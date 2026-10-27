@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 
 import {
+  Command,
   CommandDialog,
   CommandEmpty,
   CommandGroup,
@@ -70,7 +71,11 @@ export function CommandPalette({
       title="命令面板"
       description="快速执行操作"
     >
-      <CommandInput placeholder="搜索命令、项目…" />
+      {/* CommandDialog in this shadcn build only provides the dialog shell;
+          cmdk's context comes from <Command>, and without it every child that
+          reads the store (CommandInput, CommandList) throws on mount. */}
+      <Command>
+        <CommandInput placeholder="搜索命令、项目…" />
       <CommandList>
         <CommandEmpty>没有匹配的命令</CommandEmpty>
 
@@ -140,6 +145,7 @@ export function CommandPalette({
           </CommandItem>
         </CommandGroup>
       </CommandList>
+      </Command>
     </CommandDialog>
   );
 }

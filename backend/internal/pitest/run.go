@@ -280,18 +280,35 @@ func (s *server) run(text string, cancel chan struct{}) {
 
 	s.emit(map[string]any{"type": "agent_end", "messages": []any{}, "willRetry": false})
 
-	// Drain follow-ups exactly once, like Pi does when the run ends.
+	// Drain one queued message, like Pi does when a run ends.
+	//
+	// Steering is drained before follow-ups because a steering message is the
+	// one the user wanted applied sooner: real Pi injects it right after the
+	// current turn's tool calls, so it must not sit behind a follow-up that was
+	// only meant as a postscript. Re-running with it keeps the transcript
+	// honest without pretending to implement mid-turn injection.
 	s.mu.Lock()
 	var next string
 	hasNext := false
-	if len(s.followUp) > 0 {
+	if len(s.steering) > 0 {
+		next = s.steering[0]
+		s.steering = s.steering[1:]
+		hasNext = true
+	} else if len(s.followUp) > 0 {
 		next = s.followUp[0]
 		s.followUp = s.followUp[1:]
 		hasNext = true
 	}
+	steeringLeft := append([]string{}, s.steering...)
+	followUpLeft := append([]string{}, s.followUp...)
 	s.mu.Unlock()
 
 	if hasNext {
+		if len(steeringLeft)+len(followUpLeft) > 0 {
+			s.emit(map[string]any{
+				"type": "queue_update", "steering": steeringLeft, "followUp": followUpLeft,
+			})
+		}
 		s.run(next, cancel)
 		return
 	}
