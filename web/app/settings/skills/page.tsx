@@ -29,7 +29,7 @@ import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle }
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
-import { api } from "@/lib/api/client";
+import { api, type SkillFile } from "@/lib/api/client";
 import { formatRelative } from "@/lib/session/format";
 import { qk } from "@/lib/session/queries";
 
@@ -40,20 +40,38 @@ export default function SkillsPage() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [body, setBody] = useState("");
+  const [assets, setAssets] = useState<SkillFile[]>([]);
 
   const create = useMutation({
-    mutationFn: () =>
-      api.skills.create({
+    // Two steps on purpose: the row is created first (its id names the bundle
+    // directory), then the files land on it. A failed upload leaves a skill with
+    // a body and no assets, which the editor can fix; the reverse would be a
+    // skill that reports content it does not have.
+    mutationFn: async () => {
+      const created = await api.skills.create({
         name: name.trim(),
         description: description.trim(),
         body: body.trim() || undefined,
-      }),
+      });
+      if (assets.length > 0) {
+        // The bundle is replaced wholesale, so SKILL.md from the textarea has to
+        // be part of the same upload — sending only the picked files would
+        // delete the body that was just typed.
+        const bundle: SkillFile[] = [
+          ...(body.trim() ? [{ path: "SKILL.md", content: body }] : []),
+          ...assets.filter((file) => file.path !== "SKILL.md"),
+        ];
+        await api.skills.uploadBundle(created.skill.id, bundle);
+      }
+      return created;
+    },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: qk.skills });
       setDialogOpen(false);
       setName("");
       setDescription("");
       setBody("");
+      setAssets([]);
       toast.success("Skill 已创建");
     },
     onError: (error) => {
@@ -217,6 +235,30 @@ export default function SkillsPage() {
                   placeholder={"# 发布说明\n\n1. 收集上一个 tag 之后的提交\n2. 按类型分组…"}
                 />
                 <FieldDescription>留空则只创建一个占位 Skill，稍后再补正文。</FieldDescription>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="skill-assets">附加文件</FieldLabel>
+                <Input
+                  id="skill-assets"
+                  data-testid="skill-assets"
+                  type="file"
+                  multiple
+                  className="h-8 py-1 text-xs"
+                  onChange={(event) => {
+                    const picked = Array.from(event.target.files ?? []);
+                    void Promise.all(
+                      picked.map(async (file) => ({
+                        // A bundle is text: a skill that needs a binary asset
+                        // goes through the API instead of the browser.
+                        path: file.name.replace(/\\/g, "/"),
+                        content: await file.text(),
+                      })),
+                    ).then(setAssets);
+                  }}
+                />
+                <FieldDescription>
+                  可选。除 SKILL.md 之外的脚本和参考文件会一起挂进沙箱；需要子目录请用 API 上传。
+                </FieldDescription>
               </Field>
             </FieldGroup>
 

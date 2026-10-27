@@ -183,8 +183,8 @@ What is deliberately not here yet, and why:
 - **Multi-replica fan-out.** Events are persisted before they are broadcast, so an
   SSE reconnect is already correct across replicas; what is missing is a shared
   bus that wakes subscribers on another node.
-- **Multi-file skill authoring.** A skill can be created with a `SKILL.md` body in the
-  UI, and its bundle is written, replaced and read back through the API. Uploading a
-  whole directory of assets from the browser (scripts, references) is not wired yet;
-  `PUT /v1/skills/{id}/bundle` accepts the file set today, which is what such an
-  upload would call.
+- **Binary assets in a skill bundle.** Skills are authored as text: `SKILL.md` in the
+  editor plus any number of picked files, written through
+  `PUT /v1/skills/{id}/bundle`. A bundle that needs a compiled binary or nested
+  directories can be uploaded through that endpoint directly, but the browser picker
+  only sends flat text files.

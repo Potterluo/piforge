@@ -125,3 +125,41 @@ test("a skill written in the UI reaches the next session's checkout", async ({ p
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   expect(tooling.mounted.skills).toContain(slug);
 });
+
+/**
+ * A skill is a directory, not a paragraph: scripts and references next to
+ * SKILL.md are what make one useful, so the upload has to carry them.
+ */
+test("assets picked alongside SKILL.md land in the bundle", async ({ page }) => {
+  await login(page, USER);
+  const name = `asset-skill-${Date.now()}`;
+
+  await page.goto("/settings/skills");
+  await expect(page.getByTestId("skill-add")).toBeVisible({ timeout: 20_000 });
+  await page.getByTestId("skill-add").click();
+  await page.getByTestId("skill-name").fill(name);
+  await page.getByTestId("skill-description").fill("has a script");
+  await page.getByTestId("skill-body").fill("---\nname: asset-skill\n---\nRun the script.\n");
+  await page.getByTestId("skill-assets").setInputFiles([
+    { name: "run.sh", mimeType: "text/x-shellscript", buffer: Buffer.from("echo from-the-bundle\n") },
+  ]);
+  await page.getByTestId("skill-submit").click();
+
+  const row = page.locator(`[data-testid="skill-item"][data-name="${name}"]`);
+  await expect(row).toBeVisible({ timeout: 20_000 });
+
+  // Read it back through the API: the bundle must contain both files.
+  const listed = await (await page.request.get("/v1/skills")).json();
+  const skill = (listed.skills as { id: string; name: string }[]).find((s) => s.name === name);
+  expect(skill).toBeTruthy();
+  const bundle = await (await page.request.get(`/v1/skills/${skill!.id}/bundle`)).json();
+  const paths = (bundle.files as { path: string }[]).map((f) => f.path).sort();
+  expect(paths).toEqual(["SKILL.md", "run.sh"]);
+
+  // And the mounted checkout carries the script, which is what the agent reads.
+  const sessionId = await openNewSession(page);
+  await sendPrompt(page, "hello");
+  const tooling = await (await page.request.get(`/v1/sessions/${sessionId}/tooling`)).json();
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  expect(tooling.mounted.skills).toContain(slug);
+});

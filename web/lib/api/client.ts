@@ -298,11 +298,21 @@ export const providers = {
     request<{ ok: boolean; message: string }>(`/v1/providers/${id}/test`, { method: "POST" }),
 };
 
+export interface SkillFile {
+  /** Path inside the bundle, POSIX separators, relative to the skill root. */
+  path: string;
+  content: string;
+}
+
 export const skills = {
   list: () => request<{ skills: Skill[] }>("/v1/skills"),
   create: (input: { name: string; description: string; body?: string }) =>
     request<{ skill: Skill }>("/v1/skills", { method: "POST", body: input }),
   remove: (id: string) => request<{ ok: boolean }>(`/v1/skills/${id}`, { method: "DELETE" }),
+  /** Replaces a skill's content wholesale; the server requires SKILL.md. */
+  uploadBundle: (id: string, files: SkillFile[]) =>
+    request<{ skill: Skill }>(`/v1/skills/${id}/bundle`, { method: "PUT", body: { files } }),
+  bundle: (id: string) => request<{ files: SkillFile[] }>(`/v1/skills/${id}/bundle`),
 };
 
 export const mcp = {
