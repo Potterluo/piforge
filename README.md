@@ -42,11 +42,17 @@ backend/
   internal/pitest/     the fake peer, importable so tests run in-process
   internal/store/      SQLite persistence, user-scoped repositories
   internal/auth/       opaque session tokens, bcrypt, CSRF
-  internal/httpapi/    REST + SSE router (stdlib mux, Go 1.22 patterns)
+  internal/httpapi/    REST + SSE + WebSocket router (stdlib mux, Go 1.22 patterns)
   internal/gitx/       git via argv (status, diff, DAG, worktrees)
   internal/fsx/        file tree, previews, search, path-traversal defence
   internal/sandbox/    SandboxProvider; local implementation runs on the host
   internal/term/       PTY sessions with an offset-addressed ring buffer
+  internal/provision/  sandbox -> worktree -> store ordering, and tooling mount
+  internal/materialize/ projects skills and MCP servers into a checkout
+  internal/llmgw/      model egress: per-session tokens, key injection, streaming
+  internal/crypto/     AES-GCM box for provider keys at rest
+  internal/browser/    one Chrome per sandbox, driven over CDP, screencast out
+  tools/wsprobe/       speaks the terminal protocol, for triage without a browser
 web/                   Next.js App Router + shadcn/ui
 e2e/                   Playwright end-to-end suite
 docs/PRD.md            product spec
@@ -60,13 +66,16 @@ docs/research/         the research briefings the spec was derived from
 - git on PATH
 - Optional: `pi` on PATH for a real agent (without it, the fake peer drives everything)
 - Optional: `rg` (ripgrep) for fast content search; a bounded walk is used otherwise
+- Optional: Chrome/Chromium for the browser panel (`-chrome <path>`); without it
+  the panel reports "unavailable" instead of pretending
 
 ## Run it locally
 
 ```bash
 # 1. backend (creates ./data, seeds an admin + demo user, prints the passwords once)
 cd backend
-go run ./cmd/piforged -data ../data -addr 127.0.0.1:8080 -fake-pi
+go run ./cmd/piforged -data ../data -addr 127.0.0.1:8080 -fake-pi \
+  -chrome "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 # 2. frontend
 cd web
@@ -80,6 +89,48 @@ with streaming output → a final message), which is enough to exercise the enti
 product surface without an API key.
 
 Drop `-fake-pi` once `pi` is installed and configured; nothing else changes.
+
+### Flags that matter
+
+| Flag | Default | Why you would change it |
+|---|---|---|
+| `-data` | `./data` | Sandboxes, the SQLite file and the generated master key live here. |
+| `-fake-pi` | off | Run the whole product with no model account. |
+| `-pi` | `pi` on PATH | A specific Pi binary. |
+| `-chrome` | unset | Enables the browser panel. Unset is a supported state: the API answers 422 with a reason. |
+| `-headless-browser` | on | Turn off to watch the sandbox browser on a real display. |
+| `-gateway-url` | `http://<addr>` | The base URL handed to agents for model traffic. Must be reachable *from inside* the sandbox. |
+| `-default-provider` | `shared-anthropic` | Which provider a session uses when it pins no model. |
+| `-secure-cookies` | off | Required when serving over TLS. |
+
+Environment: `PIFORGE_MASTER_KEY` (base64/hex/32 raw bytes) seals provider keys;
+without it a `master.key` is generated in the data directory on first boot.
+`PIFORGE_ALLOWED_ORIGINS` pins the exact origins allowed to open a terminal or
+browser socket when TLS is terminated in front of the app.
+
+## How the moving parts fit
+
+**Model traffic never carries a real key.** A session's process is started with
+`ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` pointing at `/gw/llm/<token>` and the token
+in place of the API key. The gateway validates the token (stateless HMAC, so no
+database hit per model call), resolves the provider through the user-shadows-admin
+rule, decrypts the key, and streams the response back with `FlushInterval: -1` so
+the first token is not delayed by buffering. Consequences worth knowing: changing
+a model does not restart a sandbox, and a leaked sandbox variable is worth minutes
+against one upstream host.
+
+**Skills and MCP are files, so they are projected as files.** `internal/materialize`
+writes `.pi/skills/<slug>/SKILL.md` and `.mcp.json` into the checkout on every
+provisioning pass: idempotent, and it removes what it previously mounted when the
+config shrinks. Anything it writes goes into `.git/info/exclude`, never
+`.gitignore` — mounted tooling is not the user's change and must not appear in
+their diff.
+
+**One Chrome per sandbox, watched over CDP.** The profile lives in the sandbox root
+(so deleting a sandbox deletes the cookies) and outside the checkout (so it never
+shows up in `git status`). Frames come down as binary JPEG on the same WebSocket
+that carries input up; every frame is acked, because Chrome silently stops sending
+otherwise.
 
 ## Test
 
@@ -107,10 +158,24 @@ PRD §6.
 
 ## Status
 
-This is a working vertical slice, not a finished product. What is real: the RPC bridge
-and its event normalization, the session/branch/sidecar model, SQLite persistence with
-user scoping, SSE replay, git status/diff/DAG, the file tree and previews, terminal
-sessions, and the whole workbench UI. What is a stub with a documented seam: the
-Firecracker/gVisor sandbox provider (the local provider is what runs), the built-in
-browser relay, and the LLM gateway. Each stub carries a comment naming the exact
-contract its production implementation must satisfy.
+The whole product surface is implemented and covered: the RPC bridge and its event
+normalization, the session/branch/sidecar model, SQLite persistence with user
+scoping, SSE replay, git status/diff/DAG/worktrees, the file tree and previews, real
+PTYs over a WebSocket relay, the model gateway with sealed keys, skills/MCP
+materialisation, and the sandbox browser.
+
+Test counts at the time of writing: 209 backend tests (including a real-Chrome
+integration test and a real-git repository), 86 frontend unit tests, and 35
+end-to-end tests against the real control plane in a real browser.
+
+What is deliberately not here yet, and why:
+
+- **Firecracker/gVisor sandbox provider.** The `SandboxProvider` interface is the
+  seam and the local provider is what runs. A microVM backend needs a daemon on the
+  host and an image pipeline; neither can be faked honestly, so it stays a seam
+  rather than a stub that pretends.
+- **Multi-replica fan-out.** Events are persisted before they are broadcast, so an
+  SSE reconnect is already correct across replicas; what is missing is a shared
+  bus that wakes subscribers on another node.
+- **Skill authoring in the UI.** Skills mount from a bundle directory under the data
+  directory. The upload flow is the missing half of that feature.
