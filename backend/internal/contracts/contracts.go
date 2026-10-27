@@ -624,6 +624,9 @@ const (
 	ErrUpstreamOverload = "upstream_overloaded"
 	ErrConflict         = "conflict"
 	ErrInternal         = "internal"
+	// ErrClientClosed means the caller disconnected before the work finished.
+	// It is never a server fault and must not be logged as one.
+	ErrClientClosed = "client_closed"
 )
 
 // NewError builds a typed API error.

@@ -131,10 +131,18 @@ func classify(err error) (int, *contracts.APIError) {
 	case errors.Is(err, auth.ErrAccountDisabled):
 		return http.StatusForbidden, &contracts.APIError{Code: contracts.ErrForbidden, Message: "account is disabled"}
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		return http.StatusInternalServerError, &contracts.APIError{Code: contracts.ErrInternal, Message: "request cancelled"}
+		// The client went away (a navigation, an aborted fetch). Nothing will
+		// read the body, and this is not a server fault, so it must not be
+		// reported as a 500 — that turns normal navigation into alarming logs.
+		return statusClientClosed, &contracts.APIError{Code: contracts.ErrClientClosed, Message: "client closed the request"}
 	}
 	return http.StatusInternalServerError, &contracts.APIError{Code: contracts.ErrInternal, Message: "internal error"}
 }
+
+// statusClientClosed is the convention for "the caller is gone": no standard
+// status exists, and reporting 500 would misclassify an ordinary navigation as
+// a server bug.
+const statusClientClosed = 499
 
 // errorEnvelope is the wire shape of every failure: PRD §9.1 wraps the typed
 // contracts.APIError in an "error" object, and web/lib/types.ts ApiErrorBody

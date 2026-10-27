@@ -34,6 +34,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/provision"
 	"github.com/piforge/piforge/backend/internal/sandbox"
 	"github.com/piforge/piforge/backend/internal/store"
+	"github.com/piforge/piforge/backend/internal/term"
 )
 
 func main() {
@@ -122,7 +123,19 @@ func run() error {
 	}
 	defer rt.Close()
 
-	// 5. Working directories.
+	// 5. Terminals. The manager owns the PTY processes; the HTTP layer only
+	// relays bytes (PRD §7.6.1).
+	terminals := term.New(term.Config{
+		RingBytes: 4 << 20,
+		// The key is a worktree id: the HTTP layer already proved that the
+		// caller owns the session which owns this worktree.
+		WorkDir: func(ctx context.Context, worktreeID string) (string, error) {
+			return st.WorktreePathByID(ctx, worktreeID)
+		},
+	})
+	defer terminals.CloseAll()
+
+	// 6. Working directories.
 	prov := provision.New(provision.Config{Store: st, Sandbox: sb, Git: git})
 
 	// 6. Authentication.
@@ -141,6 +154,7 @@ func run() error {
 		Runtime:     rt,
 		Workspace:   fs,
 		Sandbox:     sb,
+		Term:        termAdapter{m: terminals},
 		Provisioner: prov,
 		Now:         time.Now,
 		Logger:      logger,
@@ -175,6 +189,30 @@ func run() error {
 		return fmt.Errorf("shutdown: %w", err)
 	}
 	return nil
+}
+
+// termAdapter narrows *term.Manager to the interface httpapi declares, so the
+// HTTP package never imports the terminal implementation.
+type termAdapter struct{ m *term.Manager }
+
+func (a termAdapter) Open(ctx context.Context, sandboxID, tabID, shell string) (*httpapi.TermSession, error) {
+	info, err := a.m.Open(ctx, sandboxID, tabID, shell)
+	if err != nil {
+		return nil, err
+	}
+	return &httpapi.TermSession{
+		TabID: info.TabID, Shell: info.Shell, PID: info.PID,
+		Start: info.Start, End: info.End,
+	}, nil
+}
+
+func (a termAdapter) Write(tabID string, p []byte) error { return a.m.Write(tabID, p) }
+func (a termAdapter) Resize(tabID string, cols, rows int) error {
+	return a.m.Resize(tabID, cols, rows)
+}
+func (a termAdapter) Close(tabID string) error { return a.m.Close(tabID) }
+func (a termAdapter) Read(tabID string, from int64) ([]byte, int64, bool) {
+	return a.m.Read(tabID, from)
 }
 
 // newRuntime builds the agent runtime. With -fake-pi it drives the fake peer

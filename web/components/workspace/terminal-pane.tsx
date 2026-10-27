@@ -10,19 +10,15 @@ import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTi
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import type { TerminalSurfaceHandle } from "@/components/workspace/terminal-surface";
+import { usePtySession } from "@/lib/terminal/use-pty";
 
 /**
- * Terminal pane.
+ * Terminal pane: a real shell inside the session's sandbox.
  *
- * There is no PTY transport in this slice: the backend route
- * `/v1/sessions/{id}/pty` is defined, the WebSocket relay is the next
- * milestone. So this component renders a real xterm surface, accepts streamed
- * chunks through its imperative handle, and tells the truth about the missing
- * channel instead of faking a prompt.
- *
- * It is marked with `TODO(pty)` at the two places a relay has to plug in:
- * the socket that feeds `surface.write()` and the `onData` callback that must
- * send keystrokes back (plus a resize message from `TerminalSurface`'s fit).
+ * The transport is the control plane's WebSocket relay (`usePtySession`). The
+ * overlay shown while connecting is not a placeholder — it is what a user sees
+ * when the socket is down, and it carries the endpoint so a bug report says
+ * something useful.
  */
 const TerminalSurface = dynamic(
   () => import("@/components/workspace/terminal-surface").then((mod) => mod.TerminalSurface),
@@ -125,11 +121,10 @@ function Toolbar({
 }
 
 /**
- * The message that must stay accurate until the relay exists. Kept as a
- * constant so the endpoint text is not paraphrased in two places.
+ * Shown while the socket is not open. The endpoint is included on purpose: a
+ * user reporting "the terminal is dead" then hands over the exact route.
  */
-export const PTY_NOTICE =
-  "终端通道尚未接入（后端 /v1/sessions/{id}/pty 已定义，WebSocket 中继为下一里程碑）";
+export const PTY_NOTICE = "正在连接 /v1/sessions/{id}/pty …";
 
 export interface TerminalPaneHandle {
   write: (chunk: string) => void;
@@ -140,16 +135,21 @@ export interface TerminalPaneHandle {
 
 export interface TerminalPaneProps {
   sessionId: string;
-  /** Flip to true once the WebSocket relay lands and a PTY is attached. */
+  /** Overrides the live socket state; used by tests and the follow-only pane. */
   connected?: boolean;
+  /** Tab name inside the session; several terminals may coexist. */
+  tab?: string;
   onData?: (chunk: string) => void;
   className?: string;
 }
 
 export const TerminalPane = React.forwardRef<TerminalPaneHandle, TerminalPaneProps>(
-  function TerminalPane({ sessionId, connected = false, onData, className }, ref) {
+  function TerminalPane({ sessionId, connected, tab = "main", onData, className }, ref) {
     const surfaceRef = React.useRef<TerminalSurfaceHandle | null>(null);
     const [fontSize, setFontSize] = React.useState(12);
+    const pty = usePtySession({ sessionId, tab, enabled: connected !== false });
+
+    const live = connected ?? pty.status === "open";
 
     React.useImperativeHandle(
       ref,
@@ -162,6 +162,11 @@ export const TerminalPane = React.forwardRef<TerminalPaneHandle, TerminalPanePro
       [],
     );
 
+    // Feed every byte the relay delivers into the terminal.
+    React.useEffect(() => {
+      return pty.onData((chunk) => surfaceRef.current?.write(chunk));
+    }, [pty]);
+
     const handleSearch = React.useCallback((term: string) => {
       if (term) surfaceRef.current?.search(term);
     }, []);
@@ -169,11 +174,12 @@ export const TerminalPane = React.forwardRef<TerminalPaneHandle, TerminalPanePro
     return (
       <div
         data-testid="terminal-pane"
+        data-pty-status={pty.status}
         className={cn("flex h-full min-h-0 min-w-0 flex-col", className)}
       >
         <Toolbar
           title={`bash · ${sessionId.slice(0, 8)}`}
-          connected={connected}
+          connected={live}
           fontSize={fontSize}
           onFontSize={setFontSize}
           onSearch={handleSearch}
@@ -181,17 +187,20 @@ export const TerminalPane = React.forwardRef<TerminalPaneHandle, TerminalPanePro
         />
 
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-background">
-          <div className={cn("min-h-0 flex-1", !connected && "pointer-events-none opacity-30")}>
+          <div className={cn("min-h-0 flex-1", !live && "pointer-events-none opacity-30")}>
             <SurfaceHost
               fontSize={fontSize}
-              onData={onData}
+              onData={(chunk) => {
+                pty.send(chunk);
+                onData?.(chunk);
+              }}
               onReady={(handle) => {
                 surfaceRef.current = handle;
               }}
             />
           </div>
 
-          {!connected ? (
+          {!live ? (
             <div
               data-testid="terminal-disconnected"
               className="absolute inset-0 flex items-center justify-center bg-background/70 p-3"
@@ -201,16 +210,24 @@ export const TerminalPane = React.forwardRef<TerminalPaneHandle, TerminalPanePro
                   <EmptyMedia variant="icon">
                     <TerminalIcon />
                   </EmptyMedia>
-                  <EmptyTitle>终端未连接</EmptyTitle>
-                  <EmptyDescription>{PTY_NOTICE}</EmptyDescription>
+                  <EmptyTitle>
+                    {pty.status === "reconnecting"
+                      ? "正在重连终端"
+                      : pty.status === "error"
+                        ? "终端连接失败"
+                        : "正在连接终端"}
+                  </EmptyTitle>
+                  <EmptyDescription>{pty.error ?? PTY_NOTICE}</EmptyDescription>
                 </EmptyHeader>
                 <EmptyContent>
                   <code className="block w-full truncate rounded border bg-muted px-2 py-1 text-left font-mono text-[10px]">
-                    GET /v1/sessions/{sessionId}/pty
+                    WS /v1/sessions/{sessionId}/pty
                   </code>
-                  <p className="text-[10px] text-muted-foreground">
-                    等待 WebSocket 中继：字节偏移重连 + ring buffer 回放
-                  </p>
+                  {pty.status === "error" ? (
+                    <Button size="sm" variant="outline" onClick={pty.reconnect}>
+                      重新连接
+                    </Button>
+                  ) : null}
                 </EmptyContent>
               </Empty>
             </div>

@@ -38,6 +38,28 @@ type Provisioner interface {
 	EnsureWorktree(ctx context.Context, userID string, project *contracts.Project, sess *contracts.Session) (*contracts.Worktree, error)
 }
 
+// TermManager is the subset of term.Manager the HTTP layer uses. Declaring it
+// here keeps httpapi from importing internal/term and keeps tests able to
+// substitute a fake.
+type TermManager interface {
+	Open(ctx context.Context, sandboxID, tabID, shell string) (*TermSession, error)
+	Write(tabID string, p []byte) error
+	Resize(tabID string, cols, rows int) error
+	Close(tabID string) error
+	Read(tabID string, fromOffset int64) ([]byte, int64, bool)
+}
+
+// TermSession is the subset of a terminal session the socket needs. The
+// adapter in cmd/piforged converts term.Info into it so this package never has
+// to import the terminal implementation.
+type TermSession struct {
+	TabID string
+	Shell string
+	PID   int
+	Start int64
+	End   int64
+}
+
 // Deps is everything the router needs. The zero value is not usable: Store and
 // Auth are required and NewRouter panics without them (a wiring bug at
 // startup, not a request-time condition).
@@ -52,6 +74,9 @@ type Deps struct {
 	Runtime   contracts.AgentRuntime
 	Workspace contracts.Workspace
 	Sandbox   contracts.SandboxProvider
+	// Term backs the terminal panel. When nil the PTY endpoint returns
+	// sandbox_unavailable instead of opening a socket it cannot serve.
+	Term TermManager
 	// Provisioner attaches a working directory to a session. When nil,
 	// sessions simply have no worktree and the workspace endpoints report
 	// sandbox_unavailable.
@@ -134,6 +159,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("PATCH /v1/sessions/{id}", s.mutating(s.handlePatchSession))
 	mux.Handle("GET /v1/sessions/{id}/status", s.authed(s.handleSessionStatus))
 	mux.Handle("GET /v1/sessions/{id}/stats", s.authed(s.handleSessionStats))
+	mux.Handle("GET /v1/sessions/{id}/pty", s.authed(s.handleSessionPTY))
 	mux.Handle("POST /v1/sessions/{id}/messages", s.mutating(s.handlePostMessage))
 	mux.Handle("POST /v1/sessions/{id}/interrupt", s.mutating(s.handleInterrupt))
 	mux.Handle("GET /v1/sessions/{id}/events", s.authed(s.handleEvents))

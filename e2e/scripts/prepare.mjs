@@ -42,7 +42,13 @@ execFileSync("pnpm", ["exec", "next", "build"], {
   cwd: path.join(repoRoot, "web"),
   stdio: "inherit",
   shell: process.platform === "win32",
-  env: { ...process.env, PIFORGE_BACKEND: "http://127.0.0.1:8080" },
+  env: {
+    ...process.env,
+    PIFORGE_BACKEND: "http://127.0.0.1:8080",
+    // Next does not upgrade WebSocket requests through its rewrites, so the
+    // terminal socket addresses the Go server directly.
+    NEXT_PUBLIC_PIFORGE_WS_BASE: "ws://127.0.0.1:8080",
+  },
 });
 
 console.log("[e2e] ready");

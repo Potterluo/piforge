@@ -87,11 +87,61 @@ test.describe("workspace panels", () => {
     }
   });
 
-  test("the terminal surfaces its honest disconnected state", async ({ page }) => {
+  test("the terminal opens a real PTY in the sandbox", async ({ page }) => {
     await login(page, USER);
     await openNewSession(page);
     await page.getByTestId("panel-tab-terminal").click();
-    // The PTY relay is a documented seam, not a fake shell.
-    await expect(page.getByTestId("terminal-disconnected")).toBeVisible({ timeout: 20_000 });
+
+    // "open" means the WebSocket relay accepted, the PTY was spawned and the
+    // pane is forwarding bytes — not that a placeholder is showing.
+    await expect(page.getByTestId("terminal-pane")).toHaveAttribute(
+      "data-pty-status",
+      "open",
+      { timeout: 30_000 },
+    );
+    await expect(page.getByTestId("terminal-disconnected")).toHaveCount(0);
+  });
+
+  test("keystrokes reach the shell and output comes back", async ({ page }) => {
+    await login(page, USER);
+    const sessionId = await openNewSession(page);
+
+    // Drive the protocol directly: this asserts the relay contract (binary
+    // frames up, binary frames down) without depending on how xterm paints.
+    const output = await page.evaluate(async (id) => {
+      return await new Promise<string>((resolve) => {
+        const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const ws = new WebSocket(`${proto}//${window.location.host}/v1/sessions/${id}/pty?tab=e2e`);
+        ws.binaryType = "arraybuffer";
+        let text = "";
+        const done = (value: string) => {
+          try {
+            ws.close();
+          } catch {
+            /* already closed */
+          }
+          resolve(value);
+        };
+        const timer = setTimeout(() => done(text || "TIMEOUT"), 20_000);
+
+        ws.onmessage = (event) => {
+          if (typeof event.data === "string") {
+            const msg = JSON.parse(event.data) as { type?: string };
+            if (msg.type === "ready") {
+              ws.send(new TextEncoder().encode("echo piforge-pty-ok\r"));
+            }
+            return;
+          }
+          text += new TextDecoder().decode(new Uint8Array(event.data));
+          if (text.includes("piforge-pty-ok")) {
+            clearTimeout(timer);
+            done(text);
+          }
+        };
+        ws.onerror = () => done("SOCKET_ERROR");
+      });
+    }, sessionId);
+
+    expect(output).toContain("piforge-pty-ok");
   });
 });
