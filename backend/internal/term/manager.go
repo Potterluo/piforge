@@ -28,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/piforge/piforge/backend/internal/isolate"
 	"sort"
 	"strings"
 	"sync"
@@ -68,6 +69,9 @@ type Config struct {
 	Cols, Rows int
 	// ReadChunk caps the bytes returned by one Read (default 256 KiB).
 	ReadChunk int
+	// Launcher optionally wraps the shell's argv so terminals run inside the
+	// same process jail as the agent. Nil means run it directly.
+	Launcher isolate.Launcher
 	// WorkDir resolves the working directory for a sandbox. Returning an error
 	// fails Open. When nil the current process directory is used.
 	WorkDir func(ctx context.Context, sandboxID string) (string, error)
@@ -212,7 +216,7 @@ func (m *Manager) Open(ctx context.Context, sandboxID, tabID, shell string) (*In
 		return nil, fmt.Errorf("%w: %d live sessions", ErrTooManySessions, live)
 	}
 
-	proc, err := startProcess(ctx, shellPath, dir, m.cfg.Cols, m.cfg.Rows)
+	proc, err := startProcess(ctx, m.shellCommand(shellPath), dir, m.cfg.Cols, m.cfg.Rows)
 	if err != nil {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("term: start %s: %w", shellPath, err)
@@ -530,4 +534,15 @@ func firstNonEmpty(vs ...string) string {
 		}
 	}
 	return ""
+}
+
+// shellCommand builds the argv for a terminal, applying the launcher when one is
+// configured. It is separate from Open so the wrapping can be asserted without
+// starting a process.
+func (m *Manager) shellCommand(shellPath string) []string {
+	argv := shellArgv(shellPath)
+	if m.cfg.Launcher != nil {
+		argv = m.cfg.Launcher.Wrap(argv)
+	}
+	return argv
 }

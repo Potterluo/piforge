@@ -4,6 +4,7 @@ package term
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
@@ -33,9 +34,18 @@ type unixPTY struct {
 //
 // ctx is intentionally not bound to the process: an HTTP request context is
 // cancelled right after Open returns and must not kill the user's shell.
-func startProcess(ctx context.Context, shellPath, dir string, cols, rows int) (ptyProcess, error) {
+// shellArgv builds the argv for an interactive shell. Interactive on purpose:
+// without it bash exits immediately and the terminal looks broken.
+func shellArgv(shellPath string) []string {
+	return []string{shellPath, "-i"}
+}
+
+func startProcess(ctx context.Context, argv []string, dir string, cols, rows int) (ptyProcess, error) {
 	_ = ctx
-	cmd := exec.Command(shellPath)
+	if len(argv) == 0 {
+		return nil, errors.New("term: empty argv")
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
 	if dir != "" {
 		cmd.Dir = dir
 	}

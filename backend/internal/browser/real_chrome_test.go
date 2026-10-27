@@ -53,7 +53,10 @@ func TestRealChromeScreencastAndInput(t *testing.T) {
 	}
 	binary := findChrome(t)
 
-	m := NewManager(Config{Binary: binary, Headless: true, Width: 800, Height: 600})
+	// The launcher must see the browser's argv: the jail covers the browser too,
+	// not just the agent.
+	launcher := &recordingLauncher{}
+	m := NewManager(Config{Binary: binary, Headless: true, Width: 800, Height: 600, Launcher: launcher})
 	defer m.CloseAll()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -66,6 +69,9 @@ func TestRealChromeScreencastAndInput(t *testing.T) {
 	}
 	if session.PID == 0 {
 		t.Fatal("no process id")
+	}
+	if len(launcher.got) == 0 || launcher.got[0] != binary {
+		t.Fatalf("the launcher saw %v, want chrome's argv", launcher.got)
 	}
 	// The profile must live inside the sandbox: a shared profile would share
 	// cookies between tenants.
@@ -135,3 +141,12 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// recordingLauncher captures the argv it is asked to wrap and runs it unchanged.
+type recordingLauncher struct{ got []string }
+
+func (r *recordingLauncher) Wrap(argv []string) []string {
+	r.got = append([]string{}, argv...)
+	return argv
+}
+func (r *recordingLauncher) Name() string { return "recording" }

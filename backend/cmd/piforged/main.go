@@ -188,8 +188,7 @@ func run() error {
 	if launcher.Name() != "none" {
 		logger.Info("agent processes run inside a jail",
 			"launcher", launcher.Name(),
-			"covers", "agent process",
-			"does_not_cover", "terminal shells, sandbox browser")
+			"covers", "agent process, terminal shells, sandbox browser")
 	}
 
 	rt, err := newRuntime(opt, logger, signer, gatewayBase, launcher)
@@ -203,11 +202,13 @@ func run() error {
 	browsers := browser.NewManager(browser.Config{
 		Binary:   opt.chrome,
 		Headless: opt.headlessBrowser,
+		Launcher: launcher,
 	})
 	defer browsers.CloseAll()
 
 	terminals := term.New(term.Config{
 		RingBytes: 4 << 20,
+		Launcher:  launcher,
 		// The key is a worktree id: the HTTP layer already proved that the
 		// caller owns the session which owns this worktree.
 		WorkDir: func(ctx context.Context, worktreeID string) (string, error) {

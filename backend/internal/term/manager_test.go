@@ -298,3 +298,70 @@ func TestManagerClosedRejectsOpen(t *testing.T) {
 		t.Errorf("live = %d", m.Len())
 	}
 }
+
+// recordingLauncher captures the argv it is asked to wrap, standing in for
+// bubblewrap without needing one installed.
+type recordingLauncher struct {
+	got []string
+}
+
+func (r *recordingLauncher) Wrap(argv []string) []string {
+	r.got = append([]string{}, argv...)
+	return argv
+}
+func (r *recordingLauncher) Name() string { return "recording" }
+
+func TestShellCommandAppliesTheLauncher(t *testing.T) {
+	m := New(Config{})
+	plain := m.shellCommand("/bin/sh")
+	if len(plain) == 0 || plain[0] != "/bin/sh" {
+		t.Fatalf("plain shell argv = %v", plain)
+	}
+
+	launcher := &recordingLauncher{}
+	jailed := New(Config{Launcher: launcher})
+	_ = jailed.shellCommand("/bin/sh")
+	if len(launcher.got) == 0 || launcher.got[0] != "/bin/sh" {
+		t.Fatalf("the launcher saw %v, want the shell argv", launcher.got)
+	}
+}
+
+// TestLauncherActuallyWrapsARealShell proves the wrapping reaches the process,
+// not just the helper: a shell that is started with a wrapper runs the wrapper.
+func TestLauncherActuallyWrapsARealShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("this asserts a shell script wrapper, which is POSIX")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "wrapped.txt")
+	wrapper := filepath.Join(dir, "wrap.sh")
+	script := "#!/bin/sh\necho wrapped > " + marker + "\nexec \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+		t.Fatalf("write wrapper: %v", err)
+	}
+
+	m := New(Config{Launcher: prefixLauncher{wrapper}})
+	defer m.CloseAll()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := m.Open(ctx, "sb_wrap", "tab_wrap", "/bin/sh"); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(marker); err == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the wrapper never ran: the shell was not launched through the launcher")
+}
+
+// prefixLauncher runs argv through an executable wrapper.
+type prefixLauncher struct{ path string }
+
+func (p prefixLauncher) Wrap(argv []string) []string {
+	return append([]string{p.path}, argv...)
+}
+func (prefixLauncher) Name() string { return "prefix" }

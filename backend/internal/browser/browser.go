@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/piforge/piforge/backend/internal/isolate"
 	"time"
 )
 
@@ -42,6 +44,9 @@ type Config struct {
 	Width, Height int
 	// Quality is the JPEG quality of screencast frames (1-100).
 	Quality int
+	// Launcher optionally wraps the browser's argv so it runs inside the same
+	// process jail as the agent. Nil means run it directly.
+	Launcher isolate.Launcher
 	// Now is injectable for tests.
 	Now func() time.Time
 }
@@ -176,8 +181,15 @@ func (m *Manager) launch(ctx context.Context, sandboxID, profileRoot string) (*S
 		args = append([]string{"--headless=new", "--disable-gpu"}, args...)
 	}
 
+	argv := append([]string{m.cfg.Binary}, args...)
+	if m.cfg.Launcher != nil {
+		argv = m.cfg.Launcher.Wrap(argv)
+	}
+	if len(argv) == 0 {
+		return nil, errors.New("browser: empty command")
+	}
 	//nolint:gosec // the binary path is operator configuration, not user input
-	cmd := exec.Command(m.cfg.Binary, args...)
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	if err := cmd.Start(); err != nil {

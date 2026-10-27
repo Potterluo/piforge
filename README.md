@@ -102,7 +102,7 @@ Drop `-fake-pi` once `pi` is installed and configured; nothing else changes.
 | `-gateway-url` | `http://<addr>` | The base URL handed to agents for model traffic. Must be reachable *from inside* the sandbox. |
 | `-default-provider` | `shared-anthropic` | Which provider a session uses when it pins no model. |
 | `-secure-cookies` | off | Required when serving over TLS. |
-| `-isolation` | `none` | `bubblewrap`/`firejail` runs **agent processes** in a jail on Linux. See the caveat below. |
+| `-isolation` | `none` | `bubblewrap`/`firejail`: run the agent, terminal shells and the sandbox browser inside a process jail (Linux). |
 
 Environment: `PIFORGE_MASTER_KEY` (base64/hex/32 raw bytes) seals provider keys;
 without it a `master.key` is generated in the data directory on first boot.
@@ -174,11 +174,12 @@ What is deliberately not here yet, and why:
 - **MicroVM sandboxing (Firecracker/gVisor).** The `SandboxProvider` interface is the
   seam and the local provider is what runs. A microVM backend needs a host daemon and
   an image pipeline; neither can be faked honestly, so it stays a seam rather than a
-  stub that pretends. What does exist is `-isolation bubblewrap|firejail`: a
-  process jail for **agent processes only**. Terminal shells and the sandbox browser
-  are spawned by the control plane and are *not* wrapped yet, so on this build the
-  flag hardens model-driven execution and nothing else. The server logs exactly that
-  at startup, because a half-applied jail that reads as a full one is worse than none.
+  stub that pretends. What does exist is `-isolation bubblewrap|firejail`: every
+  process this control plane starts — the agent, the shells in the terminal panel and
+  the sandbox browser — is launched through the same launcher, so the flag covers all
+  three rather than only the agent. The only path it cannot cover is whatever the
+  agent forks itself, which is exactly why the agent is the one process that must be
+  wrapped.
 - **Multi-replica fan-out.** Events are persisted before they are broadcast, so an
   SSE reconnect is already correct across replicas; what is missing is a shared
   bus that wakes subscribers on another node.

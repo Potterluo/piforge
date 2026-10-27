@@ -4,6 +4,7 @@ package term
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -41,20 +42,29 @@ type pipeProc struct {
 //
 // ctx is intentionally not bound to the process: the shell outlives the HTTP
 // request that opened it.
-func startProcess(ctx context.Context, shellPath, dir string, cols, rows int) (ptyProcess, error) {
-	_ = ctx
+// shellArgv builds the argv for an interactive shell. Windows needs flags: a
+// bare powershell.exe opens a window and exits.
+func shellArgv(shellPath string) []string {
 	base := strings.ToLower(filepath.Base(shellPath))
-	var args []string
 	switch {
 	case strings.Contains(base, "powershell"), strings.Contains(base, "pwsh"):
 		// "-Command -" reads commands from stdin and writes results to stdout.
-		args = []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "-"}
+		return []string{shellPath, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "-"}
 	case strings.Contains(base, "cmd.exe"), base == "cmd":
-		args = []string{"/Q", "/K"}
+		return []string{shellPath, "/Q", "/K"}
+	default:
+		return []string{shellPath}
+	}
+}
+
+func startProcess(ctx context.Context, argv []string, dir string, cols, rows int) (ptyProcess, error) {
+	_ = ctx
+	if len(argv) == 0 {
+		return nil, errors.New("term: empty argv")
 	}
 
 	pr, pw := io.Pipe()
-	cmd := exec.Command(shellPath, args...)
+	cmd := exec.Command(argv[0], argv[1:]...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
