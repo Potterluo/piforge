@@ -21,12 +21,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/gitx"
+	"github.com/piforge/piforge/backend/internal/materialize"
 	"github.com/piforge/piforge/backend/internal/store"
 )
 
@@ -39,6 +41,10 @@ type Config struct {
 	// Git is required. If nil, EnsureWorktree returns an error rather than
 	// silently producing a session with no files.
 	Git *gitx.Runner
+	// SkillsDir is where skill bundles live on the host, one directory per
+	// bundle_key. Empty means skills are configured but cannot be mounted, which
+	// is reported per skill rather than failing the session.
+	SkillsDir string
 	// WorktreePath overrides where a worktree is placed. The default is
 	// <sandbox root>/wt/<slug>, which keeps every checkout of one sandbox
 	// under a single directory that is trivial to snapshot.
@@ -149,6 +155,9 @@ func (s *Service) EnsureWorktree(
 			if err := s.attach(ctx, userID, sess.ID, existing.ID); err != nil {
 				return nil, err
 			}
+			if err := s.mountTooling(ctx, userID, existing.Path); err != nil {
+				return nil, err
+			}
 			return existing, nil
 		}
 
@@ -166,6 +175,9 @@ func (s *Service) EnsureWorktree(
 			return nil, fmt.Errorf("provision: record primary worktree: %w", err)
 		}
 		if err := s.attach(ctx, userID, sess.ID, wt.ID); err != nil {
+			return nil, err
+		}
+		if err := s.mountTooling(ctx, userID, wt.Path); err != nil {
 			return nil, err
 		}
 		return wt, nil
@@ -207,6 +219,35 @@ func (s *Service) EnsureWorktree(
 		return nil, err
 	}
 	return wt, nil
+}
+
+// mountTooling projects the user's skills and MCP servers into a checkout.
+//
+// It runs on every provisioning pass rather than only the first, because the
+// configuration can change while a session lives: adding an MCP server should
+// reach existing sessions the next time they are touched, and the mount is
+// idempotent by construction.
+func (s *Service) mountTooling(ctx context.Context, userID, root string) error {
+	skills, err := s.cfg.Store.ListSkills(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("provision: list skills: %w", err)
+	}
+	servers, err := s.cfg.Store.ListMCPServers(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("provision: list mcp servers: %w", err)
+	}
+	if len(skills) == 0 && len(servers) == 0 {
+		// Still mount: an empty configuration must clear anything a previous
+		// pass wrote, or a removed MCP server keeps running.
+	}
+	result, err := materialize.Mount(root, skills, servers, materialize.Options{SkillsDir: s.cfg.SkillsDir})
+	if err != nil {
+		return fmt.Errorf("provision: mount tooling: %w", err)
+	}
+	for name, reason := range result.Skipped {
+		slog.Warn("skill not mounted", "skill", name, "reason", reason)
+	}
+	return nil
 }
 
 // ensureSandbox returns the project's sandbox, creating it when absent.

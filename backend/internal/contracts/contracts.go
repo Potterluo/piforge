@@ -567,9 +567,13 @@ type Skill struct {
 	Version     string     `json:"version"`
 	Description string     `json:"description"`
 	ContentHash string     `json:"content_hash"`
-	SourceURL   string     `json:"source_url,omitempty"`
-	Enabled     bool       `json:"enabled"`
-	CreatedAt   time.Time  `json:"created_at"`
+	// BundleKey names the directory under the host's skills root that holds
+	// this skill's SKILL.md and assets. Empty means the content was never
+	// uploaded, which is why the platform skips it instead of mounting a stub.
+	BundleKey string    `json:"bundle_key,omitempty"`
+	SourceURL string    `json:"source_url,omitempty"`
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // MCPTransport is stdio or streamable HTTP. stdio is unrestricted by design

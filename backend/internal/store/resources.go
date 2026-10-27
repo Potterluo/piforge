@@ -311,8 +311,8 @@ func (s *Store) CreateSkill(ctx context.Context, userID string, in contracts.Ski
 	_, err := s.w.ExecContext(ctx,
 		`INSERT INTO skills (id, scope, owner_id, name, version, description, content_hash,
 		                     bundle_key, source_url, enabled, created_at)
-		 VALUES (?, 'user', ?, ?, ?, ?, ?, '', ?, ?, ?)`,
-		id, userID, in.Name, version, in.Description, in.ContentHash, in.SourceURL,
+		 VALUES (?, 'user', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, userID, in.Name, version, in.Description, in.ContentHash, in.BundleKey, in.SourceURL,
 		boolInt(in.Enabled), formatTime(s.now()))
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -326,7 +326,7 @@ func (s *Store) CreateSkill(ctx context.Context, userID string, in contracts.Ski
 // Skill loads one skill the caller can see (own or shared).
 func (s *Store) Skill(ctx context.Context, userID, skillID string) (*contracts.Skill, error) {
 	row := s.r.QueryRowContext(ctx,
-		`SELECT id, scope, name, version, description, content_hash, source_url, enabled, created_at
+		`SELECT id, scope, name, version, description, content_hash, bundle_key, source_url, enabled, created_at
 		   FROM skills
 		  WHERE id = ? AND ((scope = 'user' AND owner_id = ?) OR scope = 'admin')`,
 		skillID, userID)
@@ -354,7 +354,7 @@ func (s *Store) DeleteSkill(ctx context.Context, userID, skillID string) error {
 // ListSkills lists the caller's own skills plus the shared ones (PRD §5.8).
 func (s *Store) ListSkills(ctx context.Context, userID string) ([]*contracts.Skill, error) {
 	rows, err := s.r.QueryContext(ctx,
-		`SELECT id, scope, name, version, description, content_hash, source_url, enabled, created_at
+		`SELECT id, scope, name, version, description, content_hash, bundle_key, source_url, enabled, created_at
 		   FROM skills
 		  WHERE (scope = 'user' AND owner_id = ?) OR scope = 'admin'
 		  ORDER BY scope ASC, name ASC, version ASC`, userID)
@@ -385,7 +385,7 @@ func scanSkill(sc interface{ Scan(dest ...any) error }) (*contracts.Skill, error
 		created string
 	)
 	if err := sc.Scan(&sk.ID, &scope, &sk.Name, &sk.Version, &sk.Description,
-		&sk.ContentHash, &sk.SourceURL, &enabled, &created); err != nil {
+		&sk.ContentHash, &sk.BundleKey, &sk.SourceURL, &enabled, &created); err != nil {
 		return nil, err
 	}
 	sk.Scope = contracts.SkillScope(scope)

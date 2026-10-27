@@ -10,6 +10,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/gitx"
+	"github.com/piforge/piforge/backend/internal/materialize"
 	"github.com/piforge/piforge/backend/internal/sandbox"
 	"github.com/piforge/piforge/backend/internal/store"
 )
@@ -55,6 +56,9 @@ func newEnv(t *testing.T) *env {
 		Store:   st,
 		Sandbox: sb,
 		Git:     gitx.New(gitx.Config{}),
+		// A real bundle directory so the mount test exercises copying, not just
+		// config writing.
+		SkillsDir: filepath.Join(t.TempDir(), "skills"),
 	})
 	return &env{t: t, svc: svc, store: st, user: user}
 }
@@ -244,5 +248,63 @@ func TestSlug(t *testing.T) {
 	long := strings.Repeat("a", 100)
 	if got := Slug(long); len(got) > 48 {
 		t.Errorf("Slug did not truncate: %d chars", len(got))
+	}
+}
+
+// TestEnsureWorktreeMountsSkillsAndMCPServers covers the projection step end to
+// end: what the user configured must exist as files in the checkout, because
+// that is the only thing the agent can see.
+func TestEnsureWorktreeMountsSkillsAndMCPServers(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+
+	// A skill bundle on the host.
+	bundle := filepath.Join(e.svc.cfg.SkillsDir, "review-1")
+	if err := os.MkdirAll(bundle, 0o755); err != nil {
+		t.Fatalf("mkdir bundle: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "SKILL.md"), []byte("---\nname: review\n---\nReview diffs.\n"), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	if _, err := e.store.CreateSkill(ctx, e.user.ID, contracts.Skill{
+		Name: "Code Review", BundleKey: "review-1", Version: "1", ContentHash: "h", Enabled: true,
+	}); err != nil {
+		t.Fatalf("CreateSkill: %v", err)
+	}
+	if _, err := e.store.CreateMCPServer(ctx, e.user.ID, contracts.MCPServer{
+		Name: "playwright", Transport: contracts.MCPStdio,
+		Command: "npx", Args: []string{"-y", "@playwright/mcp"}, Enabled: true,
+	}); err != nil {
+		t.Fatalf("CreateMCPServer: %v", err)
+	}
+
+	project := e.project()
+	sess := e.session(project, contracts.KindMain, "main", "")
+
+	wt, err := e.svc.EnsureWorktree(ctx, e.user.ID, project, sess)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	skillFile := filepath.Join(wt.Path, ".pi", "skills", "code-review", "SKILL.md")
+	if body, err := os.ReadFile(skillFile); err != nil || !strings.Contains(string(body), "Review diffs") {
+		t.Fatalf("mounted SKILL.md = %q, %v", body, err)
+	}
+
+	mcp, err := os.ReadFile(filepath.Join(wt.Path, ".mcp.json"))
+	if err != nil {
+		t.Fatalf("read .mcp.json: %v", err)
+	}
+	if !strings.Contains(string(mcp), `"playwright"`) || !strings.Contains(string(mcp), `"@playwright/mcp"`) {
+		t.Fatalf(".mcp.json = %s", mcp)
+	}
+
+	// The manifest must record what was mounted so the API can report it.
+	manifest := materialize.Read(wt.Path)
+	if len(manifest.Skills) != 1 || manifest.Skills[0] != "code-review" {
+		t.Fatalf("manifest skills = %v", manifest.Skills)
+	}
+	if !manifest.MCPWritten {
+		t.Fatal("manifest does not record the mcp config write")
 	}
 }

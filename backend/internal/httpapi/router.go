@@ -167,6 +167,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /v1/sessions/{id}/status", s.authed(s.handleSessionStatus))
 	mux.Handle("GET /v1/sessions/{id}/stats", s.authed(s.handleSessionStats))
 	mux.Handle("GET /v1/sessions/{id}/pty", s.authed(s.handleSessionPTY))
+	mux.Handle("GET /v1/sessions/{id}/tooling", s.authed(s.handleSessionTooling))
 	mux.Handle("POST /v1/sessions/{id}/messages", s.mutating(s.handlePostMessage))
 	mux.Handle("POST /v1/sessions/{id}/interrupt", s.mutating(s.handleInterrupt))
 	mux.Handle("GET /v1/sessions/{id}/events", s.authed(s.handleEvents))
