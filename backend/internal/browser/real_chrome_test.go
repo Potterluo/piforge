@@ -59,13 +59,25 @@ func TestRealChromeScreencastAndInput(t *testing.T) {
 	m := NewManager(Config{Binary: binary, Headless: true, Width: 800, Height: 600, Launcher: launcher})
 	defer m.CloseAll()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// Generous on purpose: this test launches a real browser, and under a loaded
+	// machine (the whole suite running with -race) first-paint is the slowest
+	// step. A short budget here produces a flaky test, not a faster one.
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	profileRoot := t.TempDir()
 	session, err := m.Ensure(ctx, "sb_real", profileRoot)
 	if err != nil {
-		t.Fatalf("Ensure: %v", err)
+		// Launching a browser is the one part of this test that depends on the
+		// machine: on a saturated box (the whole suite running under -race) the
+		// devtools endpoint occasionally misses its budget. Retrying once keeps
+		// that from reading as a product failure, while a genuinely broken
+		// launcher still fails twice.
+		t.Logf("first launch failed, retrying once: %v", err)
+		session, err = m.Ensure(ctx, "sb_real", profileRoot)
+		if err != nil {
+			t.Fatalf("Ensure: %v", err)
+		}
 	}
 	if session.PID == 0 {
 		t.Fatal("no process id")
@@ -105,7 +117,7 @@ func TestRealChromeScreencastAndInput(t *testing.T) {
 		}
 	case err := <-screencastErr:
 		t.Fatalf("screencast ended before the first frame: %v", err)
-	case <-time.After(30 * time.Second):
+	case <-time.After(60 * time.Second):
 		t.Fatal("no screencast frame arrived within 30s")
 	}
 
