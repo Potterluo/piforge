@@ -79,3 +79,25 @@ test.describe("providers", () => {
     expect(headers["X-PF-CSRF"]).not.toBe("");
   });
 });
+
+/**
+ * The connectivity button exists so a user finds out their key is wrong before
+ * a run fails. It must therefore report the provider's own words, and must not
+ * pretend success when there is nothing to test.
+ */
+test("testing a provider without a key says so", async ({ page }) => {
+  await login(page, USER);
+  const name = `probe-${Date.now()}`;
+
+  const created = await apiWrite(page, "POST", "/v1/providers", {
+    name,
+    api: "openai-compat",
+    base_url: "https://example.invalid/v1",
+  });
+  expect(created.status).toBeLessThan(300);
+  const id = (created.body as { provider: { id: string } }).provider.id;
+
+  const probe = await apiWrite(page, "POST", `/v1/providers/${id}/test`);
+  expect(probe.status).toBe(400);
+  expect(JSON.stringify(probe.body)).toContain("no API key");
+});

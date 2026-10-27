@@ -89,9 +89,15 @@ func TestReadOffsetsAreStable(t *testing.T) {
 	if len(first) == 0 || next != int64(len(first)) || eof {
 		t.Fatalf("first read: len=%d next=%d eof=%v", len(first), next, eof)
 	}
+	// Compare the bytes that were already written, not the whole buffer: the
+	// shell keeps printing its prompt, so requiring the second read to be
+	// byte-identical would be asserting that time stood still.
 	second, next2, _ := m.Read("tab-off", 0)
-	if string(first) != string(second) || next2 != next {
-		t.Fatalf("replay from 0 differs: %q vs %q (%d vs %d)", first, second, next, next2)
+	if next2 < next {
+		t.Fatalf("second read went backwards: %d < %d", next2, next)
+	}
+	if len(second) < len(first) || string(second[:len(first)]) != string(first) {
+		t.Fatalf("replay from 0 differs: %q vs %q", first, second)
 	}
 	// Continuing from next returns only new bytes (possibly none).
 	rest, next3, _ := m.Read("tab-off", next)
@@ -99,10 +105,11 @@ func TestReadOffsetsAreStable(t *testing.T) {
 		t.Errorf("next moved backwards: %d < %d", next3, next)
 	}
 	_ = rest
-	// Reading past the end is a no-op at the end offset.
+	// Reading past the end returns no bytes and leaves the cursor at (or beyond,
+	// if the shell printed meanwhile) the current end.
 	empty, end, _ := m.Read("tab-off", next3+1000)
-	if len(empty) != 0 || end != next3 {
-		t.Errorf("past-end read = %q %d", empty, end)
+	if len(empty) != 0 || end < next3 {
+		t.Errorf("past-end read = %q %d, want no bytes and end >= %d", empty, end, next3)
 	}
 }
 

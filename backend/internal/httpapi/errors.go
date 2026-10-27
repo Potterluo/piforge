@@ -71,18 +71,6 @@ func apiErr(code, format string, args ...any) error {
 	return &contracts.APIError{Code: code, Message: fmt.Sprintf(format, args...)}
 }
 
-// errNotImplemented is the code used for routes the router serves but whose
-// implementation is not wired yet. A registered 501 keeps the client's error
-// parser working, unlike an unregistered route's HTML 404.
-const errNotImplemented = "not_implemented"
-
-// notImplemented answers an endpoint that exists in the contract but has no
-// implementation yet.
-func (s *server) notImplemented(w http.ResponseWriter, r *http.Request) {
-	s.fail(w, r, withStatus(http.StatusNotImplemented, errNotImplemented,
-		"this endpoint is not implemented yet"))
-}
-
 // classify turns any internal error into the wire form plus the status to send.
 //
 // This is the only translation point between "what went wrong" and "what the

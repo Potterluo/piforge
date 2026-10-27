@@ -104,6 +104,26 @@ func (s *Store) ListProviders(ctx context.Context, userID string) ([]*contracts.
 		  ORDER BY name ASC`, userID)
 }
 
+// ProviderSecret returns a provider's sealed key by id.
+//
+// It exists for the "test this provider" button, which knows the id rather than
+// the name. Like ResolveProvider it returns ciphertext: the store never sees a
+// plaintext credential.
+func (s *Store) ProviderSecret(ctx context.Context, userID, providerID string) ([]byte, error) {
+	var sealed []byte
+	err := s.r.QueryRowContext(ctx,
+		`SELECT key_cipher FROM providers
+		  WHERE id = ? AND (scope = 'admin' OR (scope = 'user' AND owner_id = ?))`,
+		providerID, userID).Scan(&sealed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("store: provider %q: %w", providerID, ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: provider secret %q: %w", providerID, err)
+	}
+	return sealed, nil
+}
+
 // ResolveProvider returns the provider a name resolves to for this user, plus
 // its sealed key.
 //

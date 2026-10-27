@@ -200,18 +200,3 @@ func (s *server) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) {
 	}
 	writeOK(w)
 }
-
-// handleTestProvider would send a one-token request to the provider to prove
-// the endpoint and key work (PRD FR-13.7). It is registered but not
-// implemented: doing it properly needs the secret layer to decrypt the key,
-// and a fake "ok" would be worse than an honest 501.
-func (s *server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
-	user := auth.MustUser(r.Context())
-	// Prove the provider is visible to the caller before answering, so the 501
-	// does not leak which ids exist.
-	if _, err := s.deps.Store.Provider(r.Context(), user.ID, pathID(r)); err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	s.notImplemented(w, r)
-}

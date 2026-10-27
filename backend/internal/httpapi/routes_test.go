@@ -134,10 +134,18 @@ func TestUnimplementedRouteUsesTheErrorEnvelope(t *testing.T) {
 		t.Fatalf("UpsertAdminProvider: %v", err)
 	}
 
+	// The route reports a usable answer now, so this asserts the shape rather
+	// than a fixed "not implemented": the shared provider in this fixture has no
+	// key, and saying so is the diagnostic the button exists for.
 	rec := env.doAuthed(http.MethodPost, "/v1/providers/"+shared.ID+"/test", map[string]any{}, c)
-	env.mustErr(rec, http.StatusNotImplemented, errNotImplemented)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("test a keyless provider = %d body %s, want 400", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "cipher") {
+		t.Fatalf("the response echoed stored key material: %s", rec.Body.String())
+	}
 
-	// An unknown provider is still a 404, so the 501 leaks nothing.
+	// An unknown provider is still a 404, so a bad id reveals nothing.
 	rec = env.doAuthed(http.MethodPost, "/v1/providers/prv_nope/test", map[string]any{}, c)
 	env.mustErr(rec, http.StatusNotFound, contracts.ErrNotFound)
 }
