@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/auth"
+	"github.com/piforge/piforge/backend/internal/browser"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/crypto"
 	"github.com/piforge/piforge/backend/internal/store"
@@ -81,6 +82,9 @@ type Deps struct {
 	// LLMGateway is mounted at /gw/llm/. It authenticates with its own signed
 	// token, so it is deliberately outside the cookie auth chain.
 	LLMGateway http.Handler
+	// Browser owns one Chrome per sandbox. Nil disables the browser panel with
+	// a typed 422 rather than a hanging socket.
+	Browser *browser.Manager
 	// Term backs the terminal panel. When nil the PTY endpoint returns
 	// sandbox_unavailable instead of opening a socket it cannot serve.
 	Term TermManager
@@ -168,6 +172,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /v1/sessions/{id}/stats", s.authed(s.handleSessionStats))
 	mux.Handle("GET /v1/sessions/{id}/pty", s.authed(s.handleSessionPTY))
 	mux.Handle("GET /v1/sessions/{id}/tooling", s.authed(s.handleSessionTooling))
+	mux.Handle("GET /v1/sessions/{id}/browser", s.authed(s.handleSessionBrowser))
 	mux.Handle("POST /v1/sessions/{id}/messages", s.mutating(s.handlePostMessage))
 	mux.Handle("POST /v1/sessions/{id}/interrupt", s.mutating(s.handleInterrupt))
 	mux.Handle("GET /v1/sessions/{id}/events", s.authed(s.handleEvents))

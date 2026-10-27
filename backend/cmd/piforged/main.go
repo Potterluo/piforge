@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/auth"
+	"github.com/piforge/piforge/backend/internal/browser"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/crypto"
 	"github.com/piforge/piforge/backend/internal/fsx"
@@ -63,6 +64,10 @@ type options struct {
 	// configurable rather than derived from the listen address.
 	gatewayURL      string
 	defaultProvider string
+	// chrome is the browser panel's executable. Empty disables the feature,
+	// which the API reports as a typed 422 instead of a broken socket.
+	chrome          string
+	headlessBrowser bool
 }
 
 func run() error {
@@ -81,6 +86,10 @@ func run() error {
 		"public base URL of the model gateway handed to agents (default http://<addr>)")
 	flag.StringVar(&opt.defaultProvider, "default-provider", envOr("PIFORGE_DEFAULT_PROVIDER", "shared-anthropic"),
 		"provider used when a session has no model_ref")
+	flag.StringVar(&opt.chrome, "chrome", envOr("PIFORGE_CHROME", ""),
+		"chrome/chromium binary for the browser panel (empty disables it)")
+	flag.BoolVar(&opt.headlessBrowser, "headless-browser", envOr("PIFORGE_HEADLESS_BROWSER", "1") != "0",
+		"run the sandbox browser headless")
 	flag.Parse()
 
 	if err := os.MkdirAll(opt.dataDir, 0o755); err != nil {
@@ -165,6 +174,12 @@ func run() error {
 
 	// 5. Terminals. The manager owns the PTY processes; the HTTP layer only
 	// relays bytes (PRD §7.6.1).
+	browsers := browser.NewManager(browser.Config{
+		Binary:   opt.chrome,
+		Headless: opt.headlessBrowser,
+	})
+	defer browsers.CloseAll()
+
 	terminals := term.New(term.Config{
 		RingBytes: 4 << 20,
 		// The key is a worktree id: the HTTP layer already proved that the
@@ -196,6 +211,7 @@ func run() error {
 		Sandbox:     sb,
 		Secrets:     box,
 		LLMGateway:  gateway,
+		Browser:     browsers,
 		Term:        termAdapter{m: terminals},
 		Provisioner: prov,
 		Now:         time.Now,

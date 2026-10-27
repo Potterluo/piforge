@@ -59,18 +59,25 @@ test.describe("git", () => {
     });
   });
 
-  test("the working tree starts clean and reports the branch", async ({ page }) => {
+  test("the branch is reported and platform files stay out of the diff", async ({ page }) => {
     await login(page, USER);
     const sessionId = await openNewSession(page);
     await sendPrompt(page, "hello");
 
     const status = await page.request.get(`/v1/sessions/${sessionId}/git/status`);
+    expect(status.status()).toBe(200);
     const body = await status.json();
-    expect(body.branch).toBeTruthy();
-    // The sandbox is initialised with a single empty commit.
-    expect(body.clean).toBe(true);
-  });
 
+    expect(body.branch).toBeTruthy();
+    // The agent's own edits belong in the diff — that is the point of the
+    // panel. What must never appear is the platform's tooling: a mounted
+    // skill, an MCP config or a browser profile in someone's working tree is
+    // the platform quietly committing itself into their repository.
+    const paths = (body.changes as { path: string }[]).map((c) => c.path).join("\n");
+    expect(paths).not.toContain(".pi/");
+    expect(paths).not.toContain(".mcp.json");
+    expect(paths).not.toContain(".piforge-browser");
+  });
   test("a diff is produced for an unstaged modification", async ({ page }) => {
     await login(page, USER);
     const sessionId = await openNewSession(page);

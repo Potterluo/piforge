@@ -9,12 +9,13 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { TerminalIcon } from "lucide-react";
+import { GlobeIcon, TerminalIcon } from "lucide-react";
 import { GitProvider } from "@/components/workspace/git-data";
 import { FilePreview } from "@/components/workspace/file-preview";
 import { FileTree } from "@/components/workspace/file-tree";
 import { GitHistoryPanel } from "@/components/workspace/git-history";
 import { GitChangesPanel } from "@/components/workspace/git-panel";
+import { BrowserPanel } from "@/components/workspace/browser-panel";
 import { TerminalPane } from "@/components/workspace/terminal-pane";
 
 /**
@@ -83,7 +84,11 @@ export function WorkspacePanels({
             <TabsTrigger value="git" data-testid="panel-tab-git" className="text-xs">
               Git
             </TabsTrigger>
-            <TabsTrigger value="terminal" data-testid="panel-tab-terminal" className="text-xs">
+            <TabsTrigger value="browser" data-testid="panel-tab-browser" className="text-xs">
+          <GlobeIcon className="size-3.5" />
+          浏览器
+        </TabsTrigger>
+        <TabsTrigger value="terminal" data-testid="panel-tab-terminal" className="text-xs">
               终端
             </TabsTrigger>
           </TabsList>
@@ -119,7 +124,11 @@ export function WorkspacePanels({
             <GitHistoryPanel />
           </TabsContent>
 
-          <TabsContent value="terminal" keepMounted className="min-h-0 min-w-0 flex-1">
+          <TabsContent value="browser" keepMounted className="min-h-0 min-w-0 flex-1">
+        <BrowserPanel sessionId={sessionId} className="min-h-0 flex-1" />
+      </TabsContent>
+
+      <TabsContent value="terminal" keepMounted className="min-h-0 min-w-0 flex-1">
             <div className="flex h-full min-h-0 min-w-0 flex-col">
               {revealTarget ? (
                 <Marker variant="border" className="shrink-0 px-2 py-1 text-[10px]">

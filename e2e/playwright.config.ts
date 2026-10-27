@@ -1,5 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 import path from "node:path";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -8,6 +9,32 @@ const backendExe = path.resolve(
   process.platform === "win32" ? ".bin/piforged.exe" : ".bin/piforged",
 );
 const dataDir = path.resolve(here, ".data");
+
+/**
+ * The browser panel needs a real Chrome inside the sandbox. The suite already
+ * requires Chrome for its own channel, so it finds it the same way and passes it
+ * to the control plane; without one the panel would only ever be tested in its
+ * "unavailable" state.
+ */
+function findChrome(): string | undefined {
+  const candidates = [
+    process.env.PIFORGE_CHROME,
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    process.env.LOCALAPPDATA
+      ? path.join(process.env.LOCALAPPDATA, "Google\\Chrome\\Application\\chrome.exe")
+      : undefined,
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+  ];
+  for (const candidate of candidates) {
+    if (candidate && existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+const chromeBinary = findChrome();
 
 /**
  * The suite runs the real Go control plane against the fake Pi peer, so no
@@ -41,7 +68,7 @@ export default defineConfig({
 
   webServer: [
     {
-      command: `"${backendExe}" -addr 127.0.0.1:8080 -data "${dataDir}" -fake-pi -dev`,
+      command: `"${backendExe}" -addr 127.0.0.1:8080 -data "${dataDir}" -fake-pi -dev${chromeBinary ? ` -chrome "${chromeBinary}"` : ""}`,
       url: "http://127.0.0.1:8080/healthz",
       reuseExistingServer: false,
       timeout: 30_000,
