@@ -154,7 +154,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     name         TEXT NOT NULL,
     namespace    TEXT NOT NULL DEFAULT '',
     args_hash    TEXT NOT NULL DEFAULT '',
-    args_preview TEXT NOT NULL DEFAULT '{}',
+    args_preview TEXT,
     is_error     INTEGER,
     exit_code    INTEGER,
     duration_ms  INTEGER,

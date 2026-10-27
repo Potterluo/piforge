@@ -17,8 +17,8 @@ import (
 //	staged   → `git diff --cached`      (index vs HEAD)
 //	commit   → `git show <sha> --format= --patch`
 //	branch   → `git diff <base>...HEAD` (merge-base semantics)
-func (c *Client) Diff(ctx context.Context, root string, req contracts.DiffRequest) ([]contracts.FileDiff, error) {
-	dir, err := repoDir(root)
+func (r *Runner) Diff(ctx context.Context, root string, req contracts.DiffRequest) ([]contracts.FileDiff, error) {
+	dir, err := repoPath(root)
 	if err != nil {
 		return nil, err
 	}
@@ -38,7 +38,7 @@ func (c *Client) Diff(ctx context.Context, root string, req contracts.DiffReques
 	case contracts.ScopeBranch:
 		base := strings.TrimSpace(req.Base)
 		if base == "" {
-			base, err = c.defaultBase(ctx, dir)
+			base, err = r.defaultBase(ctx, dir)
 			if err != nil {
 				return nil, err
 			}
@@ -59,7 +59,7 @@ func (c *Client) Diff(ctx context.Context, root string, req contracts.DiffReques
 		args = append(args, "--", rel)
 	}
 
-	res, err := c.runner.Run(ctx, dir, args...)
+	res, err := r.Run(ctx, dir, args...)
 	if err != nil {
 		return nil, fmt.Errorf("gitx: diff %s: %w", dir, err)
 	}
@@ -71,8 +71,8 @@ func (c *Client) Diff(ctx context.Context, root string, req contracts.DiffReques
 }
 
 // DiffPatch returns the raw unified diff for the same scopes as Diff.
-func (c *Client) DiffPatch(ctx context.Context, root string, req contracts.DiffRequest) (string, error) {
-	dir, err := repoDir(root)
+func (r *Runner) DiffPatch(ctx context.Context, root string, req contracts.DiffRequest) (string, error) {
+	dir, err := repoPath(root)
 	if err != nil {
 		return "", err
 	}
@@ -90,7 +90,7 @@ func (c *Client) DiffPatch(ctx context.Context, root string, req contracts.DiffR
 	case contracts.ScopeBranch:
 		base := strings.TrimSpace(req.Base)
 		if base == "" {
-			base, err = c.defaultBase(ctx, dir)
+			base, err = r.defaultBase(ctx, dir)
 			if err != nil {
 				return "", err
 			}
@@ -109,19 +109,19 @@ func (c *Client) DiffPatch(ctx context.Context, root string, req contracts.DiffR
 		}
 		args = append(args, "--", rel)
 	}
-	return c.runStdout(ctx, dir, args...)
+	return r.runStdout(ctx, dir, args...)
 }
 
 // defaultBase picks the branch to compare against for ScopeBranch.
-func (c *Client) defaultBase(ctx context.Context, dir string) (string, error) {
+func (r *Runner) defaultBase(ctx context.Context, dir string) (string, error) {
 	for _, ref := range []string{"origin/HEAD", "origin/main", "origin/master", "main", "master"} {
-		res, err := c.runner.Run(ctx, dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+		res, err := r.Run(ctx, dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
 		if err == nil && strings.TrimSpace(res.Stdout) != "" {
 			return ref, nil
 		}
 	}
 	// Fall back to the first parent of HEAD so the call still returns a diff.
-	res, err := c.runner.Run(ctx, dir, "rev-parse", "--verify", "--quiet", "HEAD^")
+	res, err := r.Run(ctx, dir, "rev-parse", "--verify", "--quiet", "HEAD^")
 	if err == nil && strings.TrimSpace(res.Stdout) != "" {
 		return "HEAD^", nil
 	}

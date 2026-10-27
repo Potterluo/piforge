@@ -1,0 +1,248 @@
+package provision
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/gitx"
+	"github.com/piforge/piforge/backend/internal/sandbox"
+	"github.com/piforge/piforge/backend/internal/store"
+)
+
+func requireGit(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+}
+
+type env struct {
+	t     *testing.T
+	svc   *Service
+	store *store.Store
+	user  *contracts.User
+}
+
+func newEnv(t *testing.T) *env {
+	t.Helper()
+	requireGit(t)
+
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "piforge.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	user, err := st.CreateUser(ctx, store.NewUser{
+		Email: "provision-" + strings.ReplaceAll(t.Name(), "/", "-") + "@example.test",
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	sb, err := sandbox.NewLocal(sandbox.LocalConfig{Root: filepath.Join(t.TempDir(), "sandboxes")})
+	if err != nil {
+		t.Fatalf("local sandbox: %v", err)
+	}
+
+	svc := New(Config{
+		Store:   st,
+		Sandbox: sb,
+		Git:     gitx.New(gitx.Config{}),
+	})
+	return &env{t: t, svc: svc, store: st, user: user}
+}
+
+func (e *env) project() *contracts.Project {
+	e.t.Helper()
+	p, err := e.store.CreateProject(context.Background(), e.user.ID, store.NewProject{
+		Name: "demo", DefaultBranch: "main",
+	})
+	if err != nil {
+		e.t.Fatalf("create project: %v", err)
+	}
+	return p
+}
+
+func (e *env) session(p *contracts.Project, kind contracts.SessionKind, label, parentID string) *contracts.Session {
+	e.t.Helper()
+	sess, err := e.store.CreateSession(context.Background(), e.user.ID, store.NewSession{
+		ProjectID: p.ID, Kind: kind, Label: label, Title: label, ParentID: parentID,
+	})
+	if err != nil {
+		e.t.Fatalf("create session: %v", err)
+	}
+	return sess
+}
+
+func TestEnsureWorktreeMainCreatesSandboxAndCheckout(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	p := e.project()
+	sess := e.session(p, contracts.KindMain, "", "")
+
+	wt, err := e.svc.EnsureWorktree(ctx, e.user.ID, p, sess)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if wt.Branch != "main" {
+		t.Fatalf("branch = %q, want main", wt.Branch)
+	}
+	if _, err := os.Stat(filepath.Join(wt.Path, ".git")); err != nil {
+		t.Fatalf("worktree has no .git: %v", err)
+	}
+
+	// The session must be pointed at it, otherwise the HTTP layer cannot find
+	// the root.
+	reloaded, err := e.store.Session(ctx, e.user.ID, sess.ID)
+	if err != nil {
+		t.Fatalf("reload session: %v", err)
+	}
+	if reloaded.WorktreeID != wt.ID {
+		t.Fatalf("session worktree = %q, want %q", reloaded.WorktreeID, wt.ID)
+	}
+
+	// Idempotent: a second call returns the same row and does not add a
+	// second checkout.
+	again, err := e.svc.EnsureWorktree(ctx, e.user.ID, p, reloaded)
+	if err != nil {
+		t.Fatalf("second EnsureWorktree: %v", err)
+	}
+	if again.ID != wt.ID {
+		t.Fatalf("idempotency broken: got %q want %q", again.ID, wt.ID)
+	}
+
+	list, err := e.store.ListWorktrees(ctx, e.user.ID, wt.SandboxID)
+	if err != nil {
+		t.Fatalf("list worktrees: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("worktree count = %d, want 1", len(list))
+	}
+}
+
+func TestEnsureWorktreeBranchGetsItsOwnCheckout(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	p := e.project()
+
+	main := e.session(p, contracts.KindMain, "", "")
+	mainWT, err := e.svc.EnsureWorktree(ctx, e.user.ID, p, main)
+	if err != nil {
+		t.Fatalf("main: %v", err)
+	}
+
+	branch := e.session(p, contracts.KindBranch, "fix-cache", main.ID)
+	brWT, err := e.svc.EnsureWorktree(ctx, e.user.ID, p, branch)
+	if err != nil {
+		t.Fatalf("branch: %v", err)
+	}
+
+	if brWT.Branch != "piforge/fix-cache" {
+		t.Fatalf("branch = %q, want piforge/fix-cache", brWT.Branch)
+	}
+	if brWT.Path == mainWT.Path {
+		t.Fatalf("branch reused the main checkout at %s", brWT.Path)
+	}
+	if brWT.SandboxID != mainWT.SandboxID {
+		t.Fatalf("branch used a different sandbox (%s vs %s); the whole point is one sandbox, many worktrees",
+			brWT.SandboxID, mainWT.SandboxID)
+	}
+	// Both checkouts must be real worktrees of the same repository.
+	if _, err := os.Stat(filepath.Join(brWT.Path, ".git")); err != nil {
+		t.Fatalf("branch worktree has no .git: %v", err)
+	}
+}
+
+func TestEnsureWorktreeSidecarSharesParent(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	p := e.project()
+
+	main := e.session(p, contracts.KindMain, "", "")
+	mainWT, err := e.svc.EnsureWorktree(ctx, e.user.ID, p, main)
+	if err != nil {
+		t.Fatalf("main: %v", err)
+	}
+	// Re-read so the parent carries its worktree id, as it will in production.
+	main, err = e.store.Session(ctx, e.user.ID, main.ID)
+	if err != nil {
+		t.Fatalf("reload main: %v", err)
+	}
+
+	side := e.session(p, contracts.KindSidecar, "", main.ID)
+	sideWT, err := e.svc.EnsureWorktree(ctx, e.user.ID, p, side)
+	if err != nil {
+		t.Fatalf("sidecar: %v", err)
+	}
+	if sideWT.ID != mainWT.ID {
+		t.Fatalf("sidecar got its own worktree (%s), want the parent's (%s)", sideWT.ID, mainWT.ID)
+	}
+
+	reloaded, err := e.store.Session(ctx, e.user.ID, side.ID)
+	if err != nil {
+		t.Fatalf("reload sidecar: %v", err)
+	}
+	if reloaded.WorktreeID != mainWT.ID {
+		t.Fatalf("sidecar worktree = %q, want %q", reloaded.WorktreeID, mainWT.ID)
+	}
+}
+
+func TestEnsureWorktreeRejectsForeignUser(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	p := e.project()
+	sess := e.session(p, contracts.KindMain, "", "")
+
+	other, err := e.store.CreateUser(ctx, store.NewUser{Email: "intruder@example.test"})
+	if err != nil {
+		t.Fatalf("create other user: %v", err)
+	}
+	if _, err := e.svc.EnsureWorktree(ctx, other.ID, p, sess); err == nil {
+		t.Fatal("expected a tenant mismatch error")
+	}
+}
+
+func TestBranchFor(t *testing.T) {
+	project := &contracts.Project{DefaultBranch: "develop"}
+	main := &contracts.Session{ID: "ses_01HXYZABCDEF", Kind: contracts.KindMain}
+	branchLabeled := &contracts.Session{ID: "ses_01HXYZABCDEF", Kind: contracts.KindBranch, Label: "Fix Cache Race!"}
+	branchBare := &contracts.Session{ID: "ses_01HXYZABCDEF", Kind: contracts.KindBranch}
+
+	cases := []struct{ name, got, want string }{
+		{"main uses the project branch", BranchFor(project, main), "develop"},
+		{"branch is namespaced and slugged", BranchFor(project, branchLabeled), "piforge/fix-cache-race"},
+		{"bare branch falls back to the id tail", BranchFor(project, branchBare), "piforge/yzabcdef"},
+		{"empty project branch defaults to main", BranchFor(&contracts.Project{}, main), "main"},
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Errorf("%s: got %q want %q", c.name, c.got, c.want)
+		}
+	}
+}
+
+func TestSlug(t *testing.T) {
+	cases := map[string]string{
+		"Fix Cache Race":     "fix-cache-race",
+		"piforge/foo":        "foo",
+		"  --weird__case-- ": "weird-case",
+		"":                   "session",
+		"!!!":                "session",
+	}
+	for in, want := range cases {
+		if got := Slug(in); got != want {
+			t.Errorf("Slug(%q) = %q, want %q", in, got, want)
+		}
+	}
+	long := strings.Repeat("a", 100)
+	if got := Slug(long); len(got) > 48 {
+		t.Errorf("Slug did not truncate: %d chars", len(got))
+	}
+}

@@ -21,6 +21,11 @@ func CleanRel(p string) (string, error) {
 	if filepath.IsAbs(p) || filepath.VolumeName(p) != "" {
 		return "", fmt.Errorf("%w: %q is an absolute path", ErrPathEscape, p)
 	}
+	// A leading separator is a rooted path on Windows ("/etc/passwd" resolves
+	// against the current volume) and an absolute path on Unix. Reject both.
+	if strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`) {
+		return "", fmt.Errorf("%w: %q is rooted", ErrPathEscape, p)
+	}
 	// On Windows a backslash separates; on Unix it is a legal filename byte and
 	// filepath.FromSlash leaves it alone, which is what we want.
 	clean := filepath.Clean(filepath.FromSlash(p))

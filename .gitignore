@@ -24,3 +24,8 @@ tmp/
 Thumbs.db
 .idea/
 .vscode/
+
+# e2e build output and runtime data
+e2e/.bin/
+e2e/.data/
+e2e/.artifacts/

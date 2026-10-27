@@ -14,12 +14,12 @@ import (
 //
 // It works on a repository with zero commits: branch.oid is then "(initial)"
 // and Branch still reports the unborn branch name.
-func (c *Client) Status(ctx context.Context, root string) (*contracts.GitStatus, error) {
-	dir, err := repoDir(root)
+func (r *Runner) Status(ctx context.Context, root string) (*contracts.GitStatus, error) {
+	dir, err := repoPath(root)
 	if err != nil {
 		return nil, err
 	}
-	res, err := c.runner.Run(ctx, dir, "status", "--porcelain=v2", "--branch", "--untracked-files=normal", "--ignore-submodules=dirty")
+	res, err := r.Run(ctx, dir, "status", "--porcelain=v2", "--branch", "--untracked-files=normal", "--ignore-submodules=dirty")
 	if err != nil {
 		return nil, fmt.Errorf("gitx: status %s: %w", dir, err)
 	}
@@ -31,8 +31,16 @@ func (c *Client) Status(ctx context.Context, root string) (*contracts.GitStatus,
 }
 
 // parsePorcelainV2 turns `--porcelain=v2 --branch` output into a GitStatus.
+//
+// The change list is always allocated: `nil` marshals to JSON `null`, and a
+// clean tree is the most common state, so returning null there would break every
+// client that reads `changes.length`.
 func parsePorcelainV2(out string) (*contracts.GitStatus, error) {
-	st := &contracts.GitStatus{Clean: true}
+	st := &contracts.GitStatus{
+		Clean:     true,
+		Changes:   []contracts.GitChange{},
+		Conflicts: []string{},
+	}
 	var detachedOID string
 	for _, raw := range strings.Split(out, "\n") {
 		line := strings.TrimRight(raw, "\r")
@@ -130,12 +138,12 @@ func addChange(st *contracts.GitStatus, path, xy string) {
 }
 
 // Head returns the current HEAD commit hash, or "" on an unborn branch.
-func (c *Client) Head(ctx context.Context, root string) (string, error) {
-	dir, err := repoDir(root)
+func (r *Runner) Head(ctx context.Context, root string) (string, error) {
+	dir, err := repoPath(root)
 	if err != nil {
 		return "", err
 	}
-	res, err := c.runner.Run(ctx, dir, "rev-parse", "--verify", "--quiet", "HEAD")
+	res, err := r.Run(ctx, dir, "rev-parse", "--verify", "--quiet", "HEAD")
 	if err != nil {
 		if ExitCode(err) == 1 {
 			return "", nil
@@ -146,24 +154,24 @@ func (c *Client) Head(ctx context.Context, root string) (string, error) {
 }
 
 // HasCommits reports whether HEAD exists.
-func (c *Client) HasCommits(ctx context.Context, root string) (bool, error) {
-	head, err := c.Head(ctx, root)
+func (r *Runner) HasCommits(ctx context.Context, root string) (bool, error) {
+	head, err := r.Head(ctx, root)
 	return head != "", err
 }
 
 // CurrentBranch returns the checked-out branch, or a short hash when detached.
-func (c *Client) CurrentBranch(ctx context.Context, root string) (string, error) {
-	dir, err := repoDir(root)
+func (r *Runner) CurrentBranch(ctx context.Context, root string) (string, error) {
+	dir, err := repoPath(root)
 	if err != nil {
 		return "", err
 	}
-	res, err := c.runner.Run(ctx, dir, "rev-parse", "--abbrev-ref", "HEAD")
+	res, err := r.Run(ctx, dir, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return "", fmt.Errorf("gitx: branch %s: %w", dir, err)
 	}
 	name := strings.TrimSpace(res.Stdout)
 	if name == "HEAD" {
-		head, herr := c.Head(ctx, dir)
+		head, herr := r.Head(ctx, dir)
 		if herr != nil {
 			return "", herr
 		}
@@ -173,12 +181,12 @@ func (c *Client) CurrentBranch(ctx context.Context, root string) (string, error)
 }
 
 // TopLevel returns the repository top level that contains root.
-func (c *Client) TopLevel(ctx context.Context, root string) (string, error) {
-	dir, err := repoDir(root)
+func (r *Runner) TopLevel(ctx context.Context, root string) (string, error) {
+	dir, err := repoPath(root)
 	if err != nil {
 		return "", err
 	}
-	res, err := c.runner.Run(ctx, dir, "rev-parse", "--show-toplevel")
+	res, err := r.Run(ctx, dir, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", fmt.Errorf("gitx: toplevel %s: %w", dir, err)
 	}
@@ -201,7 +209,7 @@ func IsRepo(ctx context.Context, dir string) bool {
 
 // repoDir makes root absolute and verifies it exists. It does not require root
 // to be a repository: individual commands surface that error with context.
-func repoDir(root string) (string, error) {
+func repoPath(root string) (string, error) {
 	if strings.TrimSpace(root) == "" {
 		return "", fmt.Errorf("gitx: empty repository path")
 	}

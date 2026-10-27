@@ -1,0 +1,85 @@
+//go:build !windows
+
+package term
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"strings"
+	"sync"
+	"syscall"
+
+	"github.com/creack/pty"
+)
+
+// shellCandidates lists the shells to try, best first.
+func shellCandidates(preferred string) []string {
+	out := make([]string, 0, 3)
+	if strings.TrimSpace(preferred) != "" {
+		out = append(out, preferred)
+	}
+	return append(out, "bash", "sh")
+}
+
+// unixPTY is a shell attached to a real pseudo terminal.
+type unixPTY struct {
+	f    *os.File
+	cmd  *exec.Cmd
+	once sync.Once
+}
+
+// startProcess starts shellPath under a PTY of the given size.
+//
+// ctx is intentionally not bound to the process: an HTTP request context is
+// cancelled right after Open returns and must not kill the user's shell.
+func startProcess(ctx context.Context, shellPath, dir string, cols, rows int) (ptyProcess, error) {
+	_ = ctx
+	cmd := exec.Command(shellPath)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "PIFORGE_TERM=1")
+	f, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	if err != nil {
+		return nil, err
+	}
+	return &unixPTY{f: f, cmd: cmd}, nil
+}
+
+// Read reads PTY output.
+func (p *unixPTY) Read(b []byte) (int, error) { return p.f.Read(b) }
+
+// Write writes to the PTY master.
+func (p *unixPTY) Write(b []byte) (int, error) { return p.f.Write(b) }
+
+// Resize updates the terminal window size (TIOCSWINSZ).
+func (p *unixPTY) Resize(cols, rows int) error {
+	return pty.Setsize(p.f, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+}
+
+// PID reports the shell pid.
+func (p *unixPTY) PID() int {
+	if p.cmd.Process == nil {
+		return 0
+	}
+	return p.cmd.Process.Pid
+}
+
+// Wait blocks until the shell exits.
+func (p *unixPTY) Wait() error { return p.cmd.Wait() }
+
+// Close closes the master and terminates the shell. Safe to call repeatedly.
+func (p *unixPTY) Close() error {
+	var err error
+	p.once.Do(func() {
+		if p.f != nil {
+			err = p.f.Close()
+		}
+		if p.cmd.Process != nil {
+			_ = p.cmd.Process.Signal(syscall.SIGHUP)
+			_ = p.cmd.Process.Kill()
+		}
+	})
+	return err
+}

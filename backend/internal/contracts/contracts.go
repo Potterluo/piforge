@@ -376,21 +376,21 @@ type GitStatus struct {
 // GitChange is one path in the change list.
 type GitChange struct {
 	Path     string `json:"path"`
-	Index    string `json:"index"`  // staged status letter
+	Index    string `json:"index"`    // staged status letter
 	Worktree string `json:"worktree"` // unstaged status letter
 }
 
 // GitCommit is a node of the commit DAG. Lane is assigned by the frontend; the
 // backend only reports enough structure for it to do so (PRD §10.6).
 type GitCommit struct {
-	Hash    string      `json:"hash"`
-	Short   string      `json:"short"`
-	Parents []string    `json:"parents"`
-	Author  string      `json:"author"`
-	Email   string      `json:"email,omitempty"`
-	TS      time.Time   `json:"ts"`
-	Subject string      `json:"subject"`
-	Refs    []GitRef    `json:"refs,omitempty"`
+	Hash    string    `json:"hash"`
+	Short   string    `json:"short"`
+	Parents []string  `json:"parents"`
+	Author  string    `json:"author"`
+	Email   string    `json:"email,omitempty"`
+	TS      time.Time `json:"ts"`
+	Subject string    `json:"subject"`
+	Refs    []GitRef  `json:"refs,omitempty"`
 }
 
 // GitRef is a branch/tag/HEAD label on a commit.
@@ -610,20 +610,20 @@ func (e *APIError) Error() string { return e.Code + ": " + e.Message }
 
 // Error codes used across the API.
 const (
-	ErrInvalidArgument   = "invalid_argument"
-	ErrUnauthenticated   = "unauthenticated"
-	ErrForbidden         = "forbidden"
-	ErrNotFound          = "not_found"
-	ErrSessionBusy       = "session_busy"
-	ErrNeedFullResync    = "need_full_resync"
-	ErrBranchConflict    = "branch_conflict"
-	ErrFileTooLarge      = "file_too_large"
-	ErrSandboxUnavail    = "sandbox_unavailable"
-	ErrSandboxPaused     = "sandbox_paused"
-	ErrRateLimited       = "rate_limited"
-	ErrUpstreamOverload  = "upstream_overloaded"
-	ErrConflict          = "conflict"
-	ErrInternal          = "internal"
+	ErrInvalidArgument  = "invalid_argument"
+	ErrUnauthenticated  = "unauthenticated"
+	ErrForbidden        = "forbidden"
+	ErrNotFound         = "not_found"
+	ErrSessionBusy      = "session_busy"
+	ErrNeedFullResync   = "need_full_resync"
+	ErrBranchConflict   = "branch_conflict"
+	ErrFileTooLarge     = "file_too_large"
+	ErrSandboxUnavail   = "sandbox_unavailable"
+	ErrSandboxPaused    = "sandbox_paused"
+	ErrRateLimited      = "rate_limited"
+	ErrUpstreamOverload = "upstream_overloaded"
+	ErrConflict         = "conflict"
+	ErrInternal         = "internal"
 )
 
 // NewError builds a typed API error.

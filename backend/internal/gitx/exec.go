@@ -21,6 +21,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/piforge/piforge/backend/internal/contracts"
 )
 
 const (
@@ -242,41 +244,51 @@ func (r *Runner) run(ctx context.Context, dir string, stdin []byte, args []strin
 	return res, fmt.Errorf("gitx: git %s: %w", name, err)
 }
 
-// Client is a stateless git facade. Every method takes the repository (or
-// worktree) directory it operates on, so one Client serves all sandboxes.
-type Client struct {
-	runner *Runner
+// Config is the wiring surface for cmd/piforged. The zero value is valid and
+// yields the platform git binary with DefaultTimeout.
+type Config struct {
+	// GitBinary overrides the git executable (default "git").
+	GitBinary string
+	// Timeout bounds a single git invocation (default DefaultTimeout).
+	Timeout time.Duration
+	// Env holds extra KEY=VALUE pairs for every invocation.
+	Env []string
 }
 
-// New builds a Client with a default Runner.
-func New(opts ...Option) *Client {
-	return &Client{runner: NewRunner(opts...)}
-}
-
-// NewWithRunner wraps an existing Runner.
-func NewWithRunner(r *Runner) *Client {
-	if r == nil {
-		r = NewRunner()
+// New builds a Runner from a Config. *Runner implements the git half of
+// contracts.Workspace (see GitWorkspace) and is what fsx.New should receive.
+func New(cfg Config) *Runner {
+	opts := make([]Option, 0, 3)
+	if strings.TrimSpace(cfg.GitBinary) != "" {
+		opts = append(opts, WithBinary(cfg.GitBinary))
 	}
-	return &Client{runner: r}
+	if cfg.Timeout > 0 {
+		opts = append(opts, WithTimeout(cfg.Timeout))
+	}
+	if len(cfg.Env) > 0 {
+		opts = append(opts, WithEnv(cfg.Env...))
+	}
+	return NewRunner(opts...)
 }
 
-// Runner exposes the underlying Runner (used by internal/fsx for check-ignore).
-func (c *Client) Runner() *Runner { return c.runner }
-
-// Run is a passthrough for callers that need a git command we do not wrap.
-func (c *Client) Run(ctx context.Context, dir string, args ...string) (Result, error) {
-	return c.runner.Run(ctx, dir, args...)
+// GitWorkspace is exactly the git half of contracts.Workspace. It exists so
+// that the compiler can prove *Runner is wireable into the workspace.
+type GitWorkspace interface {
+	Status(ctx context.Context, root string) (*contracts.GitStatus, error)
+	Diff(ctx context.Context, root string, req contracts.DiffRequest) ([]contracts.FileDiff, error)
+	Log(ctx context.Context, root string, limit int, cursor string) (*contracts.GitGraph, error)
+	Stage(ctx context.Context, root string, paths []string) error
+	Unstage(ctx context.Context, root string, paths []string) error
+	Commit(ctx context.Context, root string, req contracts.CommitRequest) (string, error)
+	CreateBranch(ctx context.Context, root, name string) error
+	Checkout(ctx context.Context, root, name string) error
 }
 
-// RunInput is Run with stdin.
-func (c *Client) RunInput(ctx context.Context, dir string, stdin []byte, args ...string) (Result, error) {
-	return c.runner.RunInput(ctx, dir, stdin, args...)
-}
+var _ GitWorkspace = (*Runner)(nil)
 
-// RunIn executes git in repo and returns stdout, wrapping failures.
-func (c *Client) runStdout(ctx context.Context, repo string, args ...string) (string, error) {
-	res, err := c.runner.Run(ctx, repo, args...)
+// runStdout executes git in repo and returns stdout, wrapping failures.
+func (r *Runner) runStdout(ctx context.Context, repo string, args ...string) (string, error) {
+	res, err := r.Run(ctx, repo, args...)
 	if err != nil {
 		return "", err
 	}
