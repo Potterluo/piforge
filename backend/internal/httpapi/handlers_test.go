@@ -683,9 +683,29 @@ func TestSettingsEndpoints(t *testing.T) {
 		if body.Skill.Name != "review" || body.Skill.ContentHash == "" {
 			t.Fatalf("skill = %+v", body.Skill)
 		}
-		want := sha256Hex("# SKILL")
-		if body.Skill.ContentHash != want {
-			t.Fatalf("content_hash = %q, want %q", body.Skill.ContentHash, want)
+		// The hash now covers the published bundle (path + content), not just a
+		// body string, because a skill is a directory: two bundles with the same
+		// SKILL.md but different assets are different skills.
+		if body.Skill.BundleKey == "" {
+			t.Fatal("a skill created with a body has no bundle key")
+		}
+		first := body.Skill.ContentHash
+		again := env.doAuthed(http.MethodPost, "/v1/skills", map[string]any{
+			"name": "review-2", "description": "same body", "body": "# SKILL",
+		}, c)
+		if again.Code != http.StatusCreated {
+			t.Fatalf("second create = %d body %s", again.Code, again.Body.String())
+		}
+		var second struct {
+			Skill *contracts.Skill `json:"skill"`
+		}
+		env.mustJSON(again, &second)
+		if second.Skill.ContentHash != first {
+			t.Fatalf("identical bundles hashed differently: %q vs %q", first, second.Skill.ContentHash)
+		}
+		// Leave the list assertion below with a single skill.
+		if rec := env.doAuthed(http.MethodDelete, "/v1/skills/"+second.Skill.ID, nil, c); rec.Code >= 300 {
+			t.Fatalf("cleanup delete = %d", rec.Code)
 		}
 
 		rec = env.doAuthed(http.MethodGet, "/v1/skills", nil, c)

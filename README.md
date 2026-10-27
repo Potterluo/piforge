@@ -102,6 +102,7 @@ Drop `-fake-pi` once `pi` is installed and configured; nothing else changes.
 | `-gateway-url` | `http://<addr>` | The base URL handed to agents for model traffic. Must be reachable *from inside* the sandbox. |
 | `-default-provider` | `shared-anthropic` | Which provider a session uses when it pins no model. |
 | `-secure-cookies` | off | Required when serving over TLS. |
+| `-isolation` | `none` | `bubblewrap`/`firejail` runs **agent processes** in a jail on Linux. See the caveat below. |
 
 Environment: `PIFORGE_MASTER_KEY` (base64/hex/32 raw bytes) seals provider keys;
 without it a `master.key` is generated in the data directory on first boot.
@@ -170,12 +171,19 @@ end-to-end tests against the real control plane in a real browser.
 
 What is deliberately not here yet, and why:
 
-- **Firecracker/gVisor sandbox provider.** The `SandboxProvider` interface is the
-  seam and the local provider is what runs. A microVM backend needs a daemon on the
-  host and an image pipeline; neither can be faked honestly, so it stays a seam
-  rather than a stub that pretends.
+- **MicroVM sandboxing (Firecracker/gVisor).** The `SandboxProvider` interface is the
+  seam and the local provider is what runs. A microVM backend needs a host daemon and
+  an image pipeline; neither can be faked honestly, so it stays a seam rather than a
+  stub that pretends. What does exist is `-isolation bubblewrap|firejail`: a
+  process jail for **agent processes only**. Terminal shells and the sandbox browser
+  are spawned by the control plane and are *not* wrapped yet, so on this build the
+  flag hardens model-driven execution and nothing else. The server logs exactly that
+  at startup, because a half-applied jail that reads as a full one is worse than none.
 - **Multi-replica fan-out.** Events are persisted before they are broadcast, so an
   SSE reconnect is already correct across replicas; what is missing is a shared
   bus that wakes subscribers on another node.
-- **Skill authoring in the UI.** Skills mount from a bundle directory under the data
-  directory. The upload flow is the missing half of that feature.
+- **Multi-file skill authoring.** A skill can be created with a `SKILL.md` body in the
+  UI, and its bundle is written, replaced and read back through the API. Uploading a
+  whole directory of assets from the browser (scripts, references) is not wired yet;
+  `PUT /v1/skills/{id}/bundle` accepts the file set today, which is what such an
+  upload would call.

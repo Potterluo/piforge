@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/isolate"
 )
 
 // RuntimeConfig configures a Runtime.
@@ -22,6 +23,9 @@ type RuntimeConfig struct {
 	// Config is the template for each per-session process. Dir is overridden by
 	// the session's worktree and SessionFile is derived per session.
 	Config
+	// Launcher optionally wraps the agent's argv so it runs inside a jail
+	// (bubblewrap/firejail). Nil means run it directly.
+	Launcher isolate.Launcher
 	// EnvFor returns extra environment entries for one session's process. It is
 	// how the control plane hands the agent a short-lived model gateway token
 	// instead of a real provider key (PRD §5.7.2).
@@ -171,6 +175,16 @@ func (r *Runtime) spawn(ctx context.Context, spec contracts.SessionSpec) (*sessi
 	if r.cfg.EnvFor != nil {
 		if extra := r.cfg.EnvFor(spec); len(extra) > 0 {
 			cfg.Env = append(append([]string{}, cfg.Env...), extra...)
+		}
+	}
+	if r.cfg.Launcher != nil {
+		// The agent is the process that runs model-driven commands, so it is
+		// the one that must be jailed. Wrapping argv here covers everything it
+		// spawns in turn.
+		wrapped := r.cfg.Launcher.Wrap(append([]string{cfg.BinaryPath}, cfg.Args...))
+		if len(wrapped) > 0 {
+			cfg.BinaryPath = wrapped[0]
+			cfg.Args = wrapped[1:]
 		}
 	}
 	norm := NewNormalizer(spec.SessionID, spec.Kind)

@@ -33,6 +33,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/fsx"
 	"github.com/piforge/piforge/backend/internal/gitx"
 	"github.com/piforge/piforge/backend/internal/httpapi"
+	"github.com/piforge/piforge/backend/internal/isolate"
 	"github.com/piforge/piforge/backend/internal/llmgw"
 	"github.com/piforge/piforge/backend/internal/pi"
 	"github.com/piforge/piforge/backend/internal/provision"
@@ -68,6 +69,9 @@ type options struct {
 	// which the API reports as a typed 422 instead of a broken socket.
 	chrome          string
 	headlessBrowser bool
+	// isolation names the process jail for agent processes.
+	isolation       string
+	isolationBinary string
 }
 
 func run() error {
@@ -90,6 +94,10 @@ func run() error {
 		"chrome/chromium binary for the browser panel (empty disables it)")
 	flag.BoolVar(&opt.headlessBrowser, "headless-browser", envOr("PIFORGE_HEADLESS_BROWSER", "1") != "0",
 		"run the sandbox browser headless")
+	flag.StringVar(&opt.isolation, "isolation", envOr("PIFORGE_ISOLATION", "none"),
+		"process jail for agent processes: none|bubblewrap|firejail")
+	flag.StringVar(&opt.isolationBinary, "isolation-binary", envOr("PIFORGE_ISOLATION_BINARY", ""),
+		"explicit path to the jail launcher")
 	flag.Parse()
 
 	if err := os.MkdirAll(opt.dataDir, 0o755); err != nil {
@@ -166,7 +174,25 @@ func run() error {
 	})
 
 	// 4. The agent runtime.
-	rt, err := newRuntime(opt, logger, signer, gatewayBase)
+	launcher, err := isolate.New(isolate.Options{
+		Kind:   opt.isolation,
+		Binary: opt.isolationBinary,
+		// The agent writes its worktree and its session file; everything else
+		// on the host is read-only inside the jail.
+		WritableDirs: []string{opt.dataDir},
+		ShareNetwork: true,
+	})
+	if err != nil {
+		return err
+	}
+	if launcher.Name() != "none" {
+		logger.Info("agent processes run inside a jail",
+			"launcher", launcher.Name(),
+			"covers", "agent process",
+			"does_not_cover", "terminal shells, sandbox browser")
+	}
+
+	rt, err := newRuntime(opt, logger, signer, gatewayBase, launcher)
 	if err != nil {
 		return err
 	}
@@ -284,7 +310,7 @@ func (a termAdapter) Read(tabID string, from int64) ([]byte, int64, bool) {
 // newRuntime builds the agent runtime. With -fake-pi it drives the fake peer
 // that ships with the repo, which is how development and the e2e suite run
 // without a model account.
-func newRuntime(opt options, logger *slog.Logger, signer *llmgw.Signer, gatewayBase string) (*pi.Runtime, error) {
+func newRuntime(opt options, logger *slog.Logger, signer *llmgw.Signer, gatewayBase string, launcher isolate.Launcher) (*pi.Runtime, error) {
 	bin := opt.piBin
 	args := []string{"--mode", "rpc"}
 
@@ -305,6 +331,7 @@ func newRuntime(opt options, logger *slog.Logger, signer *llmgw.Signer, gatewayB
 			Args:       args,
 			Stderr:     os.Stderr,
 		},
+		Launcher: launcher,
 		EnvFor: func(spec contracts.SessionSpec) []string {
 			providerName, modelID := splitModelRef(spec.ModelRef, opt.defaultProvider)
 			token, terr := signer.Issue(spec.SessionID, spec.UserID, providerName, modelID, time.Now())

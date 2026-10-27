@@ -68,12 +68,14 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatalf("auth.New: %v", err)
 	}
 
+	skillsDir := filepath.Join(dir, "skills")
 	env := &testEnv{
 		t:         t,
 		store:     st,
 		auth:      authenticator,
 		runtime:   newFakeRuntime(),
 		workspace: newFakeWorkspace(),
+		skillsDir: skillsDir,
 	}
 	// Provider keys are sealed at rest, so every test server needs a box; a
 	// server without one refuses to store a key by design.
@@ -87,6 +89,9 @@ func newTestEnv(t *testing.T) *testEnv {
 		Runtime:   env.runtime,
 		Workspace: env.workspace,
 		Secrets:   box,
+		// Creating a skill with a body writes its bundle, so every test server
+		// needs somewhere to put it.
+		SkillsDir: skillsDir,
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	env.rebuild()
