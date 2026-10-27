@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -46,7 +47,11 @@ func TestClassifyTable(t *testing.T) {
 		{"store invalid", store.ErrInvalid, 400, contracts.ErrInvalidArgument},
 		{"explicit 503", withStatus(503, contracts.ErrSandboxUnavail, "x"), 503, contracts.ErrSandboxUnavail},
 		{"wrapped api error", wrap(apiErr(contracts.ErrNotFound, "x")), 404, contracts.ErrNotFound},
-		{"plain error", context.Canceled, 500, contracts.ErrInternal},
+		// A client disconnect is not a server fault: 499 keeps it out of the
+		// error budget and out of the 5xx logs.
+		{"client cancelled", context.Canceled, statusClientClosed, contracts.ErrClientClosed},
+		{"client deadline", context.DeadlineExceeded, statusClientClosed, contracts.ErrClientClosed},
+		{"plain error", errors.New("boom"), 500, contracts.ErrInternal},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
