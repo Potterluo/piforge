@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,9 +28,11 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/crypto"
 	"github.com/piforge/piforge/backend/internal/fsx"
 	"github.com/piforge/piforge/backend/internal/gitx"
 	"github.com/piforge/piforge/backend/internal/httpapi"
+	"github.com/piforge/piforge/backend/internal/llmgw"
 	"github.com/piforge/piforge/backend/internal/pi"
 	"github.com/piforge/piforge/backend/internal/provision"
 	"github.com/piforge/piforge/backend/internal/sandbox"
@@ -55,6 +58,11 @@ type options struct {
 	seedAdmin  string
 	seedDemo   string
 	secureCook bool
+	// gatewayURL is the base URL the agent is told to use for model traffic.
+	// It must be reachable from inside the sandbox, which is why it is
+	// configurable rather than derived from the listen address.
+	gatewayURL      string
+	defaultProvider string
 }
 
 func run() error {
@@ -69,6 +77,10 @@ func run() error {
 	flag.StringVar(&opt.seedAdmin, "seed-admin-email", envOr("PIFORGE_SEED_EMAIL", ""), "seed admin email")
 	flag.StringVar(&opt.seedDemo, "seed-demo-email", envOr("PIFORGE_SEED_USER_EMAIL", ""), "seed demo user email")
 	flag.BoolVar(&opt.secureCook, "secure-cookies", false, "mark session cookies Secure (required behind TLS)")
+	flag.StringVar(&opt.gatewayURL, "gateway-url", envOr("PIFORGE_GATEWAY_URL", ""),
+		"public base URL of the model gateway handed to agents (default http://<addr>)")
+	flag.StringVar(&opt.defaultProvider, "default-provider", envOr("PIFORGE_DEFAULT_PROVIDER", "shared-anthropic"),
+		"provider used when a session has no model_ref")
 	flag.Parse()
 
 	if err := os.MkdirAll(opt.dataDir, 0o755); err != nil {
@@ -93,7 +105,35 @@ func run() error {
 		return err
 	}
 
-	// 2. Sandboxes. The local provider runs on the host; swapping in the
+	// 2. Secrets and the model gateway.
+	//
+	// Keys are sealed at rest and only opened here, on the egress path. The
+	// agent process never sees a real key: it gets a short-lived signed token
+	// and a base URL pointing at this process (PRD §5.7.2).
+	box, err := crypto.NewFromEnv(opt.dataDir)
+	if err != nil {
+		return fmt.Errorf("init secret box: %w", err)
+	}
+	signingKey := make([]byte, 32)
+	if _, rerr := rand.Read(signingKey); rerr != nil {
+		return fmt.Errorf("init gateway signer: %w", rerr)
+	}
+	signer, err := llmgw.NewSigner(signingKey, llmgw.DefaultTTL)
+	if err != nil {
+		return fmt.Errorf("init gateway signer: %w", err)
+	}
+	gateway, err := llmgw.New(llmgw.Config{
+		Store:  st,
+		Box:    box,
+		Signer: signer,
+		Logger: func(format string, args ...any) { logger.Debug(fmt.Sprintf(format, args...)) },
+	})
+	if err != nil {
+		return fmt.Errorf("init model gateway: %w", err)
+	}
+	gatewayBase := strings.TrimRight(firstNonEmpty(opt.gatewayURL, "http://"+opt.addr), "/")
+
+	// 3. Sandboxes. The local provider runs on the host; swapping in the
 	// Firecracker provider is a one-line change here and nowhere else.
 	sb, err := sandbox.NewLocal(sandbox.LocalConfig{
 		Root:          filepath.Join(opt.dataDir, "sandboxes"),
@@ -117,7 +157,7 @@ func run() error {
 	})
 
 	// 4. The agent runtime.
-	rt, err := newRuntime(opt, logger)
+	rt, err := newRuntime(opt, logger, signer, gatewayBase)
 	if err != nil {
 		return err
 	}
@@ -154,6 +194,8 @@ func run() error {
 		Runtime:     rt,
 		Workspace:   fs,
 		Sandbox:     sb,
+		Secrets:     box,
+		LLMGateway:  gateway,
 		Term:        termAdapter{m: terminals},
 		Provisioner: prov,
 		Now:         time.Now,
@@ -218,7 +260,7 @@ func (a termAdapter) Read(tabID string, from int64) ([]byte, int64, bool) {
 // newRuntime builds the agent runtime. With -fake-pi it drives the fake peer
 // that ships with the repo, which is how development and the e2e suite run
 // without a model account.
-func newRuntime(opt options, logger *slog.Logger) (*pi.Runtime, error) {
+func newRuntime(opt options, logger *slog.Logger, signer *llmgw.Signer, gatewayBase string) (*pi.Runtime, error) {
 	bin := opt.piBin
 	args := []string{"--mode", "rpc"}
 
@@ -239,7 +281,51 @@ func newRuntime(opt options, logger *slog.Logger) (*pi.Runtime, error) {
 			Args:       args,
 			Stderr:     os.Stderr,
 		},
+		EnvFor: func(spec contracts.SessionSpec) []string {
+			providerName, modelID := splitModelRef(spec.ModelRef, opt.defaultProvider)
+			token, terr := signer.Issue(spec.SessionID, spec.UserID, providerName, modelID, time.Now())
+			if terr != nil {
+				logger.Warn("cannot mint a model gateway token", "session", spec.SessionID, "error", terr.Error())
+				return nil
+			}
+			base := gatewayBase + "/gw/llm/" + token
+			// Point every supported SDK shape at the gateway. A client that
+			// honours none of them simply never reaches a model, which is a
+			// visible failure rather than a silent one.
+			return []string{
+				"ANTHROPIC_BASE_URL=" + base,
+				"ANTHROPIC_API_KEY=" + token,
+				"OPENAI_BASE_URL=" + base + "/v1",
+				"OPENAI_API_KEY=" + token,
+				"PIFORGE_GATEWAY_TOKEN=" + token,
+			}
+		},
 	}), nil
+}
+
+// splitModelRef splits "provider/model" into its parts, falling back to the
+// configured default provider when a session has no explicit model.
+func splitModelRef(ref, fallback string) (string, string) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return fallback, ""
+	}
+	if provider, model, ok := strings.Cut(ref, "/"); ok {
+		if provider == "" {
+			return fallback, model
+		}
+		return provider, model
+	}
+	return ref, ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // resolveFakePi finds (or builds) the fake peer binary.

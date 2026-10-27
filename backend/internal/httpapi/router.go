@@ -25,6 +25,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/crypto"
 	"github.com/piforge/piforge/backend/internal/store"
 )
 
@@ -74,6 +75,12 @@ type Deps struct {
 	Runtime   contracts.AgentRuntime
 	Workspace contracts.Workspace
 	Sandbox   contracts.SandboxProvider
+	// Secrets seals and opens provider credentials. When nil, creating a
+	// provider with a key is refused rather than storing it in the clear.
+	Secrets *crypto.Box
+	// LLMGateway is mounted at /gw/llm/. It authenticates with its own signed
+	// token, so it is deliberately outside the cookie auth chain.
+	LLMGateway http.Handler
 	// Term backs the terminal panel. When nil the PTY endpoint returns
 	// sandbox_unavailable instead of opening a socket it cannot serve.
 	Term TermManager
@@ -206,6 +213,12 @@ func (s *server) routes() http.Handler {
 
 	// Anything else is a JSON 404 rather than Go's text/plain default, so the
 	// client's error parser always has the same shape to read.
+	// The model gateway authenticates with a signed per-session token rather
+	// than the session cookie, so it bypasses the middleware chain entirely.
+	if s.deps.LLMGateway != nil {
+		mux.Handle("/gw/llm/", s.deps.LLMGateway)
+	}
+
 	mux.HandleFunc("/", s.handleNotFound)
 	return mux
 }

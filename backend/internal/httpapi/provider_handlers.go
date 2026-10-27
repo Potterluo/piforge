@@ -70,16 +70,30 @@ func (s *server) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// KeyCipher is opaque to the store. Wrapping the key with the platform's
-	// AES-GCM box belongs to the secret layer (PRD §5.7 FR-13.3); until that
-	// box is injected here, the raw value is what gets persisted, so this is
-	// the exact seam to change.
+	// The key is sealed before it ever reaches the database (PRD §5.7 FR-13.3).
+	// A deployment without a secret box refuses the write rather than storing a
+	// credential in the clear — silently downgrading that guarantee is exactly
+	// the failure mode nobody notices until a dump leaks.
+	var cipherText []byte
+	if in.APIKey != "" {
+		if s.deps.Secrets == nil {
+			s.fail(w, r, apiErr(contracts.ErrInternal, "secret storage is not configured on this server"))
+			return
+		}
+		sealed, err := s.deps.Secrets.SealString(in.APIKey)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		cipherText = sealed
+	}
+
 	p, err := s.deps.Store.CreateProvider(r.Context(), user.ID, store.ProviderInput{
 		Name:      in.Name,
 		API:       in.API,
 		BaseURL:   in.BaseURL,
 		Models:    in.Models,
-		KeyCipher: []byte(in.APIKey),
+		KeyCipher: cipherText,
 		Enabled:   in.Enabled,
 	})
 	if err != nil {

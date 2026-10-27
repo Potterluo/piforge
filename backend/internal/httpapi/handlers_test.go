@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -1154,4 +1156,76 @@ func TestWorkspaceMissingServiceIs503(t *testing.T) {
 	req := newTestRequest(http.MethodGet, "/v1/sessions/"+sess.ID+"/files/tree", c)
 	rec := serve(handler, req)
 	env.mustErr(rec, http.StatusServiceUnavailable, contracts.ErrSandboxUnavail)
+}
+
+// TestProviderKeysAreSealedAtRest is the guarantee PRD §5.7 FR-13.3 makes: the
+// key the user types is never stored in a readable form, and the value the
+// gateway later opens is exactly what they typed.
+func TestProviderKeysAreSealedAtRest(t *testing.T) {
+	env := newTestEnv(t)
+	dev := env.mkUser("dev@piforge.local", "pw", contracts.RoleUser)
+	c := env.login("dev@piforge.local", "pw")
+
+	const key = "sk-ant-api03-super-secret-value"
+	rec := env.doAuthed(http.MethodPost, "/v1/providers", map[string]any{
+		"name": "mine", "api": "anthropic-messages", "api_key": key,
+	}, c)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create provider = %d body %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), key) {
+		t.Fatal("the create response echoed the API key back")
+	}
+
+	// The store hands back ciphertext; the plaintext must not appear in it.
+	provider, sealed, err := env.store.ResolveProvider(context.Background(), dev.ID, "mine")
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if len(sealed) == 0 {
+		t.Fatal("no key was stored")
+	}
+	if bytes.Contains(sealed, []byte(key)) {
+		t.Fatalf("the key is stored in the clear: %q", sealed)
+	}
+	if provider.API != "anthropic-messages" || !provider.HasKey {
+		t.Fatalf("provider = %+v", provider)
+	}
+
+	// The gateway can still open it, which is the other half of the promise.
+	opened, err := env.deps.Secrets.OpenString(sealed)
+	if err != nil {
+		t.Fatalf("open sealed key: %v", err)
+	}
+	if opened != key {
+		t.Fatalf("opened key = %q, want the original", opened)
+	}
+}
+
+// TestProviderWriteRefusedWithoutASecretBox pins the failure mode: a server
+// with no secret box must reject the write rather than persist a raw key.
+func TestProviderWriteRefusedWithoutASecretBox(t *testing.T) {
+	env := newTestEnv(t)
+	env.mkUser("dev@piforge.local", "pw", contracts.RoleUser)
+	c := env.login("dev@piforge.local", "pw")
+
+	without := env.deps
+	without.Secrets = nil
+	handler := NewRouter(without)
+
+	body, err := json.Marshal(map[string]any{"name": "mine", "api": "openai-compat", "api_key": "sk-raw"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := newTestRequest(http.MethodPost, "/v1/providers", c)
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.ContentLength = int64(len(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := serve(handler, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d body %s, want 500", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "sk-raw") {
+		t.Fatal("the error echoed the key")
+	}
 }

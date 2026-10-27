@@ -16,6 +16,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/crypto"
 	"github.com/piforge/piforge/backend/internal/store"
 )
 
@@ -72,11 +73,18 @@ func newTestEnv(t *testing.T) *testEnv {
 		runtime:   newFakeRuntime(),
 		workspace: newFakeWorkspace(),
 	}
+	// Provider keys are sealed at rest, so every test server needs a box; a
+	// server without one refuses to store a key by design.
+	box, err := crypto.New(bytes.Repeat([]byte{4}, crypto.KeySize))
+	if err != nil {
+		t.Fatalf("crypto.New: %v", err)
+	}
 	env.deps = Deps{
 		Store:     st,
 		Auth:      authenticator,
 		Runtime:   env.runtime,
 		Workspace: env.workspace,
+		Secrets:   box,
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	env.rebuild()

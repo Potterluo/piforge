@@ -106,6 +106,7 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 
 	spec := contracts.SessionSpec{
 		SessionID:     sess.ID,
+		UserID:        user.ID,
 		Kind:          sess.Kind,
 		ProjectID:     sess.ProjectID,
 		ModelRef:      sess.ModelRef,

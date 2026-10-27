@@ -322,7 +322,10 @@ type AgentRuntime interface {
 
 // SessionSpec is everything the runtime needs to spawn an agent process.
 type SessionSpec struct {
-	SessionID  string
+	SessionID string
+	// UserID is who owns the session. The runtime needs it to mint a model
+	// gateway token, and the gateway needs it to pick that user's provider.
+	UserID     string
 	Kind       SessionKind
 	ProjectID  string
 	Worktree   string // absolute path inside the sandbox

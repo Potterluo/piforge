@@ -129,7 +129,12 @@ export default function ProvidersPage() {
             继承项由管理员统一配置，所有人可用；私有项只属于你，key 加密保存，任何时候都不会回显。
           </p>
         </div>
-        <Button size="sm" className="ml-auto" onClick={() => setDialogOpen(true)}>
+        <Button
+          size="sm"
+          className="ml-auto"
+          data-testid="provider-add"
+          onClick={() => setDialogOpen(true)}
+        >
           <Plus />
           添加 Provider
         </Button>
@@ -160,7 +165,7 @@ export default function ProvidersPage() {
               </EmptyDescription>
             </EmptyHeader>
             <EmptyContent>
-              <Button size="sm" onClick={() => setDialogOpen(true)}>
+              <Button size="sm" data-testid="provider-add-empty" onClick={() => setDialogOpen(true)}>
                 <Plus />
                 添加 Provider
               </Button>
@@ -168,7 +173,7 @@ export default function ProvidersPage() {
           </Empty>
         ) : (
           list.map((provider) => (
-            <Item key={provider.id} variant="outline">
+            <Item key={provider.id} variant="outline" data-testid="provider-item" data-name={provider.name}>
               <ItemMedia variant="icon">
                 <KeyRound />
               </ItemMedia>
@@ -268,6 +273,7 @@ export default function ProvidersPage() {
                 <FieldLabel htmlFor="provider-name">名称</FieldLabel>
                 <Input
                   id="provider-name"
+                  data-testid="provider-name"
                   value={name}
                   onChange={(event) => setName(event.target.value)}
                   placeholder="例如：my-openai"
@@ -308,6 +314,7 @@ export default function ProvidersPage() {
                 <FieldLabel htmlFor="provider-api-key">API Key</FieldLabel>
                 <Input
                   id="provider-api-key"
+                  data-testid="provider-api-key"
                   type="password"
                   value={apiKey}
                   onChange={(event) => setApiKey(event.target.value)}
@@ -333,7 +340,7 @@ export default function ProvidersPage() {
               <Button type="button" variant="ghost" onClick={() => setDialogOpen(false)}>
                 取消
               </Button>
-              <Button type="submit" disabled={create.isPending}>
+              <Button type="submit" data-testid="provider-submit" disabled={create.isPending}>
                 {create.isPending ? <Spinner /> : null}
                 添加
               </Button>

@@ -22,6 +22,10 @@ type RuntimeConfig struct {
 	// Config is the template for each per-session process. Dir is overridden by
 	// the session's worktree and SessionFile is derived per session.
 	Config
+	// EnvFor returns extra environment entries for one session's process. It is
+	// how the control plane hands the agent a short-lived model gateway token
+	// instead of a real provider key (PRD §5.7.2).
+	EnvFor func(spec contracts.SessionSpec) []string
 	// SessionFileFor overrides where a session's JSONL file lives. When nil the
 	// runtime uses Config.SessionFile as a template ("{session}" is replaced
 	// with the session id) or falls back to
@@ -164,6 +168,11 @@ func (r *Runtime) spawn(ctx context.Context, spec contracts.SessionSpec) (*sessi
 		cfg.Dir = spec.Worktree
 	}
 	cfg.SessionFile = file
+	if r.cfg.EnvFor != nil {
+		if extra := r.cfg.EnvFor(spec); len(extra) > 0 {
+			cfg.Env = append(append([]string{}, cfg.Env...), extra...)
+		}
+	}
 	norm := NewNormalizer(spec.SessionID, spec.Kind)
 	cfg.Translator = norm.Translate
 

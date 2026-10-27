@@ -104,6 +104,64 @@ func (s *Store) ListProviders(ctx context.Context, userID string) ([]*contracts.
 		  ORDER BY name ASC`, userID)
 }
 
+// ResolveProvider returns the provider a name resolves to for this user, plus
+// its sealed key.
+//
+// Resolution order is the product's inheritance rule (PRD §5.7.1): a user-scope
+// provider shadows an admin-scope provider with the same name. This is the only
+// lookup the egress gateway uses, so the shadowing rule lives in exactly one
+// place instead of being re-implemented by every caller.
+func (s *Store) ResolveProvider(ctx context.Context, userID, name string) (*contracts.Provider, []byte, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, nil, fmt.Errorf("store: provider name is required: %w", ErrInvalid)
+	}
+
+	var (
+		id        string
+		api       string
+		baseURL   string
+		modelsRaw string
+		scope     string
+		keyCipher []byte
+	)
+	// created_at is deliberately not selected: the gateway never shows it, and
+	// the column stores a formatted string that would need parsing for no gain.
+	err := s.r.QueryRowContext(ctx,
+		`SELECT id, scope, api, base_url, models, key_cipher
+		   FROM providers
+		  WHERE name = ?
+		    AND enabled = 1
+		    AND (scope = 'admin' OR (scope = 'user' AND owner_id = ?))
+		  ORDER BY CASE scope WHEN 'user' THEN 0 ELSE 1 END
+		  LIMIT 1`, name, userID).
+		Scan(&id, &scope, &api, &baseURL, &modelsRaw, &keyCipher)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, fmt.Errorf("store: provider %q: %w", name, ErrNotFound)
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("store: resolve provider %q: %w", name, err)
+	}
+
+	provider := &contracts.Provider{
+		ID:      id,
+		Name:    name,
+		API:     api,
+		BaseURL: baseURL,
+		Enabled: true,
+		HasKey:  len(keyCipher) > 0,
+	}
+	if err := json.Unmarshal([]byte(modelsRaw), &provider.Models); err != nil {
+		return nil, nil, fmt.Errorf("store: provider %q models: %w", name, err)
+	}
+	if scope == "admin" {
+		provider.Source = contracts.SourceInherited
+	} else {
+		provider.Source = contracts.SourceCustom
+	}
+	return provider, keyCipher, nil
+}
+
 // InheritedProviders lists the admin-scope providers every user can see.
 //
 // This is the one read that is not scoped to rows the caller owns, and that is
