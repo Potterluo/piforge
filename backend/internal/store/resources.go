@@ -324,6 +324,27 @@ func (s *Store) CreateSkill(ctx context.Context, userID string, in contracts.Ski
 }
 
 // Skill loads one skill the caller can see (own or shared).
+// UpdateSkillBundle records where a skill's content lives and its hash.
+//
+// The bundle itself is written by the caller: the store does not know about the
+// filesystem, which is what keeps a path bug from being a database bug too.
+func (s *Store) UpdateSkillBundle(ctx context.Context, userID, skillID, bundleKey, contentHash string) (*contracts.Skill, error) {
+	res, err := s.w.ExecContext(ctx,
+		`UPDATE skills SET bundle_key = ?, content_hash = ?
+		  WHERE id = ? AND scope = 'user' AND owner_id = ?`,
+		bundleKey, contentHash, skillID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("store: update skill bundle: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("store: update skill bundle: %w", err)
+	}
+	if affected == 0 {
+		return nil, fmt.Errorf("store: skill %q: %w", skillID, ErrNotFound)
+	}
+	return s.Skill(ctx, userID, skillID)
+}
 func (s *Store) Skill(ctx context.Context, userID, skillID string) (*contracts.Skill, error) {
 	row := s.r.QueryRowContext(ctx,
 		`SELECT id, scope, name, version, description, content_hash, bundle_key, source_url, enabled, created_at

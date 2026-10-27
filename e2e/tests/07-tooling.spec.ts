@@ -90,3 +90,38 @@ test.describe("tooling", () => {
     expect(mounted).toBe(false);
   });
 });
+
+/**
+ * The loop the user actually cares about: type a skill into the UI, and the
+ * agent gets it. The API test above proves the projection; this one proves the
+ * whole path, because "configured" and "mounted" were two different things
+ * until this round.
+ */
+test("a skill written in the UI reaches the next session's checkout", async ({ page }) => {
+  await login(page, USER);
+  const name = `ui-skill-${Date.now()}`;
+
+  await page.goto("/settings/skills");
+  await expect(page.getByTestId("skill-add")).toBeVisible({ timeout: 20_000 });
+  await page.getByTestId("skill-add").click();
+  await expect(page.getByTestId("skill-name")).toBeVisible({ timeout: 20_000 });
+  await page.getByTestId("skill-name").fill(name);
+  // The description is required because it is what the agent's skill index
+  // shows; a skill nobody can recognise is a skill nobody uses.
+  await page.getByTestId("skill-description").fill("run the tests before claiming done");
+  await page.getByTestId("skill-body").fill(
+    "---\nname: ui-skill\n---\nAlways run the tests before claiming a task is done.\n",
+  );
+  await page.getByTestId("skill-submit").click();
+
+  // The row appears and reports that content is on file.
+  const row = page.locator(`[data-testid="skill-item"][data-name="${name}"]`);
+  await expect(row).toBeVisible({ timeout: 20_000 });
+
+  const sessionId = await openNewSession(page);
+  await sendPrompt(page, "hello");
+
+  const tooling = await (await page.request.get(`/v1/sessions/${sessionId}/tooling`)).json();
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  expect(tooling.mounted.skills).toContain(slug);
+});

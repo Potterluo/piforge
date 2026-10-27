@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"strings"
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
@@ -78,6 +79,28 @@ func (s *server) handleCreateSkill(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.fail(w, r, err)
 		return
+	}
+
+	// A skill without content is metadata that never reaches the agent, so a
+	// create that carries a body also writes the bundle. The row exists first
+	// because its id names the directory; if the write fails the row is removed
+	// rather than left looking configured while mounting nothing.
+	if strings.TrimSpace(in.Body) != "" {
+		files, ferr := bundleFiles([]skillFile{{Path: "SKILL.md", Content: in.Body}})
+		if ferr != nil {
+			_ = s.deps.Store.DeleteSkill(r.Context(), user.ID, skill.ID)
+			s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "%s", ferr.Error()))
+			return
+		}
+		key, hash, werr := s.writeSkillBundle(skill.ID, files)
+		if werr != nil {
+			_ = s.deps.Store.DeleteSkill(r.Context(), user.ID, skill.ID)
+			s.fail(w, r, werr)
+			return
+		}
+		if updated, uerr := s.deps.Store.UpdateSkillBundle(r.Context(), user.ID, skill.ID, key, hash); uerr == nil {
+			skill = updated
+		}
 	}
 	writeJSON(w, http.StatusCreated, skillResponse{Skill: skill})
 }

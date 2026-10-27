@@ -36,6 +36,8 @@ type testEnv struct {
 	workspace *fakeWorkspace
 	deps      Deps
 	handler   http.Handler
+	// skillsDir is set only by tests that exercise bundle uploads.
+	skillsDir string
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -87,6 +89,17 @@ func newTestEnv(t *testing.T) *testEnv {
 		Secrets:   box,
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	env.rebuild()
+	return env
+}
+
+// newTestEnvWithSkills is newTestEnv plus a real bundle directory, for the
+// upload paths that write files.
+func newTestEnvWithSkills(t *testing.T) *testEnv {
+	t.Helper()
+	env := newTestEnv(t)
+	env.skillsDir = filepath.Join(t.TempDir(), "skills")
+	env.deps.SkillsDir = env.skillsDir
 	env.rebuild()
 	return env
 }

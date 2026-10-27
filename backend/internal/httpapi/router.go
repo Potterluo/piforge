@@ -76,6 +76,9 @@ type Deps struct {
 	Runtime   contracts.AgentRuntime
 	Workspace contracts.Workspace
 	Sandbox   contracts.SandboxProvider
+	// SkillsDir is where uploaded skill bundles live, one directory per skill.
+	// Empty means uploads are refused with a typed error.
+	SkillsDir string
 	// Secrets seals and opens provider credentials. When nil, creating a
 	// provider with a key is refused rather than storing it in the clear.
 	Secrets *crypto.Box
@@ -208,6 +211,10 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /v1/skills", s.authed(s.handleListSkills))
 	mux.Handle("POST /v1/skills", s.mutating(s.handleCreateSkill))
 	mux.Handle("DELETE /v1/skills/{id}", s.mutating(s.handleDeleteSkill))
+	mux.Handle("PUT /v1/skills/{id}/bundle", s.mutating(s.handleUploadSkillBundle))
+	// The bundle is content, not configuration: reading it back lets the editor
+	// show what is actually on disk.
+	mux.Handle("GET /v1/skills/{id}/bundle", s.authed(s.handleReadSkillBundle))
 
 	// MCP servers (PRD §5.9).
 	mux.Handle("GET /v1/mcp/servers", s.authed(s.handleListMCPServers))

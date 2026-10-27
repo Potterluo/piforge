@@ -191,7 +191,14 @@ func run() error {
 	defer terminals.CloseAll()
 
 	// 6. Working directories.
-	prov := provision.New(provision.Config{Store: st, Sandbox: sb, Git: git})
+	prov := provision.New(provision.Config{
+		Store:   st,
+		Sandbox: sb,
+		Git:     git,
+		// Uploaded bundles live here; without it provisioning would mount
+		// nothing and every skill would silently be metadata only.
+		SkillsDir: filepath.Join(opt.dataDir, "skills"),
+	})
 
 	// 6. Authentication.
 	authn, err := auth.New(st, st, auth.Config{
@@ -210,6 +217,7 @@ func run() error {
 		Workspace:   fs,
 		Sandbox:     sb,
 		Secrets:     box,
+		SkillsDir:   filepath.Join(opt.dataDir, "skills"),
 		LLMGateway:  gateway,
 		Browser:     browsers,
 		Term:        termAdapter{m: terminals},

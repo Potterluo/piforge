@@ -87,7 +87,7 @@ export default function SkillsPage() {
             Skill 是一份 SKILL.md：agent 按需加载，用来学会某个具体流程。共享 Skill 由管理员维护，私有 Skill 只有你自己能用。
           </p>
         </div>
-        <Button size="sm" className="ml-auto" onClick={() => setDialogOpen(true)}>
+        <Button size="sm" className="ml-auto" data-testid="skill-add" onClick={() => setDialogOpen(true)}>
           <Plus />
           新建 Skill
         </Button>
@@ -126,7 +126,7 @@ export default function SkillsPage() {
           </Empty>
         ) : (
           list.map((skill) => (
-            <Item key={skill.id} variant="outline">
+            <Item key={skill.id} variant="outline" data-testid="skill-item" data-name={skill.name}>
               <ItemMedia variant="icon">
                 <Sparkles />
               </ItemMedia>
@@ -186,6 +186,7 @@ export default function SkillsPage() {
                 <FieldLabel htmlFor="skill-name">名称</FieldLabel>
                 <Input
                   id="skill-name"
+                  data-testid="skill-name"
                   value={name}
                   onChange={(event) => setName(event.target.value)}
                   placeholder="例如：release-notes"
@@ -197,6 +198,7 @@ export default function SkillsPage() {
                 <FieldLabel htmlFor="skill-description">描述</FieldLabel>
                 <Input
                   id="skill-description"
+                  data-testid="skill-description"
                   value={description}
                   onChange={(event) => setDescription(event.target.value)}
                   placeholder="一句话说明它能做什么"
@@ -207,6 +209,7 @@ export default function SkillsPage() {
                 <FieldLabel htmlFor="skill-body">正文（SKILL.md）</FieldLabel>
                 <Textarea
                   id="skill-body"
+                  data-testid="skill-body"
                   value={body}
                   onChange={(event) => setBody(event.target.value)}
                   rows={8}
@@ -221,7 +224,7 @@ export default function SkillsPage() {
               <Button type="button" variant="ghost" onClick={() => setDialogOpen(false)}>
                 取消
               </Button>
-              <Button type="submit" disabled={create.isPending}>
+              <Button type="submit" data-testid="skill-submit" disabled={create.isPending}>
                 {create.isPending ? <Spinner /> : null}
                 创建
               </Button>
