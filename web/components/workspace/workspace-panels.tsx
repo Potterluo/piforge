@@ -16,7 +16,8 @@ import { FileTree } from "@/components/workspace/file-tree";
 import { GitHistoryPanel } from "@/components/workspace/git-history";
 import { GitChangesPanel } from "@/components/workspace/git-panel";
 import { BrowserPanel } from "@/components/workspace/browser-panel";
-import { TerminalPane } from "@/components/workspace/terminal-pane";
+import { asPTYInput, buildCdCommand } from "@/lib/terminal/cd";
+import { TerminalPane, type TerminalPaneHandle } from "@/components/workspace/terminal-pane";
 
 /**
  * The right-hand inspector of the workbench.
@@ -51,11 +52,16 @@ export function WorkspacePanels({
     setTab("files");
   }, []);
 
+  const coverageRef = React.useRef<TerminalPaneHandle | null>(null);
+
   const handleRevealInTerminal = React.useCallback((path: string) => {
-    // TODO(pty): once the WebSocket relay exists this should also run `cd` in
-    // the PTY; for now the panel records the intent and says so.
     setRevealTarget(path);
     setTab("terminal");
+    // Type the cd into the shell itself. Paths that are not provably inert are
+    // refused by buildCdCommand and only displayed: a repository can contain a
+    // file named `a; rm -rf ~`, and this string goes to a real shell.
+    const command = buildCdCommand(path);
+    if (command) coverageRef.current?.send(asPTYInput(command));
   }, []);
 
   return (
@@ -137,11 +143,11 @@ export function WorkspacePanels({
                   </MarkerIcon>
                   <MarkerContent className="truncate">
                     待打开：
-                    <code className="font-mono">{revealTarget}</code>（PTY 接入后再执行 cd）
+                    <code className="font-mono">{revealTarget}</code>（已在该目录执行 cd）
                   </MarkerContent>
                 </Marker>
               ) : null}
-              <TerminalPane sessionId={sessionId} className="min-h-0 flex-1" />
+              <TerminalPane ref={coverageRef} sessionId={sessionId} className="min-h-0 flex-1" />
             </div>
           </TabsContent>
         </Tabs>

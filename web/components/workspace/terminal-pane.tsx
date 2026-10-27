@@ -128,6 +128,8 @@ export const PTY_NOTICE = "正在连接 /v1/sessions/{id}/pty …";
 
 export interface TerminalPaneHandle {
   write: (chunk: string) => void;
+  /** Types into the shell itself, as opposed to `write`, which only displays. */
+  send: (data: string) => void;
   clear: () => void;
   fit: () => void;
   focus: () => void;
@@ -155,6 +157,7 @@ export const TerminalPane = React.forwardRef<TerminalPaneHandle, TerminalPanePro
       ref,
       () => ({
         write: (chunk) => surfaceRef.current?.write(chunk),
+        send: (data) => pty.send(data),
         clear: () => surfaceRef.current?.clear(),
         fit: () => surfaceRef.current?.fit(),
         focus: () => surfaceRef.current?.focus(),
