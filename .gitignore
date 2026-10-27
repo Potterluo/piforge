@@ -1,0 +1,26 @@
+# Go
+backend/bin/
+backend/**/*.exe
+*.test
+*.out
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+.pnpm-store/
+
+# Runtime scratch
+.data/
+*.db
+*.db-shm
+*.db-wal
+tmp/
+.e2e-artifacts/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
