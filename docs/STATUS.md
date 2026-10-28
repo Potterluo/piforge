@@ -89,7 +89,7 @@
 | FR-8.7 与分支会话联动（图上高亮「谁跑的分支」） | MISSING | `git-graph.tsx`/`git-data.tsx` 没有 worktree/session ↔ 分支的映射，也没有高亮 |
 | FR-8.8 远端操作 fetch/pull/push + 开 PR | MISSING | 无 `…/git/push`、`pull`、`fetch`、无 `…/pr` 路由；`gitx/ops.go` 无 push/fetch；"pull" 全仓库零命中 |
 | FR-9.1 跟随终端数据源（tool_execution_* partialResult） | DONE | `pi/normalize.go` `ToolProgressPayload` → `EvToolProgress`（tool_execution_update）、`PtyStreamPayload` → `EvPtyStream`；`normalize_test.go`、`web/lib/session/reduce.ts` 消费 `tool.progress` |
-| FR-9.2 自动跟随（切 tab + 滚动到底，可关） | MISSING | `FollowTerminal` 组件定义了但**没有任何地方渲染**（仅 `terminal-pane.tsx` 内导出）；无自动切换、无 `autoFollowTerminal` 设置 |
+| FR-9.2 跟随终端 | DONE | `FollowTerminal` 已挂到面板条「跟随」；`collectBashOutput` 从时间线的 bash 工具块取内容；`33-follow-terminal.spec.ts` |
 | FR-9.3 只读渲染（ansi / 只读 xterm） | PARTIAL | 工具输出走 `tool-trace.tsx` 的 `Trace` + `CodeBlock`（只读）；`FollowTerminal` 的 `readOnly` 终端从未挂载 |
 | FR-9.4 命令重放（历史命令列表） | MISSING | 无命令历史面板/端点 |
 | FR-9.5 长输出 >5000 行折叠 + 完整输出路径 | PARTIAL | `tool-trace.tsx` 可折叠输出；无 5000 行阈值，无 `fullOutputPath` 概念 |
@@ -134,7 +134,7 @@
 | FR-14.5 会话记录所用 skill@version | MISSING | `skills.version` 只在自己表里，`sessions.config` 未记录任何 skill 版本；无相关代码 |
 | FR-14.6 `/skill:name` + `/` 命令面板 | MISSING | `command-palette.tsx` 只有会话/项目命令；无 `/` 斜杠命令、无 skill 调用 |
 | FR-14.7 内置开箱可用 skill | MISSING | `store/seed.go` 只种 admin 用户与共享 provider（`EnsureAdminSeed`），无内置 skill |
-| FR-15.1 用户级 MCP（stdio / HTTP） | DONE | `handleCreateMCPServer` + `materialize.mcpEntry` 写 `.mcp.json`；`07-tooling.spec.ts` "an MCP server is materialised into the session checkout" |
+| FR-15.1 MCP server 配置 | PARTIAL（**配置不生效**） | CRUD + 加密凭据都在，但**没有任何代码把 MCP server 写进 Pi 的 `mcp.json`**，所以 agent 里没有这些工具。这一节的其它行都以此为前提 |
 | FR-15.2 MCP 凭据加密保存 | PARTIAL（存得住、读不回；未注入到进程） | `store/secrets.go` AES-GCM（`PIFORGE_SECRET_KEY` 或数据目录 `secret.key`），`secrets_cipher` 列；`MCPServerSecrets` 只给启动器用；`secrets_test.go` 断言密文不含明文、跨用户读不到；`32-mcp-secrets.spec.ts`。**还没把凭据注入到 MCP 进程的 env** |
 | FR-15.3 OAuth 代办 | MISSING | 无 `POST /v1/mcp/{id}/oauth/start`，无回调路由 |
 | FR-15.4 曝光配置（server + 按工具通配符） | PARTIAL | `MCPServer.Exposure` 会写进 `.mcp.json`（`mcpEntry`）；无按工具 `tool_overrides`，UI 只有自由文本 |
