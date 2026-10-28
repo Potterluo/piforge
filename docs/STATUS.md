@@ -60,7 +60,7 @@
 | FR-5.4 多 worktree 创建/列出/清理 | PARTIAL | 创建：`provision.EnsureWorktree`（`provision_test.go`、`routes_test.go` `TestCreateSessionProvisionsWorktree`）；列出/清理：无 HTTP 端点，`gitx.ListWorktrees`/`RemoveWorktree`/`PruneWorktrees` 无调用者 |
 | FR-5.5 依赖缓存共享 | MISSING | `GOMODCACHE`/`_cacache`/`CARGO_HOME` 全仓库零命中 |
 | FR-5.6 快照（fs / fs+mem，仅工具边界） | PARTIAL | 只有数据层：`store/resources.go` `CreateSnapshot`/`ListSnapshots` + `store_test.go`；没有任何生产者、没有工具边界钩子、无 HTTP、`sandbox.Pause` 不快照 |
-| FR-5.7 端口发现（ss -ltnp） | MISSING | 无 `/ports` 路由，无 `ss`/`ltnp` 调用 |
+| FR-5.7 空闲回收 | DONE | `Runtime.ReapIdle` + `StartIdleReaper`（`PIFORGE_AGENT_IDLE_TTL`，默认 30 分钟）；有 run 在跑时不回收；`TestReapIdleStopsUnusedAgentsOnly`；e2e 用 45s TTL |
 | FR-5.8 资源护栏（并发/CPU/内存/磁盘） | MISSING | `sandboxes` 表有 `cpu_milli`/`mem_mb`/`disk_gb` 列，但无校验、无拒绝、无 cgroup 限制 |
 | FR-5.9 手动暂停/唤醒/快照/重建 | MISSING | 路由表里没有 sandbox 操作端点（`router.go` 全量对照） |
 | FR-5.10 沙箱日志（启动 / 镜像构建） | PARTIAL | `handleSessionLogs`（代码注释标 FR-5.10）返回的是 **agent stderr 尾巴**（`contracts.LogSource`），不是容器启动或镜像构建日志；`22-logs.spec.ts` 通过 |
