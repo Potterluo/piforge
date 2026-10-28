@@ -10,6 +10,10 @@ const Toaster = ({ ...props }: ToasterProps) => {
   return (
     <Sonner
       theme={theme as ToasterProps["theme"]}
+      // Bottom-right: a toast that sits over the list you just changed swallows the
+      // next click, which is how "edit the provider I just created" became
+      // impossible to click in a user test.
+      position="bottom-right"
       className="toaster group"
       icons={{
         success: (
