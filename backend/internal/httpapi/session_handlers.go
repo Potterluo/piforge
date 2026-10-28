@@ -110,6 +110,32 @@ func (s *server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleDeleteSession removes a session, its event log and its messages.
+//
+// A running agent is stopped first: killing it afterwards would leave a child
+// writing into a row that no longer exists. The worktree stays on disk for the
+// provisioner to reclaim — deleting a directory under a live process is how
+// cleanup turns into corruption.
+func (s *server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	user := auth.MustUser(r.Context())
+	sessionID := pathID(r)
+	if _, err := s.deps.Store.Session(r.Context(), user.ID, sessionID); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if rt, err := s.requireRuntime(); err == nil {
+		stopCtx, cancel := detach(r.Context(), 10*time.Second)
+		_, _ = rt.Interrupt(stopCtx, sessionID)
+		_ = rt.Stop(stopCtx, sessionID)
+		cancel()
+	}
+	if err := s.deps.Store.DeleteSession(r.Context(), user.ID, sessionID); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeOK(w)
+}
+
 // handlePatchSession renames, re-models or archives a session.
 func (s *server) handlePatchSession(w http.ResponseWriter, r *http.Request) {
 	user := auth.MustUser(r.Context())

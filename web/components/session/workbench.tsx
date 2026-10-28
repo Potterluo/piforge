@@ -127,7 +127,9 @@ function WorkbenchBody({ sessionId, projectId }: { sessionId: string; projectId:
       <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border px-3">
         <span data-testid="run-state" data-state={state.running ? "running" : "settled"} hidden />
         <div className="flex min-w-0 flex-col">
-          <h1 className="truncate text-sm font-medium" data-testid="session-title">\n            {title}\n          </h1>
+          <h1 className="truncate text-sm font-medium" data-testid="session-title">
+            {title}
+          </h1>
           <p className="truncate text-[11px] text-muted-foreground">
             {project.data?.project.name ?? "项目"}
             {" · "}

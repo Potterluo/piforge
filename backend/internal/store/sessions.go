@@ -288,3 +288,19 @@ func scanSession(sc interface{ Scan(dest ...any) error }) (*contracts.Session, e
 	sess.LastActiveAt = parseTime(lastActive)
 	return &sess, nil
 }
+
+// DeleteSession removes a session and everything scoped to it.
+//
+// The foreign keys cascade (runs, events, tool_calls, messages), so one delete
+// is enough for the data. What cannot be cascaded is the worktree on disk and the
+// running agent: the caller stops the agent first, and the worktree is left for
+// the provisioner to reclaim, because deleting a directory out from under a live
+// process is how data gets corrupted rather than cleaned up.
+func (s *Store) DeleteSession(ctx context.Context, userID, sessionID string) error {
+	res, err := s.w.ExecContext(ctx,
+		`DELETE FROM sessions WHERE id = ? AND user_id = ?`, sessionID, userID)
+	if err != nil {
+		return fmt.Errorf("store: delete session %q: %w", sessionID, err)
+	}
+	return requireOneRow(res, "store: delete session "+sessionID)
+}

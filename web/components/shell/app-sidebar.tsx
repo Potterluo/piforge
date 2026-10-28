@@ -2,22 +2,32 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useMemo } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import {
+  Archive,
   ChevronRight,
   ChevronsUpDown,
+  Download,
   FolderGit2,
   GitBranch,
   LogOut,
   MessageSquareDashed,
   MessagesSquare,
+  MoreHorizontal,
+  PenLine,
   Plus,
   Settings,
   Shield,
+  Trash2,
 } from "lucide-react";
 
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Field, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -59,7 +69,7 @@ import {
   sessionStatusLabel,
   sessionStatusTone,
 } from "@/lib/session/format";
-import { useCurrentUser, useProjectSessions, useProjects } from "@/lib/session/queries";import { cn } from "@/lib/utils";
+import { qk, useCurrentUser, useProjectSessions, useProjects } from "@/lib/session/queries";import { cn } from "@/lib/utils";
 import type { Session, SessionStatus } from "@/lib/types";
 
 interface SessionGroup {
@@ -149,7 +159,18 @@ export function AppSidebar({
   const sessions = useProjectSessions(projectId ?? undefined);
 
   const project = projects.data?.projects.find((item) => item.id === projectId) ?? null;
-  const groups = useMemo(() => groupSessions(sessions.data?.sessions ?? []), [sessions.data]);
+  // Archived sessions stay out of the way until asked for: archiving one is how a
+  // user says "I am done with this" without losing it.
+  const [showArchived, setShowArchived] = useState(false);
+  const archivedCount = (sessions.data?.sessions ?? []).filter(
+    (item) => item.status === "archived",
+  ).length;
+  const groups = useMemo(() => {
+    const visible = (sessions.data?.sessions ?? []).filter(
+      (item) => showArchived || item.status !== "archived",
+    );
+    return groupSessions(visible);
+  }, [sessions.data, showArchived]);
 
   const user = me.data?.user;
   const isAdmin = user?.role === "admin";
@@ -259,7 +280,19 @@ export function AppSidebar({
         <SidebarSeparator />
 
         <SidebarGroup>
-          <SidebarGroupLabel>会话</SidebarGroupLabel>
+          <SidebarGroupLabel className="gap-2">
+            会话
+            {archivedCount > 0 ? (
+              <button
+                type="button"
+                data-testid="toggle-archived"
+                className="ml-auto rounded px-1 text-[10px] font-normal text-muted-foreground hover:text-foreground"
+                onClick={() => setShowArchived((value) => !value)}
+              >
+                {showArchived ? "隐藏已归档" : `显示已归档 (${archivedCount})`}
+              </button>
+            ) : null}
+          </SidebarGroupLabel>
           <SidebarGroupAction onClick={onNewSession} title="新会话">
             <Plus />
             <span className="sr-only">新会话</span>
@@ -305,6 +338,7 @@ export function AppSidebar({
                         <span>{group.root.title || "未命名会话"}</span>
                         <StatusDot status={group.root.status} />
                       </SidebarMenuButton>
+                      <SessionActions session={group.root} projectId={projectId!} />
                       {group.children.length > 0 ? (
                         <CollapsibleTrigger
                           render={
@@ -405,5 +439,181 @@ export function AppSidebar({
       </SidebarFooter>
       <SidebarRail />
     </Sidebar>
+  );
+}
+/**
+ * Per-session actions: rename, archive, export, delete.
+ *
+ * These are the four things a session list is expected to do and none of them
+ * existed, so a finished session could only be scrolled past forever.
+ */
+function SessionActions({ session, projectId }: { session: Session; projectId: string }) {
+  const queryClient = useQueryClient();
+  const router = useRouter();
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: qk.sessions(projectId) });
+    void queryClient.invalidateQueries({ queryKey: qk.session(session.id) });
+    void queryClient.invalidateQueries({ queryKey: qk.projects });
+  };
+
+  const rename = useMutation({
+    mutationFn: (title: string) => api.sessions.update(session.id, { title }),
+    onSuccess: () => {
+      toast.success("已重命名");
+      setRenaming(null);
+      refresh();
+    },
+    onError: (error) =>
+      toast.error("重命名失败", {
+        description: error instanceof Error ? error.message : "未知错误",
+      }),
+  });
+
+  const archived = session.status === "archived";
+  const archive = useMutation({
+    mutationFn: () => api.sessions.archive(session.id, !archived),
+    onSuccess: () => {
+      toast.success(archived ? "已移出归档" : "已归档", {
+        description: archived ? undefined : "归档的会话默认不出现在列表里，可随时恢复。",
+      });
+      refresh();
+    },
+    onError: (error) =>
+      toast.error("操作失败", {
+        description: error instanceof Error ? error.message : "未知错误",
+      }),
+  });
+
+  const remove = useMutation({
+    mutationFn: () => api.sessions.remove(session.id),
+    onSuccess: () => {
+      toast.success("已删除会话");
+      setDeleting(false);
+      if (session.id) refresh();
+      router.replace(`/p/${projectId}`);
+    },
+    onError: (error) =>
+      toast.error("删除失败", {
+        description: error instanceof Error ? error.message : "未知错误",
+      }),
+  });
+
+  return (
+    <>
+      <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+        <DropdownMenuTrigger
+          render={
+            <SidebarMenuAction
+              showOnHover
+              aria-label="会话操作"
+              data-testid="session-actions"
+              className={menuOpen ? "opacity-100" : undefined}
+            />
+          }
+        >
+          <MoreHorizontal />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-40">
+          <DropdownMenuItem
+            data-testid="session-rename"
+            onClick={() => {
+              setRenaming(session.title ?? "");
+              setMenuOpen(false);
+            }}
+          >
+            <PenLine />
+            重命名
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            data-testid="session-archive"
+            onClick={() => {
+              archive.mutate();
+              setMenuOpen(false);
+            }}
+          >
+            <Archive />
+            {archived ? "移出归档" : "归档"}
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            data-testid="session-export"
+            render={<a href={api.sessions.exportUrl(session.id, "md")} download />}
+          >
+            <Download />
+            导出 Markdown
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            variant="destructive"
+            data-testid="session-delete"
+            onClick={() => {
+              setDeleting(true);
+              setMenuOpen(false);
+            }}
+          >
+            <Trash2 />
+            删除
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <Dialog open={renaming !== null} onOpenChange={(open) => !open && setRenaming(null)}>
+        <DialogContent className="sm:max-w-md">
+          <form
+            className="flex flex-col gap-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              rename.mutate((renaming ?? "").trim());
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>重命名会话</DialogTitle>
+              <DialogDescription>名字只影响列表和标题，不改变对话内容。</DialogDescription>
+            </DialogHeader>
+            <Field>
+              <FieldLabel htmlFor="session-title-input">名称</FieldLabel>
+              <Input
+                id="session-title-input"
+                data-testid="session-title-input"
+                value={renaming ?? ""}
+                onChange={(event) => setRenaming(event.target.value)}
+                autoFocus
+              />
+            </Field>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setRenaming(null)}>
+                取消
+              </Button>
+              <Button type="submit" data-testid="session-rename-submit" disabled={rename.isPending}>
+                保存
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={deleting} onOpenChange={setDeleting}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除「{session.title || "未命名会话"}」？</AlertDialogTitle>
+            <AlertDialogDescription>
+              对话记录会一并删除，无法恢复。想要保留但不想看到它，请用「归档」。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              data-testid="session-delete-confirm"
+              onClick={() => remove.mutate()}
+            >
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }

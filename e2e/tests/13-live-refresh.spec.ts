@@ -47,7 +47,14 @@ test.describe("a settled run refreshes what it changed", () => {
     expect(
       (await apiWrite(page, "PUT", `/v1/sessions/${sessionId}/files?path=written-by-agent.txt`, "hello\n")).status,
     ).toBeLessThan(300);
-    await sendPrompt(page, "second run");
+    // Sent through the API on purpose: this test is about what the client does
+    // when a run settles, not about the composer. Waiting for a "running" badge
+    // the fake peer can finish before the first poll would only add flakiness.
+    const sent = await apiWrite(page, "POST", `/v1/sessions/${sessionId}/messages`, {
+      client_msg_id: `refresh-${Date.now()}`,
+      text: "second run",
+    });
+    expect(sent.status).toBeLessThan(300);
 
     // No reload, no 刷新文件树: the settle signal is the only thing that changed.
     await expect(

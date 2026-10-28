@@ -1,9 +1,12 @@
 package httpapi
 
 import (
+	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/store"
@@ -364,5 +367,88 @@ func TestSpawnFailureWithNoProviderIsExplained(t *testing.T) {
 	env.mustErr(rec, http.StatusBadRequest, contracts.ErrNoModel)
 	if !strings.Contains(rec.Body.String(), "Settings") {
 		t.Fatalf("the message does not say where to fix it: %s", rec.Body.String())
+	}
+}
+
+// Deleting a session has to take its log with it: an orphaned event row would
+// make the next session that reuses the sequence look like it had history.
+func TestDeleteSessionTakesItsLogWithIt(t *testing.T) {
+	env := newTestEnv(t)
+	user := env.mkUser("dev@piforge.local", "pw", contracts.RoleUser)
+	c := env.login("dev@piforge.local", "pw")
+	_, sess := env.mkSessionFor(user.ID, "repo")
+
+	env.runtime.script = []contracts.Event{
+		{Type: contracts.EvRunStarted, RunID: "r1", Payload: json.RawMessage(`{"trigger":"user"}`)},
+		{Type: contracts.EvRunSettled, RunID: "r1", Payload: json.RawMessage(`{}`)},
+	}
+	if rec := env.doAuthed(http.MethodPost, "/v1/sessions/"+sess.ID+"/messages",
+		map[string]any{"client_msg_id": "cm_1", "text": "hi"}, c); rec.Code != http.StatusOK {
+		t.Fatalf("send: %d %s", rec.Code, rec.Body.String())
+	}
+	// Give the pump a moment to persist the scripted events.
+	for i := 0; i < 100; i++ {
+		events, err := env.store.ListEvents(t.Context(), user.ID, sess.ID, 0, 10)
+		if err != nil {
+			t.Fatalf("events: %v", err)
+		}
+		if len(events) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if rec := env.doAuthed(http.MethodDelete, "/v1/sessions/"+sess.ID, nil, c); rec.Code != http.StatusOK {
+		t.Fatalf("delete: %d %s", rec.Code, rec.Body.String())
+	}
+	if _, err := env.store.Session(t.Context(), user.ID, sess.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("the session survived: %v", err)
+	}
+	if events, err := env.store.ListEvents(t.Context(), user.ID, sess.ID, 0, 10); err == nil && len(events) > 0 {
+		t.Fatalf("%d events survived the session", len(events))
+	}
+
+	// And somebody else's session is not deletable.
+	env.mkUser("other@piforge.local", "pw2", contracts.RoleUser)
+	other := env.login("other@piforge.local", "pw2")
+	_, theirSession := env.mkSessionFor(user.ID, "repo2")
+	if rec := env.doAuthed(http.MethodDelete, "/v1/sessions/"+theirSession.ID, nil, other); rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-user delete = %d", rec.Code)
+	}
+}
+
+// An export has to be the conversation, not the event log: users keep these.
+func TestExportSessionRendersTheConversation(t *testing.T) {
+	env := newTestEnv(t)
+	user := env.mkUser("dev@piforge.local", "pw", contracts.RoleUser)
+	c := env.login("dev@piforge.local", "pw")
+	_, sess := env.mkSessionFor(user.ID, "repo")
+
+	env.runtime.script = []contracts.Event{
+		{Type: contracts.EvRunStarted, RunID: "r1", Payload: json.RawMessage(`{"trigger":"user"}`)},
+		{Type: contracts.EvMsgFinal, RunID: "r1", Payload: json.RawMessage(`{"role":"assistant","blocks":[{"kind":"text","index":0,"text":"exported answer"}]}`)},
+		{Type: contracts.EvRunSettled, RunID: "r1", Payload: json.RawMessage(`{}`)},
+	}
+	if rec := env.doAuthed(http.MethodPost, "/v1/sessions/"+sess.ID+"/messages",
+		map[string]any{"client_msg_id": "cm_1", "text": "hi"}, c); rec.Code != http.StatusOK {
+		t.Fatalf("send: %d %s", rec.Code, rec.Body.String())
+	}
+	for i := 0; i < 100; i++ {
+		if events, _ := env.store.ListEvents(t.Context(), user.ID, sess.ID, 0, 10); len(events) >= 3 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	rec := env.doAuthed(http.MethodGet, "/v1/sessions/"+sess.ID+"/export?format=md", nil, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("export: %d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "exported answer") {
+		t.Fatalf("the answer is missing from the export: %s", body)
+	}
+	if !strings.Contains(rec.Header().Get("Content-Disposition"), "attachment") {
+		t.Fatalf("export is not an attachment: %q", rec.Header().Get("Content-Disposition"))
 	}
 }

@@ -168,6 +168,15 @@ export const sessions = {
     request<{ session: Session }>(`/v1/sessions/${id}`, { method: "PATCH", body: patch }),
   send: (id: string, input: SendMessageInput) =>
     request<PromptResult>(`/v1/sessions/${id}/messages`, { method: "POST", body: input }),
+  remove: (id: string) => request<{ ok: boolean }>(`/v1/sessions/${id}`, { method: "DELETE" }),
+  archive: (id: string, archived: boolean) =>
+    request<{ session: Session }>(`/v1/sessions/${id}`, {
+      method: "PATCH",
+      body: { status: archived ? "archived" : "active" },
+    }),
+  /** The download itself, not a fetch: the browser owns the file dialog. */
+  exportUrl: (id: string, format: "md" | "html" = "md") =>
+    `/v1/sessions/${id}/export?format=${format}`,
   interrupt: (id: string, clearQueue = true) =>
     request<InterruptResult>(`/v1/sessions/${id}/interrupt`, {
       method: "POST",
