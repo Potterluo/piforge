@@ -457,6 +457,10 @@ type SearchResult struct {
 // implementation's responsibility (PRD §6.3-坑6).
 type Workspace interface {
 	Tree(ctx context.Context, root, relPath string, depth int) ([]*FileNode, error)
+	// TreeWithOptions is Tree with per-request flags. It exists because "show
+	// ignored files" has to change what the server lists, not what the client
+	// hides: the filtering happens here.
+	TreeWithOptions(ctx context.Context, root, relPath string, depth int, includeIgnored bool) ([]*FileNode, error)
 	ReadFile(ctx context.Context, root, relPath string) (*FileContent, error)
 	WriteFile(ctx context.Context, root, relPath string, body []byte) error
 	DeleteFile(ctx context.Context, root, relPath string) error

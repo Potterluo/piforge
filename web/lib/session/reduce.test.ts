@@ -582,3 +582,29 @@ describe("selectTimeline", () => {
     expect(selectTimeline(state)).toHaveLength(2);
   });
 });
+describe("model attribution", () => {
+  it("remembers which model produced the turn", () => {
+    // A session can be pointed at a custom model id; the transcript has to say
+    // what actually answered it.
+    const state = reduceAll([
+      event(EV.msgFinal, {
+        message_id: "m1",
+        role: "assistant",
+        blocks: [{ kind: "text", text: "hi" }],
+        provider: "piforge",
+        model: "deepseek-v4-flash",
+      }, { seq: 1 }),
+    ]);
+
+    expect(state.turns[0].model).toBe("piforge/deepseek-v4-flash");
+  });
+
+  it("keeps the model when a later message omits it", () => {
+    const state = reduceAll([
+      event(EV.msgFinal, { message_id: "m1", role: "assistant", blocks: [], provider: "p", model: "m" }, { seq: 1 }),
+      event(EV.msgFinal, { message_id: "m1", role: "assistant", blocks: [{ kind: "text", text: "x" }] }, { seq: 2 }),
+    ]);
+
+    expect(state.turns[0].model).toBe("p/m");
+  });
+});

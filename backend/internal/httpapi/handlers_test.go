@@ -1271,3 +1271,38 @@ func TestRecovererIgnoresClientAborts(t *testing.T) {
 		t.Fatalf("a client abort produced a body: %q", rec.Body.String())
 	}
 }
+
+// The file panel's "显示忽略文件" switch has to reach the server: the tree is
+// filtered there, so a purely client-side flag can only hide more than the
+// default and the switch looks broken (which is exactly what a user reported).
+func TestFileTreeSwitchReachesTheServer(t *testing.T) {
+	env := newTestEnv(t)
+	user := env.mkUser("dev@piforge.local", "pw", contracts.RoleUser)
+	project, sess := env.mkSessionFor(user.ID, "repo")
+	env.withWorktree(user.ID, project.ID, sess.ID)
+	c := env.login("dev@piforge.local", "pw")
+
+	rec := env.doAuthed(http.MethodGet,
+		"/v1/sessions/"+sess.ID+"/files/tree?path=&depth=1&include_ignored=1", nil, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tree: %d %s", rec.Code, rec.Body.String())
+	}
+	env.workspace.mu.Lock()
+	got := env.workspace.includeIgnored
+	env.workspace.mu.Unlock()
+	if !got {
+		t.Fatal("include_ignored was accepted in the query but never reached the workspace")
+	}
+
+	// And the default stays filtered.
+	if rec := env.doAuthed(http.MethodGet,
+		"/v1/sessions/"+sess.ID+"/files/tree?path=&depth=1", nil, c); rec.Code != http.StatusOK {
+		t.Fatalf("tree: %d", rec.Code)
+	}
+	env.workspace.mu.Lock()
+	got = env.workspace.includeIgnored
+	env.workspace.mu.Unlock()
+	if got {
+		t.Fatal("the default tree request asked for ignored files")
+	}
+}

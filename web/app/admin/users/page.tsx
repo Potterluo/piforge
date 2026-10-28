@@ -5,6 +5,17 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { KeyRound, Plus, Shield, ShieldOff, UserX, Users } from "lucide-react";
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -243,21 +254,52 @@ export default function AdminUsersPage() {
                           {user.role === "admin" ? <ShieldOff /> : <Shield />}
                           {user.role === "admin" ? "降为普通" : "设为管理员"}
                         </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={isSelf || updateUser.isPending}
-                          title={isSelf ? "不能停用自己" : user.status === "active" ? "停用" : "启用"}
-                          onClick={() =>
-                            updateUser.mutate({
-                              id: user.id,
-                              status: user.status === "active" ? "disabled" : "active",
-                            })
-                          }
-                        >
-                          <UserX />
-                          {user.status === "active" ? "停用" : "启用"}
-                        </Button>
+                        {user.status === "active" ? (
+                          // Disabling locks somebody out mid-session, so it asks
+                          // first. Enabling is harmless and stays one click.
+                          <AlertDialog>
+                            <AlertDialogTrigger
+                              render={
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  disabled={isSelf || updateUser.isPending}
+                                  title={isSelf ? "不能停用自己" : "停用"}
+                                />
+                              }
+                            >
+                              <UserX />
+                              停用
+                            </AlertDialogTrigger>
+                            <AlertDialogContent>
+                              <AlertDialogHeader>
+                                <AlertDialogTitle>停用 {user.email}？</AlertDialogTitle>
+                                <AlertDialogDescription>
+                                  该账号会被立即登出，已有的会话无法再打开。项目、会话和沙箱数据都会保留，随时可以启用。
+                                </AlertDialogDescription>
+                              </AlertDialogHeader>
+                              <AlertDialogFooter>
+                                <AlertDialogCancel>取消</AlertDialogCancel>
+                                <AlertDialogAction
+                                  onClick={() => updateUser.mutate({ id: user.id, status: "disabled" })}
+                                >
+                                  停用
+                                </AlertDialogAction>
+                              </AlertDialogFooter>
+                            </AlertDialogContent>
+                          </AlertDialog>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={updateUser.isPending}
+                            title="启用"
+                            onClick={() => updateUser.mutate({ id: user.id, status: "active" })}
+                          >
+                            <UserX />
+                            启用
+                          </Button>
+                        )}
                         <Button
                           size="sm"
                           variant="ghost"

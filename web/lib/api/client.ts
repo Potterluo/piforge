@@ -209,9 +209,10 @@ export function eventsUrl(sessionId: string, afterSeq = 0): string {
 // ---------------------------------------------------------------------------
 
 export const files = {
-  tree: (sessionId: string, path = "", depth = 2) =>
+  tree: (sessionId: string, path = "", depth = 2, includeIgnored = false) =>
     request<{ nodes: FileNode[] }>(
-      `/v1/sessions/${sessionId}/files/tree?path=${encodeURIComponent(path)}&depth=${depth}`,
+      `/v1/sessions/${sessionId}/files/tree?path=${encodeURIComponent(path)}&depth=${depth}` +
+        (includeIgnored ? "&include_ignored=1" : ""),
     ),
   read: (sessionId: string, path: string) =>
     request<FileContent>(`/v1/sessions/${sessionId}/files?path=${encodeURIComponent(path)}`),

@@ -75,8 +75,10 @@ export function FileTree({ sessionId, activePath, onOpenFile, onRevealInTerminal
   const [pending, setPending] = React.useState<PendingDelete | null>(null);
   const [actionError, setActionError] = React.useState<string | null>(null);
 
-  const tree = useAsync(`files:${sessionId}`, async () => {
-    const response = await api.files.tree(sessionId, "", 2);
+  // The switch is part of the query key: the server decides what to list, so
+  // flipping it has to refetch rather than hide rows the client already has.
+  const tree = useAsync(`files:${sessionId}:${showIgnored ? "all" : "tracked"}`, async () => {
+    const response = await api.files.tree(sessionId, "", 2, showIgnored);
     return { nodes: response.nodes, dirs: collectDirs(response.nodes) };
   });
 
@@ -117,7 +119,7 @@ export function FileTree({ sessionId, activePath, onOpenFile, onRevealInTerminal
       if (dirs[path] || loadingDirs.includes(path)) return;
       setLoadingDirs((previous) => [...previous, path]);
       try {
-        const response = await api.files.tree(sessionId, path, 1);
+        const response = await api.files.tree(sessionId, path, 1, showIgnored);
         setExtraDirs((previous) => ({ ...previous, [path]: response.nodes }));
       } catch (error) {
         setActionError(error instanceof Error ? error.message : "目录加载失败");

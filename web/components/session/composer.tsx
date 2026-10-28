@@ -541,7 +541,13 @@ export function Composer({
               autoFocus
             />
             <FieldDescription>
-              新 id 会写进这个会话的模型配置，提供给 Pi 使用；不改动 provider 本身。
+              {customModel.trim() && !models?.some((option) => option.value === customModel.trim()) ? (
+                <span className="text-amber-600 dark:text-amber-500">
+                  这个 id 不在任何 provider 的模型列表里：端点多半会拒绝。确认拼写，或先在「设置 → 模型」里加上。
+                </span>
+              ) : (
+                "新 id 会写进这个会话的模型配置，提供给 Pi 使用；不改动 provider 本身。"
+              )}
             </FieldDescription>
           </Field>
           <DialogFooter>

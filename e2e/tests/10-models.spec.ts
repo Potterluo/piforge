@@ -52,7 +52,9 @@ test.describe("model management", () => {
     });
     expect(created.status).toBeLessThan(300);
 
-    const sessionId = await openNewSession(page);
+    // Its own project: this test must not depend on whatever project another
+    // spec happened to leave in first position.
+    const sessionId = await openNewSession(page, `custom-model-${Date.now()}`);
 
     await clickWhenSettled(page.getByTestId("composer-model"));
     await clickWhenSettled(page.getByRole("option", { name: "自定义模型 id…" }));

@@ -29,7 +29,11 @@ func (s *server) handleFileTree(w http.ResponseWriter, r *http.Request) {
 	if depth <= 0 {
 		depth = 1
 	}
-	nodes, err := s.deps.Workspace.Tree(r.Context(), root, r.URL.Query().Get("path"), depth)
+	// "显示忽略文件" is a server-side decision: the tree is filtered here, so the
+	// switch must reach this call or it only ever hides more than the default.
+	includeIgnored := r.URL.Query().Get("include_ignored") == "1"
+	nodes, err := s.deps.Workspace.TreeWithOptions(
+		r.Context(), root, r.URL.Query().Get("path"), depth, includeIgnored)
 	if err != nil {
 		s.fail(w, r, err)
 		return

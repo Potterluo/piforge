@@ -177,8 +177,22 @@ func (s *Service) Tree(ctx context.Context, root, relPath string, depth int) ([]
 	return page.Nodes, nil
 }
 
+// TreeOptions are the per-request knobs of one listing.
+type TreeOptions struct {
+	// IncludeIgnored lists what git ignores and what the service normally hides
+	// (node_modules, dot directories). The file panel's "显示忽略文件" switch is
+	// the only caller: a switch that cannot reveal anything is a lie, and it used
+	// to be exactly that because the filtering happened server-side only.
+	IncludeIgnored bool
+}
+
 // TreeWithMeta is Tree plus the root-level truncation flag.
 func (s *Service) TreeWithMeta(ctx context.Context, root, relPath string, depth int) (*TreePage, error) {
+	return s.TreePage(ctx, root, relPath, depth, TreeOptions{})
+}
+
+// TreeWithOptions lists a directory, honouring per-request options.
+func (s *Service) TreePage(ctx context.Context, root, relPath string, depth int, opt TreeOptions) (*TreePage, error) {
 	rootAbs, err := absRoot(root)
 	if err != nil {
 		return nil, err
@@ -205,10 +219,11 @@ func (s *Service) TreeWithMeta(ctx context.Context, root, relPath string, depth 
 		return nil, err
 	}
 	states := s.gitStates(ctx, rootAbs)
-	return s.readDir(ctx, rootAbs, dir, relDir, depth, states)
+	showIgnored := s.cfg.ShowIgnored || opt.IncludeIgnored
+	return s.readDir(ctx, rootAbs, dir, relDir, depth, states, showIgnored)
 }
 
-func (s *Service) readDir(ctx context.Context, rootAbs, absDir, relDir string, depth int, states map[string]string) (*TreePage, error) {
+func (s *Service) readDir(ctx context.Context, rootAbs, absDir, relDir string, depth int, states map[string]string, showIgnored bool) (*TreePage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("fsx: list %q: %w", relDir, err)
 	}
@@ -230,7 +245,7 @@ func (s *Service) readDir(ctx context.Context, rootAbs, absDir, relDir string, d
 			continue // never expose repository metadata
 		}
 		isDir := de.IsDir()
-		if !s.cfg.ShowIgnored {
+		if !showIgnored {
 			if isDir && name == "node_modules" {
 				continue
 			}
@@ -258,7 +273,7 @@ func (s *Service) readDir(ctx context.Context, rootAbs, absDir, relDir string, d
 		truncated = true
 	}
 
-	if !s.cfg.ShowIgnored && len(cands) > 0 {
+	if !showIgnored && len(cands) > 0 {
 		rels := make([]string, 0, len(cands))
 		for _, c := range cands {
 			rels = append(rels, c.rel)
@@ -292,7 +307,7 @@ func (s *Service) readDir(ctx context.Context, rootAbs, absDir, relDir string, d
 		} else {
 			node.GitState = states[c.rel]
 			if depth > 1 {
-				child, cerr := s.readDir(ctx, rootAbs, filepath.Join(absDir, c.name), c.rel, depth-1, states)
+				child, cerr := s.readDir(ctx, rootAbs, filepath.Join(absDir, c.name), c.rel, depth-1, states, showIgnored)
 				if cerr != nil {
 					node.Truncated = true
 				} else {
@@ -684,4 +699,14 @@ func trimRel(p string) string {
 		return "."
 	}
 	return p
+}
+
+// TreeWithOptions implements contracts.Workspace: the panel's switch decides
+// whether ignored entries are listed at all.
+func (s *Service) TreeWithOptions(ctx context.Context, root, relPath string, depth int, includeIgnored bool) ([]*contracts.FileNode, error) {
+	page, err := s.TreePage(ctx, root, relPath, depth, TreeOptions{IncludeIgnored: includeIgnored})
+	if err != nil {
+		return nil, err
+	}
+	return page.Nodes, nil
 }

@@ -149,6 +149,13 @@ export function MessageItem({
 
           {compact ? null : (
             <MessageFooter className="gap-1 opacity-0 transition-opacity group-focus-within/message:opacity-100 group-hover/message:opacity-100">
+              {turn.model ? (
+                // Which model answered is not decoration: a session can be pointed
+                // at a custom id, and "it replied" says nothing about what replied.
+                <span className="font-mono" data-testid="turn-model">
+                  {turn.model}
+                </span>
+              ) : null}
               <span className="tabular-nums">{formatClock(turn.ts)}</span>
               <Button
                 variant="ghost"

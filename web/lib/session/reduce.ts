@@ -46,6 +46,12 @@ export interface Turn {
    * identical errors says less than one error that admits it kept trying.
    */
   retries?: number;
+  /**
+   * Which model produced this turn, as "provider/model". The composer can point a
+   * session at a custom id, and without this there is no way to tell what
+   * actually answered.
+   */
+  model?: string;
 }
 
 export interface ContextMarker {
@@ -377,6 +383,7 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
       // turn so the transcript can say what happened instead of drawing an
       // empty assistant bubble.
       const errorText = str(payload.error) || undefined;
+      const modelRef = modelLabel(payload);
       const index = findTurn(state.turns, id);
       if (index < 0) {
         return {
@@ -389,6 +396,7 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
               entryId: event.entry_id,
               blocks: incoming,
               error: errorText,
+              model: modelRef,
             },
           ],
         };
@@ -401,6 +409,7 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
           // Replacement, never append: the final content is authoritative.
           blocks: mergeToolState(turn.blocks, incoming),
           error: errorText,
+          model: modelLabel(payload) ?? turn.model,
         })),
         activeMessageId: undefined,
       };
@@ -697,4 +706,11 @@ export function runningToolCount(state: SessionState): number {
     }
   }
   return count;
+}
+/** modelLabel renders the provider and model a final message reports. */
+function modelLabel(payload: Record<string, unknown>): string | undefined {
+  const model = str(payload.model);
+  const provider = str(payload.provider);
+  if (!model) return undefined;
+  return provider ? `${provider}/${model}` : model;
 }

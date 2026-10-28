@@ -423,14 +423,16 @@ func (f *fakeRuntime) startCount() int {
 type fakeWorkspace struct {
 	mu sync.Mutex
 
-	roots   []string
-	tree    []*contracts.FileNode
-	content *contracts.FileContent
-	status  *contracts.GitStatus
-	diffs   []contracts.FileDiff
-	graph   *contracts.GitGraph
-	results []contracts.SearchResult
-	err     error
+	roots []string
+	tree  []*contracts.FileNode
+	// includeIgnored records the last tree request's switch state.
+	includeIgnored bool
+	content        *contracts.FileContent
+	status         *contracts.GitStatus
+	diffs          []contracts.FileDiff
+	graph          *contracts.GitGraph
+	results        []contracts.SearchResult
+	err            error
 
 	written   map[string][]byte
 	deleted   []string
@@ -472,6 +474,18 @@ func (f *fakeWorkspace) guard(root string) error {
 }
 
 func (f *fakeWorkspace) Tree(_ context.Context, root, _ string, _ int) ([]*contracts.FileNode, error) {
+	if err := f.guard(root); err != nil {
+		return nil, err
+	}
+	return f.tree, nil
+}
+
+// TreeWithOptions records that the panel's "show ignored" switch reached the
+// server, which is the only way it can reveal anything.
+func (f *fakeWorkspace) TreeWithOptions(_ context.Context, root, _ string, _ int, includeIgnored bool) ([]*contracts.FileNode, error) {
+	f.mu.Lock()
+	f.includeIgnored = includeIgnored
+	f.mu.Unlock()
 	if err := f.guard(root); err != nil {
 		return nil, err
 	}

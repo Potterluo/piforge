@@ -69,7 +69,9 @@ test.describe("admin users", () => {
     const row = page.getByTestId(`admin-user-${email}`);
     await expect(row).toBeVisible({ timeout: 20_000 });
 
+    // Disabling asks first: it logs the account out mid-session.
     await clickWhenSettled(row.getByRole("button", { name: "停用" }));
+    await clickWhenSettled(page.getByRole("button", { name: "停用", exact: true }).last());
     await expect(row).toContainText("已停用", { timeout: 20_000 });
     await clickWhenSettled(row.getByRole("button", { name: "启用" }));
     await expect(row).toContainText("正常", { timeout: 20_000 });

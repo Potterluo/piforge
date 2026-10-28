@@ -101,7 +101,11 @@ const SANDBOX_LABELS: Record<SandboxState, string> = {
 };
 
 export function sandboxLabel(state: SandboxState | undefined): string {
-  return state ? (SANDBOX_LABELS[state] ?? state) : "未知";
+  // "unknown" is what a project has before anything has provisioned a sandbox;
+  // calling that 未知 tells the user something is wrong when nothing is.
+  if (!state) return "未创建";
+  const label = SANDBOX_LABELS[state];
+  return label && label !== "未知" ? label : "未创建";
 }
 
 export function sessionKindLabel(kind: SessionKind | undefined): string {
