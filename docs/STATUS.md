@@ -38,7 +38,7 @@
 | FR-2.2 分叉建新 session + 新 worktree | DONE | `handleFork` → `provisionSession` → `provision.EnsureWorktree` → `gitx.AddWorktree`（`worktree.go`）；`05-branches.spec.ts` "forking a user message creates a branch session with its own worktree"、`fork_history_test.go` |
 | FR-2.3 分支树视图（父子/时间/状态/diff 规模） | PARTIAL | `branch-tree.tsx` 画的是 **Pi entry 树**（`TreeNodeRow`，按 `children` 缩进）+ 分叉点列表；主干↔分支的父子只在侧栏 `app-sidebar.tsx` `groupSessions` 里体现（`Collapsible` + `StatusDot`）。没有「创建时间/diff 规模」列，也没有分支级图形。无测试 |
 | FR-2.4 分支命名 / 归档 / 删除（清理 worktree） | PARTIAL | 命名与归档：`handleFork` 的 `label`、`handlePatchSession`；删除：`handleDeleteSession` **明确保留 worktree 在磁盘上**（注释 "The worktree stays on disk"），`gitx.RemoveWorktree`/`PruneWorktrees` 全仓库零调用；且从未写 Pi 的 `label` entry（`pi/runtime.go` 无 `set_label`/`label`）。`18-branching.spec.ts` 只覆盖父子关系 |
-| FR-2.5 对比视图（2–3 分支并排 diff/测试/成本/耗时） | MISSING | 无 `POST /v1/branches/compare` 路由，无对比组件；全仓库无 `compare` 相关实现（仅 `git-panel.tsx` 的注释性单词） |
+| FR-2.5 对比视图（2–3 分支并排） | DONE（无「测试」列） | `GET /v1/sessions/compare?ids=`、`compare-page.tsx`、`/p/{project}/compare`、`compare_test.go` + `29-compare.spec.ts`；本部署不跑测试，故不设测试列；缺 checkout 时报 `diff_error` 而非 0 |
 | FR-2.6 采纳（cherry-pick / 整树覆盖） | DONE | `gitx.Runner.Adopt` + `POST /v1/sessions/{id}/adopt` + 侧栏「采纳回主干」；`adopt_test.go`（真 git，含两种拒绝）、`branch_adopt_test.go`、`28-adopt.spec.ts` |
 | FR-2.7 `clone` 复制当前分支 | DONE | `session_clone.go` `handleCloneSession` + `POST /v1/sessions/{id}/clone`（router.go:203）+ `api.sessions.clone` + 侧栏 `data-testid="session-clone"`；`session_clone_test.go` `TestCloneKeepsTheWholeConversation`（无 e2e） |
 | FR-3.1 同一主会话下只有一个分支在执行 | MISSING | 无「切走前 pause」逻辑：`app-sidebar.tsx`/`workbench.tsx` 切分支只是 `router.push`；`hub.ensure` 允许同一 root 下多个 session 各起一个 Pi 进程，互不感知 |
