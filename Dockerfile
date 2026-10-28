@@ -86,6 +86,12 @@ COPY --from=web /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
 
 # The agent loop, pinned so a container that worked yesterday still works today.
+# The registry argument has to be repeated here: this stage installs from npm too,
+# and the web stage's environment does not reach it.
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+ENV npm_config_registry=${NPM_REGISTRY} \
+    npm_config_fetch_retries=6 \
+    npm_config_network_concurrency=4
 ARG PI_VERSION=1.4.0
 RUN npm install -g "@earendil-works/pi-coding-agent@${PI_VERSION}" \
  && pi --version
