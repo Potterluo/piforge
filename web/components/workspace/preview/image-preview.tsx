@@ -94,6 +94,7 @@ export function ImagePreview({ src, name }: { src: string; name: string }) {
       >
         {/* eslint-disable-next-line @next/next/no-img-element -- images come from the file API as data URLs */}
         <img
+          data-testid="image-preview"
           src={src}
           alt={name}
           draggable={false}

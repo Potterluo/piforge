@@ -35,6 +35,18 @@ test.describe("browser screenshot", () => {
     expect(content.mime_type).toBe("image/png");
     expect(content.size).toBeGreaterThan(1000);
     expect(content.binary).toBe(true);
+
+    // The preview must show the picture, not a download card: the file API returns
+    // images with an empty body, so the preview has to use the inline endpoint.
+    const projectId = /\/p\/([^/]+)\//.exec(page.url())?.[1] ?? "";
+    await page.goto(`/p/${projectId}/s/${sessionId}`);
+    await expect(page.getByTestId("file-tree")).toBeVisible({ timeout: 40_000 });
+    const tree = page.getByTestId("file-tree");
+    await tree.getByText("screenshots", { exact: false }).first().click();
+    await tree.getByText(body.path.split("/").pop()!, { exact: false }).first().click();
+    const image = page.getByTestId("image-preview");
+    await expect(image).toBeVisible({ timeout: 20_000 });
+    await expect(image).toHaveAttribute("src", /inline=1/);
   });
 
   test("the panel offers the button and reports the path", async ({ page }) => {

@@ -33,6 +33,13 @@ func (s *server) handlePromoteSidecar(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "this sidecar has no parent session"))
 		return
 	}
+	// Promoting mid-run copies whatever has been written so far and leaves the
+	// sidecar running, so the branch starts empty while the UI says the
+	// conversation came along. Wait for the turn to finish instead of lying.
+	if status, serr := s.deps.Runtime.Status(r.Context(), sidecar.ID); serr == nil && status.Running {
+		s.fail(w, r, apiErr(contracts.ErrConflict, "这一轮还在跑，等它结束后再提升"))
+		return
+	}
 	parent, err := s.deps.Store.Session(r.Context(), user.ID, sidecar.ParentID)
 	if err != nil {
 		s.fail(w, r, err)

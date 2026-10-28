@@ -60,7 +60,7 @@ func (s *Store) ListProjects(ctx context.Context, userID string) ([]*contracts.P
 		                   WHERE sb.project_id = p.id AND sb.user_id = p.user_id
 		                   ORDER BY sb.created_at DESC LIMIT 1), '') AS sandbox_state,
 		        (SELECT COUNT(*) FROM sessions ss
-		          WHERE ss.project_id = p.id AND ss.user_id = p.user_id) AS session_count,
+		          WHERE ss.project_id = p.id AND ss.user_id = p.user_id AND ss.ephemeral = 0) AS session_count,
 		        (SELECT MAX(ss.last_active_at) FROM sessions ss
 		          WHERE ss.project_id = p.id AND ss.user_id = p.user_id) AS last_active
 		   FROM projects p
@@ -95,7 +95,7 @@ func (s *Store) Project(ctx context.Context, userID, projectID string) (*contrac
 		                   WHERE sb.project_id = p.id AND sb.user_id = p.user_id
 		                   ORDER BY sb.created_at DESC LIMIT 1), '') AS sandbox_state,
 		        (SELECT COUNT(*) FROM sessions ss
-		          WHERE ss.project_id = p.id AND ss.user_id = p.user_id) AS session_count,
+		          WHERE ss.project_id = p.id AND ss.user_id = p.user_id AND ss.ephemeral = 0) AS session_count,
 		        (SELECT MAX(ss.last_active_at) FROM sessions ss
 		          WHERE ss.project_id = p.id AND ss.user_id = p.user_id) AS last_active
 		   FROM projects p

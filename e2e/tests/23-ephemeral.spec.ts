@@ -21,7 +21,10 @@ test("a scratch session is hidden from the list and marked in the header", async
   expect(scratch.ephemeral).toBe(true);
 
   // Not in the list the sidebar draws from...
-  const list = (await (await page.request.get(`/v1/projects/${projectId}/sessions`)).json()) as {
+  // The sidebar reads GET /v1/sessions (with an optional ?project=), not a
+  // project-scoped route — asserting against a route that does not exist would
+  // pass no matter what the server did.
+  const list = (await (await page.request.get(`/v1/sessions?project=${projectId}`)).json()) as {
     sessions?: { id: string }[];
   };
   const ids = (list.sessions ?? []).map((item) => item.id);

@@ -137,7 +137,7 @@ function WorkbenchBody({ sessionId, projectId }: { sessionId: string; projectId:
   const runtimeModel = runtime.data?.model_ref;
   const effectiveModel = detail?.model_ref
     ? shortModel(detail.model_ref)
-    : runtimeModel
+    : runtimeModel && runtimeModel !== "unknown"
       ? `跟随默认（${shortModel(runtimeModel)}）`
       : "跟随默认";
   // Branches are titled from their label; repeating it under the title reads as a

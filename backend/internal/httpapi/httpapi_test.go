@@ -350,6 +350,11 @@ func (f *fakeRuntime) Prompt(_ context.Context, req contracts.PromptRequest) (co
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.prompts = append(f.prompts, req)
+	// A prompt runs and then settles. Modelling that (instead of a permanently
+	// running agent) is what lets a handler ask "is a turn in flight?" — the
+	// sidecar promote does, and a stuck-true fake made every such check refuse.
+	f.status.Running = false
+	f.status.Streaming = false
 	if f.promptErr != nil {
 		return contracts.PromptResult{}, f.promptErr
 	}

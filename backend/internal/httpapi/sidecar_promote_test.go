@@ -45,8 +45,11 @@ func TestPromptedSidecarBecomesABranchWithItsConversation(t *testing.T) {
 		map[string]any{"client_msg_id": "cm_1", "text": "a thought on the side"}, c); rec.Code != http.StatusOK {
 		t.Fatalf("sidecar prompt: %d %s", rec.Code, rec.Body.String())
 	}
-	for i := 0; i < 100; i++ {
-		if events, _ := env.store.ListEvents(t.Context(), user.ID, created.Session.ID, 0, 10); len(events) >= 3 {
+	// Promote refuses while a turn is in flight, so wait for the run to settle.
+	for i := 0; i < 200; i++ {
+		status, err := env.runtime.Status(t.Context(), created.Session.ID)
+		events, _ := env.store.ListEvents(t.Context(), user.ID, created.Session.ID, 0, 10)
+		if err == nil && !status.Running && len(events) >= 3 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)

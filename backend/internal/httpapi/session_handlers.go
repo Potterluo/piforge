@@ -76,6 +76,9 @@ func (s *server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		Query:     r.URL.Query().Get("q"),
 		Cursor:    r.URL.Query().Get("cursor"),
 		Limit:     limit + 1,
+		// Scratch sessions are hidden by default; this is the escape hatch for a
+		// caller that is looking for one on purpose.
+		IncludeEphemeral: r.URL.Query().Get("include_ephemeral") == "1",
 	}
 	sessions, err := s.deps.Store.ListSessions(r.Context(), user.ID, filter)
 	if err != nil {
@@ -373,6 +376,16 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 	if title == "" {
 		title = "branch of " + parent.Title
 	}
+	// Forking needs the agent's process: Pi forks inside it. A client that has not
+	// opened the session (an API-only script, a second fork after the first one
+	// stopped the parent) would otherwise get "no agent process".
+	if status, serr := s.deps.Runtime.Status(r.Context(), parent.ID); serr != nil || status.ProcessID == 0 {
+		if !s.restartAgent(r, user.ID, parent) {
+			s.fail(w, r, apiErr(contracts.ErrConflict, "会话的 agent 没能启动，稍后再试"))
+			return
+		}
+	}
+
 	child, err := s.deps.Store.CreateSession(r.Context(), user.ID, store.NewSession{
 		ProjectID:   parent.ProjectID,
 		Kind:        contracts.KindBranch,
@@ -485,6 +498,16 @@ func (s *server) handleSidecar(w http.ResponseWriter, r *http.Request) {
 	if modelRef == "" {
 		modelRef = parent.ModelRef
 	}
+	// Forking needs the agent's process: Pi forks inside it. A client that has not
+	// opened the session (an API-only script, a second fork after the first one
+	// stopped the parent) would otherwise get "no agent process".
+	if status, serr := s.deps.Runtime.Status(r.Context(), parent.ID); serr != nil || status.ProcessID == 0 {
+		if !s.restartAgent(r, user.ID, parent) {
+			s.fail(w, r, apiErr(contracts.ErrConflict, "会话的 agent 没能启动，稍后再试"))
+			return
+		}
+	}
+
 	child, err := s.deps.Store.CreateSession(r.Context(), user.ID, store.NewSession{
 		ProjectID:  parent.ProjectID,
 		WorktreeID: parent.WorktreeID,

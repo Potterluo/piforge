@@ -120,6 +120,8 @@ export function SidecarDock({
   const { mutate } = create;
 
   const router = useRouter();
+  const { state: sidecarState } = useSessionEvents(sidecarId ?? "");
+  const running = Boolean(sidecarId) && sidecarState.running;
   const promote = useMutation({
     mutationFn: () => api.sessions.promote(sidecarId ?? ""),
     onSuccess: (data) => {
@@ -183,8 +185,12 @@ export function SidecarDock({
                 size="xs"
                 variant="outline"
                 data-testid="sidecar-promote"
-                disabled={promote.isPending}
-                title="给这个旁路对话一个自己的工作区，并把它变成分支"
+                disabled={promote.isPending || running}
+                title={
+                  running
+                    ? "这一轮还在跑，等它结束后再提升"
+                    : "给这个旁路对话一个自己的工作区，并把它变成分支"
+                }
                 onClick={() => promote.mutate()}
               >
                 <GitBranch />
