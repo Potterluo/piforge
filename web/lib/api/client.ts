@@ -144,6 +144,8 @@ export interface CreateSessionInput {
   model_ref?: string;
   thinking_level?: string;
   kind?: "main";
+  /** Scratch session (FR-1.10): hidden from the list, swept after a few hours. */
+  ephemeral?: boolean;
 }
 
 export interface SendMessageInput {

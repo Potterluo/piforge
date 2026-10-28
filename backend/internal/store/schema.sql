@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     model_ref      TEXT NOT NULL DEFAULT '',
     thinking_level TEXT NOT NULL DEFAULT '',
     config         TEXT NOT NULL DEFAULT '{}',
+    ephemeral      INTEGER NOT NULL DEFAULT 0,
     created_at     TEXT NOT NULL,
     last_active_at TEXT NOT NULL
 );

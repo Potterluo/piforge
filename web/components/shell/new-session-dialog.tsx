@@ -13,7 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Field, FieldContent, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -22,6 +22,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Spinner } from "@/components/ui/spinner";
 import { useCreateSession, useProviders } from "@/lib/session/queries";
 
@@ -53,6 +54,9 @@ export function NewSessionDialog({
   const [title, setTitle] = useState("");
   const [model, setModel] = useState("auto");
   const [thinking, setThinking] = useState("default");
+  // Scratch space (PRD FR-1.10): kept out of the sidebar and swept after a few
+  // hours, so "just try something" does not leave a permanent session behind.
+  const [ephemeral, setEphemeral] = useState(false);
 
   const create = useCreateSession(projectId ?? "");
 
@@ -81,11 +85,13 @@ export function NewSessionDialog({
         title: title.trim() || undefined,
         model_ref: model === "auto" ? undefined : model,
         thinking_level: thinking === "default" ? undefined : thinking,
+        ephemeral,
       });
-      toast.success("会话已创建");
+      toast.success(ephemeral ? "临时会话已创建（数小时后自动清理）" : "会话已创建");
       setTitle("");
       setModel("auto");
       setThinking("default");
+      setEphemeral(false);
       onOpenChange(false);
       router.push(`/p/${projectId}/s/${result.session.id}`);
     } catch (error) {
@@ -118,6 +124,20 @@ export function NewSessionDialog({
                 autoFocus
               />
               <FieldDescription>留空则用第一条消息自动命名。</FieldDescription>
+            </Field>
+            <Field orientation="horizontal">
+              <Switch
+                id="session-ephemeral"
+                data-testid="session-ephemeral"
+                checked={ephemeral}
+                onCheckedChange={setEphemeral}
+              />
+              <FieldContent>
+                <FieldLabel htmlFor="session-ephemeral">临时会话</FieldLabel>
+                <FieldDescription>
+                  不进侧边栏，闲置几小时后自动清理——适合随口问一句。
+                </FieldDescription>
+              </FieldContent>
             </Field>
             <Field>
               <FieldLabel htmlFor="session-model">模型</FieldLabel>

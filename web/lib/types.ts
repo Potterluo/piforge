@@ -75,6 +75,8 @@ export interface Worktree {
 }
 
 export interface Session {
+  /** Scratch session (FR-1.10): hidden from the list, swept after a few hours. */
+  ephemeral?: boolean;
   id: string;
   user_id: string;
   project_id: string;

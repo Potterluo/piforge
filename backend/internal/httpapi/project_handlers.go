@@ -99,6 +99,9 @@ func (s *server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		WorktreeID    string `json:"worktree_id"`
 		ParentID      string `json:"parent_id"`
 		ForkEntryID   string `json:"fork_entry_id"`
+		// Ephemeral creates scratch space (PRD FR-1.10): kept out of the sidebar and
+		// deleted after a few hours.
+		Ephemeral bool `json:"ephemeral"`
 	}
 	if err := decodeOptionalJSON(r, &in); err != nil {
 		s.fail(w, r, err)
@@ -126,6 +129,7 @@ func (s *server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		Title:         in.Title,
 		ModelRef:      in.ModelRef,
 		ThinkingLevel: in.ThinkingLevel,
+		Ephemeral:     in.Ephemeral,
 	})
 	if err != nil {
 		s.fail(w, r, err)

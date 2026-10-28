@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
 )
@@ -15,7 +16,7 @@ import (
 // them as plain strings with omitempty.
 const sessionCols = `id, user_id, project_id, COALESCE(worktree_id, ''), kind,
 	COALESCE(root_id, ''), COALESCE(parent_id, ''), fork_entry_id, label, title,
-	status, model_ref, thinking_level, created_at, last_active_at`
+	status, model_ref, thinking_level, ephemeral, created_at, last_active_at`
 
 // NewSession is the input for CreateSession.
 type NewSession struct {
@@ -39,15 +40,19 @@ type NewSession struct {
 	Status        contracts.SessionStatus
 	ModelRef      string
 	ThinkingLevel string
+	// Ephemeral marks scratch sessions (PRD FR-1.10).
+	Ephemeral bool
 }
 
 // SessionFilter narrows ListSessions. The zero value lists everything the
 // caller owns, newest first.
 type SessionFilter struct {
-	ProjectID string
-	RootID    string
-	Status    contracts.SessionStatus
-	Kind      contracts.SessionKind
+	// IncludeEphemeral asks for scratch sessions too.
+	IncludeEphemeral bool
+	ProjectID        string
+	RootID           string
+	Status           contracts.SessionStatus
+	Kind             contracts.SessionKind
 	// Query is a case-insensitive substring match on title and label.
 	Query string
 	// Cursor is the id of the last row of the previous page.
@@ -107,11 +112,11 @@ func (s *Store) CreateSession(ctx context.Context, userID string, in NewSession)
 	if _, err := s.w.ExecContext(ctx,
 		`INSERT INTO sessions (id, user_id, project_id, worktree_id, kind, root_id, parent_id,
 		                       fork_entry_id, label, title, status, model_ref, thinking_level,
-		                       config, created_at, last_active_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)`,
+		                       ephemeral, config, created_at, last_active_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)`,
 		id, userID, in.ProjectID, nullString(in.WorktreeID), string(kind), nullString(rootID),
 		nullString(in.ParentID), in.ForkEntryID, in.Label, in.Title, string(status),
-		in.ModelRef, in.ThinkingLevel, formatTime(now), formatTime(now)); err != nil {
+		in.ModelRef, in.ThinkingLevel, in.Ephemeral, formatTime(now), formatTime(now)); err != nil {
 		return nil, fmt.Errorf("store: create session: %w", err)
 	}
 	return s.Session(ctx, userID, id)
@@ -159,6 +164,11 @@ func (s *Store) ListSessions(ctx context.Context, userID string, f SessionFilter
 	if f.Kind != "" {
 		where = append(where, `kind = ?`)
 		args = append(args, string(f.Kind))
+	}
+	// Scratch sessions stay out of the list unless asked for (PRD FR-1.10): a
+	// quick question should not become a permanent artifact in the sidebar.
+	if !f.IncludeEphemeral {
+		where = append(where, `ephemeral = 0`)
 	}
 	if q := strings.TrimSpace(f.Query); q != "" {
 		where = append(where, `(LOWER(title) LIKE ? OR LOWER(label) LIKE ?)`)
@@ -279,7 +289,7 @@ func scanSession(sc interface{ Scan(dest ...any) error }) (*contracts.Session, e
 	)
 	if err := sc.Scan(&sess.ID, &sess.UserID, &sess.ProjectID, &sess.WorktreeID, &kind,
 		&sess.RootID, &sess.ParentID, &sess.ForkEntryID, &sess.Label, &sess.Title,
-		&status, &sess.ModelRef, &sess.ThinkingLevel, &created, &lastActive); err != nil {
+		&status, &sess.ModelRef, &sess.ThinkingLevel, &sess.Ephemeral, &created, &lastActive); err != nil {
 		return nil, err
 	}
 	sess.Kind = contracts.SessionKind(kind)
@@ -322,4 +332,19 @@ func (s *Store) SessionAny(ctx context.Context, sessionID string) (*contracts.Se
 		return nil, fmt.Errorf("store: session %q: %w", sessionID, err)
 	}
 	return sess, nil
+}
+
+// SweepEphemeral deletes scratch sessions older than `before`, returning how many
+// went. Their events cascade with them.
+//
+// It runs on a timer rather than on demand so an abandoned scratch session does
+// not sit in the database forever because nobody opened the page again.
+func (s *Store) SweepEphemeral(ctx context.Context, before time.Time) (int, error) {
+	res, err := s.w.ExecContext(ctx,
+		`DELETE FROM sessions WHERE ephemeral = 1 AND last_active_at < ?`, formatTime(before))
+	if err != nil {
+		return 0, fmt.Errorf("store: sweep ephemeral: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
 }

@@ -129,8 +129,11 @@ type Session struct {
 	Status        SessionStatus `json:"status"`
 	ModelRef      string        `json:"model_ref,omitempty"`
 	ThinkingLevel string        `json:"thinking_level,omitempty"`
-	CreatedAt     time.Time     `json:"created_at"`
-	LastActiveAt  time.Time     `json:"last_active_at"`
+	// Ephemeral sessions are scratch space (PRD FR-1.10): hidden from the list and
+	// deleted after a few hours, so a quick question does not become an artifact.
+	Ephemeral    bool      `json:"ephemeral,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	LastActiveAt time.Time `json:"last_active_at"`
 }
 
 // Run is one prompt → agent_settled cycle.

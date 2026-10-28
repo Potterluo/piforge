@@ -177,7 +177,25 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if err := execScript(ctx, db, string(raw)); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
+	// Columns added after the first release. `CREATE TABLE IF NOT EXISTS` cannot
+	// add them to an existing database, and SQLite has no "add column if not
+	// exists", so the duplicate-column error is the success case.
+	if err := addColumn(ctx, db, "sessions", "ephemeral", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("store: migrate: %w", err)
+	}
 	return nil
+}
+
+// addColumn adds a column unless the table already has it.
+func addColumn(ctx context.Context, db *sql.DB, table, column, ddl string) error {
+	_, err := db.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+column+" "+ddl)
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return nil
+	}
+	return err
 }
 
 // execScript runs a multi-statement SQL script by splitting on line-final

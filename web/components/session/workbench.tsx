@@ -151,6 +151,11 @@ function WorkbenchBody({ sessionId, projectId }: { sessionId: string; projectId:
         <div className="flex min-w-0 flex-col">
           <h1 className="truncate text-sm font-medium" data-testid="session-title">
             {title}
+            {detail?.ephemeral ? (
+              <Badge variant="outline" className="ml-2 align-middle text-[10px]" data-testid="ephemeral-badge">
+                临时
+              </Badge>
+            ) : null}
           </h1>
           <p className="truncate text-[11px] text-muted-foreground">
             {project.data?.project.name ?? "项目"}

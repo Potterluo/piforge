@@ -368,6 +368,32 @@ func run() error {
 	}
 
 	errCh := make(chan error, 1)
+	// Scratch sessions (PRD FR-1.10) expire on their own: a quick question should
+	// not need a cleanup step from the user.
+	go func() {
+		sweep := func() {
+			n, err := st.SweepEphemeral(ctx, time.Now().Add(-6*time.Hour))
+			if err != nil {
+				logger.Warn("could not sweep ephemeral sessions", "error", err.Error())
+				return
+			}
+			if n > 0 {
+				logger.Info("swept ephemeral sessions", "count", n)
+			}
+		}
+		sweep()
+		ticker := time.NewTicker(30 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sweep()
+			}
+		}
+	}()
+
 	go func() {
 		logger.Info("listening", "url", "http://"+opt.addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
