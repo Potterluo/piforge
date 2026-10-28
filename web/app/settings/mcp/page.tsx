@@ -125,7 +125,7 @@ export default function McpPage() {
         <div className="flex min-w-0 flex-col gap-1">
           <h1 className="text-base font-medium">MCP 中心</h1>
           <p className="max-w-2xl text-xs text-muted-foreground">
-            MCP server 给 agent 提供额外工具。stdio 进程跑在沙箱里，拥有和你相同的权限。**这个部署还不保存凭据**：填了会被拒绝，请把凭据放进沙箱的环境变量。
+            MCP server 给 agent 提供额外工具。stdio 进程跑在沙箱里，拥有和你相同的权限。凭据用 AES-GCM 加密存库，接口只能写、不能读回；密钥来自 PIFORGE_SECRET_KEY 或数据目录的 secret.key。
           </p>
         </div>
         <Button size="sm" className="ml-auto" onClick={() => setDialogOpen(true)}>
@@ -335,7 +335,7 @@ export default function McpPage() {
               </Field>
 
               <Field>
-                <FieldLabel htmlFor="mcp-secrets">凭据（暂不支持保存）</FieldLabel>
+                <FieldLabel htmlFor="mcp-secrets">凭据</FieldLabel>
                 <Textarea
                   id="mcp-secrets"
                   value={secrets}

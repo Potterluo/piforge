@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
@@ -205,6 +206,13 @@ func (s *Store) CreateMCPServer(ctx context.Context, userID string, in contracts
 			return nil, fmt.Errorf("store: create mcp server %q: %w", in.Name, ErrConflict)
 		}
 		return nil, fmt.Errorf("store: create mcp server %q: %w", in.Name, err)
+	}
+	// PRD FR-15.2: a credential is stored encrypted, or not at all. It is never read
+	// back through the API — only the launcher that hands it to the process can.
+	if secrets := strings.TrimSpace(in.Secrets); secrets != "" {
+		if err := s.setMCPServerSecrets(ctx, userID, id, secrets); err != nil {
+			return nil, err
+		}
 	}
 	return s.MCPServer(ctx, userID, id)
 }

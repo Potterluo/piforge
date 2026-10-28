@@ -135,7 +135,7 @@
 | FR-14.6 `/skill:name` + `/` 命令面板 | MISSING | `command-palette.tsx` 只有会话/项目命令；无 `/` 斜杠命令、无 skill 调用 |
 | FR-14.7 内置开箱可用 skill | MISSING | `store/seed.go` 只种 admin 用户与共享 provider（`EnsureAdminSeed`），无内置 skill |
 | FR-15.1 用户级 MCP（stdio / HTTP） | DONE | `handleCreateMCPServer` + `materialize.mcpEntry` 写 `.mcp.json`；`07-tooling.spec.ts` "an MCP server is materialised into the session checkout" |
-| FR-15.2 凭据托管（加密 vault + 运行时注入） | MISSING | `handleCreateMCPServer` 注释直说 "Secrets is accepted but not persisted: the vault … is not wired into this layer yet"——**提交的 secrets 被静默丢弃**（`contracts.MCPServer` 只有 `HasSecrets` 布尔，没有可存密文的字段）；`materialize.mcpEntry` 也不写 env/headers，不存在运行时注入。而 `web/app/settings/mcp/page.tsx` 的说明文案仍写着「凭据单独加密保存，不会出现在日志里」，与实现相反 |
+| FR-15.2 MCP 凭据加密保存 | PARTIAL（存得住、读不回；未注入到进程） | `store/secrets.go` AES-GCM（`PIFORGE_SECRET_KEY` 或数据目录 `secret.key`），`secrets_cipher` 列；`MCPServerSecrets` 只给启动器用；`secrets_test.go` 断言密文不含明文、跨用户读不到；`32-mcp-secrets.spec.ts`。**还没把凭据注入到 MCP 进程的 env** |
 | FR-15.3 OAuth 代办 | MISSING | 无 `POST /v1/mcp/{id}/oauth/start`，无回调路由 |
 | FR-15.4 曝光配置（server + 按工具通配符） | PARTIAL | `MCPServer.Exposure` 会写进 `.mcp.json`（`mcpEntry`）；无按工具 `tool_overrides`，UI 只有自由文本 |
 | FR-15.5 状态徽章（Connected/Needs auth/Failed/cached） | MISSING | 契约里没有健康字段，`settings/mcp` 不显示状态，也没有探测 |

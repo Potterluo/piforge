@@ -614,7 +614,10 @@ type MCPServer struct {
 	Exposure   string       `json:"exposure"` // codemode|deferred|direct|hidden
 	Enabled    bool         `json:"enabled"`
 	HasSecrets bool         `json:"has_secrets"`
-	CreatedAt  time.Time    `json:"created_at"`
+	// Secrets is write-only: it goes in on create and comes back as `has_secrets`.
+	// Nothing in the API can read a stored credential (PRD FR-15.2).
+	Secrets   string    `json:"secrets,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // ---------------------------------------------------------------------------

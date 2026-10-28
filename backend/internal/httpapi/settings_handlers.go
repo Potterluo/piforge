@@ -157,23 +157,13 @@ func (s *server) handleCreateMCPServer(w http.ResponseWriter, r *http.Request) {
 		URL       string   `json:"url"`
 		Exposure  string   `json:"exposure"`
 		Enabled   *bool    `json:"enabled"`
-		// Secrets is accepted by the wire format but not persisted: the vault that must
-		// hold it (AES-GCM, PRD FR-15.2) is not wired into this layer yet.
+		// Secrets is write-only: encrypted at rest, never returned (FR-15.2).
 		Secrets string `json:"secrets"`
 	}
 	if err := decodeJSON(r, &in); err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	// Accepting a secret and dropping it is worse than refusing it: the user believes
-	// it is stored encrypted, the agent silently gets nothing, and the failure shows up
-	// much later as a tool that cannot authenticate. Until the vault exists, say so.
-	if strings.TrimSpace(in.Secrets) != "" {
-		s.fail(w, r, apiErr(contracts.ErrInvalidArgument,
-			"这个部署还不保存 MCP 凭据（加密存储未接入）。请把凭据放进沙箱的环境变量。"))
-		return
-	}
-
 	if in.Scope != "" && in.Scope != "user" {
 		s.fail(w, r, apiErr(contracts.ErrInvalidArgument,
 			"only admin routes may create scope=%q entries", in.Scope))
@@ -193,6 +183,8 @@ func (s *server) handleCreateMCPServer(w http.ResponseWriter, r *http.Request) {
 		URL:       in.URL,
 		Exposure:  in.Exposure,
 		Enabled:   enabled,
+		// Encrypted before it touches the database; the store never keeps plaintext.
+		Secrets: in.Secrets,
 	})
 	if err != nil {
 		s.fail(w, r, err)
