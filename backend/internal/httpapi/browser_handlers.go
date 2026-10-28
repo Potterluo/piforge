@@ -13,6 +13,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/browser"
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/store"
 )
 
 // browserWriteWait bounds a single frame write. A viewer that cannot absorb a
@@ -39,6 +40,9 @@ type browserCommand struct {
 // live. Frames go down as binary JPEG, commands come up as JSON.
 func (s *server) handleSessionBrowser(w http.ResponseWriter, r *http.Request) {
 	user := auth.MustUser(r.Context())
+	if s.featureDenied(w, r, user.ID, string(store.FeatureBrowser)) {
+		return
+	}
 	if s.deps.Browser == nil || !s.deps.Browser.Configured() {
 		s.fail(w, r, apiErr(contracts.ErrSandboxUnavail,
 			"no chrome binary is configured on this server"))

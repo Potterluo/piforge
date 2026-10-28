@@ -261,3 +261,13 @@ CREATE TABLE IF NOT EXISTS support_access (
 
 CREATE INDEX IF NOT EXISTS support_access_owner ON support_access (owner_id, seen_at);
 CREATE INDEX IF NOT EXISTS support_access_session ON support_access (session_id);
+-- ============ feature_flags: per-user switches (PRD FR-16.7) ============
+-- Defaults live in Go (store.featureDefaults) so a flag that is never written has
+-- one authoritative value; a row here is an explicit override.
+CREATE TABLE IF NOT EXISTS feature_flags (
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    flag       TEXT NOT NULL,
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, flag)
+);

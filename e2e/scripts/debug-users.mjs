@@ -1,0 +1,18 @@
+import { chromium } from "@playwright/test";
+const BASE = "http://127.0.0.1:7722";
+const browser = await chromium.launch({ channel: "chrome" });
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+await page.goto(`${BASE}/login`);
+await page.getByTestId("login-email").fill("admin@piforge.local");
+await page.getByTestId("login-password").fill("piforge-admin-123");
+await page.getByTestId("login-submit").click();
+await page.waitForTimeout(2000);
+console.log("after login url:", page.url());
+await page.goto(`${BASE}/admin/users`);
+await page.waitForTimeout(2500);
+console.log("url:", page.url());
+console.log("tables:", await page.locator("table").count());
+console.log("rows:", await page.locator("tr").count());
+console.log("feature buttons:", await page.getByTestId("user-features").count());
+console.log("body head:", (await page.locator("body").innerText()).slice(0, 300).replace(/\n/g, " | "));
+await browser.close();

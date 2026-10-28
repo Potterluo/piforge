@@ -105,3 +105,20 @@ export function useAdminUsers(enabled: boolean) {
     retry: false,
   });
 }
+/**
+ * The caller's feature flags. Used to hide what the server would refuse anyway —
+ * the server is the enforcement point, this is the courtesy.
+ */
+export function useFeatures() {
+  return useQuery({
+    queryKey: ["features"],
+    queryFn: () => api.features(),
+    staleTime: 60_000,
+  });
+}
+
+/** One flag, defaulting to "on" until the server says otherwise. */
+export function useFeature(flag: string): boolean {
+  const features = useFeatures();
+  return features.data?.features[flag] ?? true;
+}

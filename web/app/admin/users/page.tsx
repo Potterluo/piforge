@@ -1,9 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { KeyRound, Plus, Shield, ShieldOff, UserX, Users } from "lucide-react";
+import { KeyRound, Plus, Shield, ShieldOff, SlidersHorizontal, UserX, Users } from "lucide-react";
 
 import {
   AlertDialog,
@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -74,6 +75,7 @@ export default function AdminUsersPage() {
   const [password, setPassword] = useState("");
   const [role, setRole] = useState<"user" | "admin">("user");
   const [resetting, setResetting] = useState<User | null>(null);
+  const [featureUser, setFeatureUser] = useState<User | null>(null);
   const [newPassword, setNewPassword] = useState("");
 
   const refresh = () => void client.invalidateQueries({ queryKey: qk.users });
@@ -254,6 +256,16 @@ export default function AdminUsersPage() {
                           {user.role === "admin" ? <ShieldOff /> : <Shield />}
                           {user.role === "admin" ? "降为普通" : "设为管理员"}
                         </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          data-testid="user-features"
+                          title="功能开关"
+                          onClick={() => setFeatureUser(user)}
+                        >
+                          <SlidersHorizontal />
+                          功能
+                        </Button>
                         {user.status === "active" ? (
                           // Disabling locks somebody out mid-session, so it asks
                           // first. Enabling is harmless and stays one click.
@@ -392,6 +404,8 @@ export default function AdminUsersPage() {
         </DialogContent>
       </Dialog>
 
+      <FeatureDialog user={featureUser} onClose={() => setFeatureUser(null)} />
+
       <Dialog open={resetting !== null} onOpenChange={(open) => (open ? null : setResetting(null))}>
         <DialogContent>
           <DialogHeader>
@@ -437,5 +451,62 @@ export default function AdminUsersPage() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+/**
+ * Per-user feature switches (PRD FR-16.7). Each row is enforced by the server, so
+ * turning one off is a real decision rather than a hidden button.
+ */
+function FeatureDialog({ user, onClose }: { user: User | null; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const features = useQuery({
+    queryKey: ["admin", "features", user?.id],
+    queryFn: () => api.admin.userFeatures(user!.id),
+    enabled: Boolean(user),
+  });
+
+  const setFlag = useMutation({
+    mutationFn: (input: { flag: string; enabled: boolean }) =>
+      api.admin.setUserFeature(user!.id, input.flag, input.enabled),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["admin", "features", user?.id] });
+      void queryClient.invalidateQueries({ queryKey: ["features"] });
+    },
+    onError: (error) =>
+      toast.error("保存失败", {
+        description: error instanceof Error ? error.message : "未知错误",
+      }),
+  });
+
+  const labels: Record<string, string> = {
+    export: "导出会话（Markdown / HTML）",
+    browser: "沙箱内置浏览器",
+    sidecar: "Sidecar 旁路会话",
+  };
+
+  return (
+    <Dialog open={Boolean(user)} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>功能开关</DialogTitle>
+          <DialogDescription>
+            {user?.email} 的这些功能由服务端强制生效：关掉之后，对应的接口会直接拒绝，而不只是隐藏按钮。
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-col gap-3">
+          {Object.keys(labels).map((flag) => (
+            <div key={flag} className="flex items-center justify-between gap-3">
+              <span className="text-xs">{labels[flag]}</span>
+              <Switch
+                data-testid={`feature-${flag}`}
+                checked={features.data?.features[flag] ?? true}
+                disabled={features.isPending || setFlag.isPending}
+                onCheckedChange={(checked) => setFlag.mutate({ flag, enabled: checked })}
+              />
+            </div>
+          ))}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

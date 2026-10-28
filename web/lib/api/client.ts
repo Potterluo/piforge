@@ -362,6 +362,9 @@ export interface UpdateUserInput {
   password?: string;
 }
 
+/** The caller's effective feature flags (PRD FR-16.7). */
+export const features = () => request<{ features: Record<string, boolean> }>("/v1/features");
+
 /** Receipts for an admin having read your conversation. */
 export const support = {
   notices: () => request<{ notices: SupportNotice[]; unseen: number }>("/v1/support-notices"),
@@ -374,6 +377,13 @@ export const admin = {
   // Shared providers: one deployment-wide account everyone inherits.
   providers: () => request<{ providers: Provider[] }>("/v1/admin/providers"),
   status: () => request<DeploymentStatus>("/v1/admin/status"),
+  userFeatures: (id: string) =>
+    request<{ features: Record<string, boolean> }>(`/v1/admin/users/${id}/features`),
+  setUserFeature: (id: string, flag: string, enabled: boolean) =>
+    request<{ ok: boolean }>(`/v1/admin/users/${id}/features`, {
+      method: "POST",
+      body: { flag, enabled },
+    }),
   // Support mode: read one session's transcript, on the record (PRD FR-16.8).
   supportAccess: (sessionId: string, reason: string) =>
     request<{ access: SupportNotice; transcript: { role: string; text: string }[] }>(
@@ -394,5 +404,5 @@ export const admin = {
     request<{ users: User[] }>(`/v1/admin/users/${id}`, { method: "PATCH", body: input }),
 };
 
-export const api = { auth, projects, sessions, files, git, providers, skills, mcp, admin, support };
+export const api = { auth, projects, sessions, files, git, providers, skills, mcp, admin, support, features };
 export default api;

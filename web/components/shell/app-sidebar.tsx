@@ -71,7 +71,7 @@ import {
   sessionStatusLabel,
   sessionStatusTone,
 } from "@/lib/session/format";
-import { qk, useCurrentUser, useProjectSessions, useProjects } from "@/lib/session/queries";
+import { qk, useCurrentUser, useFeature, useProjectSessions, useProjects } from "@/lib/session/queries";
 import { SupportNotices } from "@/components/shell/support-notices";import { cn } from "@/lib/utils";
 import type { Session, SessionStatus } from "@/lib/types";
 
@@ -482,6 +482,9 @@ export function AppSidebar({
  */
 function SessionActions({ session, projectId }: { session: Session; projectId: string }) {
   const queryClient = useQueryClient();
+  // The server refuses export when the flag is off; hiding the item keeps the
+  // refusal from looking like a broken menu.
+  const exportEnabled = useFeature("export");
   const router = useRouter();
   const [renaming, setRenaming] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -575,13 +578,15 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
             <Archive />
             {archived ? "移出归档" : "归档"}
           </DropdownMenuItem>
-          <DropdownMenuItem
-            data-testid="session-export"
-            render={<a href={api.sessions.exportUrl(session.id, "md")} download />}
-          >
-            <Download />
-            导出 Markdown
-          </DropdownMenuItem>
+          {exportEnabled ? (
+            <DropdownMenuItem
+              data-testid="session-export"
+              render={<a href={api.sessions.exportUrl(session.id, "md")} download />}
+            >
+              <Download />
+              导出 Markdown
+            </DropdownMenuItem>
+          ) : null}
           <DropdownMenuSeparator />
           <DropdownMenuItem
             variant="destructive"

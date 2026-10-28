@@ -11,6 +11,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/pi"
+	"github.com/piforge/piforge/backend/internal/store"
 )
 
 // handleExportSession renders a conversation as a file the user can keep.
@@ -20,6 +21,9 @@ import (
 // process is running, which is the common case for a session worth exporting.
 func (s *server) handleExportSession(w http.ResponseWriter, r *http.Request) {
 	user := auth.MustUser(r.Context())
+	if s.featureDenied(w, r, user.ID, string(store.FeatureExport)) {
+		return
+	}
 	sess, err := s.deps.Store.Session(r.Context(), user.ID, pathID(r))
 	if err != nil {
 		s.fail(w, r, err)
