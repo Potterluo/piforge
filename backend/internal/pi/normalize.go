@@ -57,6 +57,10 @@ type MessageFinalPayload struct {
 	Provider    string       `json:"provider,omitempty"`
 	Model       string       `json:"model,omitempty"`
 	Truncated   bool         `json:"truncated,omitempty"`
+	// Error carries the provider failure verbatim. A failed call still produces
+	// an assistant message with no content, so this is the only thing that can
+	// tell the user what happened.
+	Error string `json:"error,omitempty"`
 }
 
 // ToolStartedPayload announces a tool invocation. Args is the authoritative
@@ -357,6 +361,7 @@ func (n *Normalizer) Translate(raw []byte) ([]contracts.Event, error) {
 			Provider:    w.Message.Provider,
 			Model:       w.Message.Model,
 			Truncated:   n.asm.HasTruncatedToolCall(),
+			Error:       w.Message.ErrorMessage,
 		}
 		usage := w.Message.Usage
 		if usage == nil {

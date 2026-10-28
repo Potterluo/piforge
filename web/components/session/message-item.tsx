@@ -49,6 +49,11 @@ export function MessageItem({
   const hasBlocks = turn.blocks.length > 0;
   const canFork = isUser && !compact && Boolean(forkEntryId) && Boolean(onFork);
 
+  // A failed model call arrives as an assistant turn with no content. Rendering
+  // it would draw a bare "PiForge" label and nothing else, which reads as a
+  // broken page rather than a provider error.
+  if (!isUser && !hasBlocks && !turn.error && !turn.streaming) return null;
+
   const copy = async () => {
     const text = plainText(turn);
     if (!text) return;
@@ -112,6 +117,27 @@ export function MessageItem({
 
           {!hasBlocks && turn.streaming ? (
             <p className="animate-pulse text-xs text-muted-foreground">正在思考…</p>
+          ) : null}
+
+          {turn.error ? (
+            <div
+              data-testid="turn-error"
+              role="alert"
+              className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+            >
+              <p className="font-medium">
+                模型调用失败
+                {turn.retries ? (
+                  <span className="ml-2 font-normal text-muted-foreground">
+                    已自动重试 {turn.retries} 次
+                  </span>
+                ) : null}
+              </p>
+              <p className="mt-1 whitespace-pre-wrap break-words opacity-90">{turn.error}</p>
+              <p className="mt-1 text-muted-foreground">
+                检查「设置 → 模型」里这个 provider 的地址与密钥，然后重新发送。
+              </p>
+            </div>
           ) : null}
 
           {turn.streaming && hasBlocks ? (

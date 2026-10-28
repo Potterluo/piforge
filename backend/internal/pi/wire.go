@@ -67,7 +67,11 @@ type messageWire struct {
 	Model      string          `json:"model"`
 	Usage      *Usage          `json:"usage"`
 	StopReason string          `json:"stopReason"`
-	Timestamp  int64           `json:"timestamp"`
+	// ErrorMessage is set when the provider call failed. Without it the UI can
+	// only show an empty assistant turn, which reads as "the app is broken"
+	// instead of "the model was unreachable".
+	ErrorMessage string `json:"errorMessage"`
+	Timestamp    int64  `json:"timestamp"`
 }
 
 // contentBlock is one element of a message's content array.

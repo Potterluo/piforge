@@ -34,6 +34,18 @@ export interface Turn {
   ts: string;
   /** Pi entry id when the event carried one; the fork API needs it. */
   entryId?: string;
+  /**
+   * The provider failure for this turn, verbatim. A failed model call still
+   * produces an assistant message with no content, so without this the UI can
+   * only draw an empty bubble and leave the user guessing.
+   */
+  error?: string;
+  /**
+   * How many times the provider failed for this turn. Pi retries a failed call
+   * automatically, and each attempt lands as its own message; stacking four
+   * identical errors says less than one error that admits it kept trying.
+   */
+  retries?: number;
 }
 
 export interface ContextMarker {
@@ -314,6 +326,7 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
             ...turn,
             streaming: role === "assistant",
             entryId: event.entry_id ?? turn.entryId,
+            error: undefined,
           })),
           activeMessageId: id,
         };
@@ -360,6 +373,10 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
       const id = messageIdOf(event, payload, state, true);
       const role: Turn["role"] = str(payload.role) === "user" ? "user" : "assistant";
       const incoming = finalBlocks(payload);
+      // The provider's failure travels with the final message; keep it on the
+      // turn so the transcript can say what happened instead of drawing an
+      // empty assistant bubble.
+      const errorText = str(payload.error) || undefined;
       const index = findTurn(state.turns, id);
       if (index < 0) {
         return {
@@ -367,7 +384,12 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
           activeMessageId: undefined,
           turns: [
             ...state.turns,
-            { ...newTurn(id, role, event.ts, false), entryId: event.entry_id, blocks: incoming },
+            {
+              ...newTurn(id, role, event.ts, false),
+              entryId: event.entry_id,
+              blocks: incoming,
+              error: errorText,
+            },
           ],
         };
       }
@@ -378,6 +400,7 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
           entryId: event.entry_id ?? turn.entryId,
           // Replacement, never append: the final content is authoritative.
           blocks: mergeToolState(turn.blocks, incoming),
+          error: errorText,
         })),
         activeMessageId: undefined,
       };
@@ -642,6 +665,23 @@ export function selectTimeline(state: SessionState): TimelineItem[] {
   for (const turn of state.turns) {
     const ts = Date.parse(turn.ts);
     take(Number.isFinite(ts) ? ts : Number.POSITIVE_INFINITY);
+    // Pi retries a failed provider call on its own, and every attempt lands as
+    // its own empty assistant message. Four identical boxes say less than one
+    // that admits it kept trying, so consecutive failures of the same kind
+    // collapse into the first of them.
+    const last = items[items.length - 1];
+    if (
+      turn.role === "assistant" &&
+      turn.error &&
+      turn.blocks.length === 0 &&
+      last?.kind === "turn" &&
+      last.turn.role === "assistant" &&
+      last.turn.error === turn.error &&
+      last.turn.blocks.length === 0
+    ) {
+      last.turn = { ...last.turn, retries: (last.turn.retries ?? 0) + 1 };
+      continue;
+    }
     items.push({ kind: "turn", key: turn.id, ts: turn.ts, turn });
   }
   take(Number.POSITIVE_INFINITY);

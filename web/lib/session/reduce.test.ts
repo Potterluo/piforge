@@ -78,6 +78,37 @@ describe("message.delta", () => {
 });
 
 describe("message.final", () => {
+  it("keeps the provider error on the turn", () => {
+    // A failed model call is an assistant message with no content. Without the
+    // error the transcript can only draw an empty bubble, which is
+    // indistinguishable from a broken page.
+    const state = reduceAll([
+      event(
+        EV.msgFinal,
+        {
+          message_id: "m1",
+          role: "assistant",
+          blocks: [],
+          stop_reason: "error",
+          error: '502: provider "volc" is not available',
+        },
+        { seq: 1 },
+      ),
+    ]);
+
+    expect(state.turns).toHaveLength(1);
+    expect(state.turns[0].error).toContain("not available");
+  });
+
+  it("clears the error when the message restarts", () => {
+    const state = reduceAll([
+      event(EV.msgFinal, { message_id: "m1", role: "assistant", blocks: [], error: "boom" }, { seq: 1 }),
+      event(EV.msgStarted, { message_id: "m1", role: "assistant" }, { seq: 2 }),
+    ]);
+
+    expect(state.turns[0].error).toBeUndefined();
+  });
+
   it("replaces the whole turn instead of appending", () => {
     const state = reduceAll([
       delta(1, "m1", 0, "流式输出"),
@@ -520,5 +551,34 @@ describe("sessionReducer", () => {
     const cleared = sessionReducer(state, { type: "clear-queue" });
     expect(cleared.queue).toEqual([]);
     expect(cleared.lastSeq).toBe(1);
+  });
+});
+describe("selectTimeline", () => {
+  it("collapses repeated provider failures into one turn", () => {
+    // Pi retries by itself; the transcript should say "failed, retried" once
+    // rather than stack identical error boxes.
+    const state = reduceAll([
+      event(EV.msgFinal, { message_id: "m1", role: "assistant", blocks: [], error: "502: down" }, { seq: 1 }),
+      event(EV.msgFinal, { message_id: "m2", role: "assistant", blocks: [], error: "502: down" }, { seq: 2 }),
+      event(EV.msgFinal, { message_id: "m3", role: "assistant", blocks: [], error: "502: down" }, { seq: 3 }),
+    ]);
+
+    const timeline = selectTimeline(state);
+    expect(timeline).toHaveLength(1);
+    const item = timeline[0];
+    expect(item.kind).toBe("turn");
+    if (item.kind === "turn") {
+      expect(item.turn.retries).toBe(2);
+      expect(item.turn.error).toBe("502: down");
+    }
+  });
+
+  it("keeps failures of different kinds apart", () => {
+    const state = reduceAll([
+      event(EV.msgFinal, { message_id: "m1", role: "assistant", blocks: [], error: "502" }, { seq: 1 }),
+      event(EV.msgFinal, { message_id: "m2", role: "assistant", blocks: [], error: "429" }, { seq: 2 }),
+    ]);
+
+    expect(selectTimeline(state)).toHaveLength(2);
   });
 });

@@ -2,6 +2,7 @@ package pi
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -394,5 +395,43 @@ func TestTranslatePayloadIsValidJSON(t *testing.T) {
 				t.Errorf("%s payload is not valid JSON: %s", ev.Type, ev.Payload)
 			}
 		}
+	}
+}
+
+// TestMessageEndCarriesTheProviderError pins the difference between "the model
+// said nothing" and "the model could not be reached": both arrive as an assistant
+// message with no content, and only the error explains which one happened.
+func TestMessageEndCarriesTheProviderError(t *testing.T) {
+	n := NewNormalizer("ses_err", contracts.KindMain)
+	raw := []byte(`{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"502: provider \"volc\" is not available","provider":"piforge","model":"m"}}`)
+
+	events, err := n.Translate(raw)
+	if err != nil {
+		t.Fatalf("Translate: %v", err)
+	}
+	// A failed call closes the turn as well as reporting the failure, so the
+	// final message is the last event rather than the only one.
+	var payload MessageFinalPayload
+	found := false
+	for _, event := range events {
+		if event.Type != contracts.EvMsgFinal {
+			continue
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("no message.final in %d events", len(events))
+	}
+	if payload.StopReason != "error" {
+		t.Fatalf("stop_reason = %q", payload.StopReason)
+	}
+	if payload.Error == "" {
+		t.Fatalf("the provider error was dropped: %+v", payload)
+	}
+	if !strings.Contains(payload.Error, "not available") {
+		t.Fatalf("error = %q", payload.Error)
 	}
 }
