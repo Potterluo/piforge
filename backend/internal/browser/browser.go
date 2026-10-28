@@ -545,3 +545,30 @@ func decodeBase64(s string) []byte {
 	}
 	return data
 }
+
+// Screenshot captures the viewport as PNG.
+//
+// It is the one action that turns "I can see it in the panel" into "the agent can
+// read it": the caller writes the bytes into the checkout, where the file tree and
+// the agent both see them (PRD FR-11.8).
+func (s *Session) Screenshot(ctx context.Context) ([]byte, error) {
+	var out struct {
+		Data string `json:"data"`
+	}
+	err := s.client.call(ctx, "Page.captureScreenshot", map[string]any{
+		"format":                "png",
+		"fromSurface":           true,
+		"captureBeyondViewport": false,
+	}, &out)
+	if err != nil {
+		return nil, fmt.Errorf("browser: capture screenshot: %w", err)
+	}
+	if out.Data == "" {
+		return nil, errors.New("browser: the page returned an empty screenshot")
+	}
+	raw, err := base64.StdEncoding.DecodeString(out.Data)
+	if err != nil {
+		return nil, fmt.Errorf("browser: decode screenshot: %w", err)
+	}
+	return raw, nil
+}

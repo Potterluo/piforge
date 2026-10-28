@@ -171,6 +171,11 @@ export const sessions = {
   send: (id: string, input: SendMessageInput) =>
     request<PromptResult>(`/v1/sessions/${id}/messages`, { method: "POST", body: input }),
   remove: (id: string) => request<{ ok: boolean }>(`/v1/sessions/${id}`, { method: "DELETE" }),
+  /** Captures the sandbox browser into the checkout, for the agent to read. */
+  screenshot: (id: string) =>
+    request<{ path: string; bytes: number }>(`/v1/sessions/${id}/browser/screenshot`, {
+      method: "POST",
+    }),
   archive: (id: string, archived: boolean) =>
     request<{ session: Session }>(`/v1/sessions/${id}`, {
       method: "PATCH",

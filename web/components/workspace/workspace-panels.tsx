@@ -45,10 +45,19 @@ export function WorkspacePanels({
   projectId: string;
 }): React.JSX.Element {
   const [tab, setTab] = React.useState("files");
+  // Bumped whenever something writes into the checkout from the UI side (a browser
+  // screenshot today): the file tree refetches and the preview can open the result.
+  const [revision, setRevision] = React.useState(0);
   const [openPath, setOpenPath] = React.useState<string | null>(null);
   const [revealTarget, setRevealTarget] = React.useState<string | null>(null);
 
   const handleOpenFile = React.useCallback((path: string) => {
+    setOpenPath(path);
+    setTab("files");
+  }, []);
+
+  const handleCaptured = React.useCallback((path: string) => {
+    setRevision((value) => value + 1);
     setOpenPath(path);
     setTab("files");
   }, []);
@@ -105,6 +114,7 @@ export function WorkspacePanels({
             <ResizablePanelGroup orientation="vertical" className="min-h-0 min-w-0">
               <ResizablePanel defaultSize="46%" minSize={120} className="min-h-0">
                 <FileTree
+            revision={revision}
                   key={sessionId}
                   sessionId={sessionId}
                   activePath={openPath}
@@ -133,7 +143,7 @@ export function WorkspacePanels({
           </TabsContent>
 
           <TabsContent value="browser" keepMounted className="min-h-0 min-w-0 flex-1">
-        <BrowserPanel sessionId={sessionId} className="min-h-0 flex-1" />
+        <BrowserPanel sessionId={sessionId} className="min-h-0 flex-1" onCaptured={handleCaptured} />
       </TabsContent>
 
       <TabsContent value="terminal" keepMounted className="min-h-0 min-w-0 flex-1">

@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { GlobeIcon, RotateCwIcon } from "lucide-react";
+import { Camera as CameraIcon, GlobeIcon, RotateCwIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,8 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
+import { api } from "@/lib/api/client";
+import { toast } from "sonner";
 import { useFeature } from "@/lib/session/queries";
 
 /**
@@ -34,6 +36,8 @@ interface FrameMeta {
 export interface BrowserPanelProps {
   sessionId: string;
   className?: string;
+  /** Called with the workspace-relative path after a screenshot is written. */
+  onCaptured?: (path: string) => void;
 }
 
 function wsBase(): string {
@@ -43,7 +47,7 @@ function wsBase(): string {
   return `${proto}//${window.location.host}`;
 }
 
-export function BrowserPanel({ sessionId, className }: BrowserPanelProps) {
+export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelProps) {
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const socketRef = React.useRef<WebSocket | null>(null);
   const [status, setStatus] = React.useState<Status>("connecting");
@@ -227,6 +231,25 @@ export function BrowserPanel({ sessionId, className }: BrowserPanelProps) {
     window.setTimeout(() => setPainted(true), 15_000);
   };
 
+  // Capture writes the page into the checkout rather than into the browser: that is
+  // what makes it useful to the agent (PRD FR-11.8).
+  const [capturing, setCapturing] = React.useState(false);
+  const capture = async () => {
+    if (capturing) return;
+    setCapturing(true);
+    try {
+      const result = await api.sessions.screenshot(sessionId);
+      toast.success("已保存到工作区", { description: result.path });
+      onCaptured?.(result.path);
+    } catch (error) {
+      toast.error("截图失败", {
+        description: error instanceof Error ? error.message : "未知错误",
+      });
+    } finally {
+      setCapturing(false);
+    }
+  };
+
   const live = status === "open";
   const loadingPage = live && !painted;
 
@@ -266,6 +289,17 @@ export function BrowserPanel({ sessionId, className }: BrowserPanelProps) {
         />
         <Button size="icon-xs" variant="ghost" aria-label="打开" onClick={navigate} disabled={!live}>
           <RotateCwIcon />
+        </Button>
+        <Button
+          size="icon-xs"
+          variant="ghost"
+          aria-label="截图保存到工作区"
+          title="截图保存到工作区"
+          data-testid="browser-screenshot"
+          disabled={!live || capturing}
+          onClick={() => void capture()}
+        >
+          {capturing ? <Spinner /> : <CameraIcon />}
         </Button>
         <Badge variant={live ? "secondary" : "outline"} className="text-[10px]">
           {live ? "已连接" : status === "error" ? "不可用" : "连接中"}

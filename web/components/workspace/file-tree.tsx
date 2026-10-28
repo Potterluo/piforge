@@ -57,6 +57,8 @@ const FileTreeCanvas = dynamic(
 
 export interface FileTreeProps {
   sessionId: string;
+  /** Bumped by other panels when they write into the checkout. */
+  revision?: number;
   activePath?: string | null;
   onOpenFile: (path: string) => void;
   /** Emitted by "在终端中打开"; the shell decides which terminal tab to open. */
@@ -68,7 +70,7 @@ interface PendingDelete {
   isDir: boolean;
 }
 
-export function FileTree({ sessionId, activePath, onOpenFile, onRevealInTerminal }: FileTreeProps) {
+export function FileTree({ sessionId, revision = 0, activePath, onOpenFile, onRevealInTerminal }: FileTreeProps) {
   const [showIgnored, setShowIgnored] = React.useState(false);
   const [filter, setFilter] = React.useState("");
   const [extraDirs, setExtraDirs] = React.useState<Record<string, FileNode[]>>({});
@@ -82,7 +84,7 @@ export function FileTree({ sessionId, activePath, onOpenFile, onRevealInTerminal
   // about the workspace for as long as the user trusts it.
   const settled = useOptionalSessionEventState()?.state.settled ?? 0;
 
-  const tree = useAsync(`files:${sessionId}:${showIgnored ? "all" : "tracked"}:${settled}`, async () => {
+  const tree = useAsync(`files:${sessionId}:${showIgnored ? "all" : "tracked"}:${settled}:${revision}`, async () => {
     const response = await api.files.tree(sessionId, "", 2, showIgnored);
     return { nodes: response.nodes, dirs: collectDirs(response.nodes) };
   });
