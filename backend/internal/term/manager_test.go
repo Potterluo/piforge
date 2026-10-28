@@ -413,3 +413,26 @@ func TestShellOutputIsUTF8(t *testing.T) {
 	data, _, _ := m.Read("tab-utf8", 0)
 	t.Fatalf("the UTF-8 echo never came back; last output = %q (shell %s)", data, info.Shell)
 }
+
+// TestShellShowsAPrompt covers "the terminal is blank": a shell started without
+// an interactive host prints nothing at all, which reads as a broken feature
+// even though the PTY works.
+func TestShellShowsAPrompt(t *testing.T) {
+	m := New(Config{})
+	defer m.CloseAll()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := m.Open(ctx, "sbx", "tab-prompt", ""); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		data, _, _ := m.Read("tab-prompt", 0)
+		if strings.TrimSpace(string(data)) != "" {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("the shell printed nothing at all, so the terminal looks dead")
+}

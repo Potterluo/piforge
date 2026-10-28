@@ -208,11 +208,16 @@ func (h *Handler) upstreamURL(provider *contracts.Provider, path, query string) 
 		return nil, fmt.Errorf("provider %q base URL must be http(s)", provider.Name)
 	}
 
-	// Keep any path already present on the base (many gateways use /v1).
+	// Keep any path already present on the base (many gateways document a base
+	// that ends in /v1). Clients then append /v1/... themselves, so collapse the
+	// duplicate: a provider URL ending in /v1 must not become /v1/v1/....
 	joined := strings.TrimRight(parsed.Path, "/")
 	if path != "" {
 		if !strings.HasPrefix(path, "/") {
 			path = "/" + path
+		}
+		if strings.HasSuffix(joined, "/v1") && strings.HasPrefix(path, "/v1/") {
+			path = strings.TrimPrefix(path, "/v1")
 		}
 		joined += path
 	}

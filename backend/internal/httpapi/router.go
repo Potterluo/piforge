@@ -17,6 +17,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -254,6 +255,12 @@ func (s *server) recoverer(next http.Handler) http.Handler {
 		tw := &trackedWriter{ResponseWriter: w}
 		defer func() {
 			if rec := recover(); rec != nil {
+				// net/http's own sentinel for "the client went away mid-response".
+				// ReverseProxy and the server raise it deliberately, so it is not
+				// a bug: log nothing, answer nothing, and let the connection die.
+				if err, ok := rec.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+					return
+				}
 				s.log.ErrorContext(r.Context(), "handler panic",
 					slog.String("method", r.Method),
 					slog.String("path", r.URL.Path),

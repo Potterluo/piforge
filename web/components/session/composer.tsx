@@ -351,7 +351,7 @@ export function Composer({
           className="max-h-40 min-h-9 field-sizing-content text-sm"
         />
 
-        <InputGroupAddon align="inline-end" className="gap-1">
+        <InputGroupAddon align="block-end" className="justify-end gap-1">
           <input
             ref={fileInputRef}
             type="file"

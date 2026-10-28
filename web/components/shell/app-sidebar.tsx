@@ -39,6 +39,7 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
+  SidebarTrigger,
   SidebarMenuAction,
   SidebarMenuBadge,
   SidebarMenuButton,
@@ -164,9 +165,12 @@ export function AppSidebar({
   };
 
   return (
-    <Sidebar collapsible="icon" data-testid="app-sidebar">
+    <Sidebar collapsible="offcanvas" data-testid="app-sidebar">
       <SidebarHeader>
         <SidebarMenu>
+          <SidebarMenuItem className="flex items-center gap-1">
+            <SidebarTrigger data-testid="sidebar-collapse" className="ml-auto" aria-label="收起侧边栏" />
+          </SidebarMenuItem>
           <SidebarMenuItem>
             <DropdownMenu>
               <DropdownMenuTrigger

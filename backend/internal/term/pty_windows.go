@@ -48,39 +48,22 @@ func shellArgv(shellPath string) []string {
 	base := strings.ToLower(filepath.Base(shellPath))
 	switch {
 	case strings.Contains(base, "powershell"), strings.Contains(base, "pwsh"):
-		// A tiny REPL instead of "-Command -".
-		//
-		// "-Command -" writes its output in the console's OEM code page, which
-		// the browser then decodes as UTF-8: every non-ASCII character in the
-		// terminal became a replacement glyph. Setting OutputEncoding before
-		// reading stdin fixes that, and printing exceptions keeps a failed
-		// command from looking like a dead shell.
+		// "-NoExit" keeps the host interactive over pipes: it prints the prompt
+		// and echoes what is typed, which is the difference between a terminal
+		// that looks dead and one that works. chcp + OutputEncoding make both
+		// directions UTF-8, because the browser decodes UTF-8 and the console
+		// otherwise speaks an OEM code page.
 		return []string{
-			shellPath, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-			// No backticks anywhere in this script: they are PowerShell escapes
-			// and this is a Go raw string.
-			`$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new();
-$stdin = New-Object IO.StreamReader([Console]::OpenStandardInput(), [Text.UTF8Encoding]::new());
-$buf = New-Object Text.StringBuilder;
-while (($code = $stdin.Read()) -ge 0) {
-  if ($code -eq 13 -or $code -eq 10) {
-    $line = $buf.ToString();
-    $buf.Clear() | Out-Null;
-    if ($line.Trim().Length -eq 0) { continue }
-    try { Invoke-Expression $line } catch { Write-Error $_.Exception.Message }
-  } else {
-    $buf.Append([char]$code) | Out-Null
-  }
-}`,
+			shellPath, "-NoLogo", "-NoProfile", "-NoExit", "-Command",
+			"chcp 65001 > $null; " +
+				"[Console]::OutputEncoding = [Console]::InputEncoding = [Text.UTF8Encoding]::new()",
 		}
 	case strings.Contains(base, "cmd.exe"), base == "cmd":
-		// 65001 so that programs writing UTF-8 are not mangled on the way out.
 		return []string{shellPath, "/Q", "/K", "chcp 65001>nul"}
 	default:
 		return []string{shellPath}
 	}
 }
-
 func startProcess(ctx context.Context, argv []string, dir string, cols, rows int) (ptyProcess, error) {
 	_ = ctx
 	if len(argv) == 0 {

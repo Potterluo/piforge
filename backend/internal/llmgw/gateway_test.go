@@ -325,3 +325,18 @@ func TestUpstreamURLRejectsNonHTTP(t *testing.T) {
 		t.Fatal("accepted a non-http base URL")
 	}
 }
+func TestUpstreamURLDoesNotDoubleV1(t *testing.T) {
+	h := &Handler{}
+	// A provider configured with the URL its docs give, which already ends in
+	// /v1, while the client appends /v1/... itself.
+	target, err := h.upstreamURL(&contracts.Provider{
+		Name: "volc", API: "openai-compat",
+		BaseURL: "https://gw.example/api/v1",
+	}, "/v1/chat/completions", "")
+	if err != nil {
+		t.Fatalf("upstreamURL: %v", err)
+	}
+	if got, want := target.String(), "https://gw.example/api/v1/chat/completions"; got != want {
+		t.Fatalf("target = %s, want %s", got, want)
+	}
+}

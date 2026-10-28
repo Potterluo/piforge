@@ -44,6 +44,10 @@ type Config struct {
 	Width, Height int
 	// Quality is the JPEG quality of screencast frames (1-100).
 	Quality int
+	// Proxy is passed to Chrome as --proxy-server. A sandbox usually has no
+	// direct route to the internet, and a browser that cannot resolve anything
+	// looks exactly like a broken screencast.
+	Proxy string
 	// Launcher optionally wraps the browser's argv so it runs inside the same
 	// process jail as the agent. Nil means run it directly.
 	Launcher isolate.Launcher
@@ -179,6 +183,9 @@ func (m *Manager) launch(ctx context.Context, sandboxID, profileRoot string) (*S
 	}
 	if m.cfg.Headless {
 		args = append([]string{"--headless=new", "--disable-gpu"}, args...)
+	}
+	if proxy := strings.TrimSpace(m.cfg.Proxy); proxy != "" {
+		args = append([]string{"--proxy-server=" + proxy}, args...)
 	}
 
 	argv := append([]string{m.cfg.Binary}, args...)

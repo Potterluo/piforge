@@ -191,7 +191,9 @@ func (b *Bridge) Start(ctx context.Context) error {
 	}
 	args := b.cfg.Args
 	if b.cfg.SessionFile != "" {
-		args = append(append([]string(nil), args...), "--session="+b.cfg.SessionFile)
+		// Two args, not "--session=<file>": pi 1.4 rejects the equals form with
+		// "Unknown option: --session".
+		args = append(append([]string(nil), args...), "--session", b.cfg.SessionFile)
 	}
 	cmd := exec.Command(b.cfg.BinaryPath, args...)
 	cmd.Dir = b.cfg.Dir

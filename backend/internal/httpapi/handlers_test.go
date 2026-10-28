@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -1247,5 +1248,26 @@ func TestProviderWriteRefusedWithoutASecretBox(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "sk-raw") {
 		t.Fatal("the error echoed the key")
+	}
+}
+
+// TestRecovererIgnoresClientAborts pins the difference between a bug and a
+// disconnect: http.ErrAbortHandler is raised by net/http and ReverseProxy when
+// the caller vanishes mid-response, and treating it as a panic turns every
+// cancelled stream into an alarming log line.
+func TestRecovererIgnoresClientAborts(t *testing.T) {
+	// Reuse the real test server so the recoverer is exercised exactly as it is
+	// wired in production.
+	env := newTestEnv(t)
+	srv := newServer(env.deps)
+	panicking := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic(http.ErrAbortHandler)
+	})
+	handler := srv.recoverer(panicking)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	if rec.Body.Len() != 0 {
+		t.Fatalf("a client abort produced a body: %q", rec.Body.String())
 	}
 }

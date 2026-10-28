@@ -26,6 +26,14 @@ type RuntimeConfig struct {
 	// Launcher optionally wraps the agent's argv so it runs inside a jail
 	// (bubblewrap/firejail). Nil means run it directly.
 	Launcher isolate.Launcher
+	// ModelFor translates the platform's model reference into the one Pi uses.
+	// A session's ref names the user's provider ("volc/deepseek-v4-flash"), while
+	// the process only knows the gateway provider we generated for it, so the two
+	// are not interchangeable. Nil means use the reference as-is.
+	ModelFor func(spec contracts.SessionSpec, ref string) string
+	// ArgsFor returns extra argv entries for one session's process (the model
+	// selection Pi needs). Nil means the configured Args are used as-is.
+	ArgsFor func(spec contracts.SessionSpec) []string
 	// EnvFor returns extra environment entries for one session's process. It is
 	// how the control plane hands the agent a short-lived model gateway token
 	// instead of a real provider key (PRD §5.7.2).
@@ -172,6 +180,11 @@ func (r *Runtime) spawn(ctx context.Context, spec contracts.SessionSpec) (*sessi
 		cfg.Dir = spec.Worktree
 	}
 	cfg.SessionFile = file
+	if r.cfg.ArgsFor != nil {
+		if extra := r.cfg.ArgsFor(spec); len(extra) > 0 {
+			cfg.Args = append(append([]string{}, cfg.Args...), extra...)
+		}
+	}
 	if r.cfg.EnvFor != nil {
 		if extra := r.cfg.EnvFor(spec); len(extra) > 0 {
 			cfg.Env = append(append([]string{}, cfg.Env...), extra...)
@@ -217,7 +230,11 @@ func (r *Runtime) spawn(ctx context.Context, spec contracts.SessionSpec) (*sessi
 		sub:    sub,
 	}
 	if spec.ModelRef != "" {
-		if err := r.applyModel(ctx, s, spec.ModelRef); err != nil {
+		modelRef := spec.ModelRef
+		if r.cfg.ModelFor != nil {
+			modelRef = r.cfg.ModelFor(spec, modelRef)
+		}
+		if err := r.applyModel(ctx, s, modelRef); err != nil {
 			return nil, err
 		}
 	}
@@ -330,7 +347,11 @@ func (r *Runtime) Prompt(ctx context.Context, req contracts.PromptRequest) (cont
 			"the agent is already running; set streaming_behavior to steer or follow_up")
 	}
 	if req.ModelRef != "" {
-		if err := r.applyModel(ctx, s, req.ModelRef); err != nil {
+		modelRef := req.ModelRef
+		if r.cfg.ModelFor != nil {
+			modelRef = r.cfg.ModelFor(s.spec, modelRef)
+		}
+		if err := r.applyModel(ctx, s, modelRef); err != nil {
 			return contracts.PromptResult{}, err
 		}
 	}

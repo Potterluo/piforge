@@ -9,7 +9,8 @@ import { NewProjectDialog } from "@/components/shell/new-project-dialog";
 import { NewSessionDialog } from "@/components/shell/new-session-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
+import { cn } from "@/lib/utils";
+import { SidebarInset, SidebarProvider, SidebarTrigger, useSidebar } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useCurrentUser } from "@/lib/session/queries";
 import { ApiError } from "@/lib/types";
@@ -102,10 +103,7 @@ function AppShellFrame({ children }: { children: ReactNode }) {
         onNewSession={() => setNewSessionOpen(true)}
       />
       <SidebarInset className="flex min-h-svh flex-1 flex-col overflow-hidden">
-        <div className="flex h-10 shrink-0 items-center gap-2 border-b px-2 md:hidden">
-          <SidebarTrigger />
-          <span className="text-sm font-medium">PiForge</span>
-        </div>
+        <ShellTopBar />
         {children}
       </SidebarInset>
 
@@ -142,5 +140,27 @@ export function AppShell({ children }: { children: ReactNode }) {
     <Suspense fallback={<ShellSkeleton />}>
       <AppShellFrame>{children}</AppShellFrame>
     </Suspense>
+  );
+}
+/**
+ * The bar that carries the sidebar trigger.
+ *
+ * With `collapsible="offcanvas"` the sidebar can be fully hidden, which is what
+ * the collapse button promises; that only works if something brings it back.
+ * On a wide screen the bar appears exactly when the sidebar is collapsed, and on
+ * a narrow one it is always there (the sidebar is an overlay).
+ */
+function ShellTopBar() {
+  const { state } = useSidebar();
+  return (
+    <div
+      className={cn(
+        "flex h-10 shrink-0 items-center gap-2 border-b px-2",
+        state === "collapsed" ? "flex" : "md:hidden",
+      )}
+    >
+      <SidebarTrigger data-testid="sidebar-trigger" />
+      <span className="text-sm font-medium">PiForge</span>
+    </div>
   );
 }

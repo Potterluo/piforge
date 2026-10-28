@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -36,6 +37,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/isolate"
 	"github.com/piforge/piforge/backend/internal/llmgw"
 	"github.com/piforge/piforge/backend/internal/pi"
+	"github.com/piforge/piforge/backend/internal/pimodel"
 	"github.com/piforge/piforge/backend/internal/provision"
 	"github.com/piforge/piforge/backend/internal/sandbox"
 	"github.com/piforge/piforge/backend/internal/store"
@@ -72,6 +74,8 @@ type options struct {
 	// isolation names the process jail for agent processes.
 	isolation       string
 	isolationBinary string
+	// browserProxy is handed to Chrome via --proxy-server.
+	browserProxy string
 }
 
 func run() error {
@@ -94,6 +98,8 @@ func run() error {
 		"chrome/chromium binary for the browser panel (empty disables it)")
 	flag.BoolVar(&opt.headlessBrowser, "headless-browser", envOr("PIFORGE_HEADLESS_BROWSER", "1") != "0",
 		"run the sandbox browser headless")
+	flag.StringVar(&opt.browserProxy, "browser-proxy", envOr("PIFORGE_BROWSER_PROXY", ""),
+		"proxy the sandbox browser should use (host:port)")
 	flag.StringVar(&opt.isolation, "isolation", envOr("PIFORGE_ISOLATION", "none"),
 		"process jail for agent processes: none|bubblewrap|firejail")
 	flag.StringVar(&opt.isolationBinary, "isolation-binary", envOr("PIFORGE_ISOLATION_BINARY", ""),
@@ -191,7 +197,88 @@ func run() error {
 			"covers", "agent process, terminal shells, sandbox browser")
 	}
 
-	rt, err := newRuntime(opt, logger, signer, gatewayBase, launcher)
+	// setupFor renders each session's model configuration and the environment
+	// that points Pi at the gateway. It runs at spawn time, so a provider change
+	// applies to the next session without touching a running sandbox.
+	resolvedModels := struct {
+		sync.Mutex
+		bySession map[string]string
+	}{bySession: map[string]string{}}
+
+	setupFor := func(spec contracts.SessionSpec) agentSetup {
+		providerName, modelID := splitModelRef(spec.ModelRef, opt.defaultProvider)
+
+		models := []string{}
+		api := "openai-completions"
+		if provider, _, perr := st.ResolveProvider(ctx, spec.UserID, providerName); perr == nil {
+			api = piAPI(provider.API)
+			for _, m := range provider.Models {
+				if strings.TrimSpace(m.ID) != "" {
+					models = append(models, m.ID)
+				}
+			}
+		}
+		if modelID != "" {
+			models = append([]string{modelID}, models...)
+		}
+		if len(models) == 0 {
+			logger.Warn("no models are configured for this session's provider",
+				"session", spec.SessionID, "provider", providerName)
+			return agentSetup{}
+		}
+
+		token, terr := signer.Issue(spec.SessionID, spec.UserID, providerName, modelID, time.Now())
+		if terr != nil {
+			logger.Warn("cannot mint a model gateway token", "session", spec.SessionID, "error", terr.Error())
+			return agentSetup{}
+		}
+		gatewayURL := gatewayBase + "/gw/llm/" + token
+
+		res, werr := pimodel.Write(filepath.Join(opt.dataDir, "pi-agents", spec.SessionID), pimodel.Spec{
+			GatewayURL:   gatewayURL,
+			Token:        token,
+			Models:       models,
+			APIKind:      api,
+			ProviderName: providerName,
+		})
+		if werr != nil {
+			logger.Warn("cannot write the pi model configuration",
+				"session", spec.SessionID, "error", werr.Error())
+			return agentSetup{}
+		}
+
+		resolvedModels.Lock()
+		resolvedModels.bySession[spec.SessionID] = res.Model
+		resolvedModels.Unlock()
+
+		return agentSetup{
+			Args: res.Args,
+			// PI_CODING_AGENT_DIR is the authoritative pointer; the *_BASE_URL
+			// variables stay for clients that read them directly.
+			Env: []string{
+				"PI_CODING_AGENT_DIR=" + res.Dir,
+				"ANTHROPIC_BASE_URL=" + gatewayURL,
+				"ANTHROPIC_API_KEY=" + token,
+				"OPENAI_BASE_URL=" + gatewayURL + "/v1",
+				"OPENAI_API_KEY=" + token,
+				"PIFORGE_GATEWAY_TOKEN=" + token,
+			},
+		}
+	}
+
+	// Pi knows the model under the generated gateway provider, not under the
+	// user's provider name, so the reference has to be translated before it is
+	// sent over RPC.
+	modelFor := func(spec contracts.SessionSpec, ref string) string {
+		resolvedModels.Lock()
+		defer resolvedModels.Unlock()
+		if model, ok := resolvedModels.bySession[spec.SessionID]; ok && model != "" {
+			return model
+		}
+		return ref
+	}
+
+	rt, err := newRuntime(opt, logger, setupFor, modelFor, launcher)
 	if err != nil {
 		return err
 	}
@@ -202,6 +289,7 @@ func run() error {
 	browsers := browser.NewManager(browser.Config{
 		Binary:   opt.chrome,
 		Headless: opt.headlessBrowser,
+		Proxy:    opt.browserProxy,
 		Launcher: launcher,
 	})
 	defer browsers.CloseAll()
@@ -311,7 +399,7 @@ func (a termAdapter) Read(tabID string, from int64) ([]byte, int64, bool) {
 // newRuntime builds the agent runtime. With -fake-pi it drives the fake peer
 // that ships with the repo, which is how development and the e2e suite run
 // without a model account.
-func newRuntime(opt options, logger *slog.Logger, signer *llmgw.Signer, gatewayBase string, launcher isolate.Launcher) (*pi.Runtime, error) {
+func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSpec) agentSetup, modelFor func(contracts.SessionSpec, string) string, launcher isolate.Launcher) (*pi.Runtime, error) {
 	bin := opt.piBin
 	args := []string{"--mode", "rpc"}
 
@@ -333,26 +421,33 @@ func newRuntime(opt options, logger *slog.Logger, signer *llmgw.Signer, gatewayB
 			Stderr:     os.Stderr,
 		},
 		Launcher: launcher,
+		ModelFor: modelFor,
+		ArgsFor: func(spec contracts.SessionSpec) []string {
+			return setup(spec).Args
+		},
 		EnvFor: func(spec contracts.SessionSpec) []string {
-			providerName, modelID := splitModelRef(spec.ModelRef, opt.defaultProvider)
-			token, terr := signer.Issue(spec.SessionID, spec.UserID, providerName, modelID, time.Now())
-			if terr != nil {
-				logger.Warn("cannot mint a model gateway token", "session", spec.SessionID, "error", terr.Error())
-				return nil
-			}
-			base := gatewayBase + "/gw/llm/" + token
-			// Point every supported SDK shape at the gateway. A client that
-			// honours none of them simply never reaches a model, which is a
-			// visible failure rather than a silent one.
-			return []string{
-				"ANTHROPIC_BASE_URL=" + base,
-				"ANTHROPIC_API_KEY=" + token,
-				"OPENAI_BASE_URL=" + base + "/v1",
-				"OPENAI_API_KEY=" + token,
-				"PIFORGE_GATEWAY_TOKEN=" + token,
-			}
+			return setup(spec).Env
 		},
 	}), nil
+}
+
+// agentSetup is per-session launch configuration: the model selection Pi needs
+// and the environment that points it at the gateway.
+type agentSetup struct {
+	Env  []string
+	Args []string
+}
+
+// piAPI maps a stored provider api onto the name Pi uses in models.json.
+func piAPI(api string) string {
+	switch api {
+	case "anthropic-messages":
+		return "anthropic-messages"
+	case "openai-responses":
+		return "openai-responses"
+	default:
+		return "openai-completions"
+	}
 }
 
 // splitModelRef splits "provider/model" into its parts, falling back to the
