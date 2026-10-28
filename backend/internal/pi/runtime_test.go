@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -452,5 +453,33 @@ func TestRuntimeCompactAndEntries(t *testing.T) {
 	decodePayload(t, evs[len(evs)-1], &payload)
 	if payload.Phase != "start" && payload.Phase != "end" {
 		t.Fatalf("compaction payload = %+v", payload)
+	}
+}
+
+// FR-4.2: a sidecar shares its parent's checkout, so its agent must not be able to
+// change it. The restriction has to reach Pi's own arguments — a boolean nobody reads
+// is not an enforcement.
+func TestSidecarSpawnDropsWriteTools(t *testing.T) {
+	base := []string{"--mode", "rpc", "--model", "m"}
+	main := ArgsForKind(base, contracts.KindMain)
+	if len(main) != len(base) {
+		t.Fatalf("a main session got extra args: %v", main)
+	}
+
+	sidecar := ArgsForKind(base, contracts.KindSidecar)
+	joined := strings.Join(sidecar, " ")
+	if !strings.Contains(joined, "--exclude-tools") {
+		t.Fatalf("the sidecar args do not exclude anything: %v", sidecar)
+	}
+	for _, tool := range []string{"bash", "edit", "write"} {
+		if !strings.Contains(joined, tool) {
+			t.Fatalf("the sidecar can still use %q: %v", tool, sidecar)
+		}
+	}
+	// The base arguments survive: this appends, it does not replace.
+	for _, want := range base {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("base arg %q was dropped: %v", want, sidecar)
+		}
 	}
 }

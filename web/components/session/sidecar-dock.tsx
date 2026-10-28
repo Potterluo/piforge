@@ -159,7 +159,7 @@ export function SidecarDock({
             </Badge>
           </div>
           <SheetDescription className="text-xs">
-            共享当前工作区，独立上下文。默认只读，避免和主会话抢同一份文件。
+            共享当前工作区，独立上下文。只读：agent 的 bash / edit / write 被关掉，避免和主会话抢同一份文件。
           </SheetDescription>
         </SheetHeader>
 

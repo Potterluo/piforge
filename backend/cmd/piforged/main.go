@@ -268,7 +268,10 @@ func run() error {
 		resolvedModels.Unlock()
 
 		return agentSetup{
-			Args: res.Args,
+			// A sidecar shares its parent's checkout, so it must not be able to write
+			// to it (FR-4.2). The restriction is passed to Pi as a tool denylist for
+			// this run, not merely recorded as an intention.
+			Args: pi.ArgsForKind(res.Args, spec.Kind),
 			// PI_CODING_AGENT_DIR is the authoritative pointer; the *_BASE_URL
 			// variables stay for clients that read them directly.
 			Env: []string{

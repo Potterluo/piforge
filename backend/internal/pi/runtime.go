@@ -839,3 +839,25 @@ func (r *Runtime) CloneSession(ctx context.Context, fromSession, toSession strin
 	r.mu.Unlock()
 	return nil
 }
+
+// WriteToolArgs is the flag pair that makes one agent session unable to change files
+// or run commands (PRD FR-4.2).
+//
+// A sidecar shares its parent's checkout, so "read-only" has to be enforced by the
+// agent's own tool list; assigning a boolean and never using it was a promise the code
+// did not keep. Pi accepts an allowlist/denylist per run, which is exactly this.
+func WriteToolArgs() []string {
+	return []string{"--exclude-tools", strings.Join(writeTools, ",")}
+}
+
+// writeTools are the built-in tools that change the checkout or run commands.
+var writeTools = []string{"bash", "edit", "write"}
+
+// ArgsForKind appends the per-kind restrictions to the base arguments.
+func ArgsForKind(base []string, kind contracts.SessionKind) []string {
+	out := append([]string{}, base...)
+	if kind == contracts.KindSidecar {
+		out = append(out, WriteToolArgs()...)
+	}
+	return out
+}
