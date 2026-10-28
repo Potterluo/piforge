@@ -259,6 +259,12 @@ func TestRuntimeForkProducesTrimmedTree(t *testing.T) {
 		t.Fatalf("Fork: %v", err)
 	}
 
+	// Forking does not start the branch: the caller does, from the session row, so
+	// the branch gets its own model configuration instead of the parent's.
+	branchSpec := sessionSpec(t, "ses_branch", contracts.KindBranch)
+	if _, err := rt.Start(ctx, branchSpec); err != nil {
+		t.Fatalf("start branch: %v", err)
+	}
 	branchTree, err := rt.Tree(ctx, "ses_branch")
 	if err != nil {
 		t.Fatalf("Tree(branch): %v", err)

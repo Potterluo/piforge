@@ -683,12 +683,11 @@ func (r *Runtime) Fork(ctx context.Context, req contracts.ForkRequest) error {
 	r.overrides[req.NewSession] = file
 	r.mu.Unlock()
 
-	spec := s.spec
-	spec.SessionID = req.NewSession
-	spec.Kind = contracts.KindBranch
-	if _, err := r.ensure(ctx, spec); err != nil {
-		return fmt.Errorf("pi: fork: start branch %s: %w", req.NewSession, err)
-	}
+	// The branch process is *not* started here. A runtime session's spec carries
+	// the translated model reference (`piforge/...`, the gateway's name), and
+	// reusing it minted a gateway token for a provider that does not exist — the
+	// branch's first call came back 502 provider_unavailable. The caller starts the
+	// branch from the database row, which still says `volc/...`.
 	if req.Label != "" {
 		if branch, err := r.get(req.NewSession); err == nil {
 			// Best effort: a session without a label is still a valid branch.

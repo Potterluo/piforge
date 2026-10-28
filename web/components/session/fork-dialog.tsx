@@ -65,6 +65,10 @@ function ForkForm({
 
   return (
     <>
+      <p className="rounded-md bg-amber-500/10 p-2 text-[11px] text-amber-700 dark:text-amber-400">
+        从第一条消息分叉会得到一个空分支：Pi 用“分叉点之前的历史”建分支，而第一条消息之前没有历史。想带上对话，请选后面的消息。
+      </p>
+
       {preview ? (
         <p className="rounded-md bg-muted p-2 text-xs text-muted-foreground">
           {truncate(preview, 240)}

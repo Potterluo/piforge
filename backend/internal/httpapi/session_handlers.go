@@ -400,11 +400,30 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	// The agent has the history; the transcript does not. Copy it so the branch
-	// opens with the conversation it was forked from.
-	if err := s.seedForkedHistory(context.WithoutCancel(r.Context()), user.ID, parent.ID, child.ID, in.EntryID); err != nil {
-		s.log.WarnContext(r.Context(), "could not copy history into the branch",
+
+	// Start the branch from the row, not from the parent's runtime spec: the spec
+	// carries the model reference after translation, and minting a gateway token
+	// from it produced "provider piforge is not available" on the first call.
+	startCtx, startCancel := detach(r.Context(), 30*time.Second)
+	if err := s.hub.ensure(startCtx, user.ID, s.sessionSpec(user.ID, child)); err != nil {
+		startCancel()
+		s.log.WarnContext(r.Context(), "could not start the branch",
 			"session", child.ID, "error", err.Error())
+	} else {
+		startCancel()
+	}
+
+	// Copy the transcript only if the branch really has history in the agent. The
+	// check needs the branch process to exist, so it runs after the start.
+	// Forking at the *first* user message makes Pi create an empty session (its
+	// parent is null, so there is nothing to truncate to), and seeding the
+	// transcript for that case is exactly the fiction a user test caught: a branch
+	// that displayed the conversation while the model denied ever seeing it.
+	if s.branchHasHistory(r, child.ID) {
+		if err := s.seedForkedHistory(context.WithoutCancel(r.Context()), user.ID, parent.ID, child.ID, in.EntryID); err != nil {
+			s.log.WarnContext(r.Context(), "could not copy history into the branch",
+				"session", child.ID, "error", err.Error())
+		}
 	}
 
 	writeJSON(w, http.StatusCreated, sessionResponse{Session: child})
@@ -674,4 +693,40 @@ func (s *server) entryTimestamps(ctx context.Context, userID, sessionID string) 
 		}
 	}
 	return out
+}
+
+// sessionSpec builds the runtime spec for a session from its stored row.
+func (s *server) sessionSpec(userID string, sess *contracts.Session) contracts.SessionSpec {
+	spec := contracts.SessionSpec{
+		SessionID:     sess.ID,
+		UserID:        userID,
+		Kind:          sess.Kind,
+		ProjectID:     sess.ProjectID,
+		ModelRef:      sess.ModelRef,
+		ReadOnlyTools: sess.Kind == contracts.KindSidecar,
+	}
+	if root, err := s.worktreeRoot(context.Background(), userID, sess); err == nil {
+		spec.Worktree = root
+	}
+	return spec
+}
+
+// branchHasHistory reports whether the forked agent session actually carries
+// messages. A fork at the first user message produces an empty branch, and the
+// transcript must agree with the model about that.
+func (s *server) branchHasHistory(r *http.Request, sessionID string) bool {
+	rt, err := s.requireRuntime()
+	if err != nil {
+		return false
+	}
+	entries, _, err := rt.Entries(r.Context(), sessionID, "")
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.Type == "message" {
+			return true
+		}
+	}
+	return false
 }
