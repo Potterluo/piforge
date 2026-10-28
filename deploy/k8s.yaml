@@ -1,0 +1,108 @@
+# PiForge on Kubernetes.
+#
+# One replica on purpose: the sandbox provider runs the agent, the shells and the
+# browser as child processes of the control plane, so a pod *is* a sandbox. Two
+# replicas would need a shared event bus (see README "not here yet") and a
+# session-aware Service.
+#
+#   kubectl apply -f deploy/k8s.yaml
+#   kubectl -n piforge port-forward svc/piforge 7700:7700
+#   open http://127.0.0.1:7700
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: piforge
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: piforge-secrets
+  namespace: piforge
+type: Opaque
+stringData:
+  # Change these before exposing the service, and keep the master key: losing it
+  # means every stored provider key is unrecoverable (that is the point).
+  PIFORGE_SEED_EMAIL: admin@piforge.local
+  PIFORGE_SEED_PASSWORD: change-me-please
+  PIFORGE_SEED_USER_EMAIL: dev@piforge.local
+  PIFORGE_SEED_USER_PASSWORD: change-me-too
+  # 32 bytes, base64 or hex. Generate with: openssl rand -base64 32
+  PIFORGE_MASTER_KEY: ""
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: piforge-data
+  namespace: piforge
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: piforge
+  namespace: piforge
+  labels: { app: piforge }
+spec:
+  replicas: 1
+  # The data volume is ReadWriteOnce and the pod holds live processes; never run
+  # two of these against one volume.
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: piforge }
+  template:
+    metadata:
+      labels: { app: piforge }
+    spec:
+      # PID 1 must reap the shells and agent processes the control plane spawns.
+      shareProcessNamespace: false
+      containers:
+        - name: piforge
+          image: piforge:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 7700 }
+          envFrom:
+            - secretRef: { name: piforge-secrets }
+          env:
+            - { name: PIFORGE_DATA, value: /data }
+            - { name: PIFORGE_DEFAULT_PROVIDER, value: shared-anthropic }
+            # Set when the cluster needs a proxy to reach the model endpoint.
+            # - { name: HTTPS_PROXY, value: http://proxy.example:3128 }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          # Chromium is not in the image, so the browser panel reports itself as
+          # unavailable; the rest of the workbench is unaffected.
+          resources:
+            requests: { cpu: 500m, memory: 1Gi }
+            limits: { cpu: "4", memory: 6Gi }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            # Not readOnlyRootFilesystem: the agent writes to its sandboxes under
+            # /data, and Chromium (when present) needs a writable /tmp.
+            capabilities: { drop: ["ALL"] }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: piforge-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: piforge
+  namespace: piforge
+spec:
+  type: ClusterIP
+  selector: { app: piforge }
+  ports:
+    - { name: http, port: 7700, targetPort: http }

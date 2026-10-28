@@ -76,6 +76,9 @@ type options struct {
 	isolationBinary string
 	// browserProxy is handed to Chrome via --proxy-server.
 	browserProxy string
+	// webUpstream makes this process serve the UI as well as the API, which is
+	// how a container exposes a single port.
+	webUpstream string
 }
 
 func run() error {
@@ -90,6 +93,8 @@ func run() error {
 	flag.StringVar(&opt.seedAdmin, "seed-admin-email", envOr("PIFORGE_SEED_EMAIL", ""), "seed admin email")
 	flag.StringVar(&opt.seedDemo, "seed-demo-email", envOr("PIFORGE_SEED_USER_EMAIL", ""), "seed demo user email")
 	flag.BoolVar(&opt.secureCook, "secure-cookies", false, "mark session cookies Secure (required behind TLS)")
+	flag.StringVar(&opt.webUpstream, "web-upstream", envOr("PIFORGE_WEB_UPSTREAM", ""),
+		"Next.js server to proxy page requests to (single-port deployment)")
 	flag.StringVar(&opt.gatewayURL, "gateway-url", envOr("PIFORGE_GATEWAY_URL", ""),
 		"public base URL of the model gateway handed to agents (default http://<addr>)")
 	flag.StringVar(&opt.defaultProvider, "default-provider", envOr("PIFORGE_DEFAULT_PROVIDER", "shared-anthropic"),
@@ -219,7 +224,18 @@ func run() error {
 			}
 		}
 		if modelID != "" {
-			models = append([]string{modelID}, models...)
+			// Prepend the pinned model unless the provider already lists it, so
+			// models.json does not carry the same id twice.
+			dupe := false
+			for _, existing := range models {
+				if existing == modelID {
+					dupe = true
+					break
+				}
+			}
+			if !dupe {
+				models = append([]string{modelID}, models...)
+			}
 		}
 		if len(models) == 0 {
 			logger.Warn("no models are configured for this session's provider",
@@ -332,6 +348,7 @@ func run() error {
 		Workspace:   fs,
 		Sandbox:     sb,
 		Secrets:     box,
+		WebUpstream: opt.webUpstream,
 		SkillsDir:   filepath.Join(opt.dataDir, "skills"),
 		LLMGateway:  gateway,
 		Browser:     browsers,

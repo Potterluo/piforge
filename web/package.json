@@ -15,6 +15,7 @@
     "@base-ui/react": "^1.9.0",
     "@git-diff-view/react": "^0.1.8",
     "@shadcn/react": "^0.3.1",
+    "@swc/helpers": "^0.5.23",
     "@tanstack/react-query": "^5.105.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",

@@ -1,0 +1,56 @@
+# PiForge, containerised.
+#
+# One service: the pod is the sandbox boundary, so the agent, the shells a user
+# opens and the browser they watch all live in this container. /data holds the
+# SQLite database, the master key, the sandboxes and the terminal sessions, so it
+# must be a volume — losing it loses every project.
+#
+# Run it with the fake agent (no model account):
+#   docker compose up --build
+# Run it against a real provider:
+#   PIFORGE_SEED_PASSWORD=... docker compose up -d --build
+# and add the provider in Settings -> Models.
+services:
+  piforge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: piforge:dev
+    container_name: piforge
+    # Reap the shells and agent processes the control plane spawns.
+    init: true
+    ports:
+      - "7700:7700"
+    environment:
+      # Seeded on the first boot only; change these before exposing the port.
+      PIFORGE_SEED_EMAIL: ${PIFORGE_SEED_EMAIL:-admin@piforge.local}
+      PIFORGE_SEED_PASSWORD: ${PIFORGE_SEED_PASSWORD:-piforge-admin-123}
+      PIFORGE_SEED_USER_EMAIL: ${PIFORGE_SEED_USER_EMAIL:-dev@piforge.local}
+      PIFORGE_SEED_USER_PASSWORD: ${PIFORGE_SEED_USER_PASSWORD:-piforge-dev-123}
+      # Keys are sealed with this; a deployment should set it and keep it.
+      PIFORGE_MASTER_KEY: ${PIFORGE_MASTER_KEY:-}
+      # Empty means "no proxy". Set it when the sandbox browser needs one to
+      # reach the internet (e.g. host.docker.internal:7892).
+      PIFORGE_BROWSER_PROXY: ${PIFORGE_BROWSER_PROXY:-}
+      # The model gateway runs inside this container, so *it* needs a proxy when
+      # the provider endpoint is not directly reachable.
+      HTTP_PROXY: ${PIFORGE_HTTP_PROXY:-}
+      HTTPS_PROXY: ${PIFORGE_HTTP_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1
+      # Bubblewrap is available inside the image; firejail is not installed.
+      PIFORGE_ISOLATION: ${PIFORGE_ISOLATION:-none}
+      PIFORGE_DEFAULT_PROVIDER: ${PIFORGE_DEFAULT_PROVIDER:-shared-anthropic}
+    volumes:
+      - piforge-data:/data
+    # The control plane spawns shells and chromium; give it room for both.
+    shm_size: "1gb"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7700/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  piforge-data:

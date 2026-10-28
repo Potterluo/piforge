@@ -1,0 +1,18 @@
+# Packaging-only image: artifacts are built on the host.
+FROM golang:1.25-bookworm
+COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=node:22-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
+WORKDIR /app
+COPY dist/piforged-linux /app/bin/piforged
+COPY dist/fakepi-linux /app/bin/fakepi
+COPY web/.next /app/web/.next
+COPY web/public /app/web/public
+COPY web/package.json /app/web/package.json
+COPY web/node_modules /app/web/node_modules
+COPY deploy/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh && mkdir -p /data
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PIFORGE_DATA=/data PIFORGE_PORT=7700
+VOLUME ["/data"]
+EXPOSE 7700
+ENTRYPOINT ["/app/entrypoint.sh"]

@@ -1,0 +1,21 @@
+# Host build artefacts and local state must not enter the build context: the
+# image installs and builds its own, and a Windows node_modules in a Linux image
+# is both wrong and huge.
+web/node_modules
+web/.env.local
+web/.next
+web/.turbo
+backend/vendor
+dist
+.git
+.data
+.real
+.demo
+.demo-bin
+e2e/.data
+e2e/.bin
+e2e/.artifacts
+docs/screenshots
+**/*_test.go
+**/*.test.ts
+**/*.test.tsx

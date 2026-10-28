@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/auth"
@@ -80,6 +81,10 @@ type Deps struct {
 	// SkillsDir is where uploaded skill bundles live, one directory per skill.
 	// Empty means uploads are refused with a typed error.
 	SkillsDir string
+	// WebUpstream is the Next.js server to forward page requests to. It is how a
+	// container serves one port: the API stays here, the UI is proxied. Empty
+	// means "API only", which is what the e2e suite and local development use.
+	WebUpstream string
 	// Secrets seals and opens provider credentials. When nil, creating a
 	// provider with a key is refused rather than storing it in the clear.
 	Secrets *crypto.Box
@@ -233,7 +238,15 @@ func (s *server) routes() http.Handler {
 		mux.Handle("/gw/llm/", s.deps.LLMGateway)
 	}
 
-	mux.HandleFunc("/", s.handleNotFound)
+	if strings.TrimSpace(s.deps.WebUpstream) != "" {
+		web, werr := s.newWebProxy(s.deps.WebUpstream)
+		if werr != nil {
+			panic("httpapi: invalid WebUpstream: " + werr.Error())
+		}
+		mux.HandleFunc("/", s.handleWebOrNotFound(web))
+	} else {
+		mux.HandleFunc("/", s.handleNotFound)
+	}
 	return mux
 }
 
