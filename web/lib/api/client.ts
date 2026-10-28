@@ -175,6 +175,9 @@ export const sessions = {
   send: (id: string, input: SendMessageInput) =>
     request<PromptResult>(`/v1/sessions/${id}/messages`, { method: "POST", body: input }),
   remove: (id: string) => request<{ ok: boolean }>(`/v1/sessions/${id}`, { method: "DELETE" }),
+  /** Copies a session into a parallel attempt with its own checkout (FR-2.7). */
+  clone: (id: string) =>
+    request<{ session: Session }>(`/v1/sessions/${id}/clone`, { method: "POST" }),
   /** Turns a side conversation into a branch with its own checkout (FR-4.7). */
   promote: (id: string) =>
     request<{ session: Session }>(`/v1/sessions/${id}/promote`, { method: "POST" }),

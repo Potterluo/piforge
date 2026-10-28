@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import {
   Activity,
   Archive,
+  Copy,
   Eye,
   ChevronRight,
   ChevronsUpDown,
@@ -608,6 +609,23 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
               导出 Markdown
             </DropdownMenuItem>
           ) : null}
+          <DropdownMenuItem
+            data-testid="session-clone"
+            onClick={() => {
+              setMenuOpen(false);
+              void api.sessions
+                .clone(session.id)
+                .then((data) => router.push(`/p/${projectId}/s/${data.session.id}`))
+                .catch((error: unknown) =>
+                  toast.error("克隆失败", {
+                    description: error instanceof Error ? error.message : "未知错误",
+                  }),
+                );
+            }}
+          >
+            <Copy />
+            克隆（再试一次）
+          </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem
             variant="destructive"
