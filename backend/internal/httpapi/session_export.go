@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -49,7 +50,10 @@ func (s *server) handleExportSession(w http.ResponseWriter, r *http.Request) {
 
 	filename := exportFilename(sess) + "." + format
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	// Two forms: an ASCII fallback for old clients and RFC 5987 for the real name.
+	// Chinese titles have no ASCII form worth keeping.
+	w.Header().Set("Content-Disposition", fmt.Sprintf(
+		"attachment; filename=%q; filename*=UTF-8''%s", asciiFilename(filename), url.PathEscape(filename)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(body))
 }
@@ -112,21 +116,30 @@ func messagesFromEvents(events []*contracts.Event) []exportLine {
 	return lines
 }
 
+// renderBlocks flattens one message into prose plus a mention of each tool call.
+//
+// Payload.Text and the text blocks carry the same prose: the normalizer fills both
+// so a client can render without walking blocks. Using both duplicated every
+// message in the exported file, which is how this was found.
 func renderBlocks(payload pi.MessageFinalPayload) string {
-	parts := make([]string, 0, len(payload.Blocks)+1)
-	if strings.TrimSpace(payload.Text) != "" {
-		parts = append(parts, strings.TrimSpace(payload.Text))
-	}
+	parts := make([]string, 0, len(payload.Blocks)+2)
+	textSeen := false
 	for _, block := range payload.Blocks {
 		switch block.Kind {
 		case pi.BlockText:
 			if text := strings.TrimSpace(block.Text); text != "" {
 				parts = append(parts, text)
+				textSeen = true
 			}
 		case pi.BlockToolCall:
 			if block.Tool != nil {
 				parts = append(parts, "`"+block.Tool.Name+"`")
 			}
+		}
+	}
+	if !textSeen {
+		if text := strings.TrimSpace(payload.Text); text != "" {
+			parts = append([]string{text}, parts...)
 		}
 	}
 	if payload.Error != "" {
@@ -140,13 +153,31 @@ func exportFilename(sess *contracts.Session) string {
 	if name == "" {
 		name = sess.ID
 	}
-	replacer := strings.NewReplacer("/", "-", "\\", "-", ":", "-", "\n", " ", "\t", " ")
+	replacer := strings.NewReplacer("/", "-", "\\", "-", ":", "-", `"`, "-", "\n", " ", "\t", " ")
 	name = strings.TrimSpace(replacer.Replace(name))
 	runes := []rune(name)
 	if len(runes) > 60 {
 		name = string(runes[:60])
 	}
 	return name + "-" + sess.ID
+}
+
+// asciiFilename is the fallback half of Content-Disposition: conservative ASCII,
+// because a header with raw UTF-8 in it is mangled by some clients.
+func asciiFilename(name string) string {
+	var out strings.Builder
+	for _, r := range name {
+		if r < 32 || r > 126 || r == '"' || r == ';' {
+			out.WriteByte('_')
+			continue
+		}
+		out.WriteRune(r)
+	}
+	value := out.String()
+	if strings.Trim(value, "_ ") == "" {
+		return "session-export"
+	}
+	return value
 }
 
 func exportHead(sess *contracts.Session) string {
@@ -161,12 +192,16 @@ func renderMarkdown(sess *contracts.Session, events []*contracts.Event) string {
 	var out strings.Builder
 	fmt.Fprintf(&out, "# %s\n\n", exportHead(sess))
 	fmt.Fprintf(&out, "- 会话：`%s`\n- 导出时间：%s\n\n", sess.ID, time.Now().Format(time.RFC3339))
-	for _, line := range messagesFromEvents(events) {
+	lines := messagesFromEvents(events)
+	for _, line := range lines {
 		who := "助手"
 		if line.role == "user" {
 			who = "我"
 		}
 		fmt.Fprintf(&out, "## %s\n\n%s\n\n", who, line.text)
+	}
+	if len(lines) == 0 {
+		out.WriteString("_这个会话还没有可导出的消息：要么尚未开始，要么正在运行中（未完成的一轮不会出现在这里）。_\n")
 	}
 	return out.String()
 }

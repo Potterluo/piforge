@@ -60,7 +60,35 @@ test.describe("session actions", () => {
     expect(res.headers()["content-disposition"]).toContain("attachment");
     const body = await res.text();
     expect(body.startsWith("# ")).toBe(true);
-    expect(body).toContain("export this please");
+    // Exactly once: the normalizer fills both payload.text and the text blocks,
+    // and an export that used both printed every message twice.
+    expect(body.split("export this please").length - 1).toBe(1);
+    expect(res.headers()["content-disposition"]).toContain("filename*=UTF-8''");
+  });
+
+  test("deleting a session you are not reading keeps you where you are", async ({ page }) => {
+    await login(page, USER);
+    const current = await openNewSession(page);
+    const projectId = /\/p\/([^/]+)\//.exec(page.url())?.[1] ?? "";
+    const created = await apiWrite(page, "POST", `/v1/projects/${projectId}/sessions`, {
+      title: "sibling to delete",
+    });
+    expect(created.status).toBeLessThan(300);
+    const siblingId = (created.body as { session: { id: string } }).session.id;
+
+    await page.reload();
+    await page.locator(`[data-session-actions="${siblingId}"]`).click();
+    await page.getByTestId("session-delete").click();
+    await page.getByTestId("session-delete-confirm").click();
+
+    await expect
+      .poll(async () => (await page.request.get(`/v1/sessions/${siblingId}`)).status(), {
+        timeout: 20_000,
+      })
+      .toBe(404);
+    // The session being read is untouched, and we are still reading it.
+    await expect(page).toHaveURL(new RegExp(`/s/${current}$`));
+    await expect(page.getByTestId("composer-input")).toBeVisible();
   });
 
   test("delete removes it and returns to the project", async ({ page }) => {

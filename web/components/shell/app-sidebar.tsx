@@ -287,10 +287,12 @@ export function AppSidebar({
               <button
                 type="button"
                 data-testid="toggle-archived"
-                className="ml-auto rounded px-1 text-[10px] font-normal text-muted-foreground hover:text-foreground"
+                aria-pressed={showArchived}
+                className="ml-auto rounded px-1 text-[10px] font-normal text-muted-foreground hover:text-foreground data-[on=true]:text-foreground"
+                data-on={showArchived}
                 onClick={() => setShowArchived((value) => !value)}
               >
-                {showArchived ? "隐藏已归档" : `显示已归档 (${archivedCount})`}
+                {showArchived ? `隐藏已归档 (${archivedCount})` : `显示已归档 (${archivedCount})`}
               </button>
             ) : null}
           </SidebarGroupLabel>
@@ -318,7 +320,7 @@ export function AppSidebar({
               </div>
             ) : groups.length === 0 ? (
               <div className="flex flex-col items-start gap-2 px-2 py-1 text-xs text-muted-foreground">
-                <span>还没有会话</span>
+                <span>{archivedCount > 0 && !showArchived ? "没有进行中的会话" : "还没有会话"}</span>
                 <Button size="xs" variant="outline" onClick={onNewSession}>
                   <Plus />
                   新会话
@@ -336,7 +338,18 @@ export function AppSidebar({
                         render={<Link href={`/p/${projectId}/s/${group.root.id}`} />}
                       >
                         <MessagesSquare />
-                        <span>{group.root.title || "未命名会话"}</span>
+                        <span
+                          className={cn(
+                            group.root.status === "archived" && "text-muted-foreground",
+                          )}
+                        >
+                          {group.root.title || "未命名会话"}
+                        </span>
+                        {group.root.status === "archived" ? (
+                          <Badge variant="outline" className="text-[9px] leading-none">
+                            已归档
+                          </Badge>
+                        ) : null}
                         <StatusDot status={group.root.status} />
                       </SidebarMenuButton>
                       <SessionActions session={group.root} projectId={projectId!} />
@@ -502,8 +515,11 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
     onSuccess: () => {
       toast.success("已删除会话");
       setDeleting(false);
-      if (session.id) refresh();
-      router.replace(`/p/${projectId}`);
+      refresh();
+      // Only leave the workbench if the session that just vanished is the one on
+      // screen; deleting a sibling from the list must not close what you read.
+      const path = window.location.pathname;
+      if (path.includes(`/s/${session.id}`)) router.replace(`/p/${projectId}`);
     },
     onError: (error) =>
       toast.error("删除失败", {
@@ -520,6 +536,7 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
               showOnHover
               aria-label="会话操作"
               data-testid="session-actions"
+              data-session-actions={session.id}
               className={menuOpen ? "opacity-100" : undefined}
             />
           }
@@ -596,7 +613,11 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
               <Button type="button" variant="outline" onClick={() => setRenaming(null)}>
                 取消
               </Button>
-              <Button type="submit" data-testid="session-rename-submit" disabled={rename.isPending}>
+              <Button
+                type="submit"
+                data-testid="session-rename-submit"
+                disabled={rename.isPending || (renaming ?? "").trim().length === 0}
+              >
                 保存
               </Button>
             </DialogFooter>

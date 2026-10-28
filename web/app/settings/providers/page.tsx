@@ -569,6 +569,7 @@ function SharedProviders({ onChanged }: { onChanged: () => void }) {
           <h2 className="text-sm font-medium">共享模型（全员可用）</h2>
           <p className="max-w-2xl text-xs text-muted-foreground">
             这里配置的 provider 会出现在每个用户的列表里，标记为「继承」。用户自己建的同名 provider 会覆盖它。
+            下面的列表是「能用的模型」，所以你刚共享的那些在下面也会出现一次——这里是管理，那里是使用。
           </p>
         </div>
         <Button size="sm" variant="outline" data-testid="shared-provider-add" onClick={() => setOpen(true)}>

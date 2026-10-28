@@ -98,7 +98,19 @@ export function QuickOpen({
   );
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        // Closing drops the query: reopening with last time's dead search is how a
+        // palette looks broken.
+        if (!next) {
+          setQuery("");
+          setResults([]);
+          setError(null);
+        }
+      }}
+    >
       <DialogContent
         className="top-24 translate-y-0 gap-0 overflow-hidden p-0 sm:max-w-xl"
         showCloseButton={false}
@@ -123,7 +135,7 @@ export function QuickOpen({
               <div className="px-3 py-6 text-xs text-destructive">{error}</div>
             ) : query.trim().length === 0 ? (
               <div className="px-3 py-6 text-xs text-muted-foreground">
-                输入文件名开始搜索。⌘P 打开，Esc 关闭。
+                输入文件名开始搜索。{shortcutLabel()} 打开，Esc 关闭。
               </div>
             ) : !searching && results.length === 0 ? (
               <CommandEmpty>没有匹配的文件</CommandEmpty>
@@ -148,4 +160,9 @@ export function QuickOpen({
       </DialogContent>
     </Dialog>
   );
+}
+/** The shortcut as this platform spells it. */
+function shortcutLabel(): string {
+  if (typeof navigator === "undefined") return "⌘P";
+  return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? "⌘P" : "Ctrl+P";
 }

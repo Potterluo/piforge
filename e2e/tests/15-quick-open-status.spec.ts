@@ -42,9 +42,16 @@ test.describe("quick open", () => {
     await login(page, USER);
     await openNewSession(page);
     await page.keyboard.press("Control+p");
-    await expect(page.getByTestId("quick-open-input")).toBeVisible({ timeout: 20_000 });
+    const input = page.getByTestId("quick-open-input");
+    await expect(input).toBeVisible({ timeout: 20_000 });
+    await input.fill("zzz-no-such-file");
     await page.keyboard.press("Escape");
-    await expect(page.getByTestId("quick-open-input")).toHaveCount(0);
+    await expect(input).toHaveCount(0);
+
+    // Reopening must not resurrect the dead search that was just abandoned.
+    await page.keyboard.press("Control+p");
+    await expect(page.getByTestId("quick-open-input")).toHaveValue("", { timeout: 20_000 });
+    await expect(page.getByTestId("quick-open-result")).toHaveCount(0);
   });
 });
 

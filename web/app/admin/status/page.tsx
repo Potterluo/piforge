@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Item, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "@/components/ui/item";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api/client";
+import { ApiError } from "@/lib/types";
 
 /**
  * Runtime status (PRD FR-16.5): the one screen an operator opens when something
@@ -21,6 +22,7 @@ export default function AdminStatusPage() {
   });
 
   const data = status.data;
+  const forbidden = status.error instanceof ApiError && status.error.status === 403;
 
   return (
     <div className="flex flex-col gap-5 p-4" data-testid="admin-status">
@@ -40,9 +42,13 @@ export default function AdminStatusPage() {
       ) : status.isError ? (
         <Card>
           <CardHeader>
-            <CardTitle>读取失败</CardTitle>
+            <CardTitle>{forbidden ? "需要管理员权限" : "读取失败"}</CardTitle>
             <CardDescription>
-              {status.error instanceof Error ? status.error.message : "未知错误"}
+              {forbidden
+                ? "这个页面只有管理员能打开。"
+                : status.error instanceof Error
+                  ? status.error.message
+                  : "未知错误"}
             </CardDescription>
           </CardHeader>
         </Card>

@@ -1,8 +1,11 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
 )
@@ -38,5 +41,44 @@ func TestAdminStatusCountsAndIsAdminOnly(t *testing.T) {
 
 	if rec := env.doAuthed(http.MethodGet, "/v1/admin/status", nil, dev); rec.Code != http.StatusForbidden {
 		t.Fatalf("a normal user read the status page: %d", rec.Code)
+	}
+}
+
+// The normalizer fills both payload.Text and the text blocks, so an export that
+// used both printed every message twice. This asserts one occurrence per message.
+func TestExportDoesNotDuplicateMessages(t *testing.T) {
+	env := newTestEnv(t)
+	user := env.mkUser("dev@piforge.local", "pw", contracts.RoleUser)
+	c := env.login("dev@piforge.local", "pw")
+	_, sess := env.mkSessionFor(user.ID, "repo")
+
+	env.runtime.script = []contracts.Event{
+		{Type: contracts.EvRunStarted, RunID: "r1", Payload: json.RawMessage(`{"trigger":"user"}`)},
+		{Type: contracts.EvMsgFinal, RunID: "r1", Payload: json.RawMessage(
+			`{"role":"assistant","text":"only once","blocks":[{"kind":"text","index":0,"text":"only once"}]}`)},
+		{Type: contracts.EvRunSettled, RunID: "r1", Payload: json.RawMessage(`{}`)},
+	}
+	if rec := env.doAuthed(http.MethodPost, "/v1/sessions/"+sess.ID+"/messages",
+		map[string]any{"client_msg_id": "cm_1", "text": "hi"}, c); rec.Code != http.StatusOK {
+		t.Fatalf("send: %d", rec.Code)
+	}
+	for i := 0; i < 100; i++ {
+		if events, _ := env.store.ListEvents(t.Context(), user.ID, sess.ID, 0, 10); len(events) >= 3 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	rec := env.doAuthed(http.MethodGet, "/v1/sessions/"+sess.ID+"/export?format=md", nil, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("export: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := strings.Count(rec.Body.String(), "only once"); got != 1 {
+		t.Fatalf("the message appears %d times: %s", got, rec.Body.String())
+	}
+	// RFC 5987 so a Chinese title survives, with an ASCII fallback for old clients.
+	disposition := rec.Header().Get("Content-Disposition")
+	if !strings.Contains(disposition, "filename*=UTF-8''") || !strings.Contains(disposition, "filename=") {
+		t.Fatalf("Content-Disposition is not RFC 5987: %q", disposition)
 	}
 }
