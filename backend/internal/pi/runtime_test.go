@@ -269,12 +269,14 @@ func TestRuntimeForkProducesTrimmedTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Tree(branch): %v", err)
 	}
+	// Forking at the *first* user message has nothing behind it: Pi truncates at the
+	// parent of the chosen message, and the first message has no parent. The branch
+	// is therefore empty, and pretending otherwise made the UI show a conversation
+	// the model never had.
 	branchCount := countEntries(branchTree)
-	if branchCount != 1 {
-		t.Fatalf("branch tree has %d entries, want exactly the fork point: %+v", branchCount, branchTree)
-	}
-	if branchTree[0].EntryID != points[0].EntryID {
-		t.Errorf("branch root = %q, want the fork point %q", branchTree[0].EntryID, points[0].EntryID)
+	if branchCount != 0 {
+		t.Fatalf("branch tree has %d entries, want an empty branch for a first-message fork: %+v",
+			branchCount, branchTree)
 	}
 
 	// The source session's *history* must be untouched. Its process is not: Pi

@@ -624,6 +624,26 @@ func (s *server) handleFork(c command) {
 	if m, ok := kept[idx].Message.(map[string]any); ok {
 		text = textOf(m["content"])
 	}
+
+	// Pi truncates at the *parent* of the chosen user message, so forking at the
+	// first message has nothing behind it and Pi starts an empty session. Modelling
+	// that matters: it is the case where a branch honestly has no history, and the
+	// control plane must not seed a transcript for it.
+	parentID := ""
+	if s.entries[idx].ParentID != nil {
+		parentID = *s.entries[idx].ParentID
+	}
+	if parentID == "" {
+		kept = nil
+	} else {
+		for i, e := range kept {
+			if e.ID == parentID {
+				kept = append([]entry(nil), kept[:i+1]...)
+				break
+			}
+		}
+	}
+
 	// Pi names the branched file itself and moves the process onto it.
 	branched := s.file
 	if branched != "" {
@@ -638,7 +658,10 @@ func (s *server) handleFork(c command) {
 		s.file = branched
 	}
 	s.entries = kept
-	s.leaf = kept[idx].ID
+	s.leaf = ""
+	if len(kept) > 0 {
+		s.leaf = kept[len(kept)-1].ID
+	}
 	s.persist()
 	s.mu.Unlock()
 	s.ok(c, map[string]any{"text": text, "cancelled": false, "sessionFile": branched})

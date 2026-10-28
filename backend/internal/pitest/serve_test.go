@@ -373,12 +373,12 @@ func TestServeForkWritesTrimmedSessionFile(t *testing.T) {
 	if branchFile == "" || branchFile == mainFile {
 		t.Fatalf("fork did not report a new session file: %v", forked)
 	}
+	// The only user message is the first entry, so it has no parent to truncate at
+	// and the branch is empty — Pi's documented behaviour, and the case the control
+	// plane must not paper over with a copied transcript.
 	branchEntries := readSessionFile(t, branchFile)
-	if len(branchEntries) != 1 {
-		t.Fatalf("branch file has %d entries, want 1: %v", len(branchEntries), branchEntries)
-	}
-	if branchEntries[0]["id"] != userEntryID {
-		t.Errorf("branch entry = %v, want %s", branchEntries[0]["id"], userEntryID)
+	if len(branchEntries) != 0 {
+		t.Fatalf("branch file has %d entries, want an empty branch: %v", len(branchEntries), branchEntries)
 	}
 
 	mainEntries := readSessionFile(t, mainFile)
@@ -386,12 +386,13 @@ func TestServeForkWritesTrimmedSessionFile(t *testing.T) {
 		t.Fatalf("source file has %d entries after a fork, want the original 3", len(mainEntries))
 	}
 
-	// A process started on the branch file resumes exactly the fork point.
+	// A process started on the branch file resumes the (empty) branch rather than
+	// falling back to the parent's history.
 	restored := startPeer(t, ScriptOK, 0, branchFile)
 	restored.send(t, map[string]any{"id": "4", "type": "get_tree"})
 	restoredTree := obj(restored.response(t, "4")["data"])
-	if got := len(arr(restoredTree["tree"])); got != 1 {
-		t.Fatalf("restored branch has %d roots, want 1", got)
+	if got := len(arr(restoredTree["tree"])); got != 0 {
+		t.Fatalf("restored branch has %d roots, want an empty branch", got)
 	}
 }
 

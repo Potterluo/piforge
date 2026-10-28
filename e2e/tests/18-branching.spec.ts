@@ -27,6 +27,21 @@ test.describe("branching", () => {
     await expect(page.getByText("remember the word pineapple")).toBeVisible({ timeout: 20_000 });
   });
 
+  test("forking the first message is honest about having no history", async ({ page }) => {
+    await login(page, USER);
+    const parentId = await openNewSession(page);
+    await sendPrompt(page, "the only message here");
+
+    // Pi truncates at the parent of the chosen message; the first one has none, so
+    // the branch is empty by design. The transcript must not invent one.
+    const childId = await fork(page, parentId, await forkPoint(page, parentId, 0), "fresh branch");
+
+    const projectId = /\/p\/([^/]+)\//.exec(page.url())?.[1] ?? "";
+    await page.goto(`/p/${projectId}/s/${childId}`);
+    await expect(page.getByTestId("composer-input")).toBeVisible({ timeout: 40_000 });
+    await expect(page.getByText("还没有消息")).toBeVisible({ timeout: 20_000 });
+  });
+
   test("the sidebar keeps the main session as the parent of its branch", async ({ page }) => {
     await login(page, USER);
     const parentId = await openNewSession(page);
