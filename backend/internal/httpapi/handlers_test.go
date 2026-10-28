@@ -727,7 +727,7 @@ func TestSettingsEndpoints(t *testing.T) {
 	t.Run("mcp servers", func(t *testing.T) {
 		rec := env.doAuthed(http.MethodPost, "/v1/mcp/servers", map[string]any{
 			"scope": "user", "name": "fs", "transport": "stdio",
-			"command": "npx", "args": []string{"-y", "server-fs"}, "secrets": "tok",
+			"command": "npx", "args": []string{"-y", "server-fs"},
 		}, c)
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("create mcp = %d body %s", rec.Code, rec.Body.String())
