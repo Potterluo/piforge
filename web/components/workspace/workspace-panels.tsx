@@ -11,6 +11,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { GlobeIcon, TerminalIcon } from "lucide-react";
 import { GitProvider } from "@/components/workspace/git-data";
+import { QuickOpen } from "@/components/workspace/quick-open";
 import { FilePreview } from "@/components/workspace/file-preview";
 import { FileTree } from "@/components/workspace/file-tree";
 import { GitHistoryPanel } from "@/components/workspace/git-history";
@@ -71,6 +72,7 @@ export function WorkspacePanels({
       data-project={projectId}
       className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden border-s bg-background"
     >
+      <QuickOpen sessionId={sessionId} onOpenFile={handleOpenFile} />
       <GitProvider sessionId={sessionId}>
         <Tabs
           value={tab}

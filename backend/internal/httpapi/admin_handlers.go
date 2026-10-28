@@ -164,3 +164,40 @@ func (s *server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, usersResponse{Users: []*contracts.User{user}})
 }
+
+// handleAdminStatus is the operator's one screen (PRD FR-16.5): how many tenants,
+// how many sessions are live, how many sandboxes are up, and how many agents are
+// actually running. Counts only — this is a self-hosted tool, not a metrics
+// pipeline, and the page is opened when something already feels wrong.
+func (s *server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
+	user := auth.MustUser(r.Context())
+	if user.Role != contracts.RoleAdmin {
+		s.fail(w, r, apiErr(contracts.ErrForbidden, "admin role required"))
+		return
+	}
+	stats, err := s.deps.Store.Stats(r.Context())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	running := 0
+	if s.hub != nil {
+		running = s.hub.liveCount()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"users":          stats.Users,
+		"users_active":   stats.UsersActive,
+		"projects":       stats.Projects,
+		"sessions":       stats.Sessions,
+		"sessions_live":  stats.SessionsLive,
+		"agents_running": running,
+		"sandboxes":      stats.Sandboxes,
+		"sandboxes_up":   stats.SandboxesUp,
+		"providers":      stats.Providers,
+		"skills":         stats.Skills,
+		"mcp_servers":    stats.MCP,
+		"events":         stats.Events,
+	})
+}

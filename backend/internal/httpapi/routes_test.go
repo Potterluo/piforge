@@ -80,6 +80,7 @@ func TestEveryRouteIsRegistered(t *testing.T) {
 		{http.MethodGet, "/v1/mcp/servers"},
 		{http.MethodPost, "/v1/mcp/servers"},
 		{http.MethodDelete, "/v1/mcp/servers/{id}"},
+		{http.MethodGet, "/v1/admin/status"},
 		{http.MethodGet, "/v1/admin/providers"},
 		{http.MethodPost, "/v1/admin/providers"},
 		{http.MethodDelete, "/v1/admin/providers/{id}"},

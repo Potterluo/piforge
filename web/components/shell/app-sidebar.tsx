@@ -6,6 +6,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
+  Activity,
   Archive,
   ChevronRight,
   ChevronsUpDown,
@@ -390,12 +391,20 @@ export function AppSidebar({
             </SidebarMenuButton>
           </SidebarMenuItem>
           {isAdmin ? (
-            <SidebarMenuItem>
-              <SidebarMenuButton tooltip="用户管理" render={<Link href="/admin/users" />}>
-                <Shield />
-                <span>用户管理</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
+            <>
+              <SidebarMenuItem>
+                <SidebarMenuButton tooltip="运行状态" render={<Link href="/admin/status" />}>
+                  <Activity />
+                  <span>运行状态</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton tooltip="用户管理" render={<Link href="/admin/users" />}>
+                  <Shield />
+                  <span>用户管理</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </>
           ) : null}
           <SidebarMenuItem>
             <DropdownMenu>

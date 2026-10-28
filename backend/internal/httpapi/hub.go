@@ -233,3 +233,12 @@ func toolNamespace(name string) string {
 	}
 	return ""
 }
+
+// liveCount is how many sessions currently have a subscription, which is the
+// closest thing to "agents running" the control plane knows: a subscription
+// exists from the moment the child is started until it is stopped.
+func (h *hub) liveCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.subs)
+}

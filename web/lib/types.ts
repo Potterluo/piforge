@@ -405,3 +405,18 @@ export class ApiError extends Error {
     return this.code === "need_full_resync";
   }
 }
+/** The admin status page's counts (PRD FR-16.5). */
+export interface DeploymentStatus {
+  users: number;
+  users_active: number;
+  projects: number;
+  sessions: number;
+  sessions_live: number;
+  agents_running: number;
+  sandboxes: number;
+  sandboxes_up: number;
+  providers: number;
+  skills: number;
+  mcp_servers: number;
+  events: number;
+}

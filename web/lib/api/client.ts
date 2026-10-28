@@ -18,6 +18,7 @@ import {
   type InterruptResult,
   type MCPServer,
   type Project,
+  type DeploymentStatus,
   type PromptResult,
   type Provider,
   type RuntimeStatus,
@@ -364,6 +365,7 @@ export const admin = {
   users: () => request<{ users: User[] }>("/v1/admin/users"),
   // Shared providers: one deployment-wide account everyone inherits.
   providers: () => request<{ providers: Provider[] }>("/v1/admin/providers"),
+  status: () => request<DeploymentStatus>("/v1/admin/status"),
   shareProvider: (input: CreateProviderInput) =>
     request<{ provider: Provider }>("/v1/admin/providers", { method: "POST", body: input }),
   unshareProvider: (id: string) =>
