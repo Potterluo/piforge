@@ -28,9 +28,24 @@ test("the browser panel keeps several pages", async ({ page }) => {
   const second = page.locator(`[data-testid="browser-tab"][data-tab="${id}"]`);
   await expect(second).toBeVisible({ timeout: 20_000 });
 
-  // Selecting it makes it the active tab of the viewer.
+  // Selecting it makes it the active tab of the viewer — and the viewer must actually
+  // show that page. The strip alone passing is how a blank canvas shipped once: the
+  // socket was opened with `?tab=view&tab=<id>`, the server read "view", and every
+  // tab looked connected while nothing was being painted.
   await second.click();
   await expect(second).toHaveAttribute("data-active", "1", { timeout: 20_000 });
+  const panel = page.getByTestId("browser-panel");
+  await expect(panel).toHaveAttribute("data-browser-status", "open", { timeout: 60_000 });
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(() => {
+          const canvas = document.querySelector('[data-testid="browser-canvas"]') as HTMLCanvasElement;
+          return canvas?.width ?? 0;
+        }),
+      { timeout: 30_000 },
+    )
+    .toBeGreaterThan(0);
 
   // Closing it goes back to one page.
   await page.locator(`[data-testid="browser-tab"][data-tab="${id}"]`).locator("xpath=..").getByTestId("browser-tab-close").click();

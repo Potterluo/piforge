@@ -57,7 +57,10 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
   // twenty seconds a page takes to load, which reads as a broken panel.
   // Starts true: an untouched panel is blank, not loading. It flips false when a
   // navigation is sent and true again when the first frame of that page arrives.
-  const [painted, setPainted] = React.useState(true);
+  // False until a frame actually arrives. Starting at `true` meant a viewer whose
+  // socket opened but whose screencast never produced a frame said 已连接 over an
+  // empty canvas — exactly how a broken tab target looked healthy.
+  const [painted, setPainted] = React.useState(false);
   // A disabled feature is not a broken socket: say which one it is instead of
   // looping 连接中 → 已断开 → 重新连接 forever.
   const browserEnabled = useFeature("browser");
@@ -84,8 +87,12 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
     // produces a 403 in the console and a spinner that means nothing.
     if (!browserEnabled) return;
     let disposed = false;
-    const query = tabId ? `&tab=${encodeURIComponent(tabId)}` : "";
-    const socket = new WebSocket(`${wsBase()}/v1/sessions/${sessionId}/browser?tab=view${query}`);
+    // One `tab` parameter, and it is the page. It used to be `tab=view&tab=<id>`,
+    // which JSON-decoded to "view" on the server and pointed the screencast at a
+    // target that does not exist — the canvas stayed blank while the badge said
+    // 已连接.
+    const query = tabId ? `?tab=${encodeURIComponent(tabId)}` : "";
+    const socket = new WebSocket(`${wsBase()}/v1/sessions/${sessionId}/browser${query}`);
     socket.binaryType = "blob";
     socketRef.current = socket;
 
