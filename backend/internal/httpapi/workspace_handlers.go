@@ -156,6 +156,7 @@ func (s *server) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+
 	writeOK(w)
 }
 
