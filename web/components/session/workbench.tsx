@@ -23,7 +23,7 @@ import { WorkspacePanels } from "@/components/workspace/workspace-panels";
 import { api } from "@/lib/api/client";
 import { sessionKindLabel, shortModel } from "@/lib/session/format";
 import { qk, useProject, useProviders, useSession } from "@/lib/session/queries";
-import { runningToolCount, type Turn } from "@/lib/session/reduce";
+import { collectBashOutput, runningToolCount, selectTimeline, type Turn } from "@/lib/session/reduce";
 import type { StreamStatus } from "@/lib/session/use-session-events";
 import type { ForkPoint } from "@/lib/types";
 
@@ -135,6 +135,10 @@ function WorkbenchBody({ sessionId, projectId }: { sessionId: string; projectId:
   // provider name); the session's own field is what the user picked. Guessing from
   // the first provider option produced a header that named a model nobody used.
   const runtimeModel = runtime.data?.model_ref;
+  const timeline = useMemo(() => selectTimeline(state), [state]);
+  // The agent's own bash output, which the follow view mirrors (FR-9.2).
+  const bashChunks = useMemo(() => collectBashOutput(timeline), [timeline]);
+
   const effectiveModel = detail?.model_ref
     ? shortModel(detail.model_ref)
     : runtimeModel && runtimeModel !== "unknown"
@@ -227,7 +231,11 @@ function WorkbenchBody({ sessionId, projectId }: { sessionId: string; projectId:
         <ResizableHandle withHandle />
 
         <ResizablePanel defaultSize="56" minSize="30" className="min-h-0">
-          <WorkspacePanels sessionId={sessionId} projectId={projectId} />
+          <WorkspacePanels
+          sessionId={sessionId}
+          projectId={projectId}
+          followChunks={bashChunks}
+        />
         </ResizablePanel>
       </ResizablePanelGroup>
 

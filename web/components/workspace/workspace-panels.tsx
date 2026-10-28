@@ -20,7 +20,7 @@ import { GitHistoryPanel } from "@/components/workspace/git-history";
 import { GitChangesPanel } from "@/components/workspace/git-panel";
 import { BrowserPanel } from "@/components/workspace/browser-panel";
 import { asPTYInput, buildCdCommand } from "@/lib/terminal/cd";
-import { TerminalPane, type TerminalPaneHandle } from "@/components/workspace/terminal-pane";
+import { FollowTerminal, TerminalPane, type TerminalPaneHandle } from "@/components/workspace/terminal-pane";
 
 /**
  * The right-hand inspector of the workbench.
@@ -42,9 +42,12 @@ import { TerminalPane, type TerminalPaneHandle } from "@/components/workspace/te
 export function WorkspacePanels({
   sessionId,
   projectId,
+  followChunks,
 }: {
   sessionId: string;
   projectId: string;
+  /** The agent's own bash output, mirrored by the 跟随 panel (FR-9.2). */
+  followChunks?: string[];
 }): React.JSX.Element {
   const [tab, setTab] = React.useState("files");
   // A second pane (PRD FR-3.4): watching the diff while the terminal runs is the
@@ -134,6 +137,9 @@ export function WorkspacePanels({
         <TabsTrigger value="terminal" data-testid="panel-tab-terminal" className="text-xs">
               终端
             </TabsTrigger>
+            <TabsTrigger value="follow" data-testid="panel-tab-follow" className="text-xs">
+              跟随
+            </TabsTrigger>
             <div className="ms-auto flex items-center pe-1">
               <Button
                 size="icon-xs"
@@ -200,6 +206,10 @@ export function WorkspacePanels({
               ) : null}
               <TerminalPane ref={coverageRef} sessionId={sessionId} className="min-h-0 flex-1" />
             </div>
+          </TabsContent>
+
+          <TabsContent value="follow" keepMounted className="min-h-0 min-w-0 flex-1">
+            <FollowTerminal chunks={followChunks ?? []} className="min-h-0 flex-1" />
           </TabsContent>
         </Tabs>
         </div>

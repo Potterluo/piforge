@@ -731,3 +731,24 @@ function modelLabel(payload: Record<string, unknown>): string | undefined {
   if (!provider || provider === "piforge") return model;
   return `${provider}/${model}`;
 }
+/**
+ * The agent's bash output as plain chunks, for the follow view (FR-9.2).
+ *
+ * Only `bash` tool blocks contribute: this is a mirror of the commands the agent
+ * actually ran, not a second terminal that would invent a shell of its own. Chunks keep
+ * their order across turns, and a reconnecting client re-derives the same list from the
+ * timeline it already has.
+ */
+export function collectBashOutput(items: TimelineItem[]): string[] {
+  const chunks: string[] = [];
+  for (const item of items) {
+    if (item.kind !== "turn") continue;
+    for (const block of item.turn.blocks) {
+      if (block.kind !== "tool") continue;
+      if (block.name !== "bash" && block.name !== "Bash") continue;
+      if (!block.chunk) continue;
+      chunks.push(block.chunk.endsWith("\n") ? block.chunk : block.chunk + "\n");
+    }
+  }
+  return chunks;
+}

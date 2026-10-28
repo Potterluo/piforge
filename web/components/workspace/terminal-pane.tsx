@@ -304,7 +304,10 @@ export const FollowTerminal = React.forwardRef<FollowTerminalHandle, FollowTermi
     }, [append, chunks]);
 
     return (
-      <div className={cn("flex h-full min-h-0 min-w-0 flex-col", className)}>
+      <div
+        data-testid="follow-terminal"
+        className={cn("flex h-full min-h-0 min-w-0 flex-col", className)}
+      >
         <Toolbar
           title={label}
           follow
