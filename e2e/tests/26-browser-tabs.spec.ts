@@ -54,10 +54,21 @@ test("the browser panel keeps several pages", async ({ page }) => {
     .toBe(1);
 
   // The API agrees, and refuses to close the last page.
-  const list = (await (await page.request.get(`/v1/sessions/${sessionId}/browser/tabs`)).json()) as {
-    tabs: { id: string }[];
-  };
-  expect(list.tabs.length).toBe(1);
+  // A busy browser legitimately answers 503 while it starts; poll rather than
+  // asserting on a body that may be an error.
+  let list: { tabs: { id: string }[] } = { tabs: [] };
+  await expect
+    .poll(
+      async () => {
+        const response = await page.request.get(`/v1/sessions/${sessionId}/browser/tabs`);
+        if (response.status() !== 200) return 0;
+        const body = (await response.json()) as { tabs?: { id: string }[] };
+        list = { tabs: body.tabs ?? [] };
+        return list.tabs.length;
+      },
+      { timeout: 30_000 },
+    )
+    .toBe(1);
   const refused = await apiWrite(
     page,
     "DELETE",

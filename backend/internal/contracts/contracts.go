@@ -477,6 +477,14 @@ type Workspace interface {
 	Commit(ctx context.Context, root string, req CommitRequest) (string, error)
 	CreateBranch(ctx context.Context, root, name string) error
 	Checkout(ctx context.Context, root, name string) error
+	// Adopt carries one checkout's work into another (PRD FR-2.6).
+	Adopt(ctx context.Context, sourceRoot, targetRoot, message string) (AdoptResult, error)
+}
+
+// AdoptResult says what a branch hand-off carried.
+type AdoptResult struct {
+	Commit string   `json:"commit"`
+	Files  []string `json:"files"`
 }
 
 // ---------------------------------------------------------------------------

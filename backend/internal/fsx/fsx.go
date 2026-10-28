@@ -73,6 +73,7 @@ type GitOps interface {
 	Commit(ctx context.Context, root string, req contracts.CommitRequest) (string, error)
 	CreateBranch(ctx context.Context, root, name string) error
 	Checkout(ctx context.Context, root, name string) error
+	Adopt(ctx context.Context, sourceRoot, targetRoot, message string) (contracts.AdoptResult, error)
 }
 
 // Config configures a Service. The zero value is usable: defaults apply and
@@ -639,6 +640,14 @@ func (s *Service) Checkout(ctx context.Context, root, name string) error {
 		return ErrNoGitBackend
 	}
 	return s.cfg.Git.Checkout(ctx, root, name)
+}
+
+// Adopt carries one checkout's work into another (PRD FR-2.6).
+func (s *Service) Adopt(ctx context.Context, sourceRoot, targetRoot, message string) (contracts.AdoptResult, error) {
+	if s.cfg.Git == nil {
+		return contracts.AdoptResult{}, ErrNoGitBackend
+	}
+	return s.cfg.Git.Adopt(ctx, sourceRoot, targetRoot, message)
 }
 
 // ---------------------------------------------------------------------------

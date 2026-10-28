@@ -455,6 +455,7 @@ type fakeWorkspace struct {
 	tree  []*contracts.FileNode
 	// includeIgnored records the last tree request's switch state.
 	includeIgnored bool
+	adopted        []string
 	content        *contracts.FileContent
 	status         *contracts.GitStatus
 	diffs          []contracts.FileDiff
@@ -670,4 +671,16 @@ func (f *fakeRuntime) Logs(ctx context.Context, sessionID string) (*contracts.Se
 		SessionID: sessionID,
 		Lines:     []string{"fake: agent started", "fake: nothing to report"},
 	}, nil
+}
+
+// Adopt records the hand-off so the handler test can prove which worktrees were
+// involved and what message the branch commit got.
+func (w *fakeWorkspace) Adopt(_ context.Context, sourceRoot, targetRoot, message string) (contracts.AdoptResult, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.err != nil {
+		return contracts.AdoptResult{}, w.err
+	}
+	w.adopted = append(w.adopted, sourceRoot+"->"+targetRoot+"#"+message)
+	return contracts.AdoptResult{Commit: "abc1234", Files: []string{"feature.txt"}}, nil
 }

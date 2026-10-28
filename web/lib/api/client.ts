@@ -175,6 +175,12 @@ export const sessions = {
   send: (id: string, input: SendMessageInput) =>
     request<PromptResult>(`/v1/sessions/${id}/messages`, { method: "POST", body: input }),
   remove: (id: string) => request<{ ok: boolean }>(`/v1/sessions/${id}`, { method: "DELETE" }),
+  /** Carries a branch's work back to the session it came from (FR-2.6). */
+  adopt: (id: string, message?: string) =>
+    request<{ adopted: { commit: string; files: string[] }; branch: string; target: string }>(
+      `/v1/sessions/${id}/adopt`,
+      { method: "POST", body: { message: message ?? "" } },
+    ),
   /** Copies a session into a parallel attempt with its own checkout (FR-2.7). */
   clone: (id: string) =>
     request<{ session: Session }>(`/v1/sessions/${id}/clone`, { method: "POST" }),

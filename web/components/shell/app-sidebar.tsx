@@ -15,6 +15,7 @@ import {
   Download,
   FolderGit2,
   GitBranch,
+  GitMerge,
   LogOut,
   MessageSquareDashed,
   MessagesSquare,
@@ -607,6 +608,29 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
             >
               <Download />
               导出 Markdown
+            </DropdownMenuItem>
+          ) : null}
+          {session.kind === "branch" ? (
+            <DropdownMenuItem
+              data-testid="session-adopt"
+              onClick={() => {
+                setMenuOpen(false);
+                void api.sessions
+                  .adopt(session.id)
+                  .then((data) =>
+                    toast.success("已采纳回主干", {
+                      description: `${data.adopted.commit} · ${data.adopted.files.length} 个文件`,
+                    }),
+                  )
+                  .catch((error: unknown) =>
+                    toast.error("采纳失败", {
+                      description: error instanceof Error ? error.message : "未知错误",
+                    }),
+                  );
+              }}
+            >
+              <GitMerge />
+              采纳回主干
             </DropdownMenuItem>
           ) : null}
           <DropdownMenuItem

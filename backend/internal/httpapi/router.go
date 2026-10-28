@@ -201,6 +201,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /v1/sessions/{id}/fork-points", s.authed(s.handleForkPoints))
 	mux.Handle("POST /v1/sessions/{id}/fork", s.mutatingBearer(s.handleFork))
 	mux.Handle("POST /v1/sessions/{id}/clone", s.mutatingBearer(s.handleCloneSession))
+	mux.Handle("POST /v1/sessions/{id}/adopt", s.mutatingBearer(s.handleAdoptBranch))
 	mux.Handle("POST /v1/sessions/{id}/sidecar", s.mutatingBearer(s.handleSidecar))
 	mux.Handle("POST /v1/sessions/{id}/promote", s.mutatingBearer(s.handlePromoteSidecar))
 	mux.Handle("POST /v1/sessions/{id}/compact", s.mutatingBearer(s.handleCompact))
