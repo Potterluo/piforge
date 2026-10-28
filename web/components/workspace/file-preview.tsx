@@ -52,6 +52,10 @@ export function FilePreview({ sessionId, path, onClose }: FilePreviewProps) {
     return api.files.read(sessionId, path);
   }, { enabled: Boolean(path) });
 
+  const inlineUrl = React.useMemo(
+    () => (path ? api.files.inlineUrl(sessionId, path) : ""),
+    [path, sessionId],
+  );
   const downloadUrl = React.useMemo(
     () => (path ? api.files.downloadUrl(sessionId, path) : ""),
     [sessionId, path],
@@ -168,14 +172,18 @@ export function FilePreview({ sessionId, path, onClose }: FilePreviewProps) {
             </div>
           ) : null}
 
-          {kind === "pdf" ? (
-            <BinaryCard
-              path={content.path}
-              size={content.size}
-              mime={content.mime_type}
-              reason="PDF 预览（pdfjs-dist）不在本切片内"
-              downloadUrl={downloadUrl}
-            />
+          {kind === "pdf" && !content.truncated ? (
+            // No pdfjs: every browser worth targeting renders PDFs natively, and a
+            // sandboxed iframe of the download URL is both smaller and more correct
+            // than a hand-rolled canvas viewer.
+            <div className="min-h-0 min-w-0 flex-1" data-testid="pdf-preview">
+              <iframe
+                src={inlineUrl}
+                title={content.path}
+                className="h-full w-full border-0 bg-background"
+                sandbox="allow-same-origin allow-scripts"
+              />
+            </div>
           ) : null}
         </div>
       ) : null}

@@ -243,6 +243,9 @@ export const files = {
     ),
   downloadUrl: (sessionId: string, path: string) =>
     `${BASE}/v1/sessions/${sessionId}/files?path=${encodeURIComponent(path)}&download=1`,
+  /** Same bytes, but the browser is allowed to render them (used for PDFs). */
+  inlineUrl: (sessionId: string, path: string) =>
+    `${BASE}/v1/sessions/${sessionId}/files?path=${encodeURIComponent(path)}&inline=1`,
 };
 
 // ---------------------------------------------------------------------------

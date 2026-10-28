@@ -55,6 +55,7 @@ vi.mock("@/lib/api/client", () => ({
       })),
       remove: vi.fn(async () => ({ ok: true })),
       downloadUrl: () => "/v1/dl",
+      inlineUrl: () => "/v1/inline",
     },
     git: {
       status: vi.fn(async () => status),

@@ -1,12 +1,16 @@
 package httpapi
 
 import (
+	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/fsx"
 )
 
 // maxFileBytes bounds a manual file write. The workspace service is the real
@@ -62,22 +66,66 @@ func (s *server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if queryBool(r, "download") {
-		// The workspace returns a (possibly truncated) preview; a download is
-		// therefore the same body with a Content-Disposition, and the
-		// truncation flag is surfaced as a header instead of hidden.
+	// `download=1` streams the whole file; `inline=1` streams it too but lets the
+	// browser render it (the PDF preview is an iframe of exactly this URL). The
+	// preview body is not used here: it is deliberately truncated, and a truncated
+	// download or a truncated PDF is a bug that only shows up on large files.
+	if queryBool(r, "download") || queryBool(r, "inline") {
+		inline := queryBool(r, "inline")
+		resolved, err := fsx.Resolve(root, path)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		file, err := os.Open(resolved)
+		if err != nil {
+			// The workspace may be backed by something that is not a plain file on
+			// this host (a test double, a remote provider). Fall back to the preview
+			// body and say it may be truncated, rather than pretending the file is
+			// missing.
+			if content.Body != "" {
+				mime := content.MimeType
+				if mime == "" {
+					mime = "application/octet-stream"
+				}
+				w.Header().Set("Content-Type", mime)
+				if !inline {
+					w.Header().Set("Content-Disposition",
+						`attachment; filename="`+strings.ReplaceAll(pathBase(path), `"`, "")+`"`)
+				}
+				if content.Truncated {
+					w.Header().Set("X-PF-Truncated", "1")
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, content.Body)
+				return
+			}
+			s.fail(w, r, fmt.Errorf("%w: %s", fsx.ErrNotExist, path))
+			return
+		}
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		if info.IsDir() {
+			s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "path is a directory"))
+			return
+		}
+
 		mime := content.MimeType
 		if mime == "" {
 			mime = "application/octet-stream"
 		}
 		w.Header().Set("Content-Type", mime)
-		w.Header().Set("Content-Disposition",
-			`attachment; filename="`+strings.ReplaceAll(pathBase(path), `"`, "")+`"`)
-		if content.Truncated {
-			w.Header().Set("X-PF-Truncated", "1")
+		w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+		if !inline {
+			w.Header().Set("Content-Disposition",
+				`attachment; filename="`+strings.ReplaceAll(pathBase(path), `"`, "")+`"`)
 		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, content.Body)
+		_, _ = io.Copy(w, file)
 		return
 	}
 	writeJSON(w, http.StatusOK, content)
