@@ -29,6 +29,32 @@ Chromium is downloaded with a retry loop, because the two big packages
 (`chromium`, `libllvm15`) drop mid-transfer on some links. Without it the browser
 panel reports itself unavailable and everything else works.
 
+## Iterate against a published base
+
+The full build takes ~20 minutes, and 19 of those are Node, pi and Chromium — none
+of which change while working on the product. Build the stack once, publish it,
+then layer this repository on top:
+
+```bash
+# once, on a machine with a real internet route
+docker build --build-arg INSTALL_CHROMIUM=true -t ccr.ccs.tencentyun.com/<ns>/piforge:dev .
+docker push ccr.ccs.tencentyun.com/<ns>/piforge:dev
+
+# every time after that (Windows-friendly)
+pwsh scripts/build-app-image.ps1                  # ~50 s
+pwsh scripts/build-app-image.ps1 -Tag piforge:pr  # different tag
+```
+
+`scripts/build-app-image.ps1` cross-compiles the control plane for linux/amd64,
+builds the web app, stages the two artifacts and builds `deploy/Dockerfile.app`
+on top of the published base.
+
+One trap it handles for you: `web/.env.local` points the bundle at the
+development API port, and Next inlines `NEXT_PUBLIC_*` at build time. A bundle
+built with that file present sends the terminal and browser sockets to a port the
+container never listens on — the panel then shows "已断开" and nothing else. The
+script moves the file aside for the duration of the build.
+
 ## Run
 
 ```bash
