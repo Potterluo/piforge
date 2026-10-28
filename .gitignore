@@ -36,3 +36,6 @@ e2e/.artifacts/
 
 # real-model demo instance
 .real/
+
+# staged artifacts for the iteration image
+dist/
