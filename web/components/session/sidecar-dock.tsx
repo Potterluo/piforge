@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { MessageSquareDashed, ShieldCheck } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -23,6 +23,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api/client";
+import { qk } from "@/lib/session/queries";
 import { selectTimeline } from "@/lib/session/reduce";
 import { useSessionEvents } from "@/lib/session/use-session-events";
 import { cn } from "@/lib/utils";
@@ -87,19 +88,28 @@ function SidecarConversation({ sessionId }: { sessionId: string }) {
 
 export function SidecarDock({
   sessionId,
+  projectId,
   open,
   onOpenChange,
 }: {
   sessionId: string;
+  projectId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
   const [sidecarId, setSidecarId] = useState<string | null>(null);
   const requestedRef = useRef(false);
+  const queryClient = useQueryClient();
 
   const create = useMutation({
     mutationFn: () => api.sessions.sidecar(sessionId),
-    onSuccess: (data) => setSidecarId(data.session.id),
+    onSuccess: (data) => {
+      setSidecarId(data.session.id);
+      // A sidecar is a session: the sidebar lists it, so it must learn about it
+      // now rather than on the next full reload.
+      void queryClient.invalidateQueries({ queryKey: qk.sessions(projectId) });
+      void queryClient.invalidateQueries({ queryKey: qk.projects });
+    },
     onError: () => {
       // Allow a later re-open to try again; the inline retry also resets this.
       requestedRef.current = false;

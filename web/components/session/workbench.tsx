@@ -90,6 +90,11 @@ function WorkbenchBody({ sessionId, projectId }: { sessionId: string; projectId:
   }, [settled, queryClient, sessionId, projectId]);
   const project = useProject(projectId);
   const providers = useProviders();
+  const runtime = useQuery({
+    queryKey: ["session-status", sessionId],
+    queryFn: () => api.sessions.status(sessionId),
+    staleTime: 10_000,
+  });
   const forkPoints = useQuery({
     queryKey: ["session-fork-points", sessionId],
     queryFn: () => api.sessions.forkPoints(sessionId),
@@ -124,11 +129,14 @@ function WorkbenchBody({ sessionId, projectId }: { sessionId: string; projectId:
   // A session without a pinned model follows the deployment default, and just
   // saying 默认模型 hides which model that is. The first selectable option is that
   // default, so show it and mark it as inherited.
-  const firstPinned = models.find((option) => option.value !== "inherit");
+  // `status.model_ref` is what the runtime actually loaded (the gateway rewrites the
+  // provider name); the session's own field is what the user picked. Guessing from
+  // the first provider option produced a header that named a model nobody used.
+  const runtimeModel = runtime.data?.model_ref;
   const effectiveModel = detail?.model_ref
     ? shortModel(detail.model_ref)
-    : firstPinned
-      ? `跟随默认（${shortModel(firstPinned.value)}）`
+    : runtimeModel
+      ? `跟随默认（${shortModel(runtimeModel)}）`
       : "跟随默认";
   // Branches are titled from their label; repeating it under the title reads as a
   // stutter rather than information.
@@ -218,7 +226,7 @@ function WorkbenchBody({ sessionId, projectId }: { sessionId: string; projectId:
         </SheetContent>
       </Sheet>
 
-      <SidecarDock sessionId={sessionId} open={sidecarOpen} onOpenChange={setSidecarOpen} />
+      <SidecarDock sessionId={sessionId} projectId={projectId} open={sidecarOpen} onOpenChange={setSidecarOpen} />
 
       <ForkDialog
         open={forkTarget !== null}

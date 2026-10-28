@@ -271,7 +271,13 @@ func TestRuntimeForkProducesTrimmedTree(t *testing.T) {
 		t.Errorf("branch root = %q, want the fork point %q", branchTree[0].EntryID, points[0].EntryID)
 	}
 
-	// The source session must be untouched by the fork.
+	// The source session's *history* must be untouched. Its process is not: Pi
+	// forks inside the running process and rebinds it to the branch, so the parent
+	// is stopped and restarted on demand — that is the real contract, and asserting
+	// otherwise tested a fiction.
+	if _, err := rt.Start(ctx, spec); err != nil {
+		t.Fatalf("restart root: %v", err)
+	}
 	after, err := rt.Tree(ctx, "ses_root")
 	if err != nil {
 		t.Fatalf("Tree(root) after fork: %v", err)

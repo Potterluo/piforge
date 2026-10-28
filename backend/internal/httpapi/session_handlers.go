@@ -312,6 +312,16 @@ func (s *server) handleForkPoints(w http.ResponseWriter, r *http.Request) {
 	if points == nil {
 		points = []contracts.ForkPoint{}
 	}
+	// Pi reports the messages but not when they were said; borrow the timestamp
+	// from the persisted event with the same entry id.
+	for i := range points {
+		if !points[i].TS.IsZero() {
+			continue
+		}
+		if ts, ok := s.entryTimestamps(r.Context(), user.ID, sess.ID)[points[i].EntryID]; ok {
+			points[i].TS = ts
+		}
+	}
 	writeJSON(w, http.StatusOK, forkPointsResponse{Points: points})
 }
 
@@ -634,6 +644,8 @@ func (s *server) forkPointsFromEvents(ctx context.Context, userID, sessionID str
 		out = append(out, contracts.ForkPoint{
 			EntryID: event.EntryID,
 			Preview: previewText(payload.Text, 120),
+			// Without a timestamp the UI renders Go's zero time as "1/1/1".
+			TS: event.TS,
 		})
 	}
 	return out, nil
@@ -647,4 +659,19 @@ func previewText(text string, limit int) string {
 		return flat
 	}
 	return string(runes[:limit]) + "…"
+}
+
+// entryTimestamps maps entry ids to when they were recorded.
+func (s *server) entryTimestamps(ctx context.Context, userID, sessionID string) map[string]time.Time {
+	out := make(map[string]time.Time, 64)
+	events, err := s.deps.Store.ListEvents(ctx, userID, sessionID, 0, 500)
+	if err != nil {
+		return out
+	}
+	for _, event := range events {
+		if event.EntryID != "" {
+			out[event.EntryID] = event.TS
+		}
+	}
+	return out
 }

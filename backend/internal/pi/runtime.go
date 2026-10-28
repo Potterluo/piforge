@@ -647,12 +647,38 @@ func (r *Runtime) Fork(ctx context.Context, req contracts.ForkRequest) error {
 		return err
 	}
 	file := r.sessionFileFor(req.NewSession)
-	if _, err := s.bridge.Call(ctx, "fork", map[string]any{
-		"entryId":     req.EntryID,
-		"sessionPath": file,
-	}); err != nil {
+
+	// Pi's fork happens *inside its own process*: it writes a branched session
+	// file of its own choosing and rebinds to it. It does not accept a target
+	// path, so passing one (which this used to do) silently produced an empty
+	// branch — the model had no history even though the transcript claimed it did.
+	if _, err := s.bridge.Call(ctx, "fork", map[string]any{"entryId": req.EntryID}); err != nil {
 		return fmt.Errorf("pi: fork session %s at %s: %w", req.SessionID, req.EntryID, err)
 	}
+
+	// Ask where Pi put it, then adopt that file as the branch's session file so a
+	// fresh process for the branch opens the real branched history.
+	var state struct {
+		SessionFile string `json:"sessionFile"`
+	}
+	if err := s.bridge.CallInto(ctx, "get_state", nil, &state); err != nil {
+		return fmt.Errorf("pi: fork: read forked session path: %w", err)
+	}
+	// The parent process is now running the branch: stop it so a later prompt to
+	// the parent restarts on its own transcript.
+	if err := r.Stop(ctx, req.SessionID); err != nil {
+		return fmt.Errorf("pi: fork: stop parent: %w", err)
+	}
+	if state.SessionFile != "" {
+		// Adopt Pi's file where it is. It is written lazily, so moving it here
+		// fails for a branch that has not spoken yet; an override is enough for
+		// the branch process to open the real branched history.
+		file = state.SessionFile
+	}
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		return fmt.Errorf("pi: fork: prepare session dir: %w", err)
+	}
+
 	r.mu.Lock()
 	r.overrides[req.NewSession] = file
 	r.mu.Unlock()

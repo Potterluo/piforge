@@ -342,12 +342,13 @@ func TestServeSplitsOnlyOnLF(t *testing.T) {
 	p.until(t, func(m map[string]any) bool { return m["type"] == "agent_settled" })
 }
 
-// TestServeForkWritesTrimmedSessionFile pins the fork contract: the branch file
-// holds only the entries up to the fork point and the source file is untouched.
+// TestServeForkWritesTrimmedSessionFile pins the fork contract as real Pi
+// implements it: the peer writes a branched file of its own naming (the caller
+// does not choose the path), the process moves onto it, and the source file is
+// untouched.
 func TestServeForkWritesTrimmedSessionFile(t *testing.T) {
 	dir := t.TempDir()
 	mainFile := filepath.Join(dir, "main.jsonl")
-	branchFile := filepath.Join(dir, "branch.jsonl")
 
 	p := startPeer(t, ScriptOK, 0, mainFile)
 	p.send(t, map[string]any{"id": "1", "type": "prompt", "message": "first task"})
@@ -361,12 +362,17 @@ func TestServeForkWritesTrimmedSessionFile(t *testing.T) {
 	}
 	userEntryID := obj(obj(roots[0])["entry"])["id"].(string)
 
-	p.send(t, map[string]any{"id": "3", "type": "fork", "entryId": userEntryID, "sessionPath": branchFile})
+	p.send(t, map[string]any{"id": "3", "type": "fork", "entryId": userEntryID})
 	forked := p.response(t, "3")
 	if success, _ := forked["success"].(bool); !success {
 		t.Fatalf("fork failed: %v", forked)
 	}
 
+	// The peer reports where it put the branch; the caller must adopt that path.
+	branchFile, _ := obj(forked["data"])["sessionFile"].(string)
+	if branchFile == "" || branchFile == mainFile {
+		t.Fatalf("fork did not report a new session file: %v", forked)
+	}
 	branchEntries := readSessionFile(t, branchFile)
 	if len(branchEntries) != 1 {
 		t.Fatalf("branch file has %d entries, want 1: %v", len(branchEntries), branchEntries)

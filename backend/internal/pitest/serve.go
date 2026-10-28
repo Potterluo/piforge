@@ -598,12 +598,13 @@ func (s *server) handle(c command) {
 	}
 }
 
-// handleFork branches the session at one user entry.
+// handleFork branches the session at one user entry, the way real Pi does.
 //
-// With command.SessionPath set the peer leaves its own session untouched and
-// writes the trimmed tree to that path, which is how a real fork behaves and
-// how internal/pi spawns the branch process. Without it the peer truncates in
-// place, which keeps the CLI's historical single-process behaviour.
+// Real Pi forks *inside its own process*: it writes a new session file of its own
+// naming and rebinds to it, and it ignores any target path the caller suggests.
+// Modelling that here matters — the bridge used to pass a path, real Pi ignored it,
+// and the result was a branch with no history while the fake peer's version (which
+// honoured the path) made the tests look green.
 func (s *server) handleFork(c command) {
 	s.mu.Lock()
 	idx := -1
@@ -623,22 +624,24 @@ func (s *server) handleFork(c command) {
 	if m, ok := kept[idx].Message.(map[string]any); ok {
 		text = textOf(m["content"])
 	}
-	if c.SessionPath != "" {
-		err := writeSessionFile(c.SessionPath, kept, s.cwd)
-		s.mu.Unlock()
-		if err != nil {
+	// Pi names the branched file itself and moves the process onto it.
+	branched := s.file
+	if branched != "" {
+		branched = strings.TrimSuffix(branched, ".jsonl") + "-fork-" + strconv.Itoa(len(kept)) + ".jsonl"
+	}
+	if branched != "" {
+		if err := writeSessionFile(branched, kept, s.cwd); err != nil {
+			s.mu.Unlock()
 			s.fail(c, err.Error())
 			return
 		}
-		s.ok(c, map[string]any{"text": text, "cancelled": false,
-			"newSessionPath": c.SessionPath})
-		return
+		s.file = branched
 	}
 	s.entries = kept
 	s.leaf = kept[idx].ID
 	s.persist()
 	s.mu.Unlock()
-	s.ok(c, map[string]any{"text": text, "cancelled": false})
+	s.ok(c, map[string]any{"text": text, "cancelled": false, "sessionFile": branched})
 }
 
 func (s *server) sessionStats() map[string]any {

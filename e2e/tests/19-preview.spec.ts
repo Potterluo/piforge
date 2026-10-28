@@ -50,8 +50,10 @@ test.describe("file preview", () => {
     const sessionId = await openNewSession(page);
     await sendPrompt(page, "hello");
 
-    // Larger than the preview cap, so truncation would show up as a length mismatch.
-    const body = "x".repeat(300_000);
+    // Above the 2 MiB inline cap, so the preview body is truncated while the
+    // download must not be. (A 300 KB file fits inline, which would make this
+    // assertion pass without proving anything.)
+    const body = "x".repeat(3 * 1024 * 1024);
     const written = await apiWrite(
       page,
       "PUT",
@@ -59,6 +61,9 @@ test.describe("file preview", () => {
       body,
     );
     expect(written.status).toBeLessThan(300);
+
+    const preview = await (await page.request.get(`/v1/sessions/${sessionId}/files?path=big.txt`)).json();
+    expect((preview as { body: string }).body.length).toBeLessThan(body.length);
 
     const response = await page.request.get(
       `/v1/sessions/${sessionId}/files?path=big.txt&download=1`,

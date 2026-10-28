@@ -62,6 +62,9 @@ export function BrowserPanel({ sessionId, className }: BrowserPanelProps) {
   const [generation, setGeneration] = React.useState(0);
 
   React.useEffect(() => {
+    // The flag is already known: opening a socket the server will refuse only
+    // produces a 403 in the console and a spinner that means nothing.
+    if (!browserEnabled) return;
     let disposed = false;
     const socket = new WebSocket(`${wsBase()}/v1/sessions/${sessionId}/browser?tab=view`);
     socket.binaryType = "blob";

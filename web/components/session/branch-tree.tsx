@@ -60,7 +60,7 @@ function EntryRow({
       <ItemContent className="min-w-0 gap-0">
         <ItemTitle className="max-w-full truncate text-xs">{truncate(title, 96)}</ItemTitle>
         <ItemDescription className="text-[11px]">
-          {formatRelative(node.ts)} · {node.type || node.role || "entry"}
+          {hasTime(node.ts) ? `${formatRelative(node.ts)} · ` : ""}{node.type || node.role || "entry"}
         </ItemDescription>
       </ItemContent>
       {leafId === node.entry_id ? (
@@ -216,7 +216,7 @@ export function BranchTree({
                   {truncate(point.preview, 160)}
                 </ItemDescription>
                 <ItemTitle className="text-[11px] font-normal text-muted-foreground">
-                  {formatRelative(point.ts)}
+                  {hasTime(point.ts) ? formatRelative(point.ts) : "时间未知"}
                 </ItemTitle>
               </ItemContent>
               <Button size="xs" variant="secondary" onClick={() => setTarget(point)}>
@@ -240,4 +240,12 @@ export function BranchTree({
       />
     </div>
   );
+}
+/**
+ * A fork point Pi reports has no timestamp, and Go's zero time renders as "1/1/1".
+ * Saying "unknown" is honest; showing a date from year 1 is not.
+ */
+function hasTime(value: string | undefined): boolean {
+  if (!value) return false;
+  return !value.startsWith("0001-01-01");
 }

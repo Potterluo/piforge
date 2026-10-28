@@ -403,6 +403,9 @@ export function AppSidebar({
                               <span>{child.label || child.title || "未命名"}</span>
                               <StatusDot status={child.status} />
                             </SidebarMenuSubButton>
+                            {/* A branch is a session: it can be renamed, archived,
+                                exported and deleted like its parent. */}
+                            <SessionActions session={child} projectId={projectId!} />
                           </SidebarMenuSubItem>
                         ))}
                       </SidebarMenuSub>
