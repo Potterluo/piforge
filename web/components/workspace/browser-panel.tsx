@@ -301,8 +301,18 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
         >
           {capturing ? <Spinner /> : <CameraIcon />}
         </Button>
-        <Badge variant={live ? "secondary" : "outline"} className="text-[10px]">
-          {live ? "已连接" : status === "error" ? "不可用" : "连接中"}
+        <Badge
+          variant={live ? "secondary" : "outline"}
+          className="text-[10px]"
+          title={live && !painted ? "已经连上浏览器，但页面还没有画出第一帧" : undefined}
+        >
+          {!live
+            ? status === "error"
+              ? "不可用"
+              : "连接中"
+            : painted
+              ? "已连接"
+              : "页面未加载"}
         </Badge>
       </div>
 

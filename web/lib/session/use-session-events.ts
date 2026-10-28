@@ -75,7 +75,7 @@ function parseEvent(raw: string): PfEvent | null {
  * local transcript, re-reads `entries()` to confirm the session still exists
  * and picks up Pi's leaf, then replays the event log from zero.
  */
-export function useSessionEvents(sessionId: string): SessionEventsResult {
+export function useSessionEvents(sessionId: string | null): SessionEventsResult {
   const [state, dispatch] = useReducer(sessionReducer, initialSessionState);
   const [status, setStatus] = useState<StreamStatus>("connecting");
   const [leafEntryId, setLeafEntryId] = useState<string | null>(null);
@@ -86,7 +86,7 @@ export function useSessionEvents(sessionId: string): SessionEventsResult {
   const resyncingRef = useRef(false);
 
   const resync = useCallback(async () => {
-    if (resyncingRef.current) return;
+    if (!sessionId || resyncingRef.current) return;
     resyncingRef.current = true;
     try {
       const { leaf_id } = await api.sessions.entries(sessionId);
@@ -115,6 +115,12 @@ export function useSessionEvents(sessionId: string): SessionEventsResult {
   }, [state.needsResync, resync]);
 
   useEffect(() => {
+    // No session yet (the sidecar dock mounts before one exists): subscribing to an
+    // empty id opened `/v1/sessions/events`, which 404'd and retried with backoff.
+    if (!sessionId) {
+      const timer = window.setTimeout(() => setStatus("connecting"), 0);
+      return () => window.clearTimeout(timer);
+    }
     if (typeof EventSource === "undefined") {
       // Deferred so this stays a subscription effect, not a render-time
       // cascading update (and so the SSR pass sees "connecting").

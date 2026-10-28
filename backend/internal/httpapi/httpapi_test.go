@@ -328,6 +328,7 @@ type fakeRuntime struct {
 	interrupt  contracts.InterruptResult
 	forked     []contracts.ForkRequest
 	compaction []string
+	cloned     []string
 
 	status contracts.RuntimeStatus
 	tree   []*contracts.TreeEntry
@@ -651,6 +652,15 @@ func (e *testEnv) ensureProvider(userID, name, model string) {
 	if err != nil && !errors.Is(err, store.ErrConflict) {
 		e.t.Fatalf("CreateProvider: %v", err)
 	}
+}
+
+// cloned records CloneSession calls, so the promote test can prove the agent side
+// was seeded and not only the display side.
+func (f *fakeRuntime) CloneSession(_ context.Context, from, to string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cloned = append(f.cloned, from+"->"+to)
+	return nil
 }
 
 // Logs is an optional capability: the fake runtime does not keep them, and the

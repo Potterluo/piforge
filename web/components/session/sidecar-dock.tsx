@@ -120,7 +120,7 @@ export function SidecarDock({
   const { mutate } = create;
 
   const router = useRouter();
-  const { state: sidecarState } = useSessionEvents(sidecarId ?? "");
+  const { state: sidecarState } = useSessionEvents(sidecarId ?? null);
   const running = Boolean(sidecarId) && sidecarState.running;
   const promote = useMutation({
     mutationFn: () => api.sessions.promote(sidecarId ?? ""),

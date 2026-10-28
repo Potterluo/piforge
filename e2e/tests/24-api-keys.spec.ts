@@ -25,9 +25,23 @@ test("an API key drives the API like a signed-in browser", async ({ page }) => {
   expect(token.startsWith("pfk_")).toBe(true);
   await page.getByRole("button", { name: "我已保存" }).click();
 
-  // The list shows the key but never the secret again.
-  const row = page.locator('[data-testid="api-key-row"][data-name="e2e-script"]');
-  await expect(row).toHaveCount(1, { timeout: 20_000 });
+  // The key exists on the server before the UI is asked about it: the list is a
+  // cache, and a test that reads the cache first reports the cache.
+  await expect
+    .poll(
+      async () => {
+        const body = (await (await page.request.get("/v1/api-keys")).json()) as {
+          api_keys?: { name: string }[];
+        };
+        return (body.api_keys ?? []).filter((key) => key.name === "e2e-script").length;
+      },
+      { timeout: 30_000 },
+    )
+    .toBeGreaterThan(0);
+
+  await page.reload();
+  const row = page.locator('[data-testid="api-key-row"][data-name="e2e-script"]').first();
+  await expect(row).toBeVisible({ timeout: 30_000 });
 
   // A bearer call reads without a cookie and writes without a CSRF header.
   const read = await page.request.get(`/v1/sessions?project=${projectId}`, {

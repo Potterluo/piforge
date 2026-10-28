@@ -806,3 +806,36 @@ func (r *Runtime) Logs(ctx context.Context, sessionID string) (*contracts.Sessio
 		UpdatedAt: time.Now(),
 	}, nil
 }
+
+// CloneSession copies one session's transcript file to another's.
+//
+// Promoting a sidecar needs it: the control plane can copy the *events* it stores,
+// but the model reads Pi's own file, so a branch that only had events showed the
+// conversation while the agent denied ever seeing it. Copying the file gives both
+// sides the same history.
+func (r *Runtime) CloneSession(ctx context.Context, fromSession, toSession string) error {
+	if fromSession == toSession {
+		return nil
+	}
+	source := r.sessionFileFor(fromSession)
+	target := r.sessionFileFor(toSession)
+	if source == target {
+		return nil
+	}
+	raw, err := os.ReadFile(source)
+	if err != nil {
+		return fmt.Errorf("pi: clone session: read %s: %w", source, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return fmt.Errorf("pi: clone session: prepare %s: %w", target, err)
+	}
+	if err := os.WriteFile(target, raw, 0o600); err != nil {
+		return fmt.Errorf("pi: clone session: write %s: %w", target, err)
+	}
+	// The target keeps its own path even if Pi would name one: the branch resumes
+	// this file, not a fresh session.
+	r.mu.Lock()
+	r.overrides[toSession] = target
+	r.mu.Unlock()
+	return nil
+}

@@ -680,3 +680,10 @@ type APIKey struct {
 	Revoked    bool      `json:"revoked"`
 	RevokedAt  time.Time `json:"revoked_at,omitzero"`
 }
+
+// SessionCloner copies one session's agent transcript to another. It is optional for
+// the same reason LogSource is: a runtime that cannot do it should say so by not
+// implementing the interface, and the caller keeps the display-only copy.
+type SessionCloner interface {
+	CloneSession(ctx context.Context, fromSession, toSession string) error
+}

@@ -73,8 +73,17 @@ func (s *server) handlePromoteSidecar(w http.ResponseWriter, r *http.Request) {
 	}
 	branch = s.provisionSession(r.Context(), w, user.ID, branch)
 
-	// The branch starts as a *copy* of the side conversation, so the agent and the
-	// transcript agree from the first message.
+	// Both sides have to end up with the side conversation: the events are what the
+	// page displays, and Pi's own file is what the model reads. Copying only the
+	// events produced a branch that showed the exchange while the agent answered
+	// "this conversation starts fresh" — the same fiction a fork bug taught us to
+	// avoid, one layer down.
+	if cloner, ok := s.deps.Runtime.(contracts.SessionCloner); ok {
+		if err := cloner.CloneSession(context.WithoutCancel(r.Context()), sidecar.ID, branch.ID); err != nil {
+			s.log.WarnContext(r.Context(), "could not clone the sidecar's agent transcript",
+				"session", branch.ID, "error", err.Error())
+		}
+	}
 	if err := s.copyEvents(context.WithoutCancel(r.Context()), user.ID, sidecar.ID, branch.ID); err != nil {
 		s.log.WarnContext(r.Context(), "could not copy the sidecar transcript",
 			"session", branch.ID, "error", err.Error())
