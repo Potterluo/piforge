@@ -778,3 +778,31 @@ func (r *Runtime) IsClosed() bool {
 	defer r.mu.Unlock()
 	return r.closed
 }
+
+// Logs returns the tail of the agent's stderr for one session.
+//
+// It is the first thing to read when a run dies without saying why: Pi writes
+// startup failures (a missing model, a bad flag, a crashed extension) to stderr,
+// and without this they were only visible on the host's console (PRD FR-5.10).
+func (r *Runtime) Logs(ctx context.Context, sessionID string) (*contracts.SessionLogs, error) {
+	r.mu.Lock()
+	s := r.sessions[sessionID]
+	r.mu.Unlock()
+	if s == nil {
+		return &contracts.SessionLogs{SessionID: sessionID, Lines: []string{}}, nil
+	}
+	tail := strings.TrimRight(s.bridge.StderrTail(), "\n")
+	lines := []string{}
+	if tail != "" {
+		lines = strings.Split(tail, "\n")
+	}
+	// The buffer is a byte window, not a line window: say so rather than letting
+	// the caller wonder why the first line is cut in half.
+	truncated := len(lines) > 0 && len(s.bridge.StderrTail()) >= 8<<10
+	return &contracts.SessionLogs{
+		SessionID: sessionID,
+		Lines:     lines,
+		Truncated: truncated,
+		UpdatedAt: time.Now(),
+	}, nil
+}

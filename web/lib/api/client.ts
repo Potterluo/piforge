@@ -213,6 +213,11 @@ export const sessions = {
     ),
   tree: (id: string) => request<{ tree: TreeEntry[]; leaf_id: string }>(`/v1/sessions/${id}/tree`),
   forkPoints: (id: string) => request<{ points: ForkPoint[] }>(`/v1/sessions/${id}/fork-points`),
+  /** The agent's stderr tail, for explaining a run that died quietly (FR-5.10). */
+  logs: (id: string) =>
+    request<{ logs: { session_id: string; lines: string[]; truncated: boolean }; reason?: string }>(
+      `/v1/sessions/${id}/logs`,
+    ),
   stats: (id: string) => request<SessionStats>(`/v1/sessions/${id}/stats`),
   status: (id: string) => request<RuntimeStatus>(`/v1/sessions/${id}/status`),
 };

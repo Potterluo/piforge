@@ -756,3 +756,34 @@ func (s *server) restartAgent(r *http.Request, userID string, sess *contracts.Se
 	}
 	return true
 }
+
+// handleSessionLogs returns the agent's stderr tail (PRD FR-5.10).
+//
+// A runtime that keeps no tail answers with an empty list and a reason, so the
+// panel can say "this runtime keeps no logs" instead of showing an empty box that
+// looks like a bug.
+func (s *server) handleSessionLogs(w http.ResponseWriter, r *http.Request) {
+	user := auth.MustUser(r.Context())
+	sess, err := s.deps.Store.Session(r.Context(), user.ID, pathID(r))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	source, ok := s.deps.Runtime.(contracts.LogSource)
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"logs":   contracts.SessionLogs{SessionID: sess.ID, Lines: []string{}},
+			"reason": "runtime_keeps_no_logs",
+		})
+		return
+	}
+	logs, err := source.Logs(r.Context(), sess.ID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if logs == nil {
+		logs = &contracts.SessionLogs{SessionID: sess.ID, Lines: []string{}}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"logs": logs})
+}

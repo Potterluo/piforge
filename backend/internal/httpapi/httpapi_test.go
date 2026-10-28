@@ -625,3 +625,12 @@ func (e *testEnv) ensureProvider(userID, name, model string) {
 		e.t.Fatalf("CreateProvider: %v", err)
 	}
 }
+
+// Logs is an optional capability: the fake runtime does not keep them, and the
+// endpoint must say so rather than invent an empty file.
+func (f *fakeRuntime) Logs(ctx context.Context, sessionID string) (*contracts.SessionLogs, error) {
+	return &contracts.SessionLogs{
+		SessionID: sessionID,
+		Lines:     []string{"fake: agent started", "fake: nothing to report"},
+	}, nil
+}

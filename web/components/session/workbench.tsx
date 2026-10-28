@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { GitBranch, LoaderCircle, PanelRight } from "lucide-react";
+import { GitBranch, LoaderCircle, PanelRight, ScrollText } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -33,6 +33,7 @@ import { ContextMeter } from "./context-marker";
 import { ForkDialog } from "./fork-dialog";
 import { SessionEventsProvider, useSessionEventState } from "./session-events-provider";
 import { SessionStream } from "./session-stream";
+import { SessionLogsSheet } from "./session-logs-sheet";
 import { SidecarDock } from "./sidecar-dock";
 
 /** First prose of a user turn, used as the fork dialog's context line. */
@@ -106,6 +107,7 @@ function WorkbenchBody({ sessionId, projectId }: { sessionId: string; projectId:
   });
 
   const [branchesOpen, setBranchesOpen] = useState(false);
+  const [logsOpen, setLogsOpen] = useState(false);
   const [sidecarOpen, setSidecarOpen] = useState(false);
   const [forkTarget, setForkTarget] = useState<{ entryId: string; preview?: string } | null>(null);
 
@@ -170,6 +172,16 @@ function WorkbenchBody({ sessionId, projectId }: { sessionId: string; projectId:
           ) : null}
           <ConnectionBadge status={status} />
           <ContextMeter sessionId={sessionId} running={state.running} usage={state.usage} />
+          <Button
+            size="sm"
+            variant="ghost"
+            data-testid="session-logs-open"
+            title="agent 日志（排障用）"
+            onClick={() => setLogsOpen(true)}
+          >
+            <ScrollText />
+            日志
+          </Button>
           <Button size="sm" variant="ghost" onClick={() => setBranchesOpen(true)}>
             <GitBranch />
             分支
@@ -226,6 +238,7 @@ function WorkbenchBody({ sessionId, projectId }: { sessionId: string; projectId:
         </SheetContent>
       </Sheet>
 
+      <SessionLogsSheet sessionId={sessionId} open={logsOpen} onOpenChange={setLogsOpen} />
       <SidecarDock sessionId={sessionId} projectId={projectId} open={sidecarOpen} onOpenChange={setSidecarOpen} />
 
       <ForkDialog

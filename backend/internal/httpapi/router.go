@@ -185,6 +185,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("DELETE /v1/sessions/{id}", s.mutating(s.handleDeleteSession))
 	mux.Handle("GET /v1/sessions/{id}/export", s.authed(s.handleExportSession))
 	mux.Handle("GET /v1/sessions/{id}/stats", s.authed(s.handleSessionStats))
+	mux.Handle("GET /v1/sessions/{id}/logs", s.authed(s.handleSessionLogs))
 	mux.Handle("GET /v1/sessions/{id}/pty", s.authed(s.handleSessionPTY))
 	mux.Handle("GET /v1/sessions/{id}/tooling", s.authed(s.handleSessionTooling))
 	mux.Handle("GET /v1/sessions/{id}/browser", s.authed(s.handleSessionBrowser))

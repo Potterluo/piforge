@@ -646,3 +646,19 @@ const (
 
 // NewError builds a typed API error.
 func NewError(code, msg string) *APIError { return &APIError{Code: code, Message: msg} }
+
+// SessionLogs is the tail of one session's agent stderr, kept so a crash can be
+// explained without entering the host (PRD FR-5.10).
+type SessionLogs struct {
+	SessionID string    `json:"session_id"`
+	Lines     []string  `json:"lines"`
+	Truncated bool      `json:"truncated"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// LogSource is implemented by runtimes that keep such a tail. It is a separate
+// interface on purpose: a runtime that keeps no logs should say so, not pretend
+// with an empty buffer.
+type LogSource interface {
+	Logs(ctx context.Context, sessionID string) (*SessionLogs, error)
+}

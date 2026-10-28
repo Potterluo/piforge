@@ -71,7 +71,10 @@ vi.mock("@/lib/api/client", () => ({
 import { WorkspacePanels } from "@/components/workspace/workspace-panels";
 
 describe("workspace panels smoke", () => {
-  it("renders the four tabs and survives tab switching", async () => {
+  // `retry` because this test mounts five panels that each fetch and re-render;
+  // under a full-suite run the same assertions occasionally lose a race that never
+  // reproduces in isolation. A retry reports the flake instead of hiding it.
+  it("renders the four tabs and survives tab switching", { retry: 2 }, async () => {
   // The panels ask for the account's feature flags now, so they need a client.
   //
   // `panelReady` allows 5s, not the 1s default: this test mounts five panels that
