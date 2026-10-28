@@ -111,16 +111,24 @@ func (s *server) handleSessionBrowser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The viewer names the page it wants (PRD FR-11.7). An empty `tab` means the one
+	// the browser opened with, which is what a single-tab viewer wants.
+	tabID := r.URL.Query().Get("tab")
+	if tabID == "" {
+		tabID = session.DefaultTabID()
+	}
+
 	_ = conn.Write(ctx, websocket.MessageText, mustJSON(map[string]any{
 		"type":    "ready",
 		"browser": session.Snapshot(),
+		"tab":     tabID,
 	}))
 
 	// Screencast and input are independent halves of the same socket: frames go
 	// out on one goroutine while commands come in on this one, which is what
 	// keeps a slow viewer from blocking input.
 	go func() {
-		err := session.Screencast(ctx, func(jpeg []byte, meta browser.Meta) {
+		err := session.TabScreencast(ctx, tabID, func(jpeg []byte, meta browser.Meta) {
 			if len(jpeg) == 0 {
 				return
 			}
@@ -157,21 +165,21 @@ func (s *server) handleSessionBrowser(w http.ResponseWriter, r *http.Request) {
 		}
 		switch cmd.Type {
 		case "navigate":
-			if err := session.Navigate(ctx, cmd.URL); err != nil {
+			if err := session.TabNavigate(ctx, tabID, cmd.URL); err != nil {
 				_ = conn.Write(ctx, websocket.MessageText, mustJSON(map[string]string{
 					"type": "error", "code": contracts.ErrInvalidArgument, "message": err.Error(),
 				}))
 			}
 		case "input":
 			if cmd.Input != nil {
-				if err := session.Dispatch(ctx, *cmd.Input); err != nil {
+				if err := session.TabDispatch(ctx, tabID, *cmd.Input); err != nil {
 					s.log.DebugContext(ctx, "browser input failed", "error", err.Error())
 				}
 			}
 		case "resize":
 			// A viewer that cannot see the whole page is worse than a small one:
 			// keep the render size close to the panel it is displayed in.
-			if err := session.Resize(ctx, cmd.Width, cmd.Height); err != nil {
+			if err := session.TabResize(ctx, tabID, cmd.Width, cmd.Height); err != nil {
 				s.log.DebugContext(ctx, "browser resize failed", "error", err.Error())
 			}
 		case "ping":

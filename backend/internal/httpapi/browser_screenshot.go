@@ -56,7 +56,10 @@ func (s *server) handleBrowserScreenshot(w http.ResponseWriter, r *http.Request)
 			s.fail(w, r, apiErr(contracts.ErrSandboxUnavail, "no chrome binary is configured on this server"))
 			return
 		}
-		s.fail(w, r, err)
+		// A browser that would not come up is unavailable, not a defect in this
+		// handler: a 500 here sent people looking for a bug that was a slow start.
+		s.log.WarnContext(r.Context(), "browser unavailable for a screenshot", "error", err.Error())
+		s.fail(w, r, apiErr(contracts.ErrSandboxUnavail, "浏览器没能启动，稍后再试"))
 		return
 	}
 	// One retry, because the failure is usually "the page is mid-frame": a

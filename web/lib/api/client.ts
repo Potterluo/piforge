@@ -29,6 +29,7 @@ import {
   type Skill,
   type TreeEntry,
   type APIKey,
+  type BrowserTab,
   type User,
 } from "@/lib/types";
 
@@ -177,6 +178,16 @@ export const sessions = {
   /** Turns a side conversation into a branch with its own checkout (FR-4.7). */
   promote: (id: string) =>
     request<{ session: Session }>(`/v1/sessions/${id}/promote`, { method: "POST" }),
+  /** The pages open in the sandbox browser (FR-11.7). */
+  tabs: (id: string) =>
+    request<{ tabs: BrowserTab[]; default_tab: string }>(`/v1/sessions/${id}/browser/tabs`),
+  openTab: (id: string, url?: string) =>
+    request<{ tab: BrowserTab }>(`/v1/sessions/${id}/browser/tabs`, {
+      method: "POST",
+      body: { url: url ?? "" },
+    }),
+  closeTab: (id: string, tabId: string) =>
+    request<{ ok: boolean }>(`/v1/sessions/${id}/browser/tabs/${tabId}`, { method: "DELETE" }),
   /** Captures the sandbox browser into the checkout, for the agent to read. */
   screenshot: (id: string) =>
     request<{ path: string; bytes: number }>(`/v1/sessions/${id}/browser/screenshot`, {

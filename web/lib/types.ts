@@ -450,3 +450,9 @@ export interface APIKey {
   revoked: boolean;
   revoked_at?: string;
 }
+/** One page of the sandbox browser (PRD FR-11.7). */
+export interface BrowserTab {
+  id: string;
+  url: string;
+  title: string;
+}

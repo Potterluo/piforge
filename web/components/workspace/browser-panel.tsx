@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Camera as CameraIcon, GlobeIcon, RotateCwIcon } from "lucide-react";
+import { Camera as CameraIcon, GlobeIcon, Plus as PlusIcon, RotateCwIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api/client";
 import { toast } from "sonner";
 import { useFeature } from "@/lib/session/queries";
@@ -64,13 +65,27 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
   const [meta, setMeta] = React.useState<FrameMeta | null>(null);
   const [url, setUrl] = React.useState("https://example.com");
   const [generation, setGeneration] = React.useState(0);
+  // FR-11.7: a viewer is bound to one page. Switching tabs reconnects; opening and
+  // closing pages goes through the API so the agent and the viewer see the same set.
+  const [tabId, setTabId] = React.useState<string | null>(null);
+  const tabs = useQuery({
+    queryKey: ["browser-tabs", sessionId],
+    queryFn: () => api.sessions.tabs(sessionId),
+    enabled: browserEnabled,
+    refetchInterval: 5_000,
+  });
+  React.useEffect(() => {
+    if (tabId || !tabs.data) return;
+    setTabId(tabs.data.default_tab || tabs.data.tabs[0]?.id || null);
+  }, [tabs.data, tabId]);
 
   React.useEffect(() => {
     // The flag is already known: opening a socket the server will refuse only
     // produces a 403 in the console and a spinner that means nothing.
     if (!browserEnabled) return;
     let disposed = false;
-    const socket = new WebSocket(`${wsBase()}/v1/sessions/${sessionId}/browser?tab=view`);
+    const query = tabId ? `&tab=${encodeURIComponent(tabId)}` : "";
+    const socket = new WebSocket(`${wsBase()}/v1/sessions/${sessionId}/browser?tab=view${query}`);
     socket.binaryType = "blob";
     socketRef.current = socket;
 
@@ -141,7 +156,7 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
       socket.close(1000, "unmount");
       socketRef.current = null;
     };
-  }, [sessionId, generation, browserEnabled]);
+  }, [sessionId, generation, browserEnabled, tabId]);
 
   const send = React.useCallback((payload: unknown) => {
     const socket = socketRef.current;
@@ -250,6 +265,30 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
     }
   };
 
+  const queryClient = useQueryClient();
+  const openTabMutation = useMutation({
+    mutationFn: () => api.sessions.openTab(sessionId, url),
+    onSuccess: (data) => {
+      setTabId(data.tab.id);
+      void queryClient.invalidateQueries({ queryKey: ["browser-tabs", sessionId] });
+    },
+    onError: (error) =>
+      toast.error("打开标签页失败", {
+        description: error instanceof Error ? error.message : "未知错误",
+      }),
+  });
+  const closeTab = async (id: string) => {
+    try {
+      await api.sessions.closeTab(sessionId, id);
+      if (id === tabId) setTabId(null);
+      await queryClient.invalidateQueries({ queryKey: ["browser-tabs", sessionId] });
+    } catch (error) {
+      toast.error("关闭标签页失败", {
+        description: error instanceof Error ? error.message : "未知错误",
+      });
+    }
+  };
+
   const live = status === "open";
   const loadingPage = live && !painted;
 
@@ -275,6 +314,49 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
       data-browser-painted={painted ? "1" : "0"}
       className={cn("flex h-full min-h-0 min-w-0 flex-col", className)}
     >
+      <div className="flex shrink-0 items-center gap-1 border-b border-border px-1 py-1" data-testid="browser-tabs">
+        {(tabs.data?.tabs ?? []).map((tab) => (
+          <div key={tab.id} className="flex min-w-0 items-center">
+            <button
+              type="button"
+              data-testid="browser-tab"
+              data-tab={tab.id}
+              data-active={tab.id === tabId ? "1" : "0"}
+              title={tab.url}
+              onClick={() => setTabId(tab.id)}
+              className={cn(
+                "max-w-40 truncate rounded-t px-2 py-1 text-[11px]",
+                tab.id === tabId
+                  ? "bg-muted text-foreground"
+                  : "text-muted-foreground hover:bg-muted/60",
+              )}
+            >
+              {tab.title || tab.url || "新标签页"}
+            </button>
+            {(tabs.data?.tabs ?? []).length > 1 ? (
+              <button
+                type="button"
+                aria-label="关闭标签页"
+                data-testid="browser-tab-close"
+                className="px-1 text-[11px] text-muted-foreground hover:text-foreground"
+                onClick={() => void closeTab(tab.id)}
+              >
+                ×
+              </button>
+            ) : null}
+          </div>
+        ))}
+        <Button
+          size="icon-xs"
+          variant="ghost"
+          aria-label="新标签页"
+          data-testid="browser-tab-add"
+          onClick={() => void openTabMutation.mutate()}
+        >
+          <PlusIcon />
+        </Button>
+      </div>
+
       <div className="flex shrink-0 items-center gap-1.5 border-b border-border px-2 py-1.5">
         <GlobeIcon className="size-3.5 shrink-0 text-muted-foreground" />
         <Input

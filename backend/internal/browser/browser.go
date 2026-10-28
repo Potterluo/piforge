@@ -67,6 +67,12 @@ type Session struct {
 	client   *cdp
 	stopOnce sync.Once
 	stopped  chan struct{}
+
+	// Tab state (PRD FR-11.7): one devtools connection per extra page.
+	tabMu      sync.Mutex
+	tabs       map[string]*cdp
+	debugHTTP  string
+	defaultTab string
 }
 
 // Snapshot is what the API reports about a browser.
@@ -212,7 +218,10 @@ func (m *Manager) launch(ctx context.Context, sandboxID, profileRoot string) (*S
 		return nil, fmt.Errorf("browser: start chrome: %w", err)
 	}
 
-	wsURL, err := waitForDevTools(ctx, port, 15*time.Second)
+	// 30s, not 15: a loaded machine can take far longer than 15s to bring Chrome's
+	// devtools endpoint up, and the failure mode — "connection refused" mapped to a
+	// 500 — looks like a product bug rather than a slow start.
+	wsURL, err := waitForDevTools(ctx, port, 30*time.Second)
 	if err != nil {
 		_ = cmd.Process.Kill()
 		return nil, err
@@ -232,14 +241,17 @@ func (m *Manager) launch(ctx context.Context, sandboxID, profileRoot string) (*S
 	}
 
 	session := &Session{
-		SandboxID: sandboxID,
-		Profile:   profile,
-		WSURL:     wsURL,
-		PID:       cmd.Process.Pid,
-		Started:   m.cfg.Now(),
-		proc:      cmd,
-		client:    client,
-		stopped:   make(chan struct{}),
+		SandboxID:  sandboxID,
+		Profile:    profile,
+		WSURL:      wsURL,
+		PID:        cmd.Process.Pid,
+		Started:    m.cfg.Now(),
+		proc:       cmd,
+		client:     client,
+		stopped:    make(chan struct{}),
+		tabs:       map[string]*cdp{},
+		debugHTTP:  fmt.Sprintf("http://127.0.0.1:%d", port),
+		defaultTab: client.sessionID,
 	}
 	// Watch the process so a crash shows up as a dead session, not a hang.
 	go func() {
@@ -305,6 +317,7 @@ func (s *Session) dead() bool {
 func (s *Session) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopped)
+		s.closeTabs()
 		// Ask the browser to close before killing it. Chromium flushes its profile
 		// (cookies, storage) on a normal shutdown; a bare Kill loses whatever was
 		// written since the last flush, which is how a login in the panel failed to
@@ -352,7 +365,13 @@ func (s *Session) Snapshot() Snapshot {
 // sent here rather than left to the caller: forgetting it looks exactly like a
 // frozen page.
 func (s *Session) Screencast(ctx context.Context, onFrame func(jpeg []byte, meta Meta)) error {
-	if err := s.client.call(ctx, "Page.enable", nil, nil); err != nil {
+	return s.screencastOn(ctx, s.client, onFrame)
+}
+
+// screencastOn is Screencast for a specific connection, so a tab can stream
+// without disturbing the default page.
+func (s *Session) screencastOn(ctx context.Context, client *cdp, onFrame func(jpeg []byte, meta Meta)) error {
+	if err := client.call(ctx, "Page.enable", nil, nil); err != nil {
 		return err
 	}
 	params := map[string]any{
@@ -362,13 +381,13 @@ func (s *Session) Screencast(ctx context.Context, onFrame func(jpeg []byte, meta
 		"maxHeight":     800,
 		"everyNthFrame": 1,
 	}
-	if err := s.client.call(ctx, "Page.startScreencast", params, nil); err != nil {
+	if err := client.call(ctx, "Page.startScreencast", params, nil); err != nil {
 		return err
 	}
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = s.client.call(stopCtx, "Page.stopScreencast", nil, nil)
+		_ = client.call(stopCtx, "Page.stopScreencast", nil, nil)
 	}()
 
 	type frame struct {
@@ -378,7 +397,7 @@ func (s *Session) Screencast(ctx context.Context, onFrame func(jpeg []byte, meta
 	}
 
 	for {
-		event, err := s.client.next(ctx)
+		event, err := client.next(ctx)
 		if err != nil {
 			return err
 		}
@@ -389,7 +408,7 @@ func (s *Session) Screencast(ctx context.Context, onFrame func(jpeg []byte, meta
 		if json.Unmarshal(event.Params, &f) != nil {
 			continue
 		}
-		if err := s.client.call(ctx, "Page.screencastFrameAck",
+		if err := client.call(ctx, "Page.screencastFrameAck",
 			map[string]any{"sessionId": f.SessionID}, nil); err != nil {
 			return err
 		}
@@ -467,6 +486,11 @@ type Input struct {
 
 // Dispatch forwards one input event to the page.
 func (s *Session) Dispatch(ctx context.Context, in Input) error {
+	return s.dispatchOn(ctx, s.client, in)
+}
+
+// dispatchOn sends one event through a specific connection.
+func (s *Session) dispatchOn(ctx context.Context, client *cdp, in Input) error {
 	switch in.Type {
 	case "move":
 		return s.client.call(ctx, "Input.dispatchMouseEvent", map[string]any{
@@ -478,7 +502,7 @@ func (s *Session) Dispatch(ctx context.Context, in Input) error {
 			button = "left"
 		}
 		for _, eventType := range []string{"mousePressed", "mouseReleased"} {
-			if err := s.client.call(ctx, "Input.dispatchMouseEvent", map[string]any{
+			if err := client.call(ctx, "Input.dispatchMouseEvent", map[string]any{
 				"type": eventType, "x": in.X, "y": in.Y,
 				"button": button, "clickCount": 1,
 			}, nil); err != nil {
@@ -487,12 +511,12 @@ func (s *Session) Dispatch(ctx context.Context, in Input) error {
 		}
 		return nil
 	case "scroll":
-		return s.client.call(ctx, "Input.dispatchMouseEvent", map[string]any{
+		return client.call(ctx, "Input.dispatchMouseEvent", map[string]any{
 			"type": "mouseWheel", "x": in.X, "y": in.Y,
 			"deltaX": in.DeltaX, "deltaY": in.DeltaY,
 		}, nil)
 	case "text":
-		return s.client.call(ctx, "Input.insertText", map[string]any{"text": in.Text}, nil)
+		return client.call(ctx, "Input.insertText", map[string]any{"text": in.Text}, nil)
 	case "key":
 		// keyDown then keyUp, which is what a real key press produces. `text`
 		// is only set for printable characters; sending it for Enter or an
@@ -503,12 +527,12 @@ func (s *Session) Dispatch(ctx context.Context, in Input) error {
 		if in.Text != "" {
 			payload["text"] = in.Text
 		}
-		if err := s.client.call(ctx, "Input.dispatchKeyEvent", payload, nil); err != nil {
+		if err := client.call(ctx, "Input.dispatchKeyEvent", payload, nil); err != nil {
 			return err
 		}
 		payload["type"] = "keyUp"
 		delete(payload, "text")
-		return s.client.call(ctx, "Input.dispatchKeyEvent", payload, nil)
+		return client.call(ctx, "Input.dispatchKeyEvent", payload, nil)
 	default:
 		return fmt.Errorf("browser: unknown input type %q", in.Type)
 	}
@@ -572,10 +596,15 @@ func decodeBase64(s string) []byte {
 // read it": the caller writes the bytes into the checkout, where the file tree and
 // the agent both see them (PRD FR-11.8).
 func (s *Session) Screenshot(ctx context.Context) ([]byte, error) {
+	return captureOn(ctx, s.client)
+}
+
+// captureOn takes a screenshot over a given connection (one tab).
+func captureOn(ctx context.Context, client *cdp) ([]byte, error) {
 	var out struct {
 		Data string `json:"data"`
 	}
-	err := s.client.call(ctx, "Page.captureScreenshot", map[string]any{
+	err := client.call(ctx, "Page.captureScreenshot", map[string]any{
 		"format":                "png",
 		"fromSurface":           true,
 		"captureBeyondViewport": false,
