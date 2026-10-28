@@ -19,6 +19,10 @@ Two build arguments matter:
 | `GOPROXY` | `https://goproxy.cn,direct` | Same, for Go modules. |
 | `APT_MIRROR` | `http://mirrors.aliyun.com` | `deb.debian.org` is often unreachable; a TLS-terminating proxy also breaks apt's signature check. |
 | `INSTALL_CHROMIUM` | `false` | Adds ~250 MB and the browser panel. Opt-in because it is the one part of the image that fails on a flaky link. |
+| `CJK_FONTS` | `true` | Installs `fonts-noto-cjk` for the sandbox browser. Without it every Chinese page renders as empty boxes inside the container. |
+
+The font package is fetched with `curl -C -` rather than by apt: it is a ~50 MB
+transfer, apt restarts it from zero on every failure, and this link drops.
 
 ```bash
 # with the browser panel

@@ -61,6 +61,13 @@ export function BrowserPanel({ sessionId, className }: BrowserPanelProps) {
       if (disposed) return;
       setStatus("open");
       setError(null);
+      // The size was measured before the socket existed, so the request made on
+      // mount had nowhere to go. Send it now: otherwise the first frame is the
+      // launch size and the page stays letterboxed until something resizes.
+      const measured = surfaceSizeRef.current;
+      if (measured.width >= 120 && measured.height >= 120) {
+        socket.send(JSON.stringify({ type: "resize", ...measured }));
+      }
     };
 
     socket.onmessage = async (event) => {
@@ -118,6 +125,38 @@ export function BrowserPanel({ sessionId, className }: BrowserPanelProps) {
     const socket = socketRef.current;
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
   }, []);
+
+  // The sandbox renders at the size the viewer shows, not at a fixed window size:
+  // collapsing the sidebar or resizing the window must reflow the page, otherwise
+  // a responsive site keeps its 1280x800 layout and gets letterboxed.
+  const surfaceRef = React.useRef<HTMLDivElement | null>(null);
+  const surfaceSizeRef = React.useRef({ width: 0, height: 0 });
+  React.useEffect(() => {
+    const surface = surfaceRef.current;
+    if (!surface) return;
+    let timer: number | undefined;
+    let last = { width: 0, height: 0 };
+    const push = () => {
+      const rect = surface.getBoundingClientRect();
+      const width = Math.round(rect.width);
+      const height = Math.round(rect.height);
+      if (width < 120 || height < 120) return;
+      if (Math.abs(width - last.width) < 8 && Math.abs(height - last.height) < 8) return;
+      last = { width, height };
+      surfaceSizeRef.current = last;
+      send({ type: "resize", width, height });
+    };
+    const observer = new ResizeObserver(() => {
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(push, 120);
+    });
+    observer.observe(surface);
+    push();
+    return () => {
+      observer.disconnect();
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [send, sessionId, generation]);
 
   // Page coordinates: the canvas is scaled to fit, so a click has to be mapped
   // back through the element's client size.
@@ -192,17 +231,22 @@ export function BrowserPanel({ sessionId, className }: BrowserPanelProps) {
       </div>
 
       <div
-        className="relative flex min-h-0 min-w-0 flex-1 items-center justify-center bg-muted/30 p-1"
+        ref={surfaceRef}
+        className="relative flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-hidden bg-muted/30"
         tabIndex={0}
         onKeyDown={handleKeyDown}
         data-testid="browser-surface"
       >
+        {/*
+          `block` matters: an inline canvas adds a descender gap, which shows up as
+          the panel being a few pixels taller than the frame it displays.
+        */}
         <canvas
           ref={canvasRef}
           onClick={handleClick}
           onWheel={handleWheel}
           onContextMenu={(event) => event.preventDefault()}
-          className={cn("max-h-full max-w-full object-contain", !live && "opacity-0")}
+          className={cn("block h-full w-full object-contain", !live && "opacity-0")}
           data-testid="browser-canvas"
         />
 

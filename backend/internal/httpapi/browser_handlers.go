@@ -26,6 +26,9 @@ type browserCommand struct {
 	URL string `json:"url,omitempty"`
 	// Input is used by input.
 	Input *browser.Input `json:"input,omitempty"`
+	// Width and Height are used by resize.
+	Width  int `json:"width,omitempty"`
+	Height int `json:"height,omitempty"`
 }
 
 // handleSessionBrowser streams the sandbox's browser to a viewer and forwards
@@ -160,6 +163,12 @@ func (s *server) handleSessionBrowser(w http.ResponseWriter, r *http.Request) {
 				if err := session.Dispatch(ctx, *cmd.Input); err != nil {
 					s.log.DebugContext(ctx, "browser input failed", "error", err.Error())
 				}
+			}
+		case "resize":
+			// A viewer that cannot see the whole page is worse than a small one:
+			// keep the render size close to the panel it is displayed in.
+			if err := session.Resize(ctx, cmd.Width, cmd.Height); err != nil {
+				s.log.DebugContext(ctx, "browser resize failed", "error", err.Error())
 			}
 		case "ping":
 			_ = conn.Write(ctx, websocket.MessageText, mustJSON(map[string]string{"type": "pong"}))

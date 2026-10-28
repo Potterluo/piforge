@@ -63,6 +63,7 @@ RUN set -e; \
     apt-get update -qq; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       ca-certificates curl tini \
+      fonts-noto-cjk \
     ; rm -rf /var/lib/apt/lists/*
 
 # Chromium is opt-in: it is ~250 MB of packages, and on a flaky link the transfer

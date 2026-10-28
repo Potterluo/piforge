@@ -403,6 +403,31 @@ func (s *Session) Navigate(ctx context.Context, url string) error {
 	return s.client.call(ctx, "Page.navigate", map[string]any{"url": url}, nil)
 }
 
+// Resize makes the page render at the viewer's size.
+//
+// The browser starts at a fixed window size, but the panel changes size whenever
+// the sidebar collapses or the window is resized. Without this the page keeps
+// rendering at 1280x800 and the viewer either letterboxes it or stretches it,
+// which is why a responsive site would not actually adapt.
+func (s *Session) Resize(ctx context.Context, width, height int) error {
+	if width < 120 || height < 120 {
+		return fmt.Errorf("browser: refusing to resize to %dx%d", width, height)
+	}
+	// Cap it: a 4K panel should not make the sandbox render a 4K page.
+	if width > 2560 {
+		width = 2560
+	}
+	if height > 1600 {
+		height = 1600
+	}
+	return s.client.call(ctx, "Emulation.setDeviceMetricsOverride", map[string]any{
+		"width":             width,
+		"height":            height,
+		"deviceScaleFactor": 1,
+		"mobile":            false,
+	}, nil)
+}
+
 // Input is one user action from the viewer.
 type Input struct {
 	// Type is click|move|key|text|scroll.
