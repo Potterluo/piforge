@@ -1,6 +1,11 @@
 import { expect, test } from "@playwright/test";
 import { apiWrite, login, openNewSession, sendPrompt, USER } from "./helpers";
 
+// Creating a project and a session before the panels can render takes a few
+// round trips; under a full-suite load the 60s budget on this file was the first
+// thing to run out. The assertions are unchanged.
+test.setTimeout(120_000);
+
 test.describe("workspace panels", () => {
   test("a written file appears in the tree and previews with highlighting", async ({ page }) => {
     await login(page, USER);

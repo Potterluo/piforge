@@ -47,11 +47,22 @@ test("the browser panel keeps several pages", async ({ page }) => {
     )
     .toBeGreaterThan(0);
 
-  // Closing it goes back to one page.
-  await page.locator(`[data-testid="browser-tab"][data-tab="${id}"]`).locator("xpath=..").getByTestId("browser-tab-close").click();
+  // Closing it goes back to one page. Asserted against the server as well: the strip
+  // is a 5s poll, so reading only the DOM can report a stale count.
+  await page.locator(`[data-testid="browser-tab-close"][data-tab="${id}"]`).click();
   await expect
-    .poll(async () => tabs.count(), { timeout: 20_000 })
+    .poll(
+      async () =>
+        page.evaluate(async ({ tabId, sessionId }) => {
+          const response = await fetch(`/v1/sessions/${sessionId}/browser/tabs`);
+          if (!response.ok) return -1;
+          const body = (await response.json()) as { tabs?: { id: string }[] };
+          return (body.tabs ?? []).some((tab) => tab.id === tabId) ? 2 : 1;
+        }, { tabId: id, sessionId }),
+      { timeout: 20_000 },
+    )
     .toBe(1);
+  await expect.poll(async () => tabs.count(), { timeout: 20_000 }).toBe(1);
 
   // The API agrees, and refuses to close the last page.
   // A busy browser legitimately answers 503 while it starts; poll rather than

@@ -30,6 +30,7 @@ import {
   type TreeEntry,
   type APIKey,
   type BrowserTab,
+  type CompareRow,
   type User,
 } from "@/lib/types";
 
@@ -165,6 +166,9 @@ export const sessions = {
   },
   get: (id: string) =>
     request<{ session: Session; status?: RuntimeStatus; project?: Project }>(`/v1/sessions/${id}`),
+  /** Two or three branches side by side (FR-2.5). */
+  compare: (ids: string[]) =>
+    request<{ rows: CompareRow[] }>(`/v1/sessions/compare?ids=${ids.join(",")}`),
   create: (projectId: string, input: CreateSessionInput) =>
     request<{ session: Session }>(`/v1/projects/${projectId}/sessions`, {
       method: "POST",

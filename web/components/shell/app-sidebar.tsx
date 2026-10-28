@@ -15,6 +15,7 @@ import {
   Download,
   FolderGit2,
   GitBranch,
+  GitCompare,
   GitMerge,
   LogOut,
   MessageSquareDashed,
@@ -610,6 +611,21 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
               导出 Markdown
             </DropdownMenuItem>
           ) : null}
+          <DropdownMenuItem
+            data-testid="session-compare"
+            onClick={() => {
+              setMenuOpen(false);
+              // Compare against the session this one came from: that is the choice a
+              // person is actually making ("is this attempt better than where I
+              // started?").
+              const other = session.parent_id || session.id;
+              const ids = session.parent_id ? [session.id, other] : [other, other];
+              router.push(`/p/${projectId}/compare?ids=${ids.join(",")}`);
+            }}
+          >
+            <GitCompare />
+            对比
+          </DropdownMenuItem>
           {session.kind === "branch" ? (
             <DropdownMenuItem
               data-testid="session-adopt"

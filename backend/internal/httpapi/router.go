@@ -179,6 +179,7 @@ func (s *server) routes() http.Handler {
 
 	// Sessions.
 	mux.Handle("GET /v1/sessions", s.authed(s.handleListSessions))
+	mux.Handle("GET /v1/sessions/compare", s.authed(s.handleCompareSessions))
 	mux.Handle("GET /v1/sessions/{id}", s.authed(s.handleGetSession))
 	mux.Handle("PATCH /v1/sessions/{id}", s.mutatingBearer(s.handlePatchSession))
 	mux.Handle("GET /v1/sessions/{id}/status", s.authed(s.handleSessionStatus))

@@ -456,3 +456,22 @@ export interface BrowserTab {
   url: string;
   title: string;
 }
+/** One column of the branch comparison screen (PRD FR-2.5). */
+export interface CompareRow {
+  session_id: string;
+  title: string;
+  kind: string;
+  status: string;
+  model_ref?: string;
+  last_active_at: string;
+  user_messages: number;
+  tool_calls: number;
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number;
+  files_changed: number;
+  additions: number;
+  deletions: number;
+  /** Present when the change size could not be measured, instead of a fake zero. */
+  diff_error?: string;
+}

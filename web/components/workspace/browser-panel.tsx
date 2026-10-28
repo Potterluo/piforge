@@ -345,6 +345,7 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
                 type="button"
                 aria-label="关闭标签页"
                 data-testid="browser-tab-close"
+                data-tab={tab.id}
                 className="px-1 text-[11px] text-muted-foreground hover:text-foreground"
                 onClick={() => void closeTab(tab.id)}
               >
