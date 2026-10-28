@@ -114,3 +114,52 @@ func (s *server) handleDeleteProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	writeOK(w)
 }
+
+// handleUpdateProvider patches one of the caller's providers.
+//
+// Patching is what makes model management usable: a typo in a model id, a
+// rotated key or a changed endpoint are all edits to an existing provider, and
+// delete-and-recreate would discard the key that was typed once.
+func (s *server) handleUpdateProvider(w http.ResponseWriter, r *http.Request) {
+	user := auth.MustUser(r.Context())
+
+	var in struct {
+		API      *string               `json:"api"`
+		BaseURL  *string               `json:"base_url"`
+		Models   []contracts.ModelSpec `json:"models"`
+		APIKey   string                `json:"api_key"`
+		ClearKey bool                  `json:"clear_key"`
+		Enabled  *bool                 `json:"enabled"`
+	}
+	if err := decodeJSON(r, &in); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	patch := store.ProviderPatch{
+		API:      in.API,
+		BaseURL:  in.BaseURL,
+		Models:   in.Models,
+		ClearKey: in.ClearKey,
+		Enabled:  in.Enabled,
+	}
+	if in.APIKey != "" {
+		if s.deps.Secrets == nil {
+			s.fail(w, r, apiErr(contracts.ErrInternal, "secret storage is not configured on this server"))
+			return
+		}
+		sealed, err := s.deps.Secrets.SealString(in.APIKey)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		patch.KeyCipher = sealed
+	}
+
+	p, err := s.deps.Store.UpdateProvider(r.Context(), user.ID, pathID(r), patch)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, providerResponse{Provider: p})
+}

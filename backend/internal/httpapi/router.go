@@ -210,6 +210,7 @@ func (s *server) routes() http.Handler {
 	// Providers.
 	mux.Handle("GET /v1/providers", s.authed(s.handleListProviders))
 	mux.Handle("POST /v1/providers", s.mutating(s.handleCreateProvider))
+	mux.Handle("PATCH /v1/providers/{id}", s.mutating(s.handleUpdateProvider))
 	mux.Handle("DELETE /v1/providers/{id}", s.mutating(s.handleDeleteProvider))
 	mux.Handle("POST /v1/providers/{id}/test", s.mutating(s.handleTestProvider))
 
@@ -229,6 +230,8 @@ func (s *server) routes() http.Handler {
 
 	// Admin.
 	mux.Handle("GET /v1/admin/users", s.authed(s.handleAdminUsers))
+	mux.Handle("POST /v1/admin/users", s.mutating(s.handleAdminCreateUser))
+	mux.Handle("PATCH /v1/admin/users/{id}", s.mutating(s.handleAdminUpdateUser))
 
 	// Anything else is a JSON 404 rather than Go's text/plain default, so the
 	// client's error parser always has the same shape to read.

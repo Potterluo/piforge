@@ -289,10 +289,25 @@ export interface CreateProviderInput {
   models?: { id: string; name?: string; context_window?: number }[];
 }
 
+/**
+ * A patch, not a replacement: the caller only sends what changed, and an absent
+ * `api_key` means "keep the stored one" so a model-list edit never asks the user
+ * to paste their key again.
+ */
+export interface UpdateProviderInput {
+  api?: string;
+  base_url?: string;
+  models?: { id: string; name?: string; context_window?: number }[];
+  api_key?: string;
+  clear_key?: boolean;
+}
+
 export const providers = {
   list: () => request<{ providers: Provider[] }>("/v1/providers"),
   create: (input: CreateProviderInput) =>
     request<{ provider: Provider }>("/v1/providers", { method: "POST", body: input }),
+  update: (id: string, input: UpdateProviderInput) =>
+    request<{ provider: Provider }>(`/v1/providers/${id}`, { method: "PATCH", body: input }),
   remove: (id: string) => request<{ ok: boolean }>(`/v1/providers/${id}`, { method: "DELETE" }),
   test: (id: string) =>
     request<{ ok: boolean; message: string }>(`/v1/providers/${id}/test`, { method: "POST" }),
@@ -322,8 +337,25 @@ export const mcp = {
   remove: (id: string) => request<{ ok: boolean }>(`/v1/mcp/servers/${id}`, { method: "DELETE" }),
 };
 
+export interface CreateUserInput {
+  email: string;
+  password: string;
+  display_name?: string;
+  role?: "user" | "admin";
+}
+
+export interface UpdateUserInput {
+  role?: "user" | "admin";
+  status?: "active" | "disabled";
+  password?: string;
+}
+
 export const admin = {
   users: () => request<{ users: User[] }>("/v1/admin/users"),
+  createUser: (input: CreateUserInput) =>
+    request<{ users: User[] }>("/v1/admin/users", { method: "POST", body: input }),
+  updateUser: (id: string, input: UpdateUserInput) =>
+    request<{ users: User[] }>(`/v1/admin/users/${id}`, { method: "PATCH", body: input }),
 };
 
 export const api = { auth, projects, sessions, files, git, providers, skills, mcp, admin };

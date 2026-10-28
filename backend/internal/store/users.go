@@ -305,3 +305,48 @@ func isUniqueViolation(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "unique constraint") || strings.Contains(msg, "constraint failed: unique")
 }
+
+// SetUserRole changes one account's role.
+//
+// Two guards, both about not locking the deployment out of its own admin area:
+// the caller must be an active admin, and the last remaining admin cannot be
+// demoted. A product where nobody can reach the user list is worse than one
+// where the wrong person is an admin.
+func (s *Store) SetUserRole(ctx context.Context, callerID, userID string, role contracts.Role) error {
+	if err := s.requireAdmin(ctx, callerID); err != nil {
+		return err
+	}
+	if role != contracts.RoleUser && role != contracts.RoleAdmin {
+		return fmt.Errorf("store: set role: unknown role %q: %w", role, ErrInvalid)
+	}
+	if role == contracts.RoleUser {
+		admins, err := s.countAdmins(ctx)
+		if err != nil {
+			return err
+		}
+		current, err := s.UserByID(ctx, userID)
+		if err != nil {
+			return err
+		}
+		if current.Role == contracts.RoleAdmin && admins <= 1 {
+			return fmt.Errorf("store: the last admin cannot be demoted: %w", ErrConflict)
+		}
+	}
+	res, err := s.w.ExecContext(ctx,
+		`UPDATE users SET role = ? WHERE id = ? AND deleted_at IS NULL`, string(role), userID)
+	if err != nil {
+		return fmt.Errorf("store: set role for %q: %w", userID, err)
+	}
+	return requireOneRow(res, "store: set role for "+userID)
+}
+
+// countAdmins returns how many active admins exist.
+func (s *Store) countAdmins(ctx context.Context) (int, error) {
+	var n int
+	err := s.r.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM users WHERE role = ? AND deleted_at IS NULL`, string(contracts.RoleAdmin)).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: count admins: %w", err)
+	}
+	return n, nil
+}

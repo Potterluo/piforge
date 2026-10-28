@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { KeyRound, Plus, Trash } from "lucide-react";
+import { KeyRound, Pencil, Plus, Trash } from "lucide-react";
 
 import {
   AlertDialog,
@@ -42,6 +42,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { api, type CreateProviderInput } from "@/lib/api/client";
+import type { Provider } from "@/lib/types";
 import { qk, useProviders } from "@/lib/session/queries";
 
 const API_KINDS = [
@@ -73,6 +74,14 @@ export default function ProvidersPage() {
   const [apiKey, setApiKey] = useState("");
   const [modelsText, setModelsText] = useState("");
 
+  // Edit state: a model list or an endpoint changes far more often than a key,
+  // so editing never asks for the key again — an empty field means "leave it".
+  const [editing, setEditing] = useState<Provider | null>(null);
+  const [editApi, setEditApi] = useState("openai-compat");
+  const [editBaseUrl, setEditBaseUrl] = useState("");
+  const [editModels, setEditModels] = useState("");
+  const [editKey, setEditKey] = useState("");
+
   const create = useMutation({
     mutationFn: (input: CreateProviderInput) => api.providers.create(input),
     onSuccess: () => {
@@ -100,6 +109,27 @@ export default function ProvidersPage() {
     },
     onError: (error) => {
       toast.error("删除失败", {
+        description: error instanceof Error ? error.message : "未知错误",
+      });
+    },
+  });
+
+  const update = useMutation({
+    mutationFn: (input: { id: string; api: string; base_url: string; models: string; api_key: string }) =>
+      api.providers.update(input.id, {
+        api: input.api,
+        base_url: input.base_url,
+        models: parseModels(input.models),
+        api_key: input.api_key.trim() || undefined,
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: qk.providers });
+      setEditing(null);
+      setEditKey("");
+      toast.success("Provider 已更新");
+    },
+    onError: (error) => {
+      toast.error("更新失败", {
         description: error instanceof Error ? error.message : "未知错误",
       });
     },
@@ -211,6 +241,23 @@ export default function ProvidersPage() {
                   {test.isPending && test.variables === provider.id ? <Spinner /> : null}
                   测试
                 </Button>
+                {provider.source === "custom" ? (
+                  <Button
+                    size="xs"
+                    variant="ghost"
+                    data-testid="provider-edit"
+                    onClick={() => {
+                      setEditing(provider);
+                      setEditApi(provider.api);
+                      setEditBaseUrl(provider.base_url ?? "");
+                      setEditModels(provider.models.map((model) => model.id).join("\n"));
+                      setEditKey("");
+                    }}
+                  >
+                    <Pencil />
+                    编辑
+                  </Button>
+                ) : null}
                 {provider.source === "custom" ? (
                   <AlertDialog>
                     <AlertDialogTrigger
@@ -343,6 +390,92 @@ export default function ProvidersPage() {
               <Button type="submit" data-testid="provider-submit" disabled={create.isPending}>
                 {create.isPending ? <Spinner /> : null}
                 添加
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={editing !== null} onOpenChange={(open) => (open ? null : setEditing(null))}>
+        <DialogContent className="sm:max-w-lg">
+          <form
+            className="flex flex-col gap-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!editing) return;
+              update.mutate({
+                id: editing.id,
+                api: editApi,
+                base_url: editBaseUrl.trim(),
+                models: editModels,
+                api_key: editKey,
+              });
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>编辑「{editing?.name}」</DialogTitle>
+              <DialogDescription>
+                模型列表按行填写，可以是任意 id——Pi 只要求端点说 OpenAI 或 Anthropic 的协议。
+              </DialogDescription>
+            </DialogHeader>
+
+            <FieldGroup>
+              <Field>
+                <FieldLabel htmlFor="edit-provider-api">接口协议</FieldLabel>
+                <Select items={API_KINDS} value={editApi} onValueChange={(value) => setEditApi(String(value))}>
+                  <SelectTrigger id="edit-provider-api" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {API_KINDS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="edit-provider-base">Base URL</FieldLabel>
+                <Input
+                  id="edit-provider-base"
+                  value={editBaseUrl}
+                  onChange={(event) => setEditBaseUrl(event.target.value)}
+                  placeholder="https://api.example.com/v1"
+                  className="font-mono text-xs"
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="edit-provider-models">模型</FieldLabel>
+                <Textarea
+                  id="edit-provider-models"
+                  data-testid="edit-provider-models"
+                  value={editModels}
+                  onChange={(event) => setEditModels(event.target.value)}
+                  rows={4}
+                  placeholder={"gpt-4o\nclaude-sonnet-4"}
+                  className="font-mono text-xs"
+                />
+                <FieldDescription>每行一个模型 id，第一个会作为默认值。</FieldDescription>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="edit-provider-key">新的 API Key（可选）</FieldLabel>
+                <Input
+                  id="edit-provider-key"
+                  type="password"
+                  value={editKey}
+                  onChange={(event) => setEditKey(event.target.value)}
+                  placeholder="留空表示沿用已保存的 key"
+                />
+              </Field>
+            </FieldGroup>
+
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setEditing(null)}>
+                取消
+              </Button>
+              <Button type="submit" disabled={update.isPending}>
+                保存
               </Button>
             </DialogFooter>
           </form>

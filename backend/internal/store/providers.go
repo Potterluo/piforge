@@ -358,3 +358,83 @@ func nullBytes(b []byte) any {
 	}
 	return b
 }
+
+// UpdateProvider patches a provider the caller owns.
+//
+// Patching rather than delete-and-recreate matters for the key: rotating a URL or
+// a model list must not throw away a key the user pasted once. An empty KeyCipher
+// means "leave the stored key alone"; callers that mean "remove the key" pass
+// ClearKey.
+func (s *Store) UpdateProvider(ctx context.Context, userID, providerID string, in ProviderPatch) (*contracts.Provider, error) {
+	current, err := s.Provider(ctx, userID, providerID)
+	if err != nil {
+		return nil, err
+	}
+	if current.Source != contracts.SourceCustom {
+		// An admin's shared provider is not a user's to edit, even when it is
+		// visible to them; editing it would silently change every other tenant.
+		return nil, fmt.Errorf("store: update provider %q: %w", providerID, ErrForbidden)
+	}
+
+	sets := []string{}
+	args := []any{}
+	if in.API != nil {
+		if strings.TrimSpace(*in.API) == "" {
+			return nil, fmt.Errorf("store: update provider: api is required: %w", ErrInvalid)
+		}
+		sets = append(sets, "api = ?")
+		args = append(args, *in.API)
+	}
+	if in.BaseURL != nil {
+		if strings.TrimSpace(*in.BaseURL) == "" {
+			return nil, fmt.Errorf("store: update provider: base url is required: %w", ErrInvalid)
+		}
+		sets = append(sets, "base_url = ?")
+		args = append(args, *in.BaseURL)
+	}
+	if in.Models != nil {
+		models, merr := json.Marshal(modelsOrEmpty(in.Models))
+		if merr != nil {
+			return nil, fmt.Errorf("store: update provider %q: encode models: %w", providerID, merr)
+		}
+		sets = append(sets, "models = ?")
+		args = append(args, string(models))
+	}
+	if len(in.KeyCipher) > 0 {
+		sets = append(sets, "key_cipher = ?")
+		args = append(args, in.KeyCipher)
+	} else if in.ClearKey {
+		sets = append(sets, "key_cipher = NULL")
+	}
+	if in.Enabled != nil {
+		sets = append(sets, "enabled = ?")
+		args = append(args, boolInt(*in.Enabled))
+	}
+	if len(sets) == 0 {
+		return current, nil
+	}
+	// The providers table has no updated_at column: created_at is the only
+	// timestamp it keeps, and adding one means a migration for a field nothing
+	// reads. The edit is still observable through the row it changes.
+	args = append(args, providerID)
+
+	res, err := s.w.ExecContext(ctx,
+		`UPDATE providers SET `+strings.Join(sets, ", ")+` WHERE id = ? AND scope = 'user'`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: update provider %q: %w", providerID, err)
+	}
+	if err := requireOneRow(res, "store: update provider "+providerID); err != nil {
+		return nil, err
+	}
+	return s.Provider(ctx, userID, providerID)
+}
+
+// ProviderPatch is a partial provider update; nil means "leave as is".
+type ProviderPatch struct {
+	API       *string
+	BaseURL   *string
+	Models    []contracts.ModelSpec
+	KeyCipher []byte
+	ClearKey  bool
+	Enabled   *bool
+}

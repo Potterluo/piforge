@@ -71,6 +71,7 @@ func TestEveryRouteIsRegistered(t *testing.T) {
 		{http.MethodPost, "/v1/sessions/{id}/git/checkout"},
 		{http.MethodGet, "/v1/providers"},
 		{http.MethodPost, "/v1/providers"},
+		{http.MethodPatch, "/v1/providers/{id}"},
 		{http.MethodDelete, "/v1/providers/{id}"},
 		{http.MethodPost, "/v1/providers/{id}/test"},
 		{http.MethodGet, "/v1/skills"},
@@ -80,6 +81,8 @@ func TestEveryRouteIsRegistered(t *testing.T) {
 		{http.MethodPost, "/v1/mcp/servers"},
 		{http.MethodDelete, "/v1/mcp/servers/{id}"},
 		{http.MethodGet, "/v1/admin/users"},
+		{http.MethodPost, "/v1/admin/users"},
+		{http.MethodPatch, "/v1/admin/users/{id}"},
 		{http.MethodGet, "/healthz"},
 		{http.MethodGet, "/readyz"},
 	}

@@ -24,6 +24,16 @@ import {
 } from "@/components/ui/attachment";
 import { Button } from "@/components/ui/button";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import {
   InputGroup,
   InputGroupAddon,
   InputGroupButton,
@@ -256,7 +266,15 @@ export function Composer({
     }
   };
 
-  const modelItems = models?.length ? models : [];
+  // A model id the provider list does not know yet. Pi takes any id the endpoint
+  // accepts, so typing one here must work without a trip to Settings first: the
+  // gateway forwards it and the session's model config gains it at spawn time.
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customModel, setCustomModel] = useState("");
+
+  const modelItems = models?.length
+    ? [...models, { value: "__custom", label: "自定义模型 id…" }]
+    : [];
 
   return (
     <div className={cn("flex flex-col gap-2 border-t border-border bg-background p-3", className)}>
@@ -442,6 +460,11 @@ export function Composer({
               value={model}
               onValueChange={(value) => {
                 const next = String(value);
+                if (next === "__custom") {
+                  setCustomModel(model === "inherit" ? "" : model);
+                  setCustomOpen(true);
+                  return;
+                }
                 setModelOverride(next);
                 if (next !== "inherit") {
                   void persistSetting({ model_ref: next });
@@ -495,6 +518,49 @@ export function Composer({
           </Select>
         </div>
       </div>
+
+      <Dialog open={customOpen} onOpenChange={setCustomOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>自定义模型</DialogTitle>
+            <DialogDescription>
+              格式是「provider/模型 id」。id 由端点决定，Pi 会把它原样发给 provider，所以端点认什么就填什么。
+            </DialogDescription>
+          </DialogHeader>
+          <Field>
+            <FieldLabel htmlFor="custom-model">模型</FieldLabel>
+            <Input
+              id="custom-model"
+              data-testid="custom-model-input"
+              value={customModel}
+              onChange={(event) => setCustomModel(event.target.value)}
+              placeholder="openrouter/anthropic/claude-sonnet-4"
+              className="font-mono text-xs"
+              autoFocus
+            />
+            <FieldDescription>
+              新 id 会写进这个会话的模型配置，提供给 Pi 使用；不改动 provider 本身。
+            </FieldDescription>
+          </Field>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCustomOpen(false)}>
+              取消
+            </Button>
+            <Button
+              data-testid="custom-model-submit"
+              disabled={!/^[^/]+\/.+$/.test(customModel.trim())}
+              onClick={() => {
+                const next = customModel.trim();
+                setModelOverride(next);
+                void persistSetting({ model_ref: next });
+                setCustomOpen(false);
+              }}
+            >
+              使用
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
