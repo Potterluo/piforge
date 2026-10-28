@@ -665,3 +665,18 @@ type SessionLogs struct {
 type LogSource interface {
 	Logs(ctx context.Context, sessionID string) (*SessionLogs, error)
 }
+
+// APIKey is a bearer token a user creates for scripts (PRD FR-13.9). The
+// plaintext exists only in the creation response; everything here describes it.
+type APIKey struct {
+	ID     string `json:"id"`
+	UserID string `json:"user_id"`
+	Name   string `json:"name"`
+	// Prefix is the readable head of the token, shown in the list so a person can
+	// tell two keys apart without ever seeing the secret again.
+	Prefix     string    `json:"prefix"`
+	CreatedAt  time.Time `json:"created_at"`
+	LastUsedAt time.Time `json:"last_used_at,omitzero"`
+	Revoked    bool      `json:"revoked"`
+	RevokedAt  time.Time `json:"revoked_at,omitzero"`
+}

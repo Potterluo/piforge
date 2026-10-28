@@ -163,6 +163,9 @@ func (a *Authenticator) Login(ctx context.Context, email, password string) (*Ses
 }
 
 // Authenticate resolves the session cookie on r to a user.
+//
+// A bearer token is handled by the HTTP layer before this is called (it needs the
+// store), so this stays the cookie path and nothing else.
 func (a *Authenticator) Authenticate(ctx context.Context, r *http.Request) (*contracts.User, error) {
 	c, err := r.Cookie(CookieSession)
 	if err != nil || c.Value == "" {

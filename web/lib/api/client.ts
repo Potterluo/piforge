@@ -28,6 +28,7 @@ import {
   type SessionStats,
   type Skill,
   type TreeEntry,
+  type APIKey,
   type User,
 } from "@/lib/types";
 
@@ -422,5 +423,21 @@ export const admin = {
     request<{ users: User[] }>(`/v1/admin/users/${id}`, { method: "PATCH", body: input }),
 };
 
-export const api = { auth, projects, sessions, files, git, providers, skills, mcp, admin, support, features };
+// ---------------------------------------------------------------------------
+// API keys (FR-13.9)
+// ---------------------------------------------------------------------------
+
+export const apiKeys = {
+  list: () => request<{ api_keys: APIKey[] }>("/v1/api-keys"),
+  /** The token is returned once, here; nothing can read it back later. */
+  create: (name: string) =>
+    request<{ api_key: APIKey; token: string }>("/v1/api-keys", {
+      method: "POST",
+      body: { name },
+    }),
+  revoke: (id: string) =>
+    request<{ api_key: APIKey }>(`/v1/api-keys/${id}`, { method: "DELETE" }),
+};
+
+export const api = { auth, projects, sessions, files, git, providers, skills, mcp, admin, support, features, apiKeys };
 export default api;

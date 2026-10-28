@@ -438,3 +438,15 @@ export interface SupportNotice {
   session_title?: string;
   admin_email?: string;
 }
+/** A bearer token a user created for scripts (PRD FR-13.9). */
+export interface APIKey {
+  id: string;
+  user_id: string;
+  name: string;
+  /** The readable head of the token, so two keys can be told apart. */
+  prefix: string;
+  created_at: string;
+  last_used_at?: string;
+  revoked: boolean;
+  revoked_at?: string;
+}

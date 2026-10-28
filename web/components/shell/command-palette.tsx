@@ -112,6 +112,10 @@ export function CommandPalette({
             <KeyRound />
             模型与凭据
           </CommandItem>
+          <CommandItem onSelect={() => run(() => router.push("/settings/api-keys"))}>
+            <KeyRound />
+            API Key
+          </CommandItem>
           <CommandItem onSelect={() => run(() => router.push("/settings/skills"))}>
             <Sparkles />
             Skill 中心

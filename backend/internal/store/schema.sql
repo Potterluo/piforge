@@ -272,3 +272,16 @@ CREATE TABLE IF NOT EXISTS feature_flags (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (user_id, flag)
 );
+-- ============ api keys: a bearer token for scripts (PRD FR-13.9) ============
+CREATE TABLE IF NOT EXISTS api_keys (
+    id           TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    prefix       TEXT NOT NULL,
+    token_hash   TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    last_used_at TEXT,
+    revoked_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS api_keys_user ON api_keys (user_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS api_keys_hash ON api_keys (token_hash);

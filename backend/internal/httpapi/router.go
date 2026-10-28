@@ -173,85 +173,88 @@ func (s *server) routes() http.Handler {
 
 	// Projects.
 	mux.Handle("GET /v1/projects", s.authed(s.handleListProjects))
-	mux.Handle("POST /v1/projects", s.mutating(s.handleCreateProject))
+	mux.Handle("POST /v1/projects", s.mutatingBearer(s.handleCreateProject))
 	mux.Handle("GET /v1/projects/{id}", s.authed(s.handleGetProject))
-	mux.Handle("POST /v1/projects/{id}/sessions", s.mutating(s.handleCreateSession))
+	mux.Handle("POST /v1/projects/{id}/sessions", s.mutatingBearer(s.handleCreateSession))
 
 	// Sessions.
 	mux.Handle("GET /v1/sessions", s.authed(s.handleListSessions))
 	mux.Handle("GET /v1/sessions/{id}", s.authed(s.handleGetSession))
-	mux.Handle("PATCH /v1/sessions/{id}", s.mutating(s.handlePatchSession))
+	mux.Handle("PATCH /v1/sessions/{id}", s.mutatingBearer(s.handlePatchSession))
 	mux.Handle("GET /v1/sessions/{id}/status", s.authed(s.handleSessionStatus))
-	mux.Handle("DELETE /v1/sessions/{id}", s.mutating(s.handleDeleteSession))
+	mux.Handle("DELETE /v1/sessions/{id}", s.mutatingBearer(s.handleDeleteSession))
 	mux.Handle("GET /v1/sessions/{id}/export", s.authed(s.handleExportSession))
 	mux.Handle("GET /v1/sessions/{id}/stats", s.authed(s.handleSessionStats))
 	mux.Handle("GET /v1/sessions/{id}/logs", s.authed(s.handleSessionLogs))
 	mux.Handle("GET /v1/sessions/{id}/pty", s.authed(s.handleSessionPTY))
 	mux.Handle("GET /v1/sessions/{id}/tooling", s.authed(s.handleSessionTooling))
 	mux.Handle("GET /v1/sessions/{id}/browser", s.authed(s.handleSessionBrowser))
-	mux.Handle("POST /v1/sessions/{id}/browser/screenshot", s.mutating(s.handleBrowserScreenshot))
-	mux.Handle("POST /v1/sessions/{id}/messages", s.mutating(s.handlePostMessage))
-	mux.Handle("POST /v1/sessions/{id}/interrupt", s.mutating(s.handleInterrupt))
+	mux.Handle("POST /v1/sessions/{id}/browser/screenshot", s.mutatingBearer(s.handleBrowserScreenshot))
+	mux.Handle("POST /v1/sessions/{id}/messages", s.mutatingBearer(s.handlePostMessage))
+	mux.Handle("POST /v1/sessions/{id}/interrupt", s.mutatingBearer(s.handleInterrupt))
 	mux.Handle("GET /v1/sessions/{id}/events", s.authed(s.handleEvents))
 	mux.Handle("GET /v1/sessions/{id}/entries", s.authed(s.handleEntries))
 	mux.Handle("GET /v1/sessions/{id}/tree", s.authed(s.handleTree))
 	mux.Handle("GET /v1/sessions/{id}/fork-points", s.authed(s.handleForkPoints))
-	mux.Handle("POST /v1/sessions/{id}/fork", s.mutating(s.handleFork))
-	mux.Handle("POST /v1/sessions/{id}/sidecar", s.mutating(s.handleSidecar))
-	mux.Handle("POST /v1/sessions/{id}/promote", s.mutating(s.handlePromoteSidecar))
-	mux.Handle("POST /v1/sessions/{id}/compact", s.mutating(s.handleCompact))
+	mux.Handle("POST /v1/sessions/{id}/fork", s.mutatingBearer(s.handleFork))
+	mux.Handle("POST /v1/sessions/{id}/sidecar", s.mutatingBearer(s.handleSidecar))
+	mux.Handle("POST /v1/sessions/{id}/promote", s.mutatingBearer(s.handlePromoteSidecar))
+	mux.Handle("POST /v1/sessions/{id}/compact", s.mutatingBearer(s.handleCompact))
 
 	// Workspace: files, search, git. All delegate to Deps.Workspace.
 	mux.Handle("GET /v1/sessions/{id}/files/tree", s.authed(s.handleFileTree))
 	mux.Handle("GET /v1/sessions/{id}/files", s.authed(s.handleReadFile))
-	mux.Handle("PUT /v1/sessions/{id}/files", s.mutating(s.handleWriteFile))
-	mux.Handle("DELETE /v1/sessions/{id}/files", s.mutating(s.handleDeleteFile))
+	mux.Handle("PUT /v1/sessions/{id}/files", s.mutatingBearer(s.handleWriteFile))
+	mux.Handle("DELETE /v1/sessions/{id}/files", s.mutatingBearer(s.handleDeleteFile))
 	mux.Handle("GET /v1/sessions/{id}/search", s.authed(s.handleSearch))
 	mux.Handle("GET /v1/sessions/{id}/git/status", s.authed(s.handleGitStatus))
 	mux.Handle("GET /v1/sessions/{id}/git/diff", s.authed(s.handleGitDiff))
 	mux.Handle("GET /v1/sessions/{id}/git/log", s.authed(s.handleGitLog))
-	mux.Handle("POST /v1/sessions/{id}/git/stage", s.mutating(s.handleGitStage))
-	mux.Handle("POST /v1/sessions/{id}/git/unstage", s.mutating(s.handleGitUnstage))
-	mux.Handle("POST /v1/sessions/{id}/git/commit", s.mutating(s.handleGitCommit))
-	mux.Handle("POST /v1/sessions/{id}/git/branch", s.mutating(s.handleGitBranch))
-	mux.Handle("POST /v1/sessions/{id}/git/checkout", s.mutating(s.handleGitCheckout))
+	mux.Handle("POST /v1/sessions/{id}/git/stage", s.mutatingBearer(s.handleGitStage))
+	mux.Handle("POST /v1/sessions/{id}/git/unstage", s.mutatingBearer(s.handleGitUnstage))
+	mux.Handle("POST /v1/sessions/{id}/git/commit", s.mutatingBearer(s.handleGitCommit))
+	mux.Handle("POST /v1/sessions/{id}/git/branch", s.mutatingBearer(s.handleGitBranch))
+	mux.Handle("POST /v1/sessions/{id}/git/checkout", s.mutatingBearer(s.handleGitCheckout))
 
 	// Providers.
+	mux.Handle("GET /v1/api-keys", s.authed(s.handleListAPIKeys))
+	mux.Handle("POST /v1/api-keys", s.mutating(s.handleCreateAPIKey))
+	mux.Handle("DELETE /v1/api-keys/{id}", s.mutating(s.handleRevokeAPIKey))
 	mux.Handle("GET /v1/providers", s.authed(s.handleListProviders))
-	mux.Handle("POST /v1/providers", s.mutating(s.handleCreateProvider))
-	mux.Handle("PATCH /v1/providers/{id}", s.mutating(s.handleUpdateProvider))
-	mux.Handle("DELETE /v1/providers/{id}", s.mutating(s.handleDeleteProvider))
-	mux.Handle("POST /v1/providers/{id}/test", s.mutating(s.handleTestProvider))
+	mux.Handle("POST /v1/providers", s.mutatingBearer(s.handleCreateProvider))
+	mux.Handle("PATCH /v1/providers/{id}", s.mutatingBearer(s.handleUpdateProvider))
+	mux.Handle("DELETE /v1/providers/{id}", s.mutatingBearer(s.handleDeleteProvider))
+	mux.Handle("POST /v1/providers/{id}/test", s.mutatingBearer(s.handleTestProvider))
 
 	// Skills (PRD §5.8).
 	mux.Handle("GET /v1/skills", s.authed(s.handleListSkills))
-	mux.Handle("POST /v1/skills", s.mutating(s.handleCreateSkill))
-	mux.Handle("DELETE /v1/skills/{id}", s.mutating(s.handleDeleteSkill))
-	mux.Handle("PUT /v1/skills/{id}/bundle", s.mutating(s.handleUploadSkillBundle))
+	mux.Handle("POST /v1/skills", s.mutatingBearer(s.handleCreateSkill))
+	mux.Handle("DELETE /v1/skills/{id}", s.mutatingBearer(s.handleDeleteSkill))
+	mux.Handle("PUT /v1/skills/{id}/bundle", s.mutatingBearer(s.handleUploadSkillBundle))
 	// The bundle is content, not configuration: reading it back lets the editor
 	// show what is actually on disk.
 	mux.Handle("GET /v1/skills/{id}/bundle", s.authed(s.handleReadSkillBundle))
 
 	// MCP servers (PRD §5.9).
 	mux.Handle("GET /v1/mcp/servers", s.authed(s.handleListMCPServers))
-	mux.Handle("POST /v1/mcp/servers", s.mutating(s.handleCreateMCPServer))
-	mux.Handle("DELETE /v1/mcp/servers/{id}", s.mutating(s.handleDeleteMCPServer))
+	mux.Handle("POST /v1/mcp/servers", s.mutatingBearer(s.handleCreateMCPServer))
+	mux.Handle("DELETE /v1/mcp/servers/{id}", s.mutatingBearer(s.handleDeleteMCPServer))
 
 	// Admin.
 	mux.Handle("GET /v1/admin/status", s.authed(s.handleAdminStatus))
 	mux.Handle("GET /v1/features", s.authed(s.handleFeatures))
 	mux.Handle("GET /v1/admin/users/{id}/features", s.authed(s.handleAdminUserFeatures))
-	mux.Handle("POST /v1/admin/users/{id}/features", s.mutating(s.handleAdminSetUserFeature))
-	mux.Handle("POST /v1/admin/support-access", s.mutating(s.handleCreateSupportAccess))
+	mux.Handle("POST /v1/admin/users/{id}/features", s.mutatingBearer(s.handleAdminSetUserFeature))
+	mux.Handle("POST /v1/admin/support-access", s.mutatingBearer(s.handleCreateSupportAccess))
 	mux.Handle("GET /v1/admin/support-access/{id}/transcript", s.authed(s.handleSupportTranscript))
 	mux.Handle("GET /v1/support-notices", s.authed(s.handleSupportNotices))
-	mux.Handle("POST /v1/support-notices/{id}/seen", s.mutating(s.handleSupportNoticeSeen))
+	mux.Handle("POST /v1/support-notices/{id}/seen", s.mutatingBearer(s.handleSupportNoticeSeen))
 	mux.Handle("GET /v1/admin/providers", s.authed(s.handleAdminListProviders))
-	mux.Handle("POST /v1/admin/providers", s.mutating(s.handleAdminUpsertProvider))
-	mux.Handle("DELETE /v1/admin/providers/{id}", s.mutating(s.handleAdminDeleteProvider))
+	mux.Handle("POST /v1/admin/providers", s.mutatingBearer(s.handleAdminUpsertProvider))
+	mux.Handle("DELETE /v1/admin/providers/{id}", s.mutatingBearer(s.handleAdminDeleteProvider))
 	mux.Handle("GET /v1/admin/users", s.authed(s.handleAdminUsers))
-	mux.Handle("POST /v1/admin/users", s.mutating(s.handleAdminCreateUser))
-	mux.Handle("PATCH /v1/admin/users/{id}", s.mutating(s.handleAdminUpdateUser))
+	mux.Handle("POST /v1/admin/users", s.mutatingBearer(s.handleAdminCreateUser))
+	mux.Handle("PATCH /v1/admin/users/{id}", s.mutatingBearer(s.handleAdminUpdateUser))
 
 	// Anything else is a JSON 404 rather than Go's text/plain default, so the
 	// client's error parser always has the same shape to read.
@@ -274,8 +277,37 @@ func (s *server) routes() http.Handler {
 }
 
 // authed wraps a handler that needs a resolved user.
+//
+// An `Authorization: Bearer pfk_...` header is accepted too: a script driving the API
+// is the point of FR-13.9, and it carries no cookie for CSRF to protect.
 func (s *server) authed(h http.HandlerFunc) http.Handler {
-	return s.deps.Auth.RequireUser(h)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if user, presented := s.bearerUser(r); presented {
+			if user == nil {
+				s.fail(w, r, apiErr(contracts.ErrUnauthenticated, "这个 API key 无效或已被吊销"))
+				return
+			}
+			h(w, r.WithContext(auth.WithUser(r.Context(), user)))
+			return
+		}
+		s.deps.Auth.RequireUser(h).ServeHTTP(w, r)
+	})
+}
+
+// mutatingBearer is mutating, except that a bearer token skips CSRF: there is no
+// cookie for an attacker's page to ride.
+func (s *server) mutatingBearer(h http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if user, presented := s.bearerUser(r); presented {
+			if user == nil {
+				s.fail(w, r, apiErr(contracts.ErrUnauthenticated, "这个 API key 无效或已被吊销"))
+				return
+			}
+			h(w, r.WithContext(auth.WithUser(r.Context(), user)))
+			return
+		}
+		s.deps.Auth.RequireUser(s.deps.Auth.RequireCSRF(h)).ServeHTTP(w, r)
+	})
 }
 
 // mutating wraps a handler that changes state: user plus double-submit CSRF.

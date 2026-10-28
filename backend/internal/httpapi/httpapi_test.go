@@ -215,6 +215,28 @@ func (e *testEnv) doAuthed(method, path string, body any, c *creds) *httptest.Re
 	return e.do(method, path, body, c, c.csrf)
 }
 
+// doBearer sends a request with an API key instead of a cookie, and deliberately
+// without a CSRF header: that is the whole point of a bearer token.
+func (e *testEnv) doBearer(method, path string, body any, token string) *httptest.ResponseRecorder {
+	e.t.Helper()
+	var reader io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			e.t.Fatalf("marshal: %v", err)
+		}
+		reader = bytes.NewReader(raw)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	e.handler.ServeHTTP(rec, req)
+	return rec
+}
+
 // doRaw sends a raw byte body (file writes).
 func (e *testEnv) doRaw(method, path, contentType string, body []byte, c *creds) *httptest.ResponseRecorder {
 	e.t.Helper()
