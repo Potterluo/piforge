@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -34,10 +35,11 @@ func (s *server) handlePromoteSidecar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Promoting mid-run copies whatever has been written so far and leaves the
-	// sidecar running, so the branch starts empty while the UI says the
-	// conversation came along. Wait for the turn to finish instead of lying.
-	if status, serr := s.deps.Runtime.Status(r.Context(), sidecar.ID); serr == nil && status.Running {
-		s.fail(w, r, apiErr(contracts.ErrConflict, "这一轮还在跑，等它结束后再提升"))
+	// sidecar running, so the branch would start empty while the UI says the
+	// conversation came along. Wait for the turn instead of lying about it: a user
+	// clicking just as the answer lands should get their branch, not an error.
+	if err := s.waitUntilSettled(r.Context(), sidecar.ID, 20*time.Second); err != nil {
+		s.fail(w, r, apiErr(contracts.ErrConflict, "这一轮还没结束，等它结束再提升"))
 		return
 	}
 	parent, err := s.deps.Store.Session(r.Context(), user.ID, sidecar.ParentID)
@@ -120,4 +122,25 @@ func (s *server) copyEvents(ctx context.Context, userID, fromID, toID string) er
 		}
 	}
 	return nil
+}
+
+// waitUntilSettled polls the runtime until no turn is in flight, or the budget runs
+// out. Polling is enough: the runtime reports a boolean, and a subscription would be
+// a lot of machinery for a 20-second wait.
+func (s *server) waitUntilSettled(ctx context.Context, sessionID string, budget time.Duration) error {
+	deadline := time.Now().Add(budget)
+	for {
+		status, err := s.deps.Runtime.Status(ctx, sessionID)
+		if err != nil || !status.Running {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return errors.New("still running")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }

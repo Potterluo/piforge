@@ -59,9 +59,18 @@ func (s *server) handleBrowserScreenshot(w http.ResponseWriter, r *http.Request)
 		s.fail(w, r, err)
 		return
 	}
+	// One retry, because the failure is usually "the page is mid-frame": a
+	// screenshot taken while a screencast is streaming occasionally loses the race,
+	// and asking a person to click the camera twice is not a design.
 	png, err := shot.Screenshot(ctx)
 	if err != nil {
-		s.fail(w, r, err)
+		time.Sleep(250 * time.Millisecond)
+		png, err = shot.Screenshot(ctx)
+	}
+	if err != nil {
+		// A busy or slow browser is not an internal defect: say so, so the panel can
+		// suggest trying again instead of showing a stack-trace-shaped error.
+		s.fail(w, r, apiErr(contracts.ErrSandboxUnavail, "浏览器正忙，稍后再试一次"))
 		return
 	}
 
