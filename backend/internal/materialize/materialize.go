@@ -174,36 +174,29 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 	}
 
 	// --- MCP ------------------------------------------------------------
+	//
+	// MCP configuration is written by `pimodel.WriteMCP` into the session's agent
+	// directory, which is where Pi actually looks (`$PI_CODING_AGENT_DIR/mcp.json`).
+	// This function used to write `<worktree>/.mcp.json`, a filename Pi does not read:
+	// the mount looked correct in the file tree and the agent never had the tools.
+	//
+	// It is deliberately not duplicated here. Two files would mean two sources of
+	// truth, and the project-local one wins in Pi — silently dropping the credentials
+	// the agent directory carries.
 	servers2 := map[string]any{}
 	for _, server := range servers {
 		if server == nil || !server.Enabled {
 			continue
 		}
-		entry, err := mcpEntry(server)
-		if err != nil {
-			result.Skipped[server.Name] = err.Error()
-			continue
-		}
-		servers2[server.Name] = entry
 		result.MCPServers = append(result.MCPServers, server.Name)
 	}
 	sort.Strings(result.MCPServers)
 
+	// Remove the file older builds wrote. It is ours by construction — the path is a
+	// constant of this package — and leaving it would keep a config Pi never reads.
 	configPath := filepath.Join(root, MCPConfig)
-	if len(servers2) > 0 {
-		payload, err := json.MarshalIndent(map[string]any{mcpKey: servers2}, "", "  ")
-		if err != nil {
-			return Result{}, fmt.Errorf("materialize: encode mcp config: %w", err)
-		}
-		if err := os.WriteFile(configPath, append(payload, '\n'), 0o644); err != nil {
-			return Result{}, fmt.Errorf("materialize: write mcp config: %w", err)
-		}
-		result.MCPPath = configPath
-	} else if previous.MCPWritten {
-		// We wrote it, so removing it is ours to do.
-		if err := os.Remove(configPath); err != nil && !os.IsNotExist(err) {
-			return Result{}, fmt.Errorf("materialize: remove mcp config: %w", err)
-		}
+	if err := os.Remove(configPath); err != nil && !os.IsNotExist(err) {
+		return Result{}, fmt.Errorf("materialize: remove legacy mcp config: %w", err)
 	}
 
 	// Mounted tooling must not show up as the user's changes. Writing to

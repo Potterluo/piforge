@@ -291,12 +291,11 @@ func TestEnsureWorktreeMountsSkillsAndMCPServers(t *testing.T) {
 		t.Fatalf("mounted SKILL.md = %q, %v", body, err)
 	}
 
-	mcp, err := os.ReadFile(filepath.Join(wt.Path, ".mcp.json"))
-	if err != nil {
-		t.Fatalf("read .mcp.json: %v", err)
-	}
-	if !strings.Contains(string(mcp), `"playwright"`) || !strings.Contains(string(mcp), `"@playwright/mcp"`) {
-		t.Fatalf(".mcp.json = %s", mcp)
+	// The enabled MCP servers are reported, and no MCP file is written into the
+	// checkout: `pimodel.WriteMCP` puts the one Pi reads in the session's agent
+	// directory, credentials included.
+	if _, err := os.Stat(filepath.Join(wt.Path, ".mcp.json")); !os.IsNotExist(err) {
+		t.Fatalf("an MCP file appeared in the worktree: %v", err)
 	}
 
 	// The manifest must record what was mounted so the API can report it.
@@ -304,7 +303,7 @@ func TestEnsureWorktreeMountsSkillsAndMCPServers(t *testing.T) {
 	if len(manifest.Skills) != 1 || manifest.Skills[0] != "code-review" {
 		t.Fatalf("manifest skills = %v", manifest.Skills)
 	}
-	if !manifest.MCPWritten {
-		t.Fatal("manifest does not record the mcp config write")
+	if len(manifest.MCPServers) != 1 || manifest.MCPServers[0] != "playwright" {
+		t.Fatalf("manifest mcp servers = %v", manifest.MCPServers)
 	}
 }

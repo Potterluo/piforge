@@ -1,7 +1,6 @@
 package materialize
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,28 +49,17 @@ func TestMountWritesSkillsAndMCPConfig(t *testing.T) {
 		t.Fatalf("SKILL.md = %q, %v", body, err)
 	}
 
-	// Disabled servers must not be written at all.
+	// Mount reports the enabled servers, and deliberately writes no MCP file: Pi reads
+	// the one `pimodel.WriteMCP` puts in the agent directory, and a second file here
+	// would win over it and drop the credentials.
 	if len(result.MCPServers) != 2 {
 		t.Fatalf("mcp servers = %v", result.MCPServers)
 	}
-	raw, err := os.ReadFile(result.MCPPath)
-	if err != nil {
-		t.Fatalf("read mcp config: %v", err)
+	if result.MCPPath != "" {
+		t.Fatalf("mount wrote an MCP file at %q", result.MCPPath)
 	}
-	var config struct {
-		Servers map[string]map[string]any `json:"mcpServers"`
-	}
-	if err := json.Unmarshal(raw, &config); err != nil {
-		t.Fatalf("mcp config is not JSON: %v", err)
-	}
-	if _, ok := config.Servers["off"]; ok {
-		t.Fatal("a disabled MCP server was written")
-	}
-	if got := config.Servers["playwright"]["command"]; got != "npx" {
-		t.Fatalf("stdio command = %v", got)
-	}
-	if got := config.Servers["docs"]["type"]; got != "http" {
-		t.Fatalf("http type = %v", got)
+	if _, err := os.Stat(filepath.Join(root, MCPConfig)); !os.IsNotExist(err) {
+		t.Fatalf("an MCP file appeared in the worktree: %v", err)
 	}
 }
 
@@ -158,25 +146,26 @@ func TestMountSkipsSkillsWithoutContent(t *testing.T) {
 	}
 }
 
-func TestMountRemovesMCPConfigItWrote(t *testing.T) {
+// A worktree that already has an MCP file from an older build must lose it: it named a
+// file Pi does not read, and leaving it behind would keep the lie alive.
+func TestMountRemovesAStaleMCPFileFromTheWorktree(t *testing.T) {
 	work := t.TempDir()
 	root := filepath.Join(work, "repo")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	stale := filepath.Join(root, MCPConfig)
+	if err := os.WriteFile(stale, []byte(`{"mcpServers":{}}`), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
 
 	if _, err := Mount(root, nil, []*contracts.MCPServer{
 		{Name: "s", Transport: contracts.MCPStdio, Command: "run", Enabled: true},
 	}, Options{}); err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, MCPConfig)); err != nil {
-		t.Fatalf("mcp config missing: %v", err)
-	}
-
-	// With the server removed, the file we created must go away.
-	if _, err := Mount(root, nil, nil, Options{}); err != nil {
-		t.Fatalf("Mount: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(root, MCPConfig)); !os.IsNotExist(err) {
-		t.Fatalf("mcp config survived with no servers: %v", err)
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("the stale MCP file survived: %v", err)
 	}
 }
 
