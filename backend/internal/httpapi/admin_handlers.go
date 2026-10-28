@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -85,6 +86,13 @@ func (s *server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 		Role:         role,
 	})
 	if err != nil {
+		// The one conflict this endpoint can produce is a taken address, and
+		// "create user ...: conflict" is not a sentence anybody wants to read.
+		if errors.Is(err, store.ErrConflict) {
+			s.fail(w, r, apiErr(contracts.ErrConflict,
+				"that email already has an account"))
+			return
+		}
 		s.fail(w, r, err)
 		return
 	}

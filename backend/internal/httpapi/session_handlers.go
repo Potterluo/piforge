@@ -197,7 +197,14 @@ func (s *server) handleEntries(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	entries, leaf, err := rt.Entries(r.Context(), sess.ID, r.URL.Query().Get("since"))
+	// `?since=0` is the natural way to say "everything", and Pi treats it as an
+	// entry id that does not exist ("Entry not found: 0"), so it is normalised to
+	// the empty cursor Pi understands.
+	since := strings.TrimSpace(r.URL.Query().Get("since"))
+	if since == "0" {
+		since = ""
+	}
+	entries, leaf, err := rt.Entries(r.Context(), sess.ID, since)
 	if err != nil {
 		if noLiveProcess(err) {
 			writeJSON(w, http.StatusOK, entriesResponse{Entries: []*contracts.TreeEntry{}, LeafID: ""})

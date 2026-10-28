@@ -49,7 +49,9 @@ export function BrowserPanel({ sessionId, className }: BrowserPanelProps) {
   // "Attached to the browser" and "the page has drawn something" are different
   // facts. Without this the panel says 已连接 over an empty canvas for the ten to
   // twenty seconds a page takes to load, which reads as a broken panel.
-  const [painted, setPainted] = React.useState(false);
+  // Starts true: an untouched panel is blank, not loading. It flips false when a
+  // navigation is sent and true again when the first frame of that page arrives.
+  const [painted, setPainted] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [meta, setMeta] = React.useState<FrameMeta | null>(null);
   const [url, setUrl] = React.useState("https://example.com");
@@ -86,6 +88,10 @@ export function BrowserPanel({ sessionId, className }: BrowserPanelProps) {
           };
           if (message.type === "frame" && message.width && message.height) {
             setMeta({ width: message.width, height: message.height });
+            // The control plane sends this text frame right after every binary
+            // frame, so it is a cheaper and more reliable "a frame arrived" signal
+            // than the bitmap decode path below.
+            setPainted(true);
           } else if (message.type === "error") {
             setError(message.message ?? "浏览器不可用");
             setStatus("error");
@@ -208,6 +214,10 @@ export function BrowserPanel({ sessionId, className }: BrowserPanelProps) {
     // flag here is what keeps the loading hint honest about which page it is for.
     setPainted(false);
     send({ type: "navigate", url: target.startsWith("http") ? target : `https://${target}` });
+    // A page that refuses to load sends no frame at all, and an overlay that
+    // never clears is indistinguishable from a broken panel. Give up explaining
+    // after this long and let the browser's own error page show through.
+    window.setTimeout(() => setPainted(true), 15_000);
   };
 
   const live = status === "open";
@@ -217,6 +227,7 @@ export function BrowserPanel({ sessionId, className }: BrowserPanelProps) {
     <div
       data-testid="browser-panel"
       data-browser-status={status}
+      data-browser-painted={painted ? "1" : "0"}
       className={cn("flex h-full min-h-0 min-w-0 flex-col", className)}
     >
       <div className="flex shrink-0 items-center gap-1.5 border-b border-border px-2 py-1.5">

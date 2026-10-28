@@ -85,6 +85,13 @@ export interface SessionState {
   running: boolean;
   /** True until run.settled. Also drives the streaming cursor. */
   streaming: boolean;
+  /**
+   * Increments on every run that settles. Anything holding a cached view of the
+   * workspace (the file tree, the session header, the sidebar) uses it as a
+   * signal to refetch: after a run the agent has probably written files, and a
+   * tree that only updates when the user clicks 刷新 is a tree that lies.
+   */
+  settled: number;
   lastSeq: number;
   /** Set when a seq gap is detected; the hook repairs the stream. */
   needsResync: boolean;
@@ -103,6 +110,7 @@ export const initialSessionState: SessionState = {
   queue: [],
   running: false,
   streaming: false,
+  settled: 0,
   lastSeq: 0,
   needsResync: false,
   error: null,
@@ -307,6 +315,7 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
         ...state,
         running: false,
         streaming: false,
+        settled: state.settled + 1,
         turns: state.turns.map((turn) => (turn.streaming ? { ...turn, streaming: false } : turn)),
         error: settled.aborted === true ? null : state.error,
       };
@@ -707,10 +716,18 @@ export function runningToolCount(state: SessionState): number {
   }
   return count;
 }
-/** modelLabel renders the provider and model a final message reports. */
+/**
+ * modelLabel renders what produced a message.
+ *
+ * Pi talks to our gateway, so the provider it reports is always the gateway's own
+ * name (`piforge`) whichever upstream account actually served the call. Repeating
+ * that to the user contradicts the composer, which names their provider, so the
+ * gateway's name is dropped and only the model is shown.
+ */
 function modelLabel(payload: Record<string, unknown>): string | undefined {
   const model = str(payload.model);
   const provider = str(payload.provider);
   if (!model) return undefined;
-  return provider ? `${provider}/${model}` : model;
+  if (!provider || provider === "piforge") return model;
+  return `${provider}/${model}`;
 }

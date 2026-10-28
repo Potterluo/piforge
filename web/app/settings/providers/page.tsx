@@ -79,6 +79,7 @@ export default function ProvidersPage() {
   // Edit state: a model list or an endpoint changes far more often than a key,
   // so editing never asks for the key again — an empty field means "leave it".
   const [editing, setEditing] = useState<Provider | null>(null);
+  const [editingModels, setEditingModels] = useState<{ id: string; name?: string }[]>([]);
   const [editApi, setEditApi] = useState("openai-compat");
   const [editBaseUrl, setEditBaseUrl] = useState("");
   const [editModels, setEditModels] = useState("");
@@ -121,7 +122,7 @@ export default function ProvidersPage() {
       api.providers.update(input.id, {
         api: input.api,
         base_url: input.base_url,
-        models: parseModels(input.models),
+        models: mergeModelNames(parseModels(input.models), editingModels),
         api_key: input.api_key.trim() || undefined,
       }),
     onSuccess: () => {
@@ -258,7 +259,14 @@ export default function ProvidersPage() {
                       setEditing(provider);
                       setEditApi(provider.api);
                       setEditBaseUrl(provider.base_url ?? "");
-                      setEditModels(provider.models.map((model) => model.id).join("\n"));
+                      setEditModels(
+                        provider.models
+                          // The textarea edits ids; a display name is kept so saving
+                          // an unrelated change does not erase it.
+                          .map((model) => (model.name ? `${model.id} ${model.name}` : model.id))
+                          .join("\n"),
+                      );
+                      setEditingModels(provider.models);
                       setEditKey("");
                     }}
                   >
@@ -703,4 +711,19 @@ function SharedProviders({ onChanged }: { onChanged: () => void }) {
       </Dialog>
     </section>
   );
+}
+/**
+ * parseModels keeps a display name when one follows the id on the same line, and
+ * mergeModelNames puts back the names the textarea cannot show. Without this,
+ * editing a base URL silently blanked every model's display name.
+ */
+function mergeModelNames(
+  next: { id: string; name?: string }[],
+  previous: { id: string; name?: string }[],
+): { id: string; name?: string }[] {
+  const known = new Map(previous.map((model) => [model.id, model.name]));
+  return next.map((model) => ({
+    id: model.id,
+    name: model.name || known.get(model.id) || undefined,
+  }));
 }

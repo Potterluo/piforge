@@ -126,6 +126,13 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	err = s.hub.ensure(startCtx, user.ID, spec)
 	startCancel()
 	if err != nil {
+		// Starting the agent is the other place a missing model shows up: with no
+		// provider the child cannot be told which model to use and exits. Same
+		// rule as below — explain configuration when it is the cause.
+		if modelErr := s.explainMissingModel(r.Context(), user.ID, sess.ModelRef); modelErr != nil {
+			s.fail(w, r, modelErr)
+			return
+		}
 		s.fail(w, r, err)
 		return
 	}
@@ -232,18 +239,15 @@ func (s *server) explainMissingModel(ctx context.Context, userID, modelRef strin
 	}
 	providerName, modelID := modelParts(modelRef)
 	if providerName == "" {
-		// No explicit model: only speak up when the account has no provider at
-		// all, which is unambiguous.
-		inherited, err := s.deps.Store.InheritedProviders(ctx, userID)
-		if err != nil || len(inherited) > 0 {
-			return nil
+		// No explicit model: the deployment default applies, exactly as the
+		// runtime resolves it. A session that pins nothing is the normal case for
+		// a first admin, so guessing "maybe it will work" here is what produced
+		// "internal error" on a fresh deployment.
+		providerName = s.deps.DefaultProvider
+		if providerName == "" {
+			return apiErr(contracts.ErrNoModel,
+				"no model provider is configured: add one in Settings → Models")
 		}
-		own, err := s.deps.Store.ListProviders(ctx, userID)
-		if err != nil || len(own) > 0 {
-			return nil
-		}
-		return apiErr(contracts.ErrNoModel,
-			"no model provider is configured: add one in Settings → Models")
 	}
 	provider, _, err := s.deps.Store.ResolveProvider(ctx, userID, providerName)
 	if err != nil || provider == nil {
@@ -253,6 +257,14 @@ func (s *server) explainMissingModel(ctx context.Context, userID, modelRef strin
 	if len(provider.Models) == 0 && modelID == "" {
 		return apiErr(contracts.ErrNoModel,
 			"the provider %q lists no models: add a model id in Settings → Models", providerName)
+	}
+	// A provider that resolves but has no key fails every run at the first model
+	// call, and the agent reports that as an opaque "internal error". The
+	// inherited default provider is exactly this shape on a fresh deployment,
+	// which is how an admin with nothing configured ends up here.
+	if !provider.HasKey {
+		return apiErr(contracts.ErrNoModel,
+			"the provider %q has no API key: add one in Settings → Models", providerName)
 	}
 	return nil
 }

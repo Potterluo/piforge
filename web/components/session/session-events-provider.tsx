@@ -32,3 +32,14 @@ export function useSessionEventState(): SessionEventsResult {
   }
   return value;
 }
+/**
+ * The same state, or null outside the provider.
+ *
+ * Used by panels that merely benefit from knowing a run settled (the file tree
+ * refetches then). Making those panels throw would mean a workspace panel can
+ * only be rendered inside a live session, which is not true: they are also
+ * mounted in isolation by tests and by the settings preview.
+ */
+export function useOptionalSessionEventState(): SessionEventsResult | null {
+  return useContext(SessionEventsContext);
+}

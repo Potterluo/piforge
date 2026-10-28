@@ -342,20 +342,21 @@ func run() error {
 
 	// 7. HTTP.
 	handler := httpapi.NewRouter(httpapi.Deps{
-		Store:       st,
-		Auth:        authn,
-		Runtime:     rt,
-		Workspace:   fs,
-		Sandbox:     sb,
-		Secrets:     box,
-		WebUpstream: opt.webUpstream,
-		SkillsDir:   filepath.Join(opt.dataDir, "skills"),
-		LLMGateway:  gateway,
-		Browser:     browsers,
-		Term:        termAdapter{m: terminals},
-		Provisioner: prov,
-		Now:         time.Now,
-		Logger:      logger,
+		Store:           st,
+		Auth:            authn,
+		Runtime:         rt,
+		Workspace:       fs,
+		DefaultProvider: opt.defaultProvider,
+		Sandbox:         sb,
+		Secrets:         box,
+		WebUpstream:     opt.webUpstream,
+		SkillsDir:       filepath.Join(opt.dataDir, "skills"),
+		LLMGateway:      gateway,
+		Browser:         browsers,
+		Term:            termAdapter{m: terminals},
+		Provisioner:     prov,
+		Now:             time.Now,
+		Logger:          logger,
 	})
 
 	srv := &http.Server{

@@ -404,10 +404,18 @@ export default function AdminUsersPage() {
             <FieldLabel htmlFor="reset-password">新密码</FieldLabel>
             <Input
               id="reset-password"
+              data-testid="reset-password-input"
               type="password"
               value={newPassword}
               onChange={(event) => setNewPassword(event.target.value)}
             />
+            <FieldDescription data-testid="reset-password-hint">
+              {newPassword.length === 0
+                ? "至少 8 位。"
+                : newPassword.length < 8
+                  ? `还差 ${8 - newPassword.length} 位（至少 8 位）。`
+                  : "长度符合要求。"}
+            </FieldDescription>
           </Field>
           <DialogFooter>
             <Button variant="outline" onClick={() => setResetting(null)}>

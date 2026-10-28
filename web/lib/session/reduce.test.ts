@@ -596,7 +596,9 @@ describe("model attribution", () => {
       }, { seq: 1 }),
     ]);
 
-    expect(state.turns[0].model).toBe("piforge/deepseek-v4-flash");
+    // The gateway is an implementation detail: the composer says `volc/...`, so a
+    // transcript that says `piforge/...` reads as a contradiction.
+    expect(state.turns[0].model).toBe("deepseek-v4-flash");
   });
 
   it("keeps the model when a later message omits it", () => {

@@ -284,3 +284,85 @@ func TestAdminSharesAProviderThatUsersInherit(t *testing.T) {
 		}
 	}
 }
+
+// The inherited default provider on a fresh deployment exists but has no key.
+// That is the most common way a first admin meets this error, and "internal
+// error" was the previous answer.
+func TestSendWithAKeylessProviderSaysItHasNoKey(t *testing.T) {
+	env := newTestEnv(t)
+	user := env.mkUser("admin@piforge.local", "pw", contracts.RoleAdmin)
+	c := env.login("admin@piforge.local", "pw")
+	p, err := env.store.CreateProject(t.Context(), user.ID, store.NewProject{Name: "p", DefaultBranch: "main"})
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	if _, err := env.store.UpsertAdminProvider(t.Context(), user.ID, store.ProviderInput{
+		Name:    "shared-house",
+		API:     "openai-compat",
+		BaseURL: "https://house.example.invalid/v1",
+		Models:  []contracts.ModelSpec{{ID: "house-model"}},
+	}); err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+	sess, err := env.store.CreateSession(t.Context(), user.ID, store.NewSession{
+		ProjectID: p.ID, Kind: contracts.KindMain, Title: "x", ModelRef: "shared-house/house-model",
+	})
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+
+	env.runtime.promptErr = contracts.NewError(contracts.ErrInternal, "spawn failed")
+	rec := env.doAuthed(http.MethodPost, "/v1/sessions/"+sess.ID+"/messages",
+		map[string]any{"client_msg_id": "cm_1", "text": "hi"}, c)
+	env.mustErr(rec, http.StatusBadRequest, contracts.ErrNoModel)
+	if !strings.Contains(rec.Body.String(), "no API key") {
+		t.Fatalf("the message does not mention the missing key: %s", rec.Body.String())
+	}
+}
+
+// The spawn path is where a missing model actually fails: with no provider the
+// child has no model to load and exits before reading a prompt. That error used
+// to escape as "internal error" even after the prompt path learned to explain it.
+func TestSpawnFailureWithNoProviderIsExplained(t *testing.T) {
+	env := newTestEnv(t)
+	user := env.mkUser("solo@piforge.local", "pw", contracts.RoleAdmin)
+	c := env.login("solo@piforge.local", "pw")
+	p, err := env.store.CreateProject(t.Context(), user.ID, store.NewProject{Name: "p", DefaultBranch: "main"})
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	sess, err := env.store.CreateSession(t.Context(), user.ID, store.NewSession{
+		ProjectID: p.ID, Kind: contracts.KindMain, Title: "x", ModelRef: "shared-anthropic/claude",
+	})
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+
+	// The deployment's default provider is what a session with no model_ref uses.
+	// It exists on a fresh install and has no key, which is the case that used to
+	// answer "internal error".
+	if _, err := env.store.UpsertAdminProvider(t.Context(), user.ID, store.ProviderInput{
+		Name: "shared-anthropic", API: "anthropic-messages",
+		Models: []contracts.ModelSpec{{ID: "claude-sonnet-4"}},
+	}); err != nil {
+		t.Fatalf("default provider: %v", err)
+	}
+	env.deps.DefaultProvider = "shared-anthropic"
+	env.rebuild()
+	if _, err := env.store.UpdateSession(t.Context(), user.ID, sess.ID,
+		store.SessionPatch{ModelRef: ptrString("")}); err != nil {
+		t.Fatalf("clear model: %v", err)
+	}
+	if _, err := env.store.CreateSession(t.Context(), user.ID, store.NewSession{
+		ProjectID: p.ID, Kind: contracts.KindMain, Title: "y",
+	}); err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	env.runtime.startErr = contracts.NewError(contracts.ErrInternal, "spawn failed")
+	rec := env.doAuthed(http.MethodPost, "/v1/sessions/"+sess.ID+"/messages",
+		map[string]any{"client_msg_id": "cm_1", "text": "hi"}, c)
+	env.mustErr(rec, http.StatusBadRequest, contracts.ErrNoModel)
+	if !strings.Contains(rec.Body.String(), "Settings") {
+		t.Fatalf("the message does not say where to fix it: %s", rec.Body.String())
+	}
+}

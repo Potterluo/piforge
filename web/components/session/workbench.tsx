@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { GitBranch, LoaderCircle, PanelRight } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -22,7 +22,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { WorkspacePanels } from "@/components/workspace/workspace-panels";
 import { api } from "@/lib/api/client";
 import { sessionKindLabel, shortModel } from "@/lib/session/format";
-import { useProject, useProviders, useSession } from "@/lib/session/queries";
+import { qk, useProject, useProviders, useSession } from "@/lib/session/queries";
 import { runningToolCount, type Turn } from "@/lib/session/reduce";
 import type { StreamStatus } from "@/lib/session/use-session-events";
 import type { ForkPoint } from "@/lib/types";
@@ -79,6 +79,15 @@ function ConnectionBadge({ status }: { status: StreamStatus }) {
 function WorkbenchBody({ sessionId, projectId }: { sessionId: string; projectId: string }) {
   const { state, status } = useSessionEventState();
   const session = useSession(sessionId);
+  // The first message names an untitled session on the server. Nothing pushes
+  // that title, so a settled run is the cue to re-read it.
+  const queryClient = useQueryClient();
+  const settled = state.settled;
+  useEffect(() => {
+    if (settled === 0) return;
+    void queryClient.invalidateQueries({ queryKey: qk.session(sessionId) });
+    void queryClient.invalidateQueries({ queryKey: qk.sessions(projectId) });
+  }, [settled, queryClient, sessionId, projectId]);
   const project = useProject(projectId);
   const providers = useProviders();
   const forkPoints = useQuery({
@@ -118,7 +127,7 @@ function WorkbenchBody({ sessionId, projectId }: { sessionId: string; projectId:
       <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border px-3">
         <span data-testid="run-state" data-state={state.running ? "running" : "settled"} hidden />
         <div className="flex min-w-0 flex-col">
-          <h1 className="truncate text-sm font-medium">{title}</h1>
+          <h1 className="truncate text-sm font-medium" data-testid="session-title">\n            {title}\n          </h1>
           <p className="truncate text-[11px] text-muted-foreground">
             {project.data?.project.name ?? "项目"}
             {" · "}

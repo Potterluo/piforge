@@ -77,7 +77,11 @@ type Deps struct {
 	Auth      *auth.Authenticator
 	Runtime   contracts.AgentRuntime
 	Workspace contracts.Workspace
-	Sandbox   contracts.SandboxProvider
+	// DefaultProvider is the provider a session falls back to when it pins no
+	// model. The runtime resolves it the same way, so the explanation of a failed
+	// run has to use the same fallback or it reports the wrong provider.
+	DefaultProvider string
+	Sandbox         contracts.SandboxProvider
 	// SkillsDir is where uploaded skill bundles live, one directory per skill.
 	// Empty means uploads are refused with a typed error.
 	SkillsDir string

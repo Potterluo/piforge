@@ -612,11 +612,14 @@ func (f *fakeWorkspace) lastRoot() string {
 // can be called from any fixture.
 func (e *testEnv) ensureProvider(userID, name, model string) {
 	e.t.Helper()
+	// A keyed provider, because a keyless one is now reported as "no API key"
+	// when a run fails, and these fixtures are about everything else.
 	_, err := e.store.CreateProvider(context.Background(), userID, store.ProviderInput{
-		Name:    name,
-		API:     "openai-compat",
-		BaseURL: "https://example.invalid/v1",
-		Models:  []contracts.ModelSpec{{ID: model}},
+		Name:      name,
+		API:       "openai-compat",
+		BaseURL:   "https://example.invalid/v1",
+		Models:    []contracts.ModelSpec{{ID: model}},
+		KeyCipher: []byte("sealed-test-key"),
 	})
 	if err != nil && !errors.Is(err, store.ErrConflict) {
 		e.t.Fatalf("CreateProvider: %v", err)

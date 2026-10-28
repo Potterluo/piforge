@@ -31,6 +31,7 @@ import { baseName, gitLetterMap } from "@/lib/fs/file-kind";
 import type { FileNode } from "@/lib/types";
 import { PanelError, PanelSkeleton } from "@/components/workspace/panel-state";
 import { useAsync } from "@/components/workspace/use-async";
+import { useOptionalSessionEventState } from "@/components/session/session-events-provider";
 import {
   buildTree,
   collectDirs,
@@ -77,7 +78,11 @@ export function FileTree({ sessionId, activePath, onOpenFile, onRevealInTerminal
 
   // The switch is part of the query key: the server decides what to list, so
   // flipping it has to refetch rather than hide rows the client already has.
-  const tree = useAsync(`files:${sessionId}:${showIgnored ? "all" : "tracked"}`, async () => {
+  // The agent writes files during a run; a tree that waits for a click is wrong
+  // about the workspace for as long as the user trusts it.
+  const settled = useOptionalSessionEventState()?.state.settled ?? 0;
+
+  const tree = useAsync(`files:${sessionId}:${showIgnored ? "all" : "tracked"}:${settled}`, async () => {
     const response = await api.files.tree(sessionId, "", 2, showIgnored);
     return { nodes: response.nodes, dirs: collectDirs(response.nodes) };
   });

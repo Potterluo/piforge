@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/auth"
@@ -97,13 +98,13 @@ func classify(err error) (int, *contracts.APIError) {
 
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		return http.StatusNotFound, &contracts.APIError{Code: contracts.ErrNotFound, Message: err.Error()}
+		return http.StatusNotFound, &contracts.APIError{Code: contracts.ErrNotFound, Message: userMessage(err)}
 	case errors.Is(err, store.ErrForbidden):
-		return http.StatusForbidden, &contracts.APIError{Code: contracts.ErrForbidden, Message: err.Error()}
+		return http.StatusForbidden, &contracts.APIError{Code: contracts.ErrForbidden, Message: userMessage(err)}
 	case errors.Is(err, store.ErrConflict):
-		return http.StatusConflict, &contracts.APIError{Code: contracts.ErrConflict, Message: err.Error()}
+		return http.StatusConflict, &contracts.APIError{Code: contracts.ErrConflict, Message: userMessage(err)}
 	case errors.Is(err, store.ErrInvalid):
-		return http.StatusBadRequest, &contracts.APIError{Code: contracts.ErrInvalidArgument, Message: err.Error()}
+		return http.StatusBadRequest, &contracts.APIError{Code: contracts.ErrInvalidArgument, Message: userMessage(err)}
 	// Filesystem rejections are client errors, not bugs: a path that escapes
 	// the worktree is exactly the "invalid_argument" the caller sent, and
 	// answering 500 would make an attack indistinguishable from an outage.
@@ -238,4 +239,32 @@ func decodeOptionalJSON(r *http.Request, v any) error {
 		return apiErr(contracts.ErrInvalidArgument, "invalid JSON body: %v", err)
 	}
 	return nil
+}
+
+// internalPrefixes are the package names that show up at the front of a wrapped
+// error and mean nothing to a user. `store: create user "x": conflict` reached
+// the UI verbatim before this existed.
+var internalPrefixes = []string{
+	"store: ", "fsx: ", "gitx: ", "sandbox: ", "term: ", "pi: ", "llmgw: ", "auth: ", "pimodel: ",
+}
+
+// userMessage strips the wrapping an internal package adds so the message reads
+// as a sentence about the request rather than a stack trace.
+func userMessage(err error) string {
+	message := strings.TrimSpace(err.Error())
+	for _, prefix := range internalPrefixes {
+		message = strings.TrimPrefix(message, prefix)
+		for strings.HasPrefix(message, prefix) {
+			message = strings.TrimPrefix(message, prefix)
+		}
+	}
+	// A trailing ", conflict" / ": invalid argument" is the sentinel we matched
+	// on; repeating it to the user adds nothing.
+	for _, suffix := range []string{": conflict", ": invalid argument", ": not found", ": forbidden"} {
+		message = strings.TrimSuffix(message, suffix)
+	}
+	if message == "" {
+		return "the request could not be completed"
+	}
+	return message
 }
