@@ -39,3 +39,6 @@ e2e/.artifacts/
 
 # staged artifacts for the iteration image
 dist/
+
+# QA screenshots
+shot-*.png
