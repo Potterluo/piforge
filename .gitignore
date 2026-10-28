@@ -29,3 +29,7 @@ Thumbs.db
 e2e/.bin/
 e2e/.data/
 e2e/.artifacts/
+
+# local demo instance
+.demo/
+.demo-bin/

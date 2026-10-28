@@ -372,3 +372,44 @@ func (p prefixLauncher) Wrap(argv []string) []string {
 	return append([]string{p.path}, argv...)
 }
 func (prefixLauncher) Name() string { return "prefix" }
+
+// TestShellOutputIsUTF8 is the regression for the mojibake: a Windows shell that
+// writes in the console code page turns every non-ASCII character in the
+// terminal into a replacement glyph, because the browser decodes UTF-8.
+func TestShellOutputIsUTF8(t *testing.T) {
+	m := New(Config{})
+	defer m.CloseAll()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	info, err := m.Open(ctx, "sbx", "tab-utf8", "")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	// Something that is ASCII in every shell.
+	if err := m.Write("tab-utf8", []byte("echo ascii-marker\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	waitFor(t, m, "tab-utf8", "ascii-marker", 20*time.Second)
+
+	if runtime.GOOS != "windows" {
+		t.Skip("the code-page problem this guards against is Windows-specific")
+	}
+	// A non-ASCII echo: it must come back as valid UTF-8, not as U+FFFD.
+	if err := m.Write("tab-utf8", []byte("echo 中文标记\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		data, _, _ := m.Read("tab-utf8", 0)
+		if strings.Contains(string(data), "中文标记") {
+			return
+		}
+		if strings.Contains(string(data), "\uFFFD") {
+			t.Fatalf("the shell emitted a code page the terminal cannot decode: %q", data)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	data, _, _ := m.Read("tab-utf8", 0)
+	t.Fatalf("the UTF-8 echo never came back; last output = %q (shell %s)", data, info.Shell)
+}

@@ -12,6 +12,22 @@ behavioural question; this README only covers running the thing.
 
 ---
 
+## What it looks like
+
+Screenshots from a local run (`e2e/scripts/demo-shots.mjs` reproduces them against a
+fake-Pi instance; the only thing not real in them is the model).
+
+| | |
+|---|---|
+| ![workbench while a run is streaming](docs/screenshots/03-workbench-running.png) | ![settled run with an expanded tool trace](docs/screenshots/04-workbench-settled.png) |
+| A run in flight: streamed text, a live tool call, and the dual-queue composer (Enter queues, ⌘/Ctrl+Enter interrupts). | Settled: the tool trace opens to its output and input, and the composer returns to send mode. |
+| ![file tree with syntax-highlighted preview](docs/screenshots/06-file-preview.png) | ![git history with lanes](docs/screenshots/07-git-graph.png) |
+| Lazy file tree and a preview with highlighting, line numbers and a language badge. | Commit history with lanes and HEAD markers, from the same sandbox the agent writes to. |
+| ![terminal running real commands](docs/screenshots/08-terminal.png) | ![browser panel showing a live page](docs/screenshots/09-browser.png) |
+| A real PTY: `git log` and `ls` run inside the sandbox checkout. | The sandbox's own Chrome, screencast over CDP — the page the agent is driving. |
+
+More in [`docs/screenshots/`](docs/screenshots): login, project overview, a forked
+branch, and the provider/skill/MCP settings pages.
 ## Why it is built this way
 
 | Piece | Responsibility |

@@ -48,10 +48,27 @@ func shellArgv(shellPath string) []string {
 	base := strings.ToLower(filepath.Base(shellPath))
 	switch {
 	case strings.Contains(base, "powershell"), strings.Contains(base, "pwsh"):
-		// "-Command -" reads commands from stdin and writes results to stdout.
-		return []string{shellPath, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "-"}
+		// A tiny REPL instead of "-Command -".
+		//
+		// "-Command -" writes its output in the console's OEM code page, which
+		// the browser then decodes as UTF-8: every non-ASCII character in the
+		// terminal became a replacement glyph. Setting OutputEncoding before
+		// reading stdin fixes that, and printing exceptions keeps a failed
+		// command from looking like a dead shell.
+		return []string{
+			shellPath, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+			`$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new(); ` +
+				// Read stdin through a UTF-8 StreamReader: [Console]::In decodes
+				// with the console code page, which turns UTF-8 input from the
+				// browser into garbage before the shell ever sees it.
+				`$in = New-Object IO.StreamReader([Console]::OpenStandardInput(), [Text.UTF8Encoding]::new()); ` +
+				`while (($line = $in.ReadLine()) -ne $null) { ` +
+				`if ($line.Trim().Length -eq 0) { continue }; ` +
+				`try { Invoke-Expression $line } catch { Write-Error $_.Exception.Message } }`,
+		}
 	case strings.Contains(base, "cmd.exe"), base == "cmd":
-		return []string{shellPath, "/Q", "/K"}
+		// 65001 so that programs writing UTF-8 are not mangled on the way out.
+		return []string{shellPath, "/Q", "/K", "chcp 65001>nul"}
 	default:
 		return []string{shellPath}
 	}
