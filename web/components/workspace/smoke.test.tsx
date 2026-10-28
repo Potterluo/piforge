@@ -1,5 +1,6 @@
 import * as React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 
 const status = {
@@ -70,7 +71,12 @@ import { WorkspacePanels } from "@/components/workspace/workspace-panels";
 
 describe("workspace panels smoke", () => {
   it("renders the four tabs and survives tab switching", async () => {
-    render(<WorkspacePanels sessionId="s1" projectId="p1" />);
+    // The panels ask for the account's feature flags now, so they need a client.
+  render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <WorkspacePanels sessionId="s1" projectId="p1" />
+    </QueryClientProvider>,
+  );
 
     expect(screen.getByTestId("workspace-panels")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByTestId("file-tree")).toBeInTheDocument());

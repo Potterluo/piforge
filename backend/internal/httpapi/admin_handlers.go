@@ -90,7 +90,7 @@ func (s *server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 		// "create user ...: conflict" is not a sentence anybody wants to read.
 		if errors.Is(err, store.ErrConflict) {
 			s.fail(w, r, apiErr(contracts.ErrConflict,
-				"that email already has an account"))
+				"该邮箱已经注册过了"))
 			return
 		}
 		s.fail(w, r, err)

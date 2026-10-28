@@ -121,6 +121,18 @@ function WorkbenchBody({ sessionId, projectId }: { sessionId: string; projectId:
   const detail = session.data?.session;
   const title = detail?.title?.trim() || "未命名会话";
   const tools = runningToolCount(state);
+  // A session without a pinned model follows the deployment default, and just
+  // saying 默认模型 hides which model that is. The first selectable option is that
+  // default, so show it and mark it as inherited.
+  const firstPinned = models.find((option) => option.value !== "inherit");
+  const effectiveModel = detail?.model_ref
+    ? shortModel(detail.model_ref)
+    : firstPinned
+      ? `跟随默认（${shortModel(firstPinned.value)}）`
+      : "跟随默认";
+  // Branches are titled from their label; repeating it under the title reads as a
+  // stutter rather than information.
+  const showLabel = Boolean(detail?.label) && detail?.label !== title;
 
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden" data-session-id={sessionId}>
@@ -135,8 +147,8 @@ function WorkbenchBody({ sessionId, projectId }: { sessionId: string; projectId:
             {" · "}
             {sessionKindLabel(detail?.kind)}
             {" · "}
-            {shortModel(detail?.model_ref)}
-            {detail?.label ? ` · ${detail.label}` : ""}
+            {effectiveModel}
+            {showLabel && detail ? ` · ${detail.label}` : ""}
           </p>
         </div>
 

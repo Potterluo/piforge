@@ -9,6 +9,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
+import { useFeature } from "@/lib/session/queries";
 
 /**
  * The browser panel.
@@ -52,6 +53,9 @@ export function BrowserPanel({ sessionId, className }: BrowserPanelProps) {
   // Starts true: an untouched panel is blank, not loading. It flips false when a
   // navigation is sent and true again when the first frame of that page arrives.
   const [painted, setPainted] = React.useState(true);
+  // A disabled feature is not a broken socket: say which one it is instead of
+  // looping 连接中 → 已断开 → 重新连接 forever.
+  const browserEnabled = useFeature("browser");
   const [error, setError] = React.useState<string | null>(null);
   const [meta, setMeta] = React.useState<FrameMeta | null>(null);
   const [url, setUrl] = React.useState("https://example.com");
@@ -222,6 +226,21 @@ export function BrowserPanel({ sessionId, className }: BrowserPanelProps) {
 
   const live = status === "open";
   const loadingPage = live && !painted;
+
+  if (!browserEnabled) {
+    return (
+      <div
+        data-testid="browser-panel"
+        data-browser-status="disabled"
+        className={cn("flex h-full min-h-0 min-w-0 flex-col items-center justify-center gap-2 p-6", className)}
+      >
+        <p className="text-sm">内置浏览器已被管理员关闭</p>
+        <p className="max-w-sm text-center text-xs text-muted-foreground">
+          这是账号级别的开关。需要它的话请联系部署管理员，在「用户管理 → 功能」里打开。
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div

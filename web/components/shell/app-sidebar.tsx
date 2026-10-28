@@ -81,27 +81,42 @@ interface SessionGroup {
   lastActive: string;
 }
 
-/** Groups main sessions with the branches and sidecars forked from them. */
+/**
+ * Groups main sessions with the branches and sidecars forked from them.
+ *
+ * The root is the session whose own id is the group key, not whichever row showed
+ * up first: the API returns sessions sorted by activity, so a freshly created
+ * sidecar often arrives before its parent. Taking "first" made the sidecar the
+ * parent of the session it was attached to — and, worse, mounted the row actions
+ * on the wrong session entirely.
+ */
 export function groupSessions(sessions: Session[]): SessionGroup[] {
-  const groups = new Map<string, SessionGroup>();
+  const groups = new Map<string, { root?: Session; children: Session[]; lastActive: string }>();
 
   for (const session of sessions) {
     const rootId = session.root_id ?? session.id;
-    const existing = groups.get(rootId);
-    if (existing) {
-      if (session.id !== existing.root.id) existing.children.push(session);
-      if (Date.parse(session.last_active_at) > Date.parse(existing.lastActive)) {
-        existing.lastActive = session.last_active_at;
-      }
-      continue;
+    const group = groups.get(rootId) ?? { children: [], lastActive: session.last_active_at };
+    if (session.id === rootId) {
+      group.root = session;
+    } else {
+      group.children.push(session);
     }
-    groups.set(rootId, { root: session, children: [], lastActive: session.last_active_at });
+    if (Date.parse(session.last_active_at) > Date.parse(group.lastActive)) {
+      group.lastActive = session.last_active_at;
+    }
+    groups.set(rootId, group);
   }
 
   return [...groups.values()]
+    .filter((group): group is { root: Session; children: Session[]; lastActive: string } =>
+      Boolean(group.root),
+    )
     .map((group) => ({
-      ...group,
-      children: group.children.sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at)),
+      root: group.root,
+      children: group.children.sort(
+        (a, b) => Date.parse(a.created_at) - Date.parse(b.created_at),
+      ),
+      lastActive: group.lastActive,
     }))
     .sort((a, b) => Date.parse(b.lastActive) - Date.parse(a.lastActive));
 }
@@ -360,7 +375,10 @@ export function AppSidebar({
                           render={
                             <SidebarMenuAction
                               showOnHover
-                              className="group"
+                              // Two hover actions share the right edge: the chevron
+                              // sits left of the kebab, or one swallows the other's
+                              // clicks (which is how the session menu died).
+                              className="group right-7"
                               aria-label="展开分支"
                               title={`展开 ${group.children.length} 个分支`}
                             />

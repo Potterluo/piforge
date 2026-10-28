@@ -124,13 +124,22 @@ export async function clickWhenSettled(locator: ReturnType<Page["getByTestId"]>)
   }).toPass({ timeout: 20_000 });
 }
 
-/** Sends a prompt through the composer and waits for the run to settle. */
+/**
+ * Sends a prompt through the composer and waits for the run to settle.
+ *
+ * It must not insist on *observing* "running": the fake peer can finish a scripted
+ * run between two polls, and asserting a transient state turns a passing product
+ * into a failing test. The wait is for the effects instead — the prompt appears and
+ * a run settles afterwards.
+ */
 export async function sendPrompt(page: Page, text: string): Promise<void> {
+  const before = await page.getByTestId("turn-user").count();
   await page.getByTestId("composer-input").fill(text);
   await page.getByTestId("composer-send").click();
-  await expect(page.getByTestId("run-state")).toHaveAttribute("data-state", "running", {
-    timeout: 30_000,
-  });
+  // The user's turn appears as soon as the message is accepted, which is the
+  // effect worth waiting for. Insisting on observing "running" first fails against
+  // a peer fast enough to settle between two polls.
+  await expect(page.getByTestId("turn-user")).toHaveCount(before + 1, { timeout: 30_000 });
   await expect(page.getByTestId("run-state")).toHaveAttribute("data-state", "settled", {
     timeout: 90_000,
   });

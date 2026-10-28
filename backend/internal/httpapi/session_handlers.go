@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -49,6 +50,9 @@ type treeResponse struct {
 // forkPointsResponse lists the messages a branch may be forked at.
 type forkPointsResponse struct {
 	Points []contracts.ForkPoint `json:"points"`
+	// Reason explains an empty list: the panel used to claim "no messages to fork
+	// from" whenever the agent happened to be stopped.
+	Reason string `json:"reason,omitempty"`
 }
 
 // handleListSessions lists the caller's sessions, newest activity first.
@@ -291,7 +295,15 @@ func (s *server) handleForkPoints(w http.ResponseWriter, r *http.Request) {
 	points, err := rt.ForkPoints(r.Context(), sess.ID)
 	if err != nil {
 		if noLiveProcess(err) {
-			writeJSON(w, http.StatusOK, forkPointsResponse{Points: []contracts.ForkPoint{}})
+			// The agent is not running, but the conversation exists in the event
+			// log. Deriving the fork points from there keeps the panel honest:
+			// "还没有可分叉的消息" over a visible conversation is a lie.
+			fallback, ferr := s.forkPointsFromEvents(r.Context(), user.ID, sess.ID)
+			if ferr != nil {
+				s.fail(w, r, ferr)
+				return
+			}
+			writeJSON(w, http.StatusOK, forkPointsResponse{Points: fallback, Reason: "no_agent"})
 			return
 		}
 		s.fail(w, r, err)
@@ -378,6 +390,13 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	// The agent has the history; the transcript does not. Copy it so the branch
+	// opens with the conversation it was forked from.
+	if err := s.seedForkedHistory(context.WithoutCancel(r.Context()), user.ID, parent.ID, child.ID, in.EntryID); err != nil {
+		s.log.WarnContext(r.Context(), "could not copy history into the branch",
+			"session", child.ID, "error", err.Error())
+	}
+
 	writeJSON(w, http.StatusCreated, sessionResponse{Session: child})
 }
 
@@ -585,4 +604,47 @@ func deepestLeaf(tree []*contracts.TreeEntry) string {
 		nodes = node.Children
 	}
 	return leaf
+}
+
+// forkPointsFromEvents reconstructs the forkable user messages from the persisted
+// log, for sessions whose agent is not running.
+func (s *server) forkPointsFromEvents(ctx context.Context, userID, sessionID string) ([]contracts.ForkPoint, error) {
+	events, err := s.deps.Store.ListEvents(ctx, userID, sessionID, 0, 500)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]contracts.ForkPoint, 0, 8)
+	seen := make(map[string]bool, 8)
+	for _, event := range events {
+		if event.Type != contracts.EvMsgFinal || event.EntryID == "" || seen[event.EntryID] {
+			continue
+		}
+		var payload struct {
+			Role  string `json:"role"`
+			Text  string `json:"text"`
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if payload.Role != "user" || strings.TrimSpace(payload.Text) == "" {
+			continue
+		}
+		seen[event.EntryID] = true
+		out = append(out, contracts.ForkPoint{
+			EntryID: event.EntryID,
+			Preview: previewText(payload.Text, 120),
+		})
+	}
+	return out, nil
+}
+
+// previewText is the one-line preview a fork point shows.
+func previewText(text string, limit int) string {
+	flat := strings.Join(strings.Fields(text), " ")
+	runes := []rune(flat)
+	if len(runes) <= limit {
+		return flat
+	}
+	return string(runes[:limit]) + "…"
 }

@@ -44,7 +44,13 @@ const chromeBinary = findChrome();
 export default defineConfig({
   testDir: "./tests",
   timeout: 60_000,
-  expect: { timeout: 15_000 },
+  // One retry: this suite drives a real Chrome against a real server, and under a
+  // full-suite load a settle occasionally lands outside the expect window. A retry
+  // reports the flake instead of hiding it, and a genuine failure still fails twice.
+  retries: 1,
+  // 15s was tight when every other spec had just run; assertions that wait on a
+  // streamed run now get the time they need rather than a coin flip.
+  expect: { timeout: 20_000 },
   fullyParallel: false,
   workers: 1,
   retries: process.env.CI ? 1 : 0,

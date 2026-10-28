@@ -98,7 +98,9 @@ func classify(err error) (int, *contracts.APIError) {
 
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		return http.StatusNotFound, &contracts.APIError{Code: contracts.ErrNotFound, Message: userMessage(err)}
+		// A user never asked for "not found": they asked for a thing that is gone
+		// or was never theirs, and the message should say so in their language.
+		return http.StatusNotFound, &contracts.APIError{Code: contracts.ErrNotFound, Message: "找不到这个对象，可能已被删除"}
 	case errors.Is(err, store.ErrForbidden):
 		return http.StatusForbidden, &contracts.APIError{Code: contracts.ErrForbidden, Message: userMessage(err)}
 	case errors.Is(err, store.ErrConflict):

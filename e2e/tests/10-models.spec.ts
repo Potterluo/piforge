@@ -64,10 +64,14 @@ test.describe("model management", () => {
     // The composer reflects it…
     await expect(page.getByTestId("composer-model")).toContainText(modelId, { timeout: 20_000 });
 
-    // …and so does the session, which is what the control plane hands to Pi.
-    const session = await page.request.get(`/v1/sessions/${sessionId}`);
-    expect(session.status()).toBe(200);
-    const body = (await session.json()) as { session: { model_ref: string } };
-    expect(body.session.model_ref).toBe(modelId);
+    // …and so does the session, which is what the control plane hands to Pi. The
+    // PATCH is fired from the picker, so poll rather than race it.
+    await expect
+      .poll(async () => {
+        const session = await page.request.get(`/v1/sessions/${sessionId}`);
+        const body = (await session.json()) as { session: { model_ref?: string } };
+        return body.session.model_ref ?? "";
+      }, { timeout: 20_000 })
+      .toBe(modelId);
   });
 });

@@ -19,6 +19,7 @@ import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api/client";
+import { qk } from "@/lib/session/queries";
 import { truncate } from "@/lib/session/format";
 
 /**
@@ -47,6 +48,10 @@ function ForkForm({
     onSuccess: (data) => {
       void queryClient.invalidateQueries({ queryKey: ["session-tree", sessionId] });
       void queryClient.invalidateQueries({ queryKey: ["session-fork-points", sessionId] });
+      // The new branch belongs in the sidebar immediately: a fork you cannot see
+      // until you reload looks like the action failed.
+      void queryClient.invalidateQueries({ queryKey: qk.sessions(projectId) });
+      void queryClient.invalidateQueries({ queryKey: qk.projects });
       onClose();
       toast.success("分支已创建", { description: data.session.title });
       router.push(`/p/${projectId}/s/${data.session.id}`);
