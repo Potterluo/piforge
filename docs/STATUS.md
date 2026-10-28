@@ -39,7 +39,7 @@
 | FR-2.3 分支树视图（父子/时间/状态/diff 规模） | PARTIAL | `branch-tree.tsx` 画的是 **Pi entry 树**（`TreeNodeRow`，按 `children` 缩进）+ 分叉点列表；主干↔分支的父子只在侧栏 `app-sidebar.tsx` `groupSessions` 里体现（`Collapsible` + `StatusDot`）。没有「创建时间/diff 规模」列，也没有分支级图形。无测试 |
 | FR-2.4 分支命名 / 归档 / 删除（清理 worktree） | PARTIAL | 命名与归档：`handleFork` 的 `label`、`handlePatchSession`；删除：`handleDeleteSession` **明确保留 worktree 在磁盘上**（注释 "The worktree stays on disk"），`gitx.RemoveWorktree`/`PruneWorktrees` 全仓库零调用；且从未写 Pi 的 `label` entry（`pi/runtime.go` 无 `set_label`/`label`）。`18-branching.spec.ts` 只覆盖父子关系 |
 | FR-2.5 对比视图（2–3 分支并排 diff/测试/成本/耗时） | MISSING | 无 `POST /v1/branches/compare` 路由，无对比组件；全仓库无 `compare` 相关实现（仅 `git-panel.tsx` 的注释性单词） |
-| FR-2.6 采纳（cherry-pick / 整树覆盖） | MISSING | 无 `POST /v1/branches/{id}/adopt`，无二次确认 UI；全仓库 `cherry` 零命中 |
+| FR-2.6 采纳（cherry-pick / 整树覆盖） | DONE | `gitx.Runner.Adopt` + `POST /v1/sessions/{id}/adopt` + 侧栏「采纳回主干」；`adopt_test.go`（真 git，含两种拒绝）、`branch_adopt_test.go`、`28-adopt.spec.ts` |
 | FR-2.7 `clone` 复制当前分支 | DONE | `session_clone.go` `handleCloneSession` + `POST /v1/sessions/{id}/clone`（router.go:203）+ `api.sessions.clone` + 侧栏 `data-testid="session-clone"`；`session_clone_test.go` `TestCloneKeepsTheWholeConversation`（无 e2e） |
 | FR-3.1 同一主会话下只有一个分支在执行 | MISSING | 无「切走前 pause」逻辑：`app-sidebar.tsx`/`workbench.tsx` 切分支只是 `router.push`；`hub.ensure` 允许同一 root 下多个 session 各起一个 Pi 进程，互不感知 |
 | FR-3.2 显式并行运行 2–3 分支 | MISSING | 无并行开关、无「每个分支一个独立 PTY」的语义层；"parallel" 仅出现在 `web/lib/git/lanes.test.ts`（图形 lane，无关） |
@@ -153,7 +153,7 @@
 
 ## 最影响用户的缺口（按「用户多久会撞上」排序）
 
-1. **FR-2.5 对比视图 / FR-2.6 采纳**——PRD 的招牌场景 JS-2「三种改法并行试，对比后择优」只完成了「分叉」和「clone」，没有对比页、没有 cherry-pick/整树覆盖。分出去的分支只能靠人肉看 diff，也没有回主干的路径。
+1. **FR-2.5 对比视图**——PRD 的招牌场景 JS-2「三种改法并行试，对比后择优」现在有了分叉、clone、采纳（FR-2.6 已完成），还差「并排对比」这一屏。
 2. **FR-3.1 / 3.2 / 3.3 并行执行控制**——既没有「切走前 pause」的互斥，也没有「显式并行」开关与 3→5 上限/排队原因。多分支现在只是「多个独立会话」，PRD 里那层语义完全不存在；`docs/STATUS.md` 也承认这三条未做。
 3. **FR-4.2 / FR-4.5 sidecar 只读不成立**——`ReadOnlyTools` 只是个被赋值 4 次、从未被 `pi/runtime.go` 使用的字段。PRD 的 AC-4.2（sidecar 里 `rm -rf` 被工具集拦住）现实是拦不住，且没有提权开关。这是「说了但没做到」的安全承诺。
 4. **FR-15.2 MCP 凭据被静默丢弃，UI 却宣称已加密**——`POST /v1/mcp/servers` 接受 `secrets` 后直接不落库（代码注释自认；`contracts.MCPServer` 连存密文的字段都没有），而设置页写着「凭据单独加密保存」。用户填的 token 消失且无报错，需要 header/env 的 MCP 服务器永远连不上——这是「文案撒谎」而不只是「功能缺失」。
@@ -175,5 +175,5 @@
 - `FR-3.4 多窗格` 记为「完成」——实际是多面板检查器（`PANELS = changes/git/browser/terminal`），不是 2–4 个分支的实时流，`25-split.spec.ts` 也只验证两个检查器面板并排。
 - `FR-4.6 多个 sidecar` 记为「完成」——后端有 3 个上限与单测，但 UI 只有一个 dock，没有 tab 切换。
 - `FR-1.5` 记为「完成」——缺搜索；`FR-2.4` 记为「完成」——删除分支不清理 worktree（`RemoveWorktree` 无调用者），也从未写 Pi 的 `label` entry。
-- `FR-2.7 clone` 在审计期间才落地（`2e5f206`），STATUS.md 里仍写着「未做」，现已过时。
+- `FR-2.7 clone`（2e5f206）与 `FR-2.6 采纳`（85ceaba）已在审计之后落地，两行都已更新。
 - STATUS.md 完全没有覆盖 FR-5.x、FR-9.x、FR-10.x、FR-12.x、FR-14.x、FR-15.x 的大部分行，这些正是 MISSING 最集中的区域。
