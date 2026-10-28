@@ -229,6 +229,9 @@ func (s *server) routes() http.Handler {
 	mux.Handle("DELETE /v1/mcp/servers/{id}", s.mutating(s.handleDeleteMCPServer))
 
 	// Admin.
+	mux.Handle("GET /v1/admin/providers", s.authed(s.handleAdminListProviders))
+	mux.Handle("POST /v1/admin/providers", s.mutating(s.handleAdminUpsertProvider))
+	mux.Handle("DELETE /v1/admin/providers/{id}", s.mutating(s.handleAdminDeleteProvider))
 	mux.Handle("GET /v1/admin/users", s.authed(s.handleAdminUsers))
 	mux.Handle("POST /v1/admin/users", s.mutating(s.handleAdminCreateUser))
 	mux.Handle("PATCH /v1/admin/users/{id}", s.mutating(s.handleAdminUpdateUser))

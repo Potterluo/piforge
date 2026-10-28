@@ -438,3 +438,19 @@ type ProviderPatch struct {
 	ClearKey  bool
 	Enabled   *bool
 }
+
+// DeleteAdminProvider removes a shared provider.
+//
+// AdminXxx: admin only, and scoped to `scope = 'admin'` so this path can never
+// delete somebody's personal provider.
+func (s *Store) DeleteAdminProvider(ctx context.Context, callerID, providerID string) error {
+	if err := s.requireAdmin(ctx, callerID); err != nil {
+		return err
+	}
+	res, err := s.w.ExecContext(ctx,
+		`DELETE FROM providers WHERE id = ? AND scope = 'admin'`, providerID)
+	if err != nil {
+		return fmt.Errorf("store: delete admin provider %q: %w", providerID, err)
+	}
+	return requireOneRow(res, "store: delete admin provider "+providerID)
+}

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { KeyRound, Pencil, Plus, Trash } from "lucide-react";
 
@@ -43,7 +43,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { api, type CreateProviderInput } from "@/lib/api/client";
 import type { Provider } from "@/lib/types";
-import { qk, useProviders } from "@/lib/session/queries";
+import { qk, useCurrentUser, useProviders } from "@/lib/session/queries";
 
 const API_KINDS = [
   { value: "anthropic-messages", label: "anthropic-messages" },
@@ -66,6 +66,8 @@ function parseModels(raw: string): { id: string; name?: string }[] {
 export default function ProvidersPage() {
   const queryClient = useQueryClient();
   const providers = useProviders();
+  const me = useCurrentUser();
+  const isAdmin = me.data?.user.role === "admin";
   const [dialogOpen, setDialogOpen] = useState(false);
 
   const [name, setName] = useState("");
@@ -169,6 +171,12 @@ export default function ProvidersPage() {
           添加 Provider
         </Button>
       </header>
+
+      {isAdmin ? (
+        <SharedProviders
+          onChanged={() => void queryClient.invalidateQueries({ queryKey: qk.providers })}
+        />
+      ) : null}
 
       <div className="flex flex-col gap-2 p-4">
         {providers.isPending ? (
@@ -482,5 +490,217 @@ export default function ProvidersPage() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+/**
+ * Shared providers (PRD FR-16.2): the deployment's own model accounts. An admin
+ * configures one here and every user inherits it; a user's own provider of the
+ * same name shadows it, which is the "your machine is yours" illusion in one
+ * line.
+ */
+function SharedProviders({ onChanged }: { onChanged: () => void }) {
+  const queryClient = useQueryClient();
+  const shared = useQuery({
+    queryKey: ["admin", "providers"],
+    queryFn: () => api.admin.providers(),
+  });
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [apiKind, setApiKind] = useState("openai-compat");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [modelsText, setModelsText] = useState("");
+
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: ["admin", "providers"] });
+    onChanged();
+  };
+
+  const share = useMutation({
+    mutationFn: () =>
+      api.admin.shareProvider({
+        name: name.trim(),
+        api: apiKind,
+        base_url: baseUrl.trim() || undefined,
+        api_key: apiKey.trim() || undefined,
+        models: parseModels(modelsText),
+      }),
+    onSuccess: () => {
+      toast.success("已共享给所有用户");
+      setOpen(false);
+      setName("");
+      setBaseUrl("");
+      setApiKey("");
+      setModelsText("");
+      refresh();
+    },
+    onError: (error) =>
+      toast.error("共享失败", {
+        description: error instanceof Error ? error.message : "未知错误",
+      }),
+  });
+
+  const unshare = useMutation({
+    mutationFn: (id: string) => api.admin.unshareProvider(id),
+    onSuccess: () => {
+      toast.success("已取消共享");
+      refresh();
+    },
+    onError: (error) =>
+      toast.error("取消失败", {
+        description: error instanceof Error ? error.message : "未知错误",
+      }),
+  });
+
+  const list = shared.data?.providers ?? [];
+
+  return (
+    <section className="flex flex-col gap-2 border-b border-border p-4" data-testid="shared-providers">
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <h2 className="text-sm font-medium">共享模型（全员可用）</h2>
+          <p className="max-w-2xl text-xs text-muted-foreground">
+            这里配置的 provider 会出现在每个用户的列表里，标记为「继承」。用户自己建的同名 provider 会覆盖它。
+          </p>
+        </div>
+        <Button size="sm" variant="outline" data-testid="shared-provider-add" onClick={() => setOpen(true)}>
+          <Plus />
+          共享一个
+        </Button>
+      </div>
+
+      {list.length === 0 ? (
+        <p className="text-xs text-muted-foreground">还没有共享 provider，每个用户得自己配 key。</p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {list.map((provider) => (
+            <Item key={provider.id} variant="outline" data-testid="shared-provider-item">
+              <ItemMedia variant="icon">
+                <KeyRound />
+              </ItemMedia>
+              <ItemContent className="min-w-0 gap-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <ItemTitle>{provider.name}</ItemTitle>
+                  <Badge variant="outline">{provider.api}</Badge>
+                  {provider.has_key ? (
+                    <Badge variant="outline">已配置 key</Badge>
+                  ) : (
+                    <Badge variant="destructive">缺少 key</Badge>
+                  )}
+                </div>
+                <ItemDescription className="font-mono text-xs">
+                  {provider.base_url || "默认端点"}
+                  {provider.models.length
+                    ? ` · ${provider.models.map((model) => model.id).join(", ")}`
+                    : " · 未声明模型"}
+                </ItemDescription>
+              </ItemContent>
+              <ItemActions>
+                <Button
+                  size="icon-xs"
+                  variant="ghost"
+                  aria-label="取消共享"
+                  disabled={unshare.isPending}
+                  onClick={() => unshare.mutate(provider.id)}
+                >
+                  <Trash />
+                </Button>
+              </ItemActions>
+            </Item>
+          ))}
+        </div>
+      )}
+
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <form
+            className="flex flex-col gap-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!name.trim()) {
+                toast.error("请填写名称");
+                return;
+              }
+              share.mutate();
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>共享一个 provider</DialogTitle>
+              <DialogDescription>
+                所有用户都会看到它；同名时用户自己的配置优先。key 同样加密保存，不会回显。
+              </DialogDescription>
+            </DialogHeader>
+            <FieldGroup>
+              <Field>
+                <FieldLabel htmlFor="shared-name">名称</FieldLabel>
+                <Input
+                  id="shared-name"
+                  data-testid="shared-provider-name"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  placeholder="shared-anthropic"
+                  autoFocus
+                  required
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="shared-api">接口协议</FieldLabel>
+                <Select items={API_KINDS} value={apiKind} onValueChange={(value) => setApiKind(String(value))}>
+                  <SelectTrigger id="shared-api" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {API_KINDS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="shared-base">Base URL</FieldLabel>
+                <Input
+                  id="shared-base"
+                  value={baseUrl}
+                  onChange={(event) => setBaseUrl(event.target.value)}
+                  placeholder="https://api.example.com/v1"
+                  className="font-mono text-xs"
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="shared-key">API Key</FieldLabel>
+                <Input
+                  id="shared-key"
+                  type="password"
+                  value={apiKey}
+                  onChange={(event) => setApiKey(event.target.value)}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="shared-models">模型</FieldLabel>
+                <Textarea
+                  id="shared-models"
+                  value={modelsText}
+                  onChange={(event) => setModelsText(event.target.value)}
+                  rows={3}
+                  placeholder={"claude-sonnet-4\ngpt-4o"}
+                  className="font-mono text-xs"
+                />
+                <FieldDescription>每行一个模型 id。</FieldDescription>
+              </Field>
+            </FieldGroup>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setOpen(false)}>
+                取消
+              </Button>
+              <Button type="submit" data-testid="shared-provider-submit" disabled={share.isPending}>
+                共享
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+    </section>
   );
 }

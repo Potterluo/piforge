@@ -189,8 +189,8 @@ scoping, SSE replay, git status/diff/DAG/worktrees, the file tree and previews, 
 PTYs over a WebSocket relay, the model gateway with sealed keys, skills/MCP
 materialisation, and the sandbox browser.
 
-Test counts at the time of writing: 246 backend tests (including a real-Chrome
-integration test and a real-git repository), 108 frontend unit tests, and 48
+Test counts at the time of writing: 248 backend tests (including a real-Chrome
+integration test and a real-git repository), 108 frontend unit tests, and 50
 end-to-end tests against the real control plane in a real browser.
 
 What is deliberately not here yet, and why:

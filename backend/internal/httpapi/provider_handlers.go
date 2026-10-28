@@ -163,3 +163,78 @@ func (s *server) handleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, providerResponse{Provider: p})
 }
+
+// Shared providers are the deployment's own model accounts (PRD FR-16.2): an
+// admin configures one, every user inherits it, and a user's own provider of the
+// same name shadows it. These three handlers are the admin half.
+
+func (s *server) handleAdminListProviders(w http.ResponseWriter, r *http.Request) {
+	user := auth.MustUser(r.Context())
+	providers, err := s.deps.Store.AdminListProviders(r.Context(), user.ID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if providers == nil {
+		providers = []*contracts.Provider{}
+	}
+	writeJSON(w, http.StatusOK, providersResponse{Providers: providers})
+}
+
+func (s *server) handleAdminUpsertProvider(w http.ResponseWriter, r *http.Request) {
+	user := auth.MustUser(r.Context())
+	if user.Role != contracts.RoleAdmin {
+		s.fail(w, r, apiErr(contracts.ErrForbidden, "admin role required"))
+		return
+	}
+
+	var in struct {
+		Name    string                `json:"name"`
+		API     string                `json:"api"`
+		BaseURL string                `json:"base_url"`
+		Models  []contracts.ModelSpec `json:"models"`
+		APIKey  string                `json:"api_key"`
+		Enabled *bool                 `json:"enabled"`
+	}
+	if err := decodeJSON(r, &in); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	var cipherText []byte
+	if in.APIKey != "" {
+		if s.deps.Secrets == nil {
+			s.fail(w, r, apiErr(contracts.ErrInternal, "secret storage is not configured on this server"))
+			return
+		}
+		sealed, err := s.deps.Secrets.SealString(in.APIKey)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		cipherText = sealed
+	}
+
+	provider, err := s.deps.Store.UpsertAdminProvider(r.Context(), user.ID, store.ProviderInput{
+		Name:      in.Name,
+		API:       in.API,
+		BaseURL:   in.BaseURL,
+		Models:    in.Models,
+		KeyCipher: cipherText,
+		Enabled:   in.Enabled,
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, providerResponse{Provider: provider})
+}
+
+func (s *server) handleAdminDeleteProvider(w http.ResponseWriter, r *http.Request) {
+	user := auth.MustUser(r.Context())
+	if err := s.deps.Store.DeleteAdminProvider(r.Context(), user.ID, pathID(r)); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeOK(w)
+}

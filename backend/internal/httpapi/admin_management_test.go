@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
@@ -226,3 +227,60 @@ func TestSendWithoutAModelSaysWhereToFixIt(t *testing.T) {
 }
 
 func ptrString(v string) *string { return &v }
+
+// A shared provider is how a deployment gives everybody a model without handing
+// out keys: the admin configures one, every user inherits it, and a user's own
+// provider of the same name shadows it (PRD FR-16.2). Until this existed the
+// policy was implemented in the store and unreachable from the product.
+func TestAdminSharesAProviderThatUsersInherit(t *testing.T) {
+	env := newTestEnv(t)
+	env.mkUser("admin@piforge.local", "adminpw", contracts.RoleAdmin)
+	admin := env.login("admin@piforge.local", "adminpw")
+	env.mkUser("dev@piforge.local", "devpw", contracts.RoleUser)
+	dev := env.login("dev@piforge.local", "devpw")
+
+	rec := env.doAuthed(http.MethodPost, "/v1/admin/providers", map[string]any{
+		"name":     "shared-house",
+		"api":      "openai-compat",
+		"base_url": "https://shared.example.com/v1",
+		"api_key":  "sk-house-key",
+		"models":   []map[string]string{{"id": "house-model"}},
+	}, admin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("share: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// The user sees it as inherited, not as something they can edit.
+	listed := env.doAuthed(http.MethodGet, "/v1/providers", nil, dev)
+	var body struct {
+		Providers []contracts.Provider `json:"providers"`
+	}
+	env.mustJSON(listed, &body)
+	var found *contracts.Provider
+	for i := range body.Providers {
+		if body.Providers[i].Name == "shared-house" {
+			found = &body.Providers[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("the shared provider is not visible to a normal user: %+v", body.Providers)
+	}
+	if found.Source != contracts.SourceInherited {
+		t.Fatalf("source = %q", found.Source)
+	}
+
+	// The key never comes back out, to either of them.
+	if listed := env.doAuthed(http.MethodGet, "/v1/admin/providers", nil, admin); strings.Contains(listed.Body.String(), "sk-house-key") {
+		t.Fatal("the shared key was echoed")
+	}
+
+	// A normal user cannot create, list or delete shared providers.
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/v1/admin/providers"},
+		{http.MethodPost, "/v1/admin/providers"},
+	} {
+		if rec := env.doAuthed(tc.method, tc.path, map[string]any{"name": "x", "api": "openai-compat"}, dev); rec.Code != http.StatusForbidden {
+			t.Fatalf("%s %s by a normal user = %d", tc.method, tc.path, rec.Code)
+		}
+	}
+}

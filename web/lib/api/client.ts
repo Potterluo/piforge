@@ -353,6 +353,12 @@ export interface UpdateUserInput {
 
 export const admin = {
   users: () => request<{ users: User[] }>("/v1/admin/users"),
+  // Shared providers: one deployment-wide account everyone inherits.
+  providers: () => request<{ providers: Provider[] }>("/v1/admin/providers"),
+  shareProvider: (input: CreateProviderInput) =>
+    request<{ provider: Provider }>("/v1/admin/providers", { method: "POST", body: input }),
+  unshareProvider: (id: string) =>
+    request<{ ok: boolean }>(`/v1/admin/providers/${id}`, { method: "DELETE" }),
   createUser: (input: CreateUserInput) =>
     request<{ users: User[] }>("/v1/admin/users", { method: "POST", body: input }),
   updateUser: (id: string, input: UpdateUserInput) =>
