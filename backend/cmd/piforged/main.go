@@ -271,6 +271,18 @@ func run() error {
 		resolvedModels.bySession[spec.SessionID] = res.Model
 		resolvedModels.Unlock()
 
+		// MCP servers reach the agent the only way Pi accepts them: a file in the
+		// session's agent directory. Credentials are decrypted here, per session, and
+		// written as environment variables — never on a command line where `ps` would
+		// show them.
+		if entries, merr := mcpEntriesFor(ctx, st, spec.UserID); merr != nil {
+			logger.Warn("cannot prepare MCP servers for this session",
+				"session", spec.SessionID, "error", merr.Error())
+		} else if _, werr := pimodel.WriteMCP(res.Dir, entries); werr != nil {
+			logger.Warn("cannot write the MCP configuration",
+				"session", spec.SessionID, "error", werr.Error())
+		}
+
 		return agentSetup{
 			// A sidecar shares its parent's checkout, so it must not be able to write
 			// to it (FR-4.2). The restriction is passed to Pi as a tool denylist for
@@ -692,4 +704,36 @@ func abs(p string) string {
 		return a
 	}
 	return p
+}
+
+// mcpEntriesFor turns a user's stored MCP servers into what Pi reads, decrypting each
+// credential for this launch only.
+func mcpEntriesFor(ctx context.Context, st *store.Store, userID string) ([]pimodel.MCPEntry, error) {
+	servers, err := st.ListMCPServers(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]pimodel.MCPEntry, 0, len(servers))
+	for _, server := range servers {
+		if !server.Enabled {
+			continue
+		}
+		entry := pimodel.MCPEntry{
+			Name:      server.Name,
+			Transport: string(server.Transport),
+			Command:   server.Command,
+			Args:      server.Args,
+			URL:       server.URL,
+		}
+		if server.HasSecrets {
+			secret, serr := st.MCPServerSecrets(ctx, userID, server.ID)
+			if serr != nil {
+				_ = serr // logged by the caller; a missing credential is not fatal to the session
+			} else if env := pimodel.ParseMCPSecrets(secret); len(env) > 0 {
+				entry.Env = env
+			}
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
 }

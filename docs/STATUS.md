@@ -134,8 +134,8 @@
 | FR-14.5 会话记录所用 skill@version | MISSING | `skills.version` 只在自己表里，`sessions.config` 未记录任何 skill 版本；无相关代码 |
 | FR-14.6 `/skill:name` + `/` 命令面板 | MISSING | `command-palette.tsx` 只有会话/项目命令；无 `/` 斜杠命令、无 skill 调用 |
 | FR-14.7 内置开箱可用 skill | MISSING | `store/seed.go` 只种 admin 用户与共享 provider（`EnsureAdminSeed`），无内置 skill |
-| FR-15.1 MCP server 配置 | PARTIAL（**配置不生效**） | CRUD + 加密凭据都在，但**没有任何代码把 MCP server 写进 Pi 的 `mcp.json`**，所以 agent 里没有这些工具。这一节的其它行都以此为前提 |
-| FR-15.2 MCP 凭据加密保存 | PARTIAL（存得住、读不回；未注入到进程） | `store/secrets.go` AES-GCM（`PIFORGE_SECRET_KEY` 或数据目录 `secret.key`），`secrets_cipher` 列；`MCPServerSecrets` 只给启动器用；`secrets_test.go` 断言密文不含明文、跨用户读不到；`32-mcp-secrets.spec.ts`。**还没把凭据注入到 MCP 进程的 env** |
+| FR-15.1 MCP server 配置 | DONE | `pimodel.WriteMCP` 在启动时写 `<agent dir>/mcp.json`；`mcpEntriesFor` 汇总用户与共享 server；`mcp_test.go`（形状取自镜像里的 `pi mcp add`）；容器实测 `pi mcp list` 认出了写入的 server |
+| FR-15.2 MCP 凭据加密 + 注入 | DONE | AES-GCM 落库（`store/secrets.go`）；启动时解密并经 `ParseMCPSecrets` 写成 `env`（不进命令行）；`secrets_test.go`、`mcp_test.go`；容器实测 mcp.json 内含 env |
 | FR-15.3 OAuth 代办 | MISSING | 无 `POST /v1/mcp/{id}/oauth/start`，无回调路由 |
 | FR-15.4 曝光配置（server + 按工具通配符） | PARTIAL | `MCPServer.Exposure` 会写进 `.mcp.json`（`mcpEntry`）；无按工具 `tool_overrides`，UI 只有自由文本 |
 | FR-15.5 状态徽章（Connected/Needs auth/Failed/cached） | MISSING | 契约里没有健康字段，`settings/mcp` 不显示状态，也没有探测 |
