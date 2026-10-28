@@ -171,6 +171,9 @@ export const sessions = {
   send: (id: string, input: SendMessageInput) =>
     request<PromptResult>(`/v1/sessions/${id}/messages`, { method: "POST", body: input }),
   remove: (id: string) => request<{ ok: boolean }>(`/v1/sessions/${id}`, { method: "DELETE" }),
+  /** Turns a side conversation into a branch with its own checkout (FR-4.7). */
+  promote: (id: string) =>
+    request<{ session: Session }>(`/v1/sessions/${id}/promote`, { method: "POST" }),
   /** Captures the sandbox browser into the checkout, for the agent to read. */
   screenshot: (id: string) =>
     request<{ path: string; bytes: number }>(`/v1/sessions/${id}/browser/screenshot`, {

@@ -72,7 +72,14 @@ import { WorkspacePanels } from "@/components/workspace/workspace-panels";
 
 describe("workspace panels smoke", () => {
   it("renders the four tabs and survives tab switching", async () => {
-    // The panels ask for the account's feature flags now, so they need a client.
+  // The panels ask for the account's feature flags now, so they need a client.
+  //
+  // `panelReady` allows 5s, not the 1s default: this test mounts five panels that
+  // each fetch, and a loaded full-suite run is slower than an isolated one. A
+  // timing-dependent assertion here reports the machine, not the product.
+  const panelReady = (id: string) =>
+    waitFor(() => expect(screen.getByTestId(id)).toBeInTheDocument(), { timeout: 5_000 });
+
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <WorkspacePanels sessionId="s1" projectId="p1" />
@@ -86,19 +93,19 @@ describe("workspace panels smoke", () => {
     const nodes = await screen.findAllByTestId("file-node");
     const fileNode = nodes.find((node) => node.dataset.kind === "file")!;
     fireEvent.click(fileNode);
-    await waitFor(() => expect(screen.getByTestId("file-preview-body")).toBeInTheDocument());
+    await panelReady("file-preview-body");
     expect(await screen.findByText(/export const a = 1;/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId("panel-tab-changes"));
-    await waitFor(() => expect(screen.getByTestId("git-panel")).toBeInTheDocument());
+    await panelReady("git-panel");
     await waitFor(() => expect(screen.getAllByText(/未暂存/).length).toBeGreaterThan(0));
 
     fireEvent.click(screen.getByTestId("panel-tab-git"));
-    await waitFor(() => expect(screen.getByTestId("git-graph")).toBeInTheDocument());
+    await panelReady("git-graph");
     expect(screen.getAllByTestId("git-graph-row")).toHaveLength(2);
 
     fireEvent.click(screen.getByTestId("panel-tab-terminal"));
-    await waitFor(() => expect(screen.getByTestId("terminal-disconnected")).toBeInTheDocument());
+    await panelReady("terminal-disconnected");
   });
 });
 

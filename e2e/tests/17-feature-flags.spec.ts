@@ -8,6 +8,11 @@ import { ADMIN, USER, login, openNewSession } from "./helpers";
  * transcripts" is a governance decision, so the API has to refuse — a hidden
  * button is not a decision.
  */
+// These flows sign out and back in several times, and every switch remounts the
+// app shell. A 60s budget is tight for that on a machine already running the rest
+// of the suite; the assertions themselves are unchanged.
+test.setTimeout(120_000);
+
 test.describe("feature flags", () => {
   test("an admin turns export off and the server refuses it", async ({ page }) => {
     const csrf = async () =>

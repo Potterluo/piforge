@@ -2,7 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { MessageSquareDashed, ShieldCheck } from "lucide-react";
+import { GitBranch, MessageSquareDashed, ShieldCheck } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -117,6 +119,21 @@ export function SidecarDock({
   });
   const { mutate } = create;
 
+  const router = useRouter();
+  const promote = useMutation({
+    mutationFn: () => api.sessions.promote(sidecarId ?? ""),
+    onSuccess: (data) => {
+      toast.success("已提升为分支", { description: "旁路对话的内容一并带走了。" });
+      void queryClient.invalidateQueries({ queryKey: qk.sessions(projectId) });
+      onOpenChange(false);
+      router.push(`/p/${projectId}/s/${data.session.id}`);
+    },
+    onError: (error) =>
+      toast.error("提升失败", {
+        description: error instanceof Error ? error.message : "未知错误",
+      }),
+  });
+
   // Opening the dock is the intent to use a sidecar, so create one lazily.
   useEffect(() => {
     if (!open || sidecarId || requestedRef.current) return;
@@ -161,6 +178,19 @@ export function SidecarDock({
           </div>
         ) : sidecarId ? (
           <div className={cn("flex min-h-0 flex-1 flex-col")}>
+            <div className="flex shrink-0 items-center justify-end gap-2 border-b border-border px-3 py-1.5">
+              <Button
+                size="xs"
+                variant="outline"
+                data-testid="sidecar-promote"
+                disabled={promote.isPending}
+                title="给这个旁路对话一个自己的工作区，并把它变成分支"
+                onClick={() => promote.mutate()}
+              >
+                <GitBranch />
+                提升为分支
+              </Button>
+            </div>
             <SidecarConversation sessionId={sidecarId} />
           </div>
         ) : null}

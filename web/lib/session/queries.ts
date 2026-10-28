@@ -33,7 +33,12 @@ export function useProjects() {
   return useQuery({
     queryKey: qk.projects,
     queryFn: () => api.projects.list(),
+    // The list carries each project's sandbox state, which changes when a sandbox
+    // is provisioned. A stale badge ("沙箱 · 未创建" over a working terminal) is the
+    // kind of detail that makes an operator distrust every other number.
     staleTime: 15_000,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
   });
 }
 

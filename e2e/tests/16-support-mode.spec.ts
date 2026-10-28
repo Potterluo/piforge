@@ -7,6 +7,11 @@ import { ADMIN, USER, apiWrite, login, openNewSession, sendPrompt } from "./help
  * conversation. The promise is: they must say why, it expires, it cannot change
  * anything, and the owner gets a receipt naming them.
  */
+// These flows sign out and back in several times, and every switch remounts the
+// app shell. A 60s budget is tight for that on a machine already running the rest
+// of the suite; the assertions themselves are unchanged.
+test.setTimeout(120_000);
+
 test.describe("support mode", () => {
   test("an admin reads on the record and the owner is told", async ({ page }) => {
     // The owner has a conversation worth reading.

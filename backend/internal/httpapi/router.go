@@ -197,6 +197,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /v1/sessions/{id}/fork-points", s.authed(s.handleForkPoints))
 	mux.Handle("POST /v1/sessions/{id}/fork", s.mutating(s.handleFork))
 	mux.Handle("POST /v1/sessions/{id}/sidecar", s.mutating(s.handleSidecar))
+	mux.Handle("POST /v1/sessions/{id}/promote", s.mutating(s.handlePromoteSidecar))
 	mux.Handle("POST /v1/sessions/{id}/compact", s.mutating(s.handleCompact))
 
 	// Workspace: files, search, git. All delegate to Deps.Workspace.
