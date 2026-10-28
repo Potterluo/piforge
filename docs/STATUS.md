@@ -41,9 +41,9 @@
 | FR-2.5 对比视图（2–3 分支并排） | DONE（无「测试」列） | `GET /v1/sessions/compare?ids=`、`compare-page.tsx`、`/p/{project}/compare`、`compare_test.go` + `29-compare.spec.ts`；本部署不跑测试，故不设测试列；缺 checkout 时报 `diff_error` 而非 0 |
 | FR-2.6 采纳（cherry-pick / 整树覆盖） | DONE | `gitx.Runner.Adopt` + `POST /v1/sessions/{id}/adopt` + 侧栏「采纳回主干」；`adopt_test.go`（真 git，含两种拒绝）、`branch_adopt_test.go`、`28-adopt.spec.ts` |
 | FR-2.7 `clone` 复制当前分支 | DONE | `session_clone.go` `handleCloneSession` + `POST /v1/sessions/{id}/clone`（router.go:203）+ `api.sessions.clone` + 侧栏 `data-testid="session-clone"`；`session_clone_test.go` `TestCloneKeepsTheWholeConversation`（无 e2e） |
-| FR-3.1 同一主会话下只有一个分支在执行 | MISSING | 无「切走前 pause」逻辑：`app-sidebar.tsx`/`workbench.tsx` 切分支只是 `router.push`；`hub.ensure` 允许同一 root 下多个 session 各起一个 Pi 进程，互不感知 |
-| FR-3.2 显式并行运行 2–3 分支 | MISSING | 无并行开关、无「每个分支一个独立 PTY」的语义层；"parallel" 仅出现在 `web/lib/git/lanes.test.ts`（图形 lane，无关） |
-| FR-3.3 并行上限 3→5 + 排队原因 | MISSING | 无上限、无排队状态、无设置项；`handleSidecar` 的 3 个上限只针对 sidecar |
+| FR-3.1 同一主会话下只有一个分支在执行 | DONE | `httpapi/concurrency.go` `enforceConcurrency`：发消息前中断同 root 的其它运行中分支，并在对方事件流写 `session.paused`；`concurrency_test.go` 断言中断 + 事件 |
+| FR-3.2 显式并行运行 2–3 分支 | DONE（每个分支仍是自己的会话与 PTY） | 每用户开关 `parallel`（`store.FeatureParallel`，默认关）；管理员「功能开关」里可打开 |
+| FR-3.3 并行上限 3→5 + 拒绝原因 | DONE（超限拒绝，不做排队） | `Deps.ParallelLimit`（默认 3，上限 5），超限返回 429「并行上限是 N 个分支，先让其中一个跑完」；`concurrency_test.go` |
 | FR-3.4 多窗格 Workbench（2–4 个分支实时流） | MISSING | `workspace-panels.tsx` 的 `split` 是**检查器第二个面板**（`PANELS = changes/git/browser/terminal`），不是多个分支的会话流；`25-split.spec.ts` 只验证两个面板同时显示。`docs/STATUS.md` 把这条记为「完成」，属误记 |
 | FR-3.5 分支级终端 tab / 浏览器 tab | PARTIAL | 终端天然按会话隔离（`pty_handlers.go` 的 key 为 `sess.ID+":"+tab`）；浏览器是**每 sandbox 一个**（`browser_handlers.go` 用 `worktree.SandboxID`），分支间共享，且无 cookie 共享/分离选项 |
 | FR-3.6 冲突预警（同一文件被两分支改） | MISSING | 无任何文件级冲突检测；`GitStatus.conflicts` 只透传工作区未合并项，与分支间比较无关 |
