@@ -57,14 +57,21 @@ func shellArgv(shellPath string) []string {
 		// command from looking like a dead shell.
 		return []string{
 			shellPath, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-			`$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new(); ` +
-				// Read stdin through a UTF-8 StreamReader: [Console]::In decodes
-				// with the console code page, which turns UTF-8 input from the
-				// browser into garbage before the shell ever sees it.
-				`$in = New-Object IO.StreamReader([Console]::OpenStandardInput(), [Text.UTF8Encoding]::new()); ` +
-				`while (($line = $in.ReadLine()) -ne $null) { ` +
-				`if ($line.Trim().Length -eq 0) { continue }; ` +
-				`try { Invoke-Expression $line } catch { Write-Error $_.Exception.Message } }`,
+			// No backticks anywhere in this script: they are PowerShell escapes
+			// and this is a Go raw string.
+			`$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new();
+$stdin = New-Object IO.StreamReader([Console]::OpenStandardInput(), [Text.UTF8Encoding]::new());
+$buf = New-Object Text.StringBuilder;
+while (($code = $stdin.Read()) -ge 0) {
+  if ($code -eq 13 -or $code -eq 10) {
+    $line = $buf.ToString();
+    $buf.Clear() | Out-Null;
+    if ($line.Trim().Length -eq 0) { continue }
+    try { Invoke-Expression $line } catch { Write-Error $_.Exception.Message }
+  } else {
+    $buf.Append([char]$code) | Out-Null
+  }
+}`,
 		}
 	case strings.Contains(base, "cmd.exe"), base == "cmd":
 		// 65001 so that programs writing UTF-8 are not mangled on the way out.
