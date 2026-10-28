@@ -19,6 +19,7 @@ import {
   type MCPServer,
   type Project,
   type DeploymentStatus,
+  type SupportNotice,
   type PromptResult,
   type Provider,
   type RuntimeStatus,
@@ -361,11 +362,28 @@ export interface UpdateUserInput {
   password?: string;
 }
 
+/** Receipts for an admin having read your conversation. */
+export const support = {
+  notices: () => request<{ notices: SupportNotice[]; unseen: number }>("/v1/support-notices"),
+  seen: (id: string) =>
+    request<{ ok: boolean }>(`/v1/support-notices/${id}/seen`, { method: "POST" }),
+};
+
 export const admin = {
   users: () => request<{ users: User[] }>("/v1/admin/users"),
   // Shared providers: one deployment-wide account everyone inherits.
   providers: () => request<{ providers: Provider[] }>("/v1/admin/providers"),
   status: () => request<DeploymentStatus>("/v1/admin/status"),
+  // Support mode: read one session's transcript, on the record (PRD FR-16.8).
+  supportAccess: (sessionId: string, reason: string) =>
+    request<{ access: SupportNotice; transcript: { role: string; text: string }[] }>(
+      "/v1/admin/support-access",
+      { method: "POST", body: { session_id: sessionId, reason } },
+    ),
+  supportTranscript: (sessionId: string) =>
+    request<{ transcript: { role: string; text: string }[] }>(
+      `/v1/admin/support-access/${sessionId}/transcript`,
+    ),
   shareProvider: (input: CreateProviderInput) =>
     request<{ provider: Provider }>("/v1/admin/providers", { method: "POST", body: input }),
   unshareProvider: (id: string) =>
@@ -376,5 +394,5 @@ export const admin = {
     request<{ users: User[] }>(`/v1/admin/users/${id}`, { method: "PATCH", body: input }),
 };
 
-export const api = { auth, projects, sessions, files, git, providers, skills, mcp, admin };
+export const api = { auth, projects, sessions, files, git, providers, skills, mcp, admin, support };
 export default api;

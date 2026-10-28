@@ -304,3 +304,22 @@ func (s *Store) DeleteSession(ctx context.Context, userID, sessionID string) err
 	}
 	return requireOneRow(res, "store: delete session "+sessionID)
 }
+
+// SessionAny returns a session without an ownership check.
+//
+// Only the support-access path uses it: the admin has already recorded why they
+// are reading and the owner has a receipt for it. Every other caller must use
+// Session, which is what makes "an admin cannot read your conversations" true by
+// default rather than by good intentions.
+func (s *Store) SessionAny(ctx context.Context, sessionID string) (*contracts.Session, error) {
+	row := s.r.QueryRowContext(ctx,
+		`SELECT `+sessionCols+` FROM sessions WHERE id = ?`, sessionID)
+	sess, err := scanSession(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: session %q: %w", sessionID, err)
+	}
+	return sess, nil
+}

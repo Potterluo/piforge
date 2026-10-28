@@ -244,3 +244,20 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at     TEXT NOT NULL,
     UNIQUE (session_id, client_msg_id)
 );
+-- ============ support_access: admin read-only troubleshooting (PRD FR-16.8) ============
+-- An admin may read one session's transcript, for a bounded window, and only
+-- after saying why. The owner sees the record: this is a receipt, not an audit
+-- system, and pretending it is one would be worse than not having it.
+CREATE TABLE IF NOT EXISTS support_access (
+    id         TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    owner_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    admin_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    reason     TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    seen_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS support_access_owner ON support_access (owner_id, seen_at);
+CREATE INDEX IF NOT EXISTS support_access_session ON support_access (session_id);

@@ -236,6 +236,10 @@ func (s *server) routes() http.Handler {
 
 	// Admin.
 	mux.Handle("GET /v1/admin/status", s.authed(s.handleAdminStatus))
+	mux.Handle("POST /v1/admin/support-access", s.mutating(s.handleCreateSupportAccess))
+	mux.Handle("GET /v1/admin/support-access/{id}/transcript", s.authed(s.handleSupportTranscript))
+	mux.Handle("GET /v1/support-notices", s.authed(s.handleSupportNotices))
+	mux.Handle("POST /v1/support-notices/{id}/seen", s.mutating(s.handleSupportNoticeSeen))
 	mux.Handle("GET /v1/admin/providers", s.authed(s.handleAdminListProviders))
 	mux.Handle("POST /v1/admin/providers", s.mutating(s.handleAdminUpsertProvider))
 	mux.Handle("DELETE /v1/admin/providers/{id}", s.mutating(s.handleAdminDeleteProvider))

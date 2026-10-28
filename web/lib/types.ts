@@ -420,3 +420,19 @@ export interface DeploymentStatus {
   mcp_servers: number;
   events: number;
 }
+/**
+ * One recorded admin read of a session (PRD FR-16.8). The owner sees these; they
+ * are receipts, not an audit log, and `seen_at` is what clears the badge.
+ */
+export interface SupportNotice {
+  id: string;
+  session_id: string;
+  owner_id: string;
+  admin_id: string;
+  reason: string;
+  created_at: string;
+  expires_at: string;
+  seen_at?: string;
+  session_title?: string;
+  admin_email?: string;
+}

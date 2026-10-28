@@ -328,3 +328,17 @@ func nullString(s string) any {
 	}
 	return s
 }
+
+// FormatTimeForTest exposes the store's timestamp layout to tests that need to
+// age a row (an expired grant is otherwise untestable without waiting).
+func FormatTimeForTest(t time.Time) string { return formatTime(t) }
+
+// ExecForTest runs a statement against the store, for tests that need to move a
+// row into a state the API cannot produce on demand.
+func (s *Store) ExecForTest(ctx context.Context, query string, args ...any) error {
+	_, err := s.w.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("store: exec: %w", err)
+	}
+	return nil
+}

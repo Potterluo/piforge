@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import {
   Activity,
   Archive,
+  Eye,
   ChevronRight,
   ChevronsUpDown,
   Download,
@@ -70,7 +71,8 @@ import {
   sessionStatusLabel,
   sessionStatusTone,
 } from "@/lib/session/format";
-import { qk, useCurrentUser, useProjectSessions, useProjects } from "@/lib/session/queries";import { cn } from "@/lib/utils";
+import { qk, useCurrentUser, useProjectSessions, useProjects } from "@/lib/session/queries";
+import { SupportNotices } from "@/components/shell/support-notices";import { cn } from "@/lib/utils";
 import type { Session, SessionStatus } from "@/lib/types";
 
 interface SessionGroup {
@@ -403,6 +405,9 @@ export function AppSidebar({
               <span>设置</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SupportNotices />
+          </SidebarMenuItem>
           {isAdmin ? (
             <>
               <SidebarMenuItem>
@@ -415,6 +420,12 @@ export function AppSidebar({
                 <SidebarMenuButton tooltip="用户管理" render={<Link href="/admin/users" />}>
                   <Shield />
                   <span>用户管理</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton tooltip="只读排障" render={<Link href="/admin/support" />}>
+                  <Eye />
+                  <span>只读排障</span>
                 </SidebarMenuButton>
               </SidebarMenuItem>
             </>
