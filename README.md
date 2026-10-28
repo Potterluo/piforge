@@ -144,6 +144,16 @@ the first token is not delayed by buffering. Consequences worth knowing: changin
 a model does not restart a sandbox, and a leaked sandbox variable is worth minutes
 against one upstream host.
 
+That last point is worth stating plainly, because an agent can print its own
+environment and sometimes does: the `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` inside a
+sandbox are **per-session gateway tokens**, not the provider's key. They are bound
+to one session, expire on their own, and open exactly one door — the model gateway
+for that session's provider. They cannot read another session, another provider, or
+any other user's data. If one appears in a transcript, it is a token that will be
+dead shortly, not a credential that needs rotating. The provider's real key never
+enters the sandbox at all: it is sealed in the database and injected by the gateway
+on the way out.
+
 **Skills and MCP are files, so they are projected as files.** `internal/materialize`
 writes `.pi/skills/<slug>/SKILL.md` and `.mcp.json` into the checkout on every
 provisioning pass: idempotent, and it removes what it previously mounted when the
