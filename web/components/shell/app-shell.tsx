@@ -22,7 +22,7 @@ function projectIdFromPath(pathname: string): string | null {
 
 function ShellSkeleton() {
   return (
-    <div className="flex min-h-svh w-full">
+    <div className="flex h-svh w-full overflow-hidden">
       <div className="hidden w-64 shrink-0 flex-col gap-3 border-r p-3 md:flex">
         <Skeleton className="h-12 w-full" />
         <Skeleton className="h-6 w-3/4" />
@@ -102,7 +102,7 @@ function AppShellFrame({ children }: { children: ReactNode }) {
         onNewProject={() => setNewProjectOpen(true)}
         onNewSession={() => setNewSessionOpen(true)}
       />
-      <SidebarInset className="flex min-h-svh flex-1 flex-col overflow-hidden">
+      <SidebarInset className="flex h-svh min-h-0 flex-1 flex-col overflow-hidden">
         <ShellTopBar />
         {children}
       </SidebarInset>

@@ -137,3 +137,32 @@ func TestProviderTestIsScopedToTheCaller(t *testing.T) {
 	rec := env.doAuthed(http.MethodPost, "/v1/providers/"+provider.Provider.ID+"/test", map[string]any{}, bob)
 	env.mustErr(rec, http.StatusNotFound, contracts.ErrNotFound)
 }
+
+// TestProbeURLNeverDoubleV1 pins the bug the QA pass found: a base that already
+// ends in /v1 was probed at /v1/v1/chat/completions, so a healthy endpoint could
+// report failure and the connectivity test could not be trusted either way.
+func TestProbeURLNeverDoubleV1(t *testing.T) {
+	cases := []struct {
+		base string
+		want string
+	}{
+		{"https://api.example.com", "https://api.example.com/v1/chat/completions"},
+		{"https://api.example.com/", "https://api.example.com/v1/chat/completions"},
+		{"https://api.example.com/v1", "https://api.example.com/v1/chat/completions"},
+		{"https://api.example.com/v1/", "https://api.example.com/v1/chat/completions"},
+	}
+	for _, tc := range cases {
+		provider := &contracts.Provider{
+			API:     "openai-compat",
+			BaseURL: tc.base,
+			Models:  []contracts.ModelSpec{{ID: "m"}},
+		}
+		target, _, _, err := probeRequest(provider, "k")
+		if err != nil {
+			t.Fatalf("%s: %v", tc.base, err)
+		}
+		if target != tc.want {
+			t.Fatalf("base %q -> %q, want %q", tc.base, target, tc.want)
+		}
+	}
+}

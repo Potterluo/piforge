@@ -23,7 +23,7 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
-import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -94,8 +94,18 @@ export default function AdminUsersPage() {
         status: input.status,
         password: input.password,
       }),
-    onSuccess: () => {
-      toast.success("已更新");
+    onSuccess: (_data, variables) => {
+      const who = (users.data?.users ?? []).find((user) => user.id === variables.id)?.email;
+      const what = variables.role
+        ? variables.role === "admin"
+          ? "已设为管理员"
+          : "已降为普通用户"
+        : variables.status
+          ? variables.status === "disabled"
+            ? "已停用"
+            : "已启用"
+          : "密码已重置";
+      toast.success(who ? `${who} · ${what}` : what);
       refresh();
     },
     onError: (error: Error) => toast.error(error.message),
@@ -307,7 +317,14 @@ export default function AdminUsersPage() {
             </Field>
             <Field>
               <FieldLabel htmlFor="new-user-role">角色</FieldLabel>
-              <Select value={role} onValueChange={(value) => setRole(value as "user" | "admin")}>
+              <Select
+                items={[
+                  { value: "user", label: "普通用户" },
+                  { value: "admin", label: "管理员" },
+                ]}
+                value={role}
+                onValueChange={(value) => setRole(value as "user" | "admin")}
+              >
                 <SelectTrigger id="new-user-role" className="w-full">
                   <SelectValue />
                 </SelectTrigger>

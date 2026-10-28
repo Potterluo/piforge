@@ -617,7 +617,11 @@ func (e *APIError) Error() string { return e.Code + ": " + e.Message }
 
 // Error codes used across the API.
 const (
-	ErrInvalidArgument  = "invalid_argument"
+	ErrInvalidArgument = "invalid_argument"
+	// ErrNoModel means the session has no usable model: no provider resolved, or
+	// the provider lists no models. It is its own code because the remedy lives in
+	// a specific place in the UI, and "internal error" sent users there blind.
+	ErrNoModel          = "no_model"
 	ErrUnauthenticated  = "unauthenticated"
 	ErrForbidden        = "forbidden"
 	ErrNotFound         = "not_found"

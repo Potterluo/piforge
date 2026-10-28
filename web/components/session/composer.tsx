@@ -51,6 +51,7 @@ import {
 import { api } from "@/lib/api/client";
 import { shortModel, truncate } from "@/lib/session/format";
 import type { QueuedPrompt } from "@/lib/session/reduce";
+import { ApiError } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export interface ModelOption {
@@ -473,6 +474,7 @@ export function Composer({
             >
               <SelectTrigger
                 size="sm"
+                data-testid="composer-model"
                 className="h-6 border-0 bg-transparent px-1 text-xs"
                 aria-label="模型"
                 disabled={disabled}

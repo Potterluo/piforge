@@ -101,16 +101,30 @@ func probeProvider(ctx context.Context, provider *contracts.Provider, key string
 	return result
 }
 
+// apiBase normalises a provider's base URL so that appending a path never
+// produces `/v1/v1/...`.
+//
+// Providers document their base both ways — with and without the `/v1` — and the
+// probe used to append `/v1` unconditionally. That made the connectivity test
+// lie in both directions: a working endpoint failed, and an endpoint whose base
+// already ended in /v1 was tested against a URL that does not exist while the
+// real gateway path (which dedupes) worked.
+func apiBase(provider *contracts.Provider, fallback string) string {
+	base := strings.TrimRight(strings.TrimSpace(provider.BaseURL), "/")
+	if base == "" {
+		return fallback
+	}
+	return strings.TrimSuffix(base, "/v1")
+}
+
 // probeRequest builds the smallest request each API kind accepts.
 func probeRequest(provider *contracts.Provider, key string) (string, []byte, map[string]string, error) {
-	base := strings.TrimRight(strings.TrimSpace(provider.BaseURL), "/")
+	base := apiBase(provider, "")
 	headers := map[string]string{"Content-Type": "application/json"}
 
 	switch provider.API {
 	case "anthropic-messages":
-		if base == "" {
-			base = "https://api.anthropic.com"
-		}
+		base = apiBase(provider, "https://api.anthropic.com")
 		headers["x-api-key"] = key
 		headers["anthropic-version"] = "2023-06-01"
 		body := map[string]any{
@@ -121,9 +135,7 @@ func probeRequest(provider *contracts.Provider, key string) (string, []byte, map
 		encoded, err := json.Marshal(body)
 		return base + "/v1/messages", encoded, headers, err
 	case "openai-responses":
-		if base == "" {
-			base = "https://api.openai.com"
-		}
+		base = apiBase(provider, "https://api.openai.com")
 		headers["Authorization"] = "Bearer " + key
 		body := map[string]any{
 			"model":             firstModel(provider, "gpt-4o-mini"),

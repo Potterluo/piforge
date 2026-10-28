@@ -26,6 +26,7 @@ const maxBodyBytes = 12 << 20 // 12 MiB
 // rely on the pairing.
 var statusByCode = map[string]int{
 	contracts.ErrInvalidArgument:  400,
+	contracts.ErrNoModel:          400,
 	contracts.ErrUnauthenticated:  401,
 	contracts.ErrForbidden:        403,
 	contracts.ErrNotFound:         404,

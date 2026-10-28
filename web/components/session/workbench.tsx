@@ -114,7 +114,7 @@ function WorkbenchBody({ sessionId, projectId }: { sessionId: string; projectId:
   const tools = runningToolCount(state);
 
   return (
-    <div className="flex h-svh min-h-0 flex-col overflow-hidden" data-session-id={sessionId}>
+    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden" data-session-id={sessionId}>
       <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border px-3">
         <span data-testid="run-state" data-state={state.running ? "running" : "settled"} hidden />
         <div className="flex min-w-0 flex-col">

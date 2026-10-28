@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -140,11 +141,23 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	})
 	promptCancel()
 	if err != nil {
-		// Nothing was persisted, so the client may safely retry with the same
-		// client_msg_id.
+		// A failure here is usually config, not a bug: no provider, a deleted
+		// provider, a provider with no models. Saying "internal error" over a
+		// prompt that cannot work sends the user to the wrong place, so the
+		// configuration check decides the message. Nothing was persisted either
+		// way, so the client may retry with the same client_msg_id.
+		if modelErr := s.explainMissingModel(r.Context(), user.ID, sess.ModelRef); modelErr != nil {
+			s.fail(w, r, modelErr)
+			return
+		}
 		s.fail(w, r, err)
 		return
 	}
+
+	// The new-session dialog promises 留空则用第一条消息自动命名. A session that keeps
+	// a placeholder title is listed, forked and shared under a name that says
+	// nothing, so the first message names it.
+	s.autoTitle(r.Context(), user.ID, sess, in.Text)
 
 	rec, created, err := s.deps.Store.SaveMessage(r.Context(), user.ID, sess.ID, clientID, in.Text, res)
 	if err != nil {
@@ -205,4 +218,90 @@ func promptResultFromRecord(rec *store.MessageRecord) contracts.PromptResult {
 		QueuePosition: rec.QueuePosition,
 		RunID:         rec.RunID,
 	}
+}
+
+// explainMissingModel turns a failed prompt into an actionable message when the
+// cause is configuration rather than a bug.
+//
+// It stays quiet when it cannot be sure: an unnamed model falls back to the
+// deployment default, which this layer does not know, and inventing an error
+// there would hide the real one.
+func (s *server) explainMissingModel(ctx context.Context, userID, modelRef string) error {
+	if s.deps.Store == nil {
+		return nil
+	}
+	providerName, modelID := modelParts(modelRef)
+	if providerName == "" {
+		// No explicit model: only speak up when the account has no provider at
+		// all, which is unambiguous.
+		inherited, err := s.deps.Store.InheritedProviders(ctx, userID)
+		if err != nil || len(inherited) > 0 {
+			return nil
+		}
+		own, err := s.deps.Store.ListProviders(ctx, userID)
+		if err != nil || len(own) > 0 {
+			return nil
+		}
+		return apiErr(contracts.ErrNoModel,
+			"no model provider is configured: add one in Settings → Models")
+	}
+	provider, _, err := s.deps.Store.ResolveProvider(ctx, userID, providerName)
+	if err != nil || provider == nil {
+		return apiErr(contracts.ErrNoModel,
+			"the provider %q is not configured: add it in Settings → Models", providerName)
+	}
+	if len(provider.Models) == 0 && modelID == "" {
+		return apiErr(contracts.ErrNoModel,
+			"the provider %q lists no models: add a model id in Settings → Models", providerName)
+	}
+	return nil
+}
+
+// autoTitle names a session after its first message when the user left the title
+// empty. Anything the user typed is kept as-is.
+func (s *server) autoTitle(ctx context.Context, userID string, sess *contracts.Session, text string) {
+	if sess == nil || strings.TrimSpace(sess.Title) != "" {
+		return
+	}
+	title := firstLine(text)
+	if title == "" {
+		return
+	}
+	updated, err := s.deps.Store.UpdateSession(ctx, userID, sess.ID, store.SessionPatch{Title: &title})
+	if err != nil {
+		// A title is a convenience; failing to write one must never fail the send.
+		return
+	}
+	*sess = *updated
+}
+
+// firstLine takes the first non-empty line of a prompt, trimmed to a length that
+// fits a sidebar row.
+func firstLine(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.Join(strings.Fields(line), " ")
+		if line == "" {
+			continue
+		}
+		runes := []rune(line)
+		if len(runes) > 40 {
+			return string(runes[:40]) + "…"
+		}
+		return line
+	}
+	return ""
+}
+
+// modelParts splits "provider/model". An empty reference has no provider: the
+// caller has to fall back to the deployment default, which this layer does not
+// know, so "unset" stays distinguishable from "named".
+func modelParts(ref string) (string, string) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "", ""
+	}
+	if provider, model, ok := strings.Cut(ref, "/"); ok {
+		return provider, model
+	}
+	return ref, ""
 }

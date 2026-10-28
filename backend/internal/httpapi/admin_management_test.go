@@ -162,3 +162,67 @@ func TestPatchProviderEditsModelsAndKeepsTheKey(t *testing.T) {
 	}
 	_ = user
 }
+
+// The new-session dialog promises that an empty title is filled in from the first
+// message. A placeholder title makes a sidebar of identical rows.
+func TestFirstMessageNamesAnUntitledSession(t *testing.T) {
+	env := newTestEnv(t)
+	user := env.mkUser("dev@piforge.local", "pw", contracts.RoleUser)
+	c := env.login("dev@piforge.local", "pw")
+	_, sess := env.mkSessionFor(user.ID, "repo")
+
+	// Clear the title, the way the dialog does when the field is left empty.
+	if _, err := env.store.UpdateSession(t.Context(), user.ID, sess.ID,
+		store.SessionPatch{Title: ptrString("")}); err != nil {
+		t.Fatalf("clear title: %v", err)
+	}
+
+	rec := env.doAuthed(http.MethodPost, "/v1/sessions/"+sess.ID+"/messages",
+		map[string]any{"client_msg_id": "cm_1", "text": "  请帮我看看这个仓库的目录结构  "}, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("send: %d %s", rec.Code, rec.Body.String())
+	}
+
+	reloaded, err := env.store.Session(t.Context(), user.ID, sess.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Title != "请帮我看看这个仓库的目录结构" {
+		t.Fatalf("title = %q", reloaded.Title)
+	}
+}
+
+// A message that names a provider nobody configured is the user's to fix, and the
+// error has to say where. "internal error" sent people looking at the wrong thing.
+func TestSendWithoutAModelSaysWhereToFixIt(t *testing.T) {
+	env := newTestEnv(t)
+	user := env.mkUser("dev@piforge.local", "pw", contracts.RoleUser)
+	c := env.login("dev@piforge.local", "pw")
+	p, err := env.store.CreateProject(t.Context(), user.ID, store.NewProject{Name: "p", DefaultBranch: "main"})
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	sess, err := env.store.CreateSession(t.Context(), user.ID, store.NewSession{
+		ProjectID: p.ID, Kind: contracts.KindMain, Title: "x", ModelRef: "ghost/model",
+	})
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+
+	// The runtime fails because the model cannot resolve; the response must name
+	// the configuration problem instead of passing "internal error" through.
+	env.runtime.promptErr = contracts.NewError(contracts.ErrInternal, "spawn failed")
+	rec := env.doAuthed(http.MethodPost, "/v1/sessions/"+sess.ID+"/messages",
+		map[string]any{"client_msg_id": "cm_1", "text": "hi"}, c)
+	env.mustErr(rec, http.StatusBadRequest, contracts.ErrNoModel)
+
+	// With a resolvable provider the same runtime failure is reported as itself:
+	// configuration is only blamed when it is actually the cause.
+	env.ensureProvider(user.ID, "ghost", "model")
+	env.runtime.promptErr = contracts.NewError(contracts.ErrInternal, "spawn failed")
+	rec = env.doAuthed(http.MethodPost, "/v1/sessions/"+sess.ID+"/messages",
+		map[string]any{"client_msg_id": "cm_2", "text": "hi"}, c)
+	env.mustErr(rec, http.StatusInternalServerError, contracts.ErrInternal)
+}
+
+func ptrString(v string) *string { return &v }

@@ -46,6 +46,10 @@ export function BrowserPanel({ sessionId, className }: BrowserPanelProps) {
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const socketRef = React.useRef<WebSocket | null>(null);
   const [status, setStatus] = React.useState<Status>("connecting");
+  // "Attached to the browser" and "the page has drawn something" are different
+  // facts. Without this the panel says 已连接 over an empty canvas for the ten to
+  // twenty seconds a page takes to load, which reads as a broken panel.
+  const [painted, setPainted] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [meta, setMeta] = React.useState<FrameMeta | null>(null);
   const [url, setUrl] = React.useState("https://example.com");
@@ -96,6 +100,7 @@ export function BrowserPanel({ sessionId, className }: BrowserPanelProps) {
       // which matters when frames arrive faster than the display refreshes.
       const bitmap = await createImageBitmap(event.data as Blob).catch(() => null);
       if (!bitmap || disposed) return;
+      setPainted((was) => was || bitmap.width > 0);
       const canvas = canvasRef.current;
       if (canvas) {
         if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
@@ -199,10 +204,14 @@ export function BrowserPanel({ sessionId, className }: BrowserPanelProps) {
   const navigate = () => {
     const target = url.trim();
     if (!target) return;
+    // The old page stays on the canvas until the new one paints; clearing the
+    // flag here is what keeps the loading hint honest about which page it is for.
+    setPainted(false);
     send({ type: "navigate", url: target.startsWith("http") ? target : `https://${target}` });
   };
 
   const live = status === "open";
+  const loadingPage = live && !painted;
 
   return (
     <div
@@ -249,6 +258,16 @@ export function BrowserPanel({ sessionId, className }: BrowserPanelProps) {
           className={cn("block h-full w-full object-contain", !live && "opacity-0")}
           data-testid="browser-canvas"
         />
+
+        {loadingPage ? (
+          <div
+            data-testid="browser-loading"
+            className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 bg-background/70 text-xs text-muted-foreground backdrop-blur-[1px]"
+          >
+            <Spinner />
+            正在加载页面…
+          </div>
+        ) : null}
 
         {!live ? (
           <div

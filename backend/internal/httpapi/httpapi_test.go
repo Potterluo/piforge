@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -139,6 +140,10 @@ func (e *testEnv) mkSessionFor(userID, name string) (*contracts.Project, *contra
 	if err != nil {
 		e.t.Fatalf("CreateProject: %v", err)
 	}
+	// A session whose model reference names a provider that does not exist cannot
+	// run, and the API now says so instead of returning "internal error". Tests
+	// that only care about another behaviour still need a resolvable model.
+	e.ensureProvider(userID, "shared", "gpt")
 	sess, err := e.store.CreateSession(ctx, userID, store.NewSession{
 		ProjectID: p.ID, Kind: contracts.KindMain, Title: "hello", ModelRef: "shared/gpt",
 	})
@@ -587,4 +592,19 @@ func (f *fakeWorkspace) lastRoot() string {
 		return ""
 	}
 	return f.roots[len(f.roots)-1]
+}
+
+// ensureProvider makes `name` resolvable for userID, ignoring a duplicate so it
+// can be called from any fixture.
+func (e *testEnv) ensureProvider(userID, name, model string) {
+	e.t.Helper()
+	_, err := e.store.CreateProvider(context.Background(), userID, store.ProviderInput{
+		Name:    name,
+		API:     "openai-compat",
+		BaseURL: "https://example.invalid/v1",
+		Models:  []contracts.ModelSpec{{ID: model}},
+	})
+	if err != nil && !errors.Is(err, store.ErrConflict) {
+		e.t.Fatalf("CreateProvider: %v", err)
+	}
 }
