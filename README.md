@@ -27,7 +27,15 @@ fake-Pi instance; the only thing not real in them is the model).
 | A real PTY: `git log` and `ls` run inside the sandbox checkout. | The sandbox's own Chrome, screencast over CDP — the page the agent is driving. |
 
 More in [`docs/screenshots/`](docs/screenshots): login, project overview, a forked
-branch, and the provider/skill/MCP settings pages.
+branch, user management, and the provider/skill/MCP settings pages.
+
+Two screens worth calling out, because they are where a self-hosted deployment
+actually gets configured:
+
+| | |
+|---|---|
+| ![user management](docs/screenshots/40-admin-users.png) | ![editing a provider](docs/screenshots/42-provider-edit.png) |
+| Accounts: create, promote, disable, reset a password. The last admin cannot demote themselves, and that guard is a test. | A provider's model list is editable in place — any id the endpoint serves — and an empty key field means "keep the one on file". |
 ## Why it is built this way
 
 | Piece | Responsibility |
