@@ -76,6 +76,8 @@ type options struct {
 	isolationBinary string
 	// browserProxy is handed to Chrome via --proxy-server.
 	browserProxy string
+	// agentIdleTTL is how long an agent process may sit unused before it is stopped.
+	agentIdleTTL time.Duration
 	// webUpstream makes this process serve the UI as well as the API, which is
 	// how a container exposes a single port.
 	webUpstream string
@@ -99,6 +101,8 @@ func run() error {
 		"public base URL of the model gateway handed to agents (default http://<addr>)")
 	flag.StringVar(&opt.defaultProvider, "default-provider", envOr("PIFORGE_DEFAULT_PROVIDER", "shared-anthropic"),
 		"provider used when a session has no model_ref")
+	flag.DurationVar(&opt.agentIdleTTL, "agent-idle-ttl", envDuration("PIFORGE_AGENT_IDLE_TTL", 30*time.Minute),
+		"stop an agent process after it has been idle this long")
 	flag.StringVar(&opt.chrome, "chrome", envOr("PIFORGE_CHROME", ""),
 		"chrome/chromium binary for the browser panel (empty disables it)")
 	flag.BoolVar(&opt.headlessBrowser, "headless-browser", envOr("PIFORGE_HEADLESS_BROWSER", "1") != "0",
@@ -371,6 +375,12 @@ func run() error {
 	}
 
 	errCh := make(chan error, 1)
+	// Idle agents are stopped on their own (FR-5.x): a session keeps its process warm
+	// for speed, but nothing else bounded how many of those a long-lived deployment
+	// accumulates. The default is generous; the e2e harness sets it low so a suite of
+	// eighty sessions does not leave eighty children behind.
+	go rt.StartIdleReaper(ctx, opt.agentIdleTTL, time.Minute)
+
 	// Scratch sessions (PRD FR-1.10) expire on their own: a quick question should
 	// not need a cleanup step from the user.
 	go func() {
@@ -662,6 +672,17 @@ func newLogger(opt options) *slog.Logger {
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+// envDuration reads a duration from the environment, falling back to def when it is
+// missing or unparseable — a typo in an env var should not stop the server.
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
 	}
 	return def
 }

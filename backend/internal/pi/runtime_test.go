@@ -483,3 +483,45 @@ func TestSidecarSpawnDropsWriteTools(t *testing.T) {
 		}
 	}
 }
+
+// FR-5.x: an agent nobody has touched is stopped, and the session is not: the next
+// prompt starts a fresh process on the same transcript. That is the difference between
+// reaping and losing work.
+func TestReapIdleStopsUnusedAgentsOnly(t *testing.T) {
+	rt := newFakeRuntime(t, pitest.ScriptOK, 0)
+	ctx, cancel := ctxFor(t)
+	defer cancel()
+
+	spec := sessionSpec(t, "ses_reap", contracts.KindMain)
+	if _, err := rt.Start(ctx, spec); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := rt.ReapIdle(ctx, time.Hour); got != 0 {
+		t.Fatalf("a fresh session was reaped (%d)", got)
+	}
+
+	// Nothing has happened for an hour, as far as the reaper is concerned.
+	if got := rt.ReapIdle(ctx, -time.Second); got != 0 {
+		t.Fatalf("a negative ttl reaped %d sessions", got)
+	}
+	// The agent is "running" for a moment while its process starts, and a reaper that
+	// respected that is correct. Poll rather than assume the machine is instant.
+	reaped := 0
+	for i := 0; i < 200; i++ {
+		if reaped = rt.ReapIdle(ctx, time.Nanosecond); reaped > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if reaped == 0 {
+		t.Fatal("idle session was never reaped")
+	}
+
+	// The session still exists as a row of history: it restarts on demand.
+	if _, err := rt.Start(ctx, spec); err != nil {
+		t.Fatalf("restart after reaping: %v", err)
+	}
+	if _, err := rt.Tree(ctx, "ses_reap"); err != nil {
+		t.Fatalf("Tree after restart: %v", err)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
@@ -78,6 +79,9 @@ type session struct {
 	bridge *Bridge
 	norm   *Normalizer
 	sub    *Subscription
+	// lastUsed is when this process was last asked to do anything, in unix nanos.
+	// The idle reaper reads it; nothing else should.
+	lastUsed atomic.Int64
 }
 
 // NewRuntime returns a runtime that spawns processes from cfg.
@@ -165,6 +169,9 @@ func (r *Runtime) ensure(ctx context.Context, spec contracts.SessionSpec) (*sess
 	if err != nil {
 		return nil, err
 	}
+	// A brand-new process is not idle: without this the reaper's first tick would see
+	// a zero timestamp and stop it immediately.
+	s.touch()
 	r.mu.Lock()
 	r.sessions[spec.SessionID] = s
 	r.mu.Unlock()
@@ -329,6 +336,10 @@ func (r *Runtime) Close() error {
 // re-runs Start, which respawns it from the session file (PRD §7.4.5 — a crash
 // is reported, never replayed automatically).
 func (r *Runtime) Prompt(ctx context.Context, req contracts.PromptRequest) (contracts.PromptResult, error) {
+	// A prompt is the strongest signal that this session is in use (FR-5.x reaping).
+	if s, err := r.get(req.SessionID); err == nil {
+		s.touch()
+	}
 	s, err := r.get(req.SessionID)
 	if err != nil {
 		return contracts.PromptResult{}, err
