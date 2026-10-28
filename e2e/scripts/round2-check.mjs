@@ -1,0 +1,24 @@
+import { chromium } from "@playwright/test";
+import path from "node:path";
+const BASE = process.env.BASE;
+const SID = process.env.SID;
+const OUT = path.resolve("../docs/screenshots");
+const browser = await chromium.launch({ channel: "chrome" });
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 });
+await page.goto(`${BASE}/login`);
+await page.getByTestId("login-email").fill("dev@piforge.local");
+await page.getByTestId("login-password").fill("piforge-dev-123");
+await page.getByTestId("login-submit").click();
+await page.getByTestId("app-sidebar").waitFor({ timeout: 30000 });
+
+const listed = await (await page.request.get(`${BASE}/v1/projects`)).json();
+const project = listed.projects.find((p) => p.name === "round2");
+await page.goto(`${BASE}/p/${project.id}/s/${SID}`);
+await page.getByTestId("composer-input").waitFor({ timeout: 40000 });
+await page.waitForTimeout(2500);
+const model = await page.getByTestId("turn-model").first().textContent().catch(() => null);
+console.log("turn model label:", model);
+await page.getByTestId("panel-tab-files").click();
+await page.waitForTimeout(1500);
+await page.screenshot({ path: path.join(OUT, "52-round2-transcript.png") });
+await browser.close();

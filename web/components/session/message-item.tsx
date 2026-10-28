@@ -75,6 +75,13 @@ export function MessageItem({
         <MessageContent className={compact ? "gap-1.5" : undefined}>
           <MessageHeader className={cn("gap-2", isUser && "justify-end")}>
             <span>{isUser ? "你" : "PiForge"}</span>
+            {!isUser && turn.model ? (
+              // Always visible, not hover-only: a session can be pointed at a
+              // custom model id, and "it replied" says nothing about what replied.
+              <span className="font-mono text-[11px] opacity-70" data-testid="turn-model">
+                {turn.model}
+              </span>
+            ) : null}
             {canFork ? (
               <Button
                 variant="ghost"
@@ -149,13 +156,7 @@ export function MessageItem({
 
           {compact ? null : (
             <MessageFooter className="gap-1 opacity-0 transition-opacity group-focus-within/message:opacity-100 group-hover/message:opacity-100">
-              {turn.model ? (
-                // Which model answered is not decoration: a session can be pointed
-                // at a custom id, and "it replied" says nothing about what replied.
-                <span className="font-mono" data-testid="turn-model">
-                  {turn.model}
-                </span>
-              ) : null}
+
               <span className="tabular-nums">{formatClock(turn.ts)}</span>
               <Button
                 variant="ghost"
