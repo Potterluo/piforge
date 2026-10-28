@@ -305,7 +305,27 @@ func (s *Session) dead() bool {
 func (s *Session) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopped)
+		// Ask the browser to close before killing it. Chromium flushes its profile
+		// (cookies, storage) on a normal shutdown; a bare Kill loses whatever was
+		// written since the last flush, which is how a login in the panel failed to
+		// survive into the next session (PRD FR-11.9).
 		if s.client != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			var ignored struct{}
+			_ = s.client.call(ctx, "Browser.close", nil, &ignored)
+			cancel()
+			// Give it a moment to exit on its own before taking the process down.
+			if s.proc != nil && s.proc.Process != nil {
+				done := make(chan struct{})
+				go func() {
+					_, _ = s.proc.Process.Wait()
+					close(done)
+				}()
+				select {
+				case <-done:
+				case <-time.After(2 * time.Second):
+				}
+			}
 			s.client.close()
 		}
 		if s.proc != nil && s.proc.Process != nil {

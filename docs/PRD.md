@@ -535,7 +535,7 @@ shadcn 官方提供的 agent 原语（`npx shadcn@latest add <name>`）：
 | FR-11.6 | agent 侧：通过 **Playwright MCP**（stdio，沙箱内）驱动同一 chromium | P1 |
 | FR-11.7 | 多 tab：≥ 3 个页面，tab 条 + 缩略图 | P2 |
 | FR-11.8 | 截图/下载：一键截图保存到 workspace；下载文件落到 workspace 供 agent 使用 | P2 |
-| FR-11.9 | profile 持久化：cookie/localStorage 存在 workspace 内，随快照保留（登录状态不用每次重来） | P2 |
+| FR-11.9 | profile 持久化：cookie/localStorage 存在 sandbox 根目录的 `.piforge-browser` 内，同一 sandbox 的所有会话共用一个浏览器与一份登录态；**跨控制平面重启的 cookie 存活取决于 Chromium 的加密与懒写入，不承诺** | P2 ✅ |
 
 **为什么用 Playwright MCP 而不是自建浏览器工具**：你已确认 stdio MCP 全放开，而 Playwright MCP 是现成的、能力完整的（导航/点击/填表/截图/网络拦截/多页），让 agent 用它比我们造一个更好。**内置浏览器只是"给同一实例加一面屏幕"**，这是这个设计最优雅的地方。
 
