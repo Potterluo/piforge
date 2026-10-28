@@ -141,7 +141,7 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
       socket.close(1000, "unmount");
       socketRef.current = null;
     };
-  }, [sessionId, generation]);
+  }, [sessionId, generation, browserEnabled]);
 
   const send = React.useCallback((payload: unknown) => {
     const socket = socketRef.current;

@@ -295,9 +295,20 @@ func (s *server) handleForkPoints(w http.ResponseWriter, r *http.Request) {
 	points, err := rt.ForkPoints(r.Context(), sess.ID)
 	if err != nil {
 		if noLiveProcess(err) {
-			// The agent is not running, but the conversation exists in the event
-			// log. Deriving the fork points from there keeps the panel honest:
-			// "还没有可分叉的消息" over a visible conversation is a lie.
+			// Forking stops the parent's process (Pi rebinds it to the branch), so a
+			// second fork used to find no process and no points — one fork per
+			// session. Restart the parent from its stored row and ask again; the
+			// event-log fallback stays as a last resort for a session whose agent
+			// cannot start.
+			if started := s.restartAgent(r, user.ID, sess); started {
+				if retried, rerr := rt.ForkPoints(r.Context(), sess.ID); rerr == nil {
+					if retried == nil {
+						retried = []contracts.ForkPoint{}
+					}
+					writeJSON(w, http.StatusOK, forkPointsResponse{Points: retried})
+					return
+				}
+			}
 			fallback, ferr := s.forkPointsFromEvents(r.Context(), user.ID, sess.ID)
 			if ferr != nil {
 				s.fail(w, r, ferr)
@@ -729,4 +740,19 @@ func (s *server) branchHasHistory(r *http.Request, sessionID string) bool {
 		}
 	}
 	return false
+}
+
+// restartAgent brings a session's agent back up from its stored row.
+//
+// It is what makes a second fork possible: forking stops the parent's process by
+// design, and the fork points live in that process.
+func (s *server) restartAgent(r *http.Request, userID string, sess *contracts.Session) bool {
+	ctx, cancel := detach(r.Context(), 20*time.Second)
+	defer cancel()
+	if err := s.hub.ensure(ctx, userID, s.sessionSpec(userID, sess)); err != nil {
+		s.log.WarnContext(r.Context(), "could not restart the agent for fork points",
+			"session", sess.ID, "error", err.Error())
+		return false
+	}
+	return true
 }

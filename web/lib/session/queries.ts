@@ -113,7 +113,11 @@ export function useFeatures() {
   return useQuery({
     queryKey: ["features"],
     queryFn: () => api.features(),
-    staleTime: 60_000,
+    // An admin can turn a feature off while this tab is open. A flag that only
+    // applies after a reload is a flag the server enforces and the UI ignores.
+    refetchInterval: 15_000,
+    refetchOnWindowFocus: true,
+    staleTime: 5_000,
   });
 }
 

@@ -136,7 +136,7 @@ export function FilePreview({ sessionId, path, onClose }: FilePreviewProps) {
           ) : null}
 
           {kind === "image" ? (
-            <ImageSurface content={content} downloadUrl={downloadUrl} />
+            <ImageSurface content={content} downloadUrl={downloadUrl} inlineUrl={inlineUrl} />
           ) : null}
 
           {!content.binary && kind === "html" ? (
@@ -191,8 +191,23 @@ export function FilePreview({ sessionId, path, onClose }: FilePreviewProps) {
   );
 }
 
-/** Image branch: a truncated image cannot be zoomed meaningfully, so it downloads. */
-function ImageSurface({ content, downloadUrl }: { content: FileContent; downloadUrl: string }) {
+/**
+ * Image branch.
+ *
+ * Images come back from the file API as `binary: true` with an empty body — the
+ * bytes are only available from the inline endpoint. Building a data URL from the
+ * body therefore always failed, which is why a captured PNG showed "接口返回的内容无法
+ * 组成图片地址" instead of the picture.
+ */
+function ImageSurface({
+  content,
+  downloadUrl,
+  inlineUrl,
+}: {
+  content: FileContent;
+  downloadUrl: string;
+  inlineUrl: string;
+}) {
   if (content.truncated) {
     return (
       <BinaryCard
@@ -205,14 +220,16 @@ function ImageSurface({ content, downloadUrl }: { content: FileContent; download
     );
   }
 
-  const src = toImageSrc(content);
+  // Prefer the bytes the API actually holds; fall back to the inline endpoint,
+  // which streams the whole file with a renderable content type.
+  const src = toImageSrc(content) || inlineUrl;
   if (!src) {
     return (
       <BinaryCard
         path={content.path}
         size={content.size}
         mime={content.mime_type}
-        reason="接口返回的内容无法组成图片地址"
+        reason="接口没有返回可用的图片地址"
         downloadUrl={downloadUrl}
       />
     );

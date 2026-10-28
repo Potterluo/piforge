@@ -42,6 +42,21 @@ test.describe("branching", () => {
     await expect(page.getByText("还没有消息")).toBeVisible({ timeout: 20_000 });
   });
 
+  test("a session can be forked more than once", async ({ page }) => {
+    await login(page, USER);
+    const parentId = await openNewSession(page);
+    await sendPrompt(page, "first message");
+    await sendPrompt(page, "second message");
+
+    const first = await fork(page, parentId, await forkPoint(page, parentId, 1), "one");
+    expect(first).toBeTruthy();
+
+    // Forking stops the parent's agent (Pi rebinds it to the branch), so the fork
+    // points have to survive that: the second fork used to be impossible.
+    const second = await fork(page, parentId, await forkPoint(page, parentId, 0), "two");
+    expect(second).not.toBe(first);
+  });
+
   test("the sidebar keeps the main session as the parent of its branch", async ({ page }) => {
     await login(page, USER);
     const parentId = await openNewSession(page);
