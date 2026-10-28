@@ -321,14 +321,15 @@ type fakeRuntime struct {
 	starts []contracts.SessionSpec
 	script []contracts.Event
 
-	prompts    []contracts.PromptRequest
-	promptRes  contracts.PromptResult
-	promptErr  error
-	startErr   error
-	interrupt  contracts.InterruptResult
-	forked     []contracts.ForkRequest
-	compaction []string
-	cloned     []string
+	prompts     []contracts.PromptRequest
+	promptRes   contracts.PromptResult
+	promptErr   error
+	startErr    error
+	interrupt   contracts.InterruptResult
+	interrupted []string
+	forked      []contracts.ForkRequest
+	compaction  []string
+	cloned      []string
 
 	status contracts.RuntimeStatus
 	tree   []*contracts.TreeEntry
@@ -384,9 +385,10 @@ func (f *fakeRuntime) Prompt(_ context.Context, req contracts.PromptRequest) (co
 	return f.promptRes, nil
 }
 
-func (f *fakeRuntime) Interrupt(_ context.Context, _ string) (contracts.InterruptResult, error) {
+func (f *fakeRuntime) Interrupt(_ context.Context, sessionID string) (contracts.InterruptResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.interrupted = append(f.interrupted, sessionID)
 	return f.interrupt, nil
 }
 

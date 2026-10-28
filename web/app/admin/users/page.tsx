@@ -482,6 +482,8 @@ function FeatureDialog({ user, onClose }: { user: User | null; onClose: () => vo
     export: "导出会话（Markdown / HTML）",
     browser: "沙箱内置浏览器",
     sidecar: "Sidecar 旁路会话",
+    // Defaults off, so a missing value and a switched-off switch must read the same.
+    parallel: "并行运行分支（同一会话下多个分支同时跑）",
   };
 
   return (
@@ -499,7 +501,7 @@ function FeatureDialog({ user, onClose }: { user: User | null; onClose: () => vo
               <span className="text-xs">{labels[flag]}</span>
               <Switch
                 data-testid={`feature-${flag}`}
-                checked={features.data?.features[flag] ?? true}
+                checked={features.data?.features[flag] ?? flag !== "parallel"}
                 disabled={features.isPending || setFlag.isPending}
                 onCheckedChange={(checked) => setFlag.mutate({ flag, enabled: checked })}
               />

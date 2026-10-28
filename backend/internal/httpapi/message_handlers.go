@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -68,6 +69,17 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, apiErr(contracts.ErrInvalidArgument,
 			"streaming_behavior must be empty, steer or follow_up"))
 		return
+	}
+
+	// FR-3.1–3.3: decide who gets to run before this run starts. A branch sending a
+	// prompt pauses its running siblings unless parallel mode is on; parallel mode
+	// refuses past the limit with a reason instead of a bare 429.
+	paused, allowed := s.enforceConcurrency(w, r, user.ID, sess)
+	if !allowed {
+		return
+	}
+	if len(paused) > 0 {
+		s.recordPausedSiblings(r, user.ID, sess, paused)
 	}
 
 	// Replay: return exactly what the first submission produced.
@@ -316,4 +328,24 @@ func modelParts(ref string) (string, string) {
 		return provider, model
 	}
 	return ref, ""
+}
+
+// recordPausedSiblings leaves a visible trace when a run stops another run (FR-3.1).
+//
+// A session that simply goes quiet is indistinguishable from one that died, so the
+// event log says who paused it.
+func (s *server) recordPausedSiblings(r *http.Request, userID string, sess *contracts.Session, paused []string) {
+	ctx := context.WithoutCancel(r.Context())
+	for _, id := range paused {
+		event := &contracts.Event{
+			SessionID: id,
+			RunID:     "",
+			Type:      "session.paused",
+			Payload:   json.RawMessage(`{"reason":"another branch started running","by":"` + sess.ID + `"}`),
+			TS:        time.Now(),
+		}
+		if _, err := s.deps.Store.AppendEvent(ctx, userID, event); err != nil {
+			s.log.WarnContext(r.Context(), "could not record a paused sibling", "session", id, "error", err.Error())
+		}
+	}
 }

@@ -77,6 +77,10 @@ type Deps struct {
 	Auth      *auth.Authenticator
 	Runtime   contracts.AgentRuntime
 	Workspace contracts.Workspace
+	// ParallelLimit caps how many branches of one session may run at once (FR-3.3).
+	// Zero means the default; anything above UnlockableParallelLimit is clamped.
+	ParallelLimit int
+
 	// DefaultProvider is the provider a session falls back to when it pins no
 	// model. The runtime resolves it the same way, so the explanation of a failed
 	// run has to use the same fallback or it reports the wrong provider.

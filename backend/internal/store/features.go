@@ -20,6 +20,9 @@ const (
 	FeatureExport  FeatureFlag = "export"
 	FeatureBrowser FeatureFlag = "browser"
 	FeatureSidecar FeatureFlag = "sidecar"
+	// FeatureParallel lets branches of one session run at the same time (FR-3.2).
+	// Off by default: two agents in two checkouts is a thing to choose, not inherit.
+	FeatureParallel FeatureFlag = "parallel"
 )
 
 // FeatureFlags is the closed set with its defaults. Everything is on unless an
@@ -29,6 +32,9 @@ var featureDefaults = map[FeatureFlag]bool{
 	FeatureExport:  true,
 	FeatureBrowser: true,
 	FeatureSidecar: true,
+	// Parallel branch execution is opt-in (FR-3.2/3.3): the safe default is one run
+	// at a time, and an admin turning it on is a deliberate act.
+	FeatureParallel: false,
 }
 
 // KnownFeature reports whether a flag exists in this build.
