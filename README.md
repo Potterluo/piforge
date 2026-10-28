@@ -36,6 +36,8 @@ actually gets configured:
 |---|---|
 | ![user management](docs/screenshots/40-admin-users.png) | ![editing a provider](docs/screenshots/42-provider-edit.png) |
 | Accounts: create, promote, disable, reset a password. The last admin cannot demote themselves, and that guard is a test. | A provider's model list is editable in place — any id the endpoint serves — and an empty key field means "keep the one on file". |
+| ![runtime status](docs/screenshots/55-admin-status.png) | ![support mode](docs/screenshots/56-support-mode.png) |
+| What an operator checks when something feels wrong: live agents from the hub's own subscription table, sessions, sandboxes, counts straight from the database. | Support mode is the only way an admin can read somebody's conversation: a required reason, a 30-minute grant, and a receipt the owner sees. |
 ## Why it is built this way
 
 | Piece | Responsibility |
