@@ -16,7 +16,14 @@ PORT=3100 HOSTNAME=127.0.0.1 node node_modules/next/dist/bin/next start -p 3100 
 WEB_PID=$!
 cd /
 
-echo "piforge: starting control plane on :$PORT (data=$DATA)"
+# The image may or may not carry Chromium (it is an opt-in build arg), so detect it
+# instead of baking a path that a slim image does not have.
+CHROME="${PIFORGE_CHROME:-}"
+if [ -z "$CHROME" ] && [ -x /usr/bin/chromium ]; then
+  CHROME=/usr/bin/chromium
+fi
+
+echo "piforge: starting control plane on :$PORT (data=$DATA, chrome=${CHROME:-none})"
 /app/bin/piforged \
   -addr "0.0.0.0:$PORT" \
   -data "$DATA" \
@@ -26,7 +33,7 @@ echo "piforge: starting control plane on :$PORT (data=$DATA)"
   -gateway-url "${PIFORGE_GATEWAY_URL:-http://127.0.0.1:$PORT}" \
   -isolation "${PIFORGE_ISOLATION:-none}" \
   ${PIFORGE_BROWSER_PROXY:+-browser-proxy "$PIFORGE_BROWSER_PROXY"} \
-  ${PIFORGE_CHROME:+-chrome "$PIFORGE_CHROME"} \
+  ${CHROME:+-chrome "$CHROME"} \
   ${PIFORGE_EXTRA_ARGS:-} &
 CONTROL_PID=$!
 

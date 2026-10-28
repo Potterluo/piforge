@@ -15,7 +15,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: piforge:dev
+    # Pull a published image with `PIFORGE_IMAGE=... docker compose up -d`, or let
+    # compose build it from this checkout.
+    image: ${PIFORGE_IMAGE:-piforge:dev}
     container_name: piforge
     # Reap the shells and agent processes the control plane spawns.
     init: true

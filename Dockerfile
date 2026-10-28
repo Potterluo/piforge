@@ -70,6 +70,7 @@ RUN set -e; \
 # itself unavailable and everything else is unaffected.
 ARG INSTALL_CHROMIUM=false
 RUN if [ "$INSTALL_CHROMIUM" = "true" ]; then \
+      apt-get update -qq; \
       for attempt in 1 2 3 4 5 6; do \
         if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --fix-missing chromium; then \
           chromium --version; rm -rf /var/lib/apt/lists/*; exit 0; \

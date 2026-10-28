@@ -184,6 +184,15 @@ func (m *Manager) launch(ctx context.Context, sandboxID, profileRoot string) (*S
 	if m.cfg.Headless {
 		args = append([]string{"--headless=new", "--disable-gpu"}, args...)
 	}
+	// Chromium refuses to start as root with its own sandbox enabled, which is
+	// how it runs inside a container. The container is the sandbox in that
+	// deployment, so this is the boundary Chromium is giving up, not the product's.
+	if runningAsRoot() {
+		args = append(args, "--no-sandbox")
+	}
+	// A container's /dev/shm is 64 MiB by default; Chromium crashes rendering a
+	// normal page into it.
+	args = append(args, "--disable-dev-shm-usage")
 	if proxy := strings.TrimSpace(m.cfg.Proxy); proxy != "" {
 		args = append([]string{"--proxy-server=" + proxy}, args...)
 	}
