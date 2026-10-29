@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
@@ -109,5 +110,30 @@ func TestDockerProviderUnknownSandbox(t *testing.T) {
 	ctx := context.Background()
 	if _, err := provider.Get(ctx, "piforge-doesnotexist"); err == nil {
 		t.Fatal("unknown sandbox returned no error")
+	}
+}
+
+// The control plane reaches the sandbox through a published port, so the provider has to
+// report the one Docker actually assigned — not the one it asked for.
+func TestDockerProviderPublishesTheAPIPort(t *testing.T) {
+	provider := newDockerForTest(t)
+	provider.cfg.APIPort = 8080
+	ctx := context.Background()
+
+	created, err := provider.Ensure(ctx, "usr_port", "prj_port", "", "main")
+	if err != nil {
+		t.Skipf("cannot start a container here: %v", err)
+	}
+	t.Cleanup(func() { _ = provider.Destroy(context.Background(), created.ID) })
+
+	endpoint, err := provider.Endpoint(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Endpoint: %v", err)
+	}
+	if !strings.HasPrefix(endpoint, "http://127.0.0.1:") {
+		t.Fatalf("endpoint = %q", endpoint)
+	}
+	if strings.HasSuffix(endpoint, ":8080") {
+		t.Logf("the published port happens to be 8080; that is fine, it is still read back")
 	}
 }

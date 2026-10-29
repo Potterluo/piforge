@@ -45,6 +45,13 @@ type DockerConfig struct {
 	// DataRoot is the host directory bind-mounted at /workspace, so a page refresh or a
 	// pause does not lose the checkout.
 	DataRoot string
+	// APIPort is the container port that serves the sandbox HTTP API (8080 for AIO
+	// Sandbox). Zero means "do not publish anything", which is what the lifecycle-only
+	// mode wants.
+	APIPort int
+	// APIKey is passed to the container as SANDBOX_API_KEY when non-empty, so every
+	// service in it requires the header.
+	APIKey string
 }
 
 // NewDocker builds a container provider.
@@ -102,6 +109,14 @@ func (d *Docker) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 	}
 	if d.cfg.Memory != "" {
 		args = append(args, "--memory", d.cfg.Memory)
+	}
+	if d.cfg.APIPort > 0 {
+		// Publish on a free host port: two sandboxes on one machine must not fight over
+		// 8080, and the control plane reads the assigned port back from `docker port`.
+		args = append(args, "-p", fmt.Sprintf("127.0.0.1::%d", d.cfg.APIPort))
+	}
+	if d.cfg.APIKey != "" {
+		args = append(args, "-e", "SANDBOX_API_KEY="+d.cfg.APIKey)
 	}
 	args = append(args, d.cfg.Image)
 	// The image may or may not have an entrypoint that idles; a sandbox has to stay up
@@ -262,4 +277,27 @@ func dockerState(status string) contracts.SandboxState {
 	default:
 		return contracts.SandboxReady
 	}
+}
+
+// Endpoint reports the host address that serves the sandbox API for one sandbox.
+//
+// It asks Docker rather than remembering: the port is assigned at creation and survives
+// a control-plane restart, and a number kept in memory would be wrong after either.
+func (d *Docker) Endpoint(ctx context.Context, sandboxID string) (string, error) {
+	if d.cfg.APIPort <= 0 {
+		return "", fmt.Errorf("sandbox: docker: no api port is published for this provider")
+	}
+	name := d.resolve(sandboxID)
+	out, err := d.docker(ctx, "port", name, fmt.Sprintf("%d/tcp", d.cfg.APIPort))
+	if err != nil {
+		return "", err
+	}
+	line := strings.TrimSpace(strings.Split(out, "\n")[0])
+	address := strings.TrimPrefix(line, "0.0.0.0:")
+	address = strings.TrimPrefix(address, "127.0.0.1:")
+	address = strings.TrimPrefix(address, ":::")
+	if address == "" {
+		return "", fmt.Errorf("sandbox: docker: %s publishes nothing on %d", name, d.cfg.APIPort)
+	}
+	return "http://127.0.0.1:" + address, nil
 }
