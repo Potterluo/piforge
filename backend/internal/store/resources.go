@@ -328,7 +328,11 @@ func (s *Store) CreateSkill(ctx context.Context, userID string, in contracts.Ski
 		}
 		return nil, fmt.Errorf("store: create skill %q: %w", in.Name, err)
 	}
-	return s.Skill(ctx, userID, id)
+	// Read back on the write connection: a read on the other one can miss a commit that
+	// just happened and report "not found" for a row it has just created.
+	return scanSkill(s.w.QueryRowContext(ctx,
+		`SELECT id, scope, name, version, description, content_hash, bundle_key, source_url, enabled, created_at
+		   FROM skills WHERE id = ?`, id))
 }
 
 // Skill loads one skill the caller can see (own or shared).
@@ -337,10 +341,12 @@ func (s *Store) CreateSkill(ctx context.Context, userID string, in contracts.Ski
 // The bundle itself is written by the caller: the store does not know about the
 // filesystem, which is what keeps a path bug from being a database bug too.
 func (s *Store) UpdateSkillBundle(ctx context.Context, userID, skillID, bundleKey, contentHash string) (*contracts.Skill, error) {
+	// The scope is not pinned to 'user': a seeded skill is admin-owned and its bundle is
+	// written through this same path. Ownership still decides who may do it.
 	res, err := s.w.ExecContext(ctx,
 		`UPDATE skills SET bundle_key = ?, content_hash = ?
-		  WHERE id = ? AND scope = 'user' AND owner_id = ?`,
-		bundleKey, contentHash, skillID, userID)
+		  WHERE id = ? AND ((scope = 'user' AND owner_id = ?) OR (scope = 'admin' AND owner_id = ?))`,
+		bundleKey, contentHash, skillID, userID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("store: update skill bundle: %w", err)
 	}
@@ -351,7 +357,11 @@ func (s *Store) UpdateSkillBundle(ctx context.Context, userID, skillID, bundleKe
 	if affected == 0 {
 		return nil, fmt.Errorf("store: skill %q: %w", skillID, ErrNotFound)
 	}
-	return s.Skill(ctx, userID, skillID)
+	// Read back on the write connection: the read pool can still be on the previous
+	// snapshot, which reported "not found" for a row that had just been updated.
+	return scanSkill(s.w.QueryRowContext(ctx,
+		`SELECT id, scope, name, version, description, content_hash, bundle_key, source_url, enabled, created_at
+		   FROM skills WHERE id = ?`, skillID))
 }
 func (s *Store) Skill(ctx context.Context, userID, skillID string) (*contracts.Skill, error) {
 	row := s.r.QueryRowContext(ctx,

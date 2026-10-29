@@ -12,6 +12,8 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,6 +24,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -623,7 +626,55 @@ func seed(ctx context.Context, st *store.Store, opt options, logger *slog.Logger
 	fmt.Println("──────────────────────────────────────────────────────")
 	fmt.Println()
 	logger.Info("seeded the first accounts")
+
+	// A deployment with no skills makes the feature look broken: the page says "write
+	// one" and there is nothing to try. Three shared skills ship with the binary
+	// (FR-14.7), installed once and left alone afterwards so an operator's edits survive.
+	if res.Created {
+		skillsDir := filepath.Join(opt.dataDir, "skills")
+		if err := os.MkdirAll(skillsDir, 0o700); err != nil {
+			return fmt.Errorf("prepare the skills directory: %w", err)
+		}
+		created, serr := st.EnsureBuiltinSkills(ctx, res.Admin.ID, func(skillID string, files map[string]string) (string, string, error) {
+			return writeBundle(skillsDir, skillID, files)
+		})
+		if serr != nil {
+			logger.Warn("could not install the built-in skills", "error", serr.Error())
+		} else if created > 0 {
+			logger.Info("installed the built-in skills", "count", created)
+		}
+	}
 	return nil
+}
+
+// writeBundle materialises one skill's files under the skills root and returns the bundle
+// key and content hash, using the same layout the HTTP handler writes.
+func writeBundle(skillsRoot, skillID string, files map[string]string) (string, string, error) {
+	root := filepath.Join(skillsRoot, skillID)
+	staging := root + ".tmp"
+	if err := os.RemoveAll(staging); err != nil {
+		return "", "", err
+	}
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	hasher := sha256.New()
+	for _, rel := range names {
+		target := filepath.Join(staging, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return "", "", err
+		}
+		if err := os.WriteFile(target, []byte(files[rel]), 0o644); err != nil {
+			return "", "", err
+		}
+		fmt.Fprintf(hasher, "%s\x00%s\x00", rel, files[rel])
+	}
+	if err := os.Rename(staging, root); err != nil {
+		return "", "", err
+	}
+	return skillID, hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 // gitLetters adapts git status into the per-path letters the file tree shows.
