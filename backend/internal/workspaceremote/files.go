@@ -237,6 +237,11 @@ func aggregateGitState(children []*contracts.FileNode) string {
 // File content
 // ---------------------------------------------------------------------------
 
+// previewSampleBytes is the window the preview sniffs for binary content.
+// fsx.ReadFile uses the same 8 KiB head, so the two workspace implementations
+// classify a file the same way.
+const previewSampleBytes = 8192
+
 // ReadFile returns a preview payload classified by size (PRD FR-7.8).
 func (w *Workspace) ReadFile(ctx context.Context, root, relPath string) (*contracts.FileContent, error) {
 	relClean, err := fsx.CleanRel(relPath)
@@ -297,8 +302,30 @@ func (w *Workspace) ReadFile(ctx context.Context, root, relPath string) (*contra
 		return content, nil
 
 	default:
+		// Sniff the first bytes before asking /v1/file/read for text: that
+		// endpoint decodes as UTF-8 and fails a PNG at byte 0. fsx classifies
+		// the same window with LooksBinary, so a local and a remote preview
+		// now agree on what "binary" means. A failed probe is not a preview
+		// failure — fall through to the text read, which reports the real
+		// error if there is one.
+		if head, herr := tgt.Client.ReadPrefix(ctx, container, previewSampleBytes); herr == nil {
+			if fsx.LooksBinary(head) {
+				content.Binary = true
+				content.MimeType = fsx.GuessMime(container, true)
+				return content, nil
+			}
+		}
 		file, rerr := tgt.Client.ReadFile(ctx, container)
 		if rerr != nil {
+			// A file the probe could not classify (no NUL in its first 8 KiB)
+			// can still be undecodable, e.g. a JPEG. The image types exactly
+			// that case as error_type "decode_error"; anything else is a real
+			// failure and stays one.
+			if aio.IsDecodeError(rerr) {
+				content.Binary = true
+				content.MimeType = fsx.GuessMime(container, true)
+				return content, nil
+			}
 			if aio.IsNotFound(rerr) {
 				return nil, fmt.Errorf("%w: %q", fsx.ErrNotExist, relPath)
 			}

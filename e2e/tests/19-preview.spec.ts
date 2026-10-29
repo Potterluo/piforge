@@ -45,6 +45,48 @@ test.describe("file preview", () => {
     await expect(frame).toHaveAttribute("src", /inline=1/);
   });
 
+  test("a binary file shows a download card instead of an error", async ({ page }) => {
+    await login(page, USER);
+    const sessionId = await openNewSession(page);
+    await sendPrompt(page, "hello");
+
+    // PNG bytes with a non-image name: a .png keeps its image preview (20-screenshot
+    // asserts that), so the binary card's own state needs a file the panel cannot
+    // render. Both modes classify it binary; the remote one used to answer 500.
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    const written = await apiWrite(
+      page,
+      "PUT",
+      `/v1/sessions/${sessionId}/files?path=${encodeURIComponent("icon.bin")}`,
+      png,
+    );
+    expect(written.status).toBeLessThan(300);
+
+    const preview = await (
+      await page.request.get(
+        `/v1/sessions/${sessionId}/files?path=${encodeURIComponent("icon.bin")}`,
+      )
+    ).json();
+    expect((preview as { binary: boolean }).binary).toBe(true);
+    expect((preview as { body: string }).body).toBe("");
+
+    await page.getByTestId("panel-tab-files").click();
+    await page.getByRole("button", { name: "刷新文件树" }).click();
+    await page.keyboard.press("Control+p");
+    await page.getByTestId("quick-open-input").fill("icon.bin");
+    await page.getByTestId("quick-open-result").first().click();
+
+    const card = page.getByTestId("preview-binary");
+    await expect(card).toBeVisible({ timeout: 20_000 });
+    await expect(card).toContainText("二进制文件，不可预览");
+    await expect(card).toContainText("70 B");
+    await expect(page.getByTestId("preview-binary-download")).toHaveAttribute("href", /download=1/);
+    await expect(page.getByTestId("preview-error")).toHaveCount(0);
+  });
+
   test("a download streams the whole file, not the preview window", async ({ page }) => {
     await login(page, USER);
     const sessionId = await openNewSession(page);

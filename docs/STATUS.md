@@ -9,7 +9,7 @@
 保留它的原因：我此前两次在汇报里把“做完”说早了。第一次是“P2 全落地”（真），第二次暗示 PRD 全落地（假）。
 一张带证据的表比一段自我评价可靠。
 
-基线：HEAD 2e5f206；此后补齐 FR-5.3。共 126 条 FR：DONE 36 / PARTIAL 51 / MISSING 39。
+基线：HEAD 2e5f206；此后补齐 FR-5.3。共 126 条 FR：DONE 37 / PARTIAL 50 / MISSING 39。
 
 ---
 # PiForge 对照 PRD 的实现审计
@@ -18,7 +18,7 @@
 - 审计方法：逐条打开 `backend/internal/httpapi/router.go` 的路由表、各 handler、`web/components/**` 与 `e2e/tests/*.spec.ts`，以「路由 + handler/组件 + 测试名」为准，不采信命名与注释。
 - 状态口径：**DONE** = 有实现且至少一条单测/e2e 覆盖；**PARTIAL** = 有实现但无测试，或只做了 API / 只做了界面 / 只做了 PRD 描述的一部分；**MISSING** = 无实现。
 - 审计过程中仓库被并发修改过：审计开始时 `POST /v1/sessions/{id}/clone`（FR-2.7）尚是未提交的未跟踪文件，约 03:50 被提交进 `2e5f206`。下表按该提交为准。
-- 计数：**126 条 FR，DONE 36 / PARTIAL 51 / MISSING 39**（审计后补上 FR-5.3）。
+- 计数：**126 条 FR，DONE 37 / PARTIAL 50 / MISSING 39**（审计后补上 FR-5.3）。
 
 > 说明：PRD 中没有「部署」类 FR（§12 是里程碑，`deploy/` 是 Dockerfile.app / Dockerfile.offline / k8s.yaml / entrypoint.sh，属交付物而非需求行），因此下面没有部署行。
 
@@ -76,7 +76,7 @@
 | FR-7.4 PDF 预览 | PARTIAL | `file-preview.tsx` 用 `iframe src=inlineUrl`（注释明说不用 pdfjs），**无 canvas 渲染、无翻页/页码**；`19-preview.spec.ts` 只验 iframe 可见 |
 | FR-7.5 CSV/TSV 表格 + 原文切换 | PARTIAL | `preview/table-preview.tsx`（`Tabs` table/raw）+ `lib/fs/csv.ts`；只有解析器单测 `csv.test.ts`，无组件测试 |
 | FR-7.6 HTML iframe sandbox 预览 | PARTIAL | `preview/html-preview.tsx`（`sandbox=""`，脚本被全禁，与 PRD「若含 JS 走预览域名」不符）；无测试 |
-| FR-7.7 二进制下载卡 | PARTIAL | `preview/binary-card.tsx`（大小/类型/下载）；无测试 |
+| FR-7.7 二进制下载卡 | DONE | `preview/binary-card.tsx`（大小/类型/下载）+ `file-preview.tsx` 的 `preview-binary` 分支；`file-preview.test.tsx` "shows size and a download for a binary file, not an error"、`19-preview.spec.ts` "a binary file shows a download card instead of an error"；远程预览的二进制分类见 `workspace_preview_remote_test.go` |
 | FR-7.8 大文件保护（2MB / 20MB） | DONE | `fsx.go` `DefaultMaxInline = 2<<20`、`DefaultMaxPreview = 20<<20`、首尾截断（`truncationMarker`）；`19-preview.spec.ts` "a download streams the whole file, not the preview window"、`fsx_test.go` |
 | FR-7.9 Diff 视图 unified / split | PARTIAL | `git-diff.tsx` + `git-diff-impl.tsx`（`@git-diff-view/react`，`DiffModeEnum.Split/Unified`）；`04-git.spec.ts` 只验 patch 内容，切换未测 |
 | FR-7.10 网页内改文件并落盘 | DONE | `PUT /v1/sessions/{id}/files` 有调用者了（`api.files.write`），保存后重新读取；`31-file-edit.spec.ts` 断言服务端字节已更新、取消不写 |

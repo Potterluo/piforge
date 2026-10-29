@@ -313,17 +313,69 @@ func (c *Client) OpenFile(ctx context.Context, path string) (io.ReadCloser, int6
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		defer res.Body.Close()
-		payload, _ := io.ReadAll(io.LimitReader(res.Body, 4<<10))
-		message := strings.TrimSpace(string(payload))
-		var envelope struct {
-			Message string `json:"message"`
-		}
-		if json.Unmarshal(payload, &envelope) == nil && envelope.Message != "" {
-			message = envelope.Message
-		}
-		return nil, -1, &HTTPError{Status: res.StatusCode, Path: path, Message: message}
+		return nil, -1, downloadFailure(res, path)
 	}
 	return res.Body, res.ContentLength, nil
+}
+
+// ReadPrefix returns up to n leading bytes of path without decoding them as
+// text. It is the probe ReadFile cannot be: /v1/file/read runs the bytes
+// through a UTF-8 codec, which rejects a PNG at its first byte. The download
+// endpoint carries raw bytes, and the 1.11.0 image honours a Range header with
+// 206 + content-range, so the preview can classify a file by its first bytes
+// instead of asking for a decode that is guaranteed to fail.
+//
+// A server that ignores Range is still safe: the read is bounded by n.
+func (c *Client) ReadPrefix(ctx context.Context, path string, n int64) ([]byte, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+	endpoint := c.base + "/v1/file/download?path=" + url.QueryEscape(path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("aio: download %s: %w", path, err)
+	}
+	if c.key != "" {
+		req.Header.Set("X-AIO-API-Key", c.key)
+	}
+	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("Range", "bytes=0-"+strconv.FormatInt(n-1, 10))
+	res, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("aio: download %s: %w", path, err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, downloadFailure(res, path)
+	}
+	raw, err := io.ReadAll(io.LimitReader(res.Body, n))
+	if err != nil {
+		return nil, fmt.Errorf("aio: read %s: %w", path, err)
+	}
+	return raw, nil
+}
+
+// downloadFailure turns a non-2xx download answer into HTTPError, preferring
+// the JSON envelope's message when the server sent one.
+func downloadFailure(res *http.Response, path string) *HTTPError {
+	payload, _ := io.ReadAll(io.LimitReader(res.Body, 4<<10))
+	message := strings.TrimSpace(string(payload))
+	var envelope struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(payload, &envelope) == nil && envelope.Message != "" {
+		message = envelope.Message
+	}
+	return &HTTPError{Status: res.StatusCode, Path: path, Message: message}
+}
+
+// IsDecodeError reports whether err is the file API refusing to read a binary
+// file as UTF-8. The live image types that answer as error_type "decode_error"
+// (exception_type UnicodeDecodeError); matching the type rather than the text
+// keeps a genuine I/O or permission failure an error.
+func IsDecodeError(err error) bool {
+	var op *OpError
+	return errors.As(err, &op) && op.Type == "decode_error"
 }
 
 // WriteFile writes a UTF-8 file inside the sandbox. Parent directories are

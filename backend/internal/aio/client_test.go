@@ -272,6 +272,73 @@ func TestOpenFileStreamsRawBytes(t *testing.T) {
 	}
 }
 
+// ReadPrefix is the preview's probe: a Range request on the download endpoint,
+// so the caller can classify bytes the text reader would reject.
+func TestReadPrefixFetchesOnlyTheRequestedWindow(t *testing.T) {
+	png := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff}
+	var seenRange, seenPath, seenKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/file/download" {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		seenRange = r.Header.Get("Range")
+		seenPath = r.URL.Query().Get("path")
+		seenKey = r.Header.Get("X-AIO-API-Key")
+		if seenPath == "/home/gem/missing.png" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"success":false,"message":"File does not exist: /home/gem/missing.png"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Range", "bytes 0-9/70")
+		w.Header().Set("Content-Length", "10")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(png)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL, APIKey: "pf-test-key"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := client.ReadPrefix(context.Background(), "/home/gem/icon.png", 10)
+	if err != nil {
+		t.Fatalf("ReadPrefix: %v", err)
+	}
+	if !bytes.Equal(got, png) {
+		t.Fatalf("prefix = %x, want %x", got, png)
+	}
+	if seenRange != "bytes=0-9" {
+		t.Fatalf("range header = %q", seenRange)
+	}
+	if seenPath != "/home/gem/icon.png" || seenKey != "pf-test-key" {
+		t.Fatalf("path = %q key = %q", seenPath, seenKey)
+	}
+
+	if _, err := client.ReadPrefix(context.Background(), "/home/gem/missing.png", 10); !IsNotFound(err) {
+		t.Fatalf("missing prefix error = %v", err)
+	}
+}
+
+// Only the image's typed decode failure may become "this file is binary";
+// every other error has to keep failing.
+func TestIsDecodeErrorMatchesOnlyTheTypedFailure(t *testing.T) {
+	if !IsDecodeError(&OpError{Type: "decode_error"}) {
+		t.Fatal("decode_error was not recognised")
+	}
+	for _, err := range []error{
+		&OpError{Type: "io_error"},
+		&OpError{Type: "not_found"},
+		&HTTPError{Status: http.StatusInternalServerError},
+		errors.New("'utf-8' codec can't decode byte 0x89"),
+	} {
+		if IsDecodeError(err) {
+			t.Fatalf("%v was treated as a decode failure", err)
+		}
+	}
+}
+
 func TestNewValidatesItsConfig(t *testing.T) {
 	if _, err := New(Config{}); err == nil {
 		t.Fatal("an empty base url was accepted")

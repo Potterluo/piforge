@@ -52,6 +52,7 @@ export function BinaryCard({
             variant="outline"
             size="sm"
             className="w-fit"
+            data-testid="preview-binary-download"
             nativeButton={false}
             render={<a href={downloadUrl} download={baseName(path)} />}
           >

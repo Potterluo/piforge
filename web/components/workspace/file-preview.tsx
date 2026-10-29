@@ -231,13 +231,15 @@ export function FilePreview({ sessionId, path, onClose }: FilePreviewProps) {
           ) : null}
 
           {content.binary && kind !== "image" ? (
-            <BinaryCard
-              path={content.path}
-              size={content.size}
-              mime={content.mime_type}
-              reason="二进制文件无法内联预览"
-              downloadUrl={downloadUrl}
-            />
+            <div data-testid="preview-binary" className="flex min-h-0 min-w-0 flex-1 flex-col">
+              <BinaryCard
+                path={content.path}
+                size={content.size}
+                mime={content.mime_type}
+                reason="二进制文件，不可预览"
+                downloadUrl={downloadUrl}
+              />
+            </div>
           ) : null}
 
           {kind === "image" ? (

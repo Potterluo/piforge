@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/piforge/piforge/backend/internal/aio"
 	"github.com/piforge/piforge/backend/internal/fsx"
@@ -157,6 +158,25 @@ func (f *fakeSandbox) handleRead(w http.ResponseWriter, r *http.Request) {
 	raw, err := os.ReadFile(hostPath)
 	if err != nil {
 		opError(w, body.File, "read", 2)
+		return
+	}
+	// The live image cannot decode a binary file as UTF-8 and says so with a
+	// typed decode error. The fake must not be more forgiving than the real
+	// server, or the preview's binary mapping would go untested.
+	if !utf8.Valid(raw) {
+		writeJSON(w, map[string]any{
+			"success": false,
+			"message": "Failed to read file: 'utf-8' codec can't decode byte 0x89 in position 0: invalid start byte",
+			"data": map[string]any{
+				"path": body.File, "operation": "read",
+				"message":        "Failed to read file: 'utf-8' codec can't decode byte 0x89 in position 0: invalid start byte",
+				"error_type":     "decode_error",
+				"retryable":      false,
+				"errno":          nil,
+				"errno_name":     nil,
+				"exception_type": "UnicodeDecodeError",
+			},
+		})
 		return
 	}
 	okData(w, map[string]any{"content": string(raw), "file": body.File})
@@ -626,6 +646,45 @@ func TestReadFileClassifiesMissingDirectoryAndBinary(t *testing.T) {
 	}
 	if content.Body != "" || !content.Truncated || content.Language != "" {
 		t.Fatalf("metadata preview = %+v", content)
+	}
+}
+
+func TestReadFileBinaryPreviewMatchesLocalWithoutTextDecode(t *testing.T) {
+	fake := newFakeSandbox(t)
+	ws, _ := newTestWorkspace(t, fake, Config{})
+	ctx := context.Background()
+	root := `C:\host\sandboxes\repo`
+
+	// A real PNG: the probe must classify it by its leading bytes, exactly as
+	// fsx does, without ever asking /v1/file/read to decode it.
+	png := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0xfe, 0x01}
+	if err := os.WriteFile(filepath.Join(fake.root, "icon.png"), png, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	content, err := ws.ReadFile(ctx, root, "icon.png")
+	if err != nil {
+		t.Fatalf("ReadFile png: %v", err)
+	}
+	if !content.Binary || content.Body != "" || content.Truncated {
+		t.Fatalf("binary preview = %+v", content)
+	}
+	if content.Size != int64(len(png)) || content.MimeType != "image/png" {
+		t.Fatalf("binary metadata = %+v", content)
+	}
+
+	// Invalid UTF-8 without a NUL byte: the probe cannot know, so the text read
+	// fails with the image's typed decode error. That one error is the binary
+	// result; it must not surface as a 500.
+	raw := []byte{0xff, 0xfe, 'n', 'o', 't', 'e', 'x', 't'}
+	if err := os.WriteFile(filepath.Join(fake.root, "raw.bin"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	content, err = ws.ReadFile(ctx, root, "raw.bin")
+	if err != nil {
+		t.Fatalf("ReadFile undecodable: %v", err)
+	}
+	if !content.Binary || content.Body != "" {
+		t.Fatalf("undecodable preview = %+v", content)
 	}
 }
 

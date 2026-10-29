@@ -367,6 +367,12 @@ WS   /v1/sessions/<id>/pty               "echo e2e-docker-ok\r\n" + "e2e-docker-
 - 下载（`?download=1` / `?inline=1`）走容器的 `GET /v1/file/download?path=…`，原样流式返回
   字节，不经过预览的 UTF-8 解码，也不受 2 MiB 预览窗口截断：PNG 和文本一样能下，`Content-Length`
   取自响应；
+- 预览先取文件前 8 KiB（`GET /v1/file/download` 加 `Range: bytes=0-8191`，1.11.0 回 206
+  `content-range`）做二进制嗅探。命中 NUL 就按本地 `fsx` 的同一形状返回
+  `binary:true` / `body:""` / `size` / `mime_type`，不再拿 `/v1/file/read` 的 UTF-8 解码
+  去读一张合法 PNG，所以远程模式不会再把二进制预览变成 500。探测没命中、但文本读取返回
+  `error_type: "decode_error"`（首 8 KiB 没有 NUL 的二进制，例如 JPEG）时同样归为二进制；
+  其它读取错误仍然原样返回 500，不会被吞成"空预览"；
 - 大文件按本地同样的阈值分档：≤2 MiB 全文，≤20 MiB 用 `head`/`tail` 取头尾并标记截断，
   更大的只给元数据；
 - git 不另写一套解析：`internal/gitx` 的 porcelain v2 解析、路径校验、"nothing to commit"
