@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -109,6 +111,53 @@ func deriveProjectName(repoURL string, now time.Time) string {
 	return "空白工作区 · " + now.Format("01-02")
 }
 
+// maxProjectNameSuffix bounds the search for a free derived name. A thousand
+// projects of the same repository is not a case worth a query storm; past it the
+// answer is a clear conflict rather than a request that never returns.
+const maxProjectNameSuffix = 1000
+
+// projectCreateAttempts is how many times a derived name is re-allocated after
+// losing the insert race to another create. Two tabs creating the same
+// repository at the same instant is the case; five tries is already generous.
+const projectCreateAttempts = 5
+
+// freeProjectName returns base when it is free, otherwise the first free
+// base-2, base-3, … .
+//
+// The predicate, rather than the store, is what decides "free" so the same rule
+// is used by tests and by the handler (the store compares case-insensitively).
+func freeProjectName(base string, taken func(string) (bool, error)) (string, error) {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return "", apiErr(contracts.ErrInvalidArgument, "name is required")
+	}
+	for suffix := 1; suffix <= maxProjectNameSuffix; suffix++ {
+		candidate := base
+		if suffix > 1 {
+			candidate = fmt.Sprintf("%s-%d", base, suffix)
+		}
+		used, err := taken(candidate)
+		if err != nil {
+			return "", err
+		}
+		if !used {
+			return candidate, nil
+		}
+	}
+	return "", apiErr(contracts.ErrConflict,
+		"项目名称「%s」及 %d 个带序号的名字都被占用了，请手动填一个名称", base, maxProjectNameSuffix-1)
+}
+
+// projectNameConflict is the 409 for a name the user typed themselves.
+//
+// A derived name gets a suffix instead (see freeProjectName); an explicit one
+// does not, because silently creating "frontend-2" is not what "frontend" asked
+// for. Naming the conflict is the useful half of refusing.
+func projectNameConflict(name string) error {
+	return withStatus(http.StatusConflict, contracts.ErrConflict,
+		fmt.Sprintf("项目名称「%s」已存在（不区分大小写），请换一个名称", name))
+}
+
 // handleCreateProject creates one project owned by the caller.
 func (s *server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	user := auth.MustUser(r.Context())
@@ -125,18 +174,77 @@ func (s *server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	repoURL := strings.TrimSpace(in.RepoURL)
+	name := strings.TrimSpace(in.Name)
 	// The name is optional on purpose: a repository URL is already a name, and
 	// making the field required is how a project ends up called "test2".
-	name := strings.TrimSpace(in.Name)
-	if name == "" {
-		name = deriveProjectName(in.RepoURL, time.Now())
+	if name != "" {
+		s.createNamedProject(w, r, user.ID, name, repoURL, in.DefaultBranch)
+		return
 	}
-	project, err := s.deps.Store.CreateProject(r.Context(), user.ID, store.NewProject{
+
+	// A derived name is the product's job to make unique: a second repository
+	// with the same basename (`frontend`) used to be a dead end with a 409 the
+	// user could not act on. Allocate the first free suffix instead, and
+	// re-allocate if another create takes it between the check and the insert.
+	base := deriveProjectName(repoURL, time.Now())
+	var project *contracts.Project
+	for attempt := 0; attempt < projectCreateAttempts; attempt++ {
+		candidate, err := freeProjectName(base, func(candidate string) (bool, error) {
+			return s.deps.Store.ProjectNameTaken(r.Context(), user.ID, candidate)
+		})
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		project, err = s.deps.Store.CreateProject(r.Context(), user.ID, store.NewProject{
+			Name:          candidate,
+			RepoURL:       repoURL,
+			DefaultBranch: in.DefaultBranch,
+		})
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, store.ErrConflict) {
+			s.fail(w, r, err)
+			return
+		}
+		// The row someone else wrote is now visible; the next loop sees it.
+		project = nil
+	}
+	if project == nil {
+		s.fail(w, r, withStatus(http.StatusConflict, contracts.ErrConflict,
+			fmt.Sprintf("项目名称「%s」已被占用，请重新提交或手动填写名称", base)))
+		return
+	}
+	writeJSON(w, http.StatusCreated, projectResponse{Project: project})
+}
+
+// createNamedProject handles the branch where the user typed the name: a
+// duplicate is refused by name rather than silently suffixed.
+func (s *server) createNamedProject(w http.ResponseWriter, r *http.Request, userID, name, repoURL, branch string) {
+	taken, err := s.deps.Store.ProjectNameTaken(r.Context(), userID, name)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if taken {
+		s.fail(w, r, projectNameConflict(name))
+		return
+	}
+	project, err := s.deps.Store.CreateProject(r.Context(), userID, store.NewProject{
 		Name:          name,
-		RepoURL:       strings.TrimSpace(in.RepoURL),
-		DefaultBranch: in.DefaultBranch,
+		RepoURL:       repoURL,
+		DefaultBranch: branch,
 	})
 	if err != nil {
+		// The check above is a courtesy to the user; the unique index is the
+		// gate. A row inserted in between still gets the named conflict instead
+		// of the raw storage error.
+		if errors.Is(err, store.ErrConflict) {
+			s.fail(w, r, projectNameConflict(name))
+			return
+		}
 		s.fail(w, r, err)
 		return
 	}
@@ -190,8 +298,20 @@ func (s *server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 func (s *server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	user := auth.MustUser(r.Context())
 	projectID := pathID(r)
-	if _, err := s.deps.Store.Project(r.Context(), user.ID, projectID); err != nil {
+	project, err := s.deps.Store.Project(r.Context(), user.ID, projectID)
+	if err != nil {
 		s.fail(w, r, err)
+		return
+	}
+	// A live turn is not a sandbox state: deleting the row underneath it kills
+	// work the user is watching and there is no undo. Refuse and say what to
+	// stop first instead of stopping it for them.
+	if running, err := s.deps.Store.RunningSessionCount(r.Context(), user.ID, projectID); err != nil {
+		s.fail(w, r, err)
+		return
+	} else if running > 0 {
+		s.fail(w, r, withStatus(http.StatusConflict, contracts.ErrConflict,
+			fmt.Sprintf("项目「%s」还有 %d 个会话正在运行，请先停止这些回合再删除项目", project.Name, running)))
 		return
 	}
 	if s.deps.Sandbox != nil {

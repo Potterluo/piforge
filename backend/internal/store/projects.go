@@ -53,6 +53,47 @@ func (s *Store) CreateProject(ctx context.Context, userID string, in NewProject)
 	return s.Project(ctx, userID, id)
 }
 
+// ProjectNameTaken reports whether the caller already has a project with this
+// name, compared case-insensitively.
+//
+// Case matters to a person reading a list and not to a router choosing what to
+// create, so "Frontend" and "frontend" are the same name here. A deleted project
+// is not a state this has to filter: DELETE removes the row and its children.
+func (s *Store) ProjectNameTaken(ctx context.Context, userID, name string) (bool, error) {
+	name = strings.TrimSpace(name)
+	if userID == "" || name == "" {
+		return false, nil
+	}
+	var one int
+	err := s.r.QueryRowContext(ctx,
+		`SELECT 1 FROM projects WHERE user_id = ? AND name COLLATE NOCASE = ? LIMIT 1`,
+		userID, name).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: project name %q: %w", name, err)
+	}
+	return true, nil
+}
+
+// RunningSessionCount counts the caller's sessions in a project that are running
+// a turn right now.
+//
+// The delete flow asks before it tears anything down: deleting the row under a
+// live turn is not a cleanup, it is killing work the user is watching.
+func (s *Store) RunningSessionCount(ctx context.Context, userID, projectID string) (int, error) {
+	var count int
+	err := s.r.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sessions
+		  WHERE user_id = ? AND project_id = ? AND status = ?`,
+		userID, projectID, string(contracts.StatusRunning)).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("store: count running sessions in project %q: %w", projectID, err)
+	}
+	return count, nil
+}
+
 // ListProjects lists the caller's projects newest first, with the runtime
 // decoration the list view needs (sandbox state, session count, last active).
 func (s *Store) ListProjects(ctx context.Context, userID string) ([]*contracts.Project, error) {

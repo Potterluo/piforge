@@ -39,5 +39,29 @@ export function deriveProjectName(repoUrl: string, now = new Date()): string {
   return `空白工作区 · ${month}-${day}`;
 }
 
+/**
+ * The first free name for a project, mirroring the API's allocation.
+ *
+ * A derived name is the product's job to make unique: two repositories both
+ * called `frontend` are a normal thing to have, so the second becomes
+ * `frontend-2` rather than a 409 the user cannot act on. Comparison is
+ * case-insensitive exactly like `GET /v1/projects` names are compared on the
+ * server; the server remains the gate, this is the preview.
+ */
+export function freeProjectName(base: string, taken: Iterable<string>): string {
+  const used = new Set<string>();
+  for (const name of taken) used.add(name.trim().toLowerCase());
+
+  const stem = base.trim();
+  if (!stem) return "";
+  // The server stops at a thousand; a preview that loops forever on a corrupt
+  // list would hang the dialog, so it stops at the same place.
+  for (let suffix = 1; suffix <= 1000; suffix += 1) {
+    const candidate = suffix === 1 ? stem : `${stem}-${suffix}`;
+    if (!used.has(candidate.toLowerCase())) return candidate;
+  }
+  return stem;
+}
+
 /** What the name field shows as its placeholder, so the outcome is explicit. */
 export const PROJECT_NAME_PLACEHOLDER = "留空则用仓库名";

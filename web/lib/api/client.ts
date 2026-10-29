@@ -135,7 +135,8 @@ export const auth = {
 // ---------------------------------------------------------------------------
 
 export interface CreateProjectInput {
-  name: string;
+  /** Omitted or empty derives the name on the server (repository basename, then -2). */
+  name?: string;
   repo_url?: string;
   default_branch?: string;
 }

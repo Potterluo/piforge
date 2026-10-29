@@ -23,14 +23,20 @@ function monthDay(date: Date): string {
 }
 
 /**
- * Project names are unique per account, so a retry of a test that creates
- * "Spoon-Knife" would otherwise fail on the row the first attempt made.
+ * Removes every project whose name starts with `prefix`.
+ *
+ * A derived name now gets a -2/-3 suffix instead of colliding, so a previous
+ * run can leave "Spoon-Knife-2" behind and the next run's first project would be
+ * "Spoon-Knife-3". Cleanup has to follow the same rule.
  */
-async function removeProjectsNamed(page: import("@playwright/test").Page, name: string) {
+async function removeProjectsMatching(page: import("@playwright/test").Page, prefix: string) {
   const listed = (await (await page.request.get("/v1/projects")).json()) as {
     projects: { id: string; name: string }[];
   };
-  for (const project of listed.projects.filter((item) => item.name === name)) {
+  for (const project of listed.projects.filter(
+    (item) => item.name.toLowerCase() === prefix.toLowerCase() ||
+      item.name.toLowerCase().startsWith(`${prefix.toLowerCase()}-`),
+  )) {
     const gone = await apiWrite(page, "DELETE", `/v1/projects/${project.id}`);
     expect(gone.status).toBeLessThan(300);
   }
@@ -80,8 +86,8 @@ test("the session dialog asks for no title and the first message names the sessi
 
 test("a project created without a name takes it from the repository", async ({ page }) => {
   await login(page, USER);
-  await removeProjectsNamed(page, "Spoon-Knife");
-  await removeProjectsNamed(page, `空白工作区 · ${monthDay(new Date())}`);
+  await removeProjectsMatching(page, "Spoon-Knife");
+  await removeProjectsMatching(page, `空白工作区 · ${monthDay(new Date())}`);
   await page.goto("/");
   await page.getByTestId("new-project-button").first().click();
 
@@ -162,4 +168,52 @@ test("a project can be renamed from its header and every surface follows", async
   const card = page.locator('[data-testid="project-card"]', { hasText: newName }).first();
   await expect(card).toBeVisible({ timeout: 20_000 });
   await page.screenshot({ path: path.join(ARTIFACTS, "59-project-renamed-home.png") });
+});
+
+/**
+ * The reported dead end: a second repository with the same basename answered
+ * 409, and there was nothing useful to click. A derived name is the product's
+ * name, so the product makes it unique: Spoon-Knife, then Spoon-Knife-2.
+ */
+test("two projects from the same repository get distinct derived names", async ({ page }) => {
+  const suffixDir = path.resolve(HERE, "../.artifacts/ux-fix3");
+  mkdirSync(suffixDir, { recursive: true });
+  await login(page, USER);
+  await removeProjectsMatching(page, "Spoon-Knife");
+
+  const created: { id: string; name: string }[] = [];
+  for (const expected of ["Spoon-Knife", "Spoon-Knife-2"]) {
+    await page.goto("/");
+    await page.getByTestId("new-project-button").first().click();
+    await page.getByTestId("project-repo").fill("https://github.com/octocat/Spoon-Knife.git");
+    // The second time the preview already names the suffix, before submitting.
+    await expect(page.getByTestId("project-name-derived")).toContainText(expected);
+    await page.getByTestId("project-submit").click();
+    await expect(page).toHaveURL(/\/p\/prj_/, { timeout: 30_000 });
+    const projectId = /\/p\/([^/]+)/.exec(page.url())?.[1] ?? "";
+    expect(projectId).not.toBe("");
+    // No failure toast: the collision was resolved, not reported.
+    await expect(
+      page.locator("[data-sonner-toast]").filter({ hasText: "创建项目失败" }),
+    ).toHaveCount(0);
+    const stored = (await (await page.request.get(`/v1/projects/${projectId}`)).json()) as {
+      project: { name: string };
+    };
+    expect(stored.project.name).toBe(expected);
+    created.push({ id: projectId, name: expected });
+  }
+
+  // Both exist at once in the list, which is the point of the suffix.
+  await page.goto("/");
+  for (const project of created) {
+    await expect(
+      page.locator('[data-testid="project-card"]', { hasText: project.name }).first(),
+    ).toBeVisible({ timeout: 20_000 });
+  }
+  await page.screenshot({ path: path.join(suffixDir, "59-two-colliding-projects.png") });
+
+  for (const project of created) {
+    const gone = await apiWrite(page, "DELETE", `/v1/projects/${project.id}`);
+    expect(gone.status).toBeLessThan(300);
+  }
 });

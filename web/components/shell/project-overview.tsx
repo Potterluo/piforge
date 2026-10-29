@@ -1,11 +1,22 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { ArrowUpRight, Clock, FolderGit2, MoreHorizontal, PenLine, Plus } from "lucide-react";
+import { ArrowUpRight, Clock, FolderGit2, MoreHorizontal, PenLine, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { NewSessionDialog } from "@/components/shell/new-session-dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -43,7 +54,7 @@ import {
   sessionStatusTone,
 } from "@/lib/session/format";
 import { humanizeError } from "@/lib/errors";
-import { useProject, useProjectSessions, useUpdateProject } from "@/lib/session/queries";
+import { useDeleteProject, useProject, useProjectSessions, useUpdateProject } from "@/lib/session/queries";
 import { cn } from "@/lib/utils";
 import type { SessionStatus } from "@/lib/types";
 
@@ -78,18 +89,39 @@ export function ProjectOverviewSkeleton() {
 }
 
 export function ProjectOverview({ projectId }: { projectId: string }) {
+  const router = useRouter();
   const project = useProject(projectId);
   const sessions = useProjectSessions(projectId);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameName, setRenameName] = useState("");
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const rename = useUpdateProject(projectId);
+  const remove = useDeleteProject();
 
   const data = project.data?.project;
 
   const startRename = () => {
     setRenameName(data?.name ?? "");
     setRenameOpen(true);
+  };
+
+  const confirmDelete = () => {
+    remove.mutate(projectId, {
+      onSuccess: () => {
+        setDeleteOpen(false);
+        toast.success("项目已删除", { description: data?.name });
+        // The project page has nothing left to show; the list is where the
+        // user's next action is.
+        router.replace("/");
+      },
+      onError: (error) =>
+        // The server refuses while a turn is running and says so in Chinese;
+        // the dialog stays open so the reason is read next to the action.
+        toast.error("删除失败", {
+          description: humanizeError(error),
+        }),
+    });
   };
 
   const submitRename = (event: React.FormEvent<HTMLFormElement>) => {
@@ -169,6 +201,14 @@ export function ProjectOverview({ projectId }: { projectId: string }) {
                 <DropdownMenuItem data-testid="project-rename" onClick={startRename}>
                   <PenLine />
                   重命名
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  variant="destructive"
+                  data-testid="project-delete"
+                  onClick={() => setDeleteOpen(true)}
+                >
+                  <Trash2 />
+                  删除项目
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -261,6 +301,30 @@ export function ProjectOverview({ projectId }: { projectId: string }) {
         onOpenChange={setDialogOpen}
         projectId={projectId}
       />
+
+      <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <AlertDialogContent data-testid="project-delete-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除「{data?.name ?? "这个项目"}」？</AlertDialogTitle>
+            <AlertDialogDescription>
+              <span className="block">
+                {data?.session_count ?? 0} 个会话及其对话记录、这个项目的沙箱都会被删除，无法恢复。
+              </span>
+              <span className="block">远程仓库不会被删除，代码仍然在托管平台上。</span>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              data-testid="project-delete-confirm"
+              disabled={remove.isPending}
+              onClick={confirmDelete}
+            >
+              删除项目
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
         <DialogContent className="sm:max-w-md">

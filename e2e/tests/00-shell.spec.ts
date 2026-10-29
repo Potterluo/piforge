@@ -22,6 +22,14 @@ test.describe("shell navigation", () => {
     await page.getByTestId("project-repo").fill("");
     await page.getByTestId("project-submit").click();
 
+    // Creating a project lands in it: the dialog navigates to the new project
+    // (an empty project has nothing useful to show on the list). The card is
+    // checked on the home page, reached the way the user reaches it — waiting
+    // for the card on the page the dialog is leaving only races the router.
+    await expect(page).toHaveURL(/\/p\/prj_/, { timeout: 30_000 });
+    await expect(page.getByTestId("project-title")).toHaveText(name);
+    await page.goto("/");
+
     // The new card must appear in the grid with the right destination. The
     // navigation itself is taken from the href instead of a click: the card is
     // a link, and a click here only re-tests Next's router, which is not what

@@ -130,6 +130,26 @@ export function useUpdateProject(projectId: string) {
   });
 }
 
+/**
+ * Deletes a project, its sessions and its sandbox record.
+ *
+ * The caller owns navigation: the project page returns home, while a maintenance
+ * action elsewhere may simply stay put. The project and session caches are
+ * removed rather than invalidated, so a deleted id is not briefly re-fetched
+ * into a 404 flash on the way out.
+ */
+export function useDeleteProject() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (projectId: string) => api.projects.remove(projectId),
+    onSuccess: (_data, projectId) => {
+      client.removeQueries({ queryKey: qk.project(projectId) });
+      client.removeQueries({ queryKey: qk.sessions(projectId) });
+      void client.invalidateQueries({ queryKey: qk.projects });
+    },
+  });
+}
+
 export function useCreateSession(projectId: string) {
   const client = useQueryClient();
   return useMutation({
