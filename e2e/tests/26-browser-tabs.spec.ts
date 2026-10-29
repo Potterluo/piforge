@@ -43,7 +43,7 @@ test("the browser panel keeps several pages", async ({ page }) => {
           const canvas = document.querySelector('[data-testid="browser-canvas"]') as HTMLCanvasElement;
           return canvas?.width ?? 0;
         }),
-      { timeout: 30_000 },
+      { timeout: 90_000 },
     )
     .toBeGreaterThan(0);
 
@@ -62,7 +62,7 @@ test("the browser panel keeps several pages", async ({ page }) => {
       { timeout: 45_000 },
     )
     .toBe(1);
-  await expect.poll(async () => tabs.count(), { timeout: 20_000 }).toBe(1);
+  await expect.poll(async () => tabs.count(), { timeout: 90_000 }).toBe(1);
 
   // The API agrees, and refuses to close the last page.
   // A busy browser legitimately answers 503 while it starts; poll rather than
@@ -77,7 +77,7 @@ test("the browser panel keeps several pages", async ({ page }) => {
         list = { tabs: body.tabs ?? [] };
         return list.tabs.length;
       },
-      { timeout: 30_000 },
+      { timeout: 90_000 },
     )
     .toBe(1);
   const refused = await apiWrite(

@@ -21,12 +21,16 @@ test.describe("conversation", () => {
     });
     await expect(page.getByTestId("turn-user").first()).toContainText("cache eviction");
 
-    // The scripted peer always emits one bash tool call. It is folded into the run's
-    // single tool row rather than occupying a row of its own; opening that row is covered
-    // by 45-tool-group.spec.ts.
+    // The scripted peer always emits one bash tool call, folded into the run's single tool
+    // row. Opening it **mid-run** used to collapse again under the user's finger: the row
+    // was keyed by its position, so every appended block remounted it.
     await expect(page.getByTestId("tool-group").first()).toContainText("个工具调用", {
       timeout: 30_000,
     });
+    await page.getByTestId("tool-group").first().click();
+    await expect
+      .poll(async () => page.getByTestId("tool-trace").count(), { timeout: 20_000 })
+      .toBeGreaterThan(0);
 
     await expect(page.getByTestId("run-state")).toHaveAttribute("data-state", "settled", {
       timeout: 60_000,

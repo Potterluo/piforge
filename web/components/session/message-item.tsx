@@ -62,7 +62,10 @@ function renderBlocks(
         index += 1;
         group.push(blocks[index]);
       }
-      out.push(<ToolGroup key={`tools-${index}`} blocks={group as never} />);
+      // Keyed by the first call, not by the position: while a run streams, blocks are
+      // appended and the index of this group moves, which remounted the component and
+      // collapsed it under the user's finger. The call id is stable for the run.
+      out.push(<ToolGroup key={`tools-${(block as { id: string }).id}`} blocks={group as never} />);
       continue;
     }
     out.push(
