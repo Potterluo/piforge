@@ -781,6 +781,57 @@ func (s *server) branchHasHistory(r *http.Request, sessionID string) bool {
 	return false
 }
 
+// modelAwareRuntime is implemented by a runtime that remembers which platform
+// model reference its live process was started with. It is optional so a fake or
+// an alternative runtime does not have to answer it.
+type modelAwareRuntime interface {
+	StartedModelRef(sessionID string) (string, bool)
+}
+
+// restartForModelSwitch stops a live agent whose model differs from the session
+// row, so the next Start spawns it with the new reference.
+//
+// A switch cannot be patched into a running process: models.json and the
+// per-session gateway token are minted per spawn from the session's ref, and Pi
+// keeps the model it resolved at startup. Before this, the picker wrote the row
+// and the agent silently kept answering from the old model — including from a
+// working provider when the picked one had no key at all.
+//
+// A switch to a provider that cannot serve (missing, no models, no key) fails
+// here, in the user's language, instead of being reported later by the model.
+// A switch during a run is refused rather than killing the run under the user.
+func (s *server) restartForModelSwitch(ctx context.Context, userID string, sess *contracts.Session) (bool, error) {
+	if sess == nil || s.deps.Runtime == nil {
+		return false, nil
+	}
+	aware, ok := s.deps.Runtime.(modelAwareRuntime)
+	if !ok {
+		return false, nil
+	}
+	started, live := aware.StartedModelRef(sess.ID)
+	if !live {
+		return false, nil
+	}
+	if strings.TrimSpace(started) == strings.TrimSpace(sess.ModelRef) {
+		return false, nil
+	}
+	// Explain the new reference before touching the process: a keyless or
+	// unconfigured provider is a configuration problem, not a model answer.
+	if err := s.explainMissingModel(ctx, userID, sess.ModelRef); err != nil {
+		return false, err
+	}
+	if status, err := s.deps.Runtime.Status(ctx, sess.ID); err == nil && (status.Running || status.Streaming) {
+		return false, apiErr(contracts.ErrConflict,
+			"模型已切换：等当前 run 结束后再发送，新的 run 会用新模型重启 agent")
+	}
+	if err := s.deps.Runtime.Stop(ctx, sess.ID); err != nil {
+		return false, apiErr(contracts.ErrInternal, "切换模型时没能停掉旧的 agent：%v", err)
+	}
+	s.log.InfoContext(ctx, "restarting the agent for a model switch",
+		"session", sess.ID, "from", started, "to", sess.ModelRef)
+	return true, nil
+}
+
 // restartAgent brings a session's agent back up from its stored row.
 //
 // It is what makes a second fork possible: forking stops the parent's process by

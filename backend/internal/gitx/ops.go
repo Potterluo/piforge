@@ -126,6 +126,36 @@ func (r *Runner) configGet(ctx context.Context, dir, key string) string {
 	return strings.TrimSpace(res.Stdout)
 }
 
+// EnsureIdentity writes a repository-local committer identity when the repository
+// has none, and reports whether it wrote one.
+//
+// `identityArgs` covers the commits *this* package makes, but the agent runs its
+// own `git commit`: on a fresh deployment (no `~/.gitconfig`, which is the normal
+// case inside the image) the first commit in a new project died with "Author
+// identity unknown. Tell me who you are." A repo-local setting fixes every
+// commit in that checkout, worktrees included, and is what the container provider
+// already does when it creates a sandbox.
+func (r *Runner) EnsureIdentity(ctx context.Context, root string) (bool, error) {
+	dir, err := repoPath(root)
+	if err != nil {
+		return false, err
+	}
+	wrote := false
+	if strings.TrimSpace(r.configGet(ctx, dir, "user.name")) == "" {
+		if _, err := r.Run(ctx, dir, "config", "--local", "user.name", "PiForge"); err != nil {
+			return wrote, fmt.Errorf("gitx: set user.name in %s: %w", dir, err)
+		}
+		wrote = true
+	}
+	if strings.TrimSpace(r.configGet(ctx, dir, "user.email")) == "" {
+		if _, err := r.Run(ctx, dir, "config", "--local", "user.email", "piforge@localhost"); err != nil {
+			return wrote, fmt.Errorf("gitx: set user.email in %s: %w", dir, err)
+		}
+		wrote = true
+	}
+	return wrote, nil
+}
+
 // CreateBranch creates a branch at HEAD without switching to it.
 func (r *Runner) CreateBranch(ctx context.Context, root, name string) error {
 	dir, err := repoPath(root)

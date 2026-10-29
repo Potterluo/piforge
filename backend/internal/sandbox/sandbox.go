@@ -261,6 +261,11 @@ func (l *Local) Ensure(ctx context.Context, userID, projectID, repoURL, branch s
 		if fi, ferr := os.Stat(sandboxDir); ferr == nil && fi.IsDir() {
 			sb := st.toContract()
 			sb.RootDir = sandboxDir
+			// A checkout created before the identity was written still needs one:
+			// the agent's first commit there is exactly the case that failed.
+			if gitxIsRepo(ctx, l.git, repoDir) {
+				_, _ = l.git.EnsureIdentity(ctx, repoDir)
+			}
 			l.adopt(sb)
 			return l.touch(sb), nil
 		}
@@ -308,6 +313,14 @@ func (l *Local) Ensure(ctx context.Context, userID, projectID, repoURL, branch s
 		if err := l.checkoutBranch(ctx, repoDir, b); err != nil {
 			return nil, err
 		}
+	}
+
+	// The agent commits inside this checkout, and a fresh host (the image has no
+	// ~/.gitconfig) has no committer identity: its first `git commit` died with
+	// "Author identity unknown". A repo-local identity is written here once, at
+	// checkout time, so every later commit — the agent's included — works.
+	if _, err := l.git.EnsureIdentity(ctx, repoDir); err != nil {
+		return nil, fmt.Errorf("sandbox: %w", err)
 	}
 
 	sb := &contracts.Sandbox{

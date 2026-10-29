@@ -337,6 +337,13 @@ type fakeRuntime struct {
 	entri  []*contracts.TreeEntry
 	leaf   string
 	points []contracts.ForkPoint
+
+	// Model-switch bookkeeping. startedModel is what the live process was
+	// launched with; modelLive says whether there is one. Zero values mean "no
+	// live process", which is the state most tests do not care about.
+	startedModel string
+	modelLive    bool
+	stops        []string
 }
 
 func newFakeRuntime() *fakeRuntime {
@@ -369,7 +376,23 @@ func (f *fakeRuntime) Start(_ context.Context, spec contracts.SessionSpec) (<-ch
 	return events, nil
 }
 
-func (f *fakeRuntime) Stop(_ context.Context, _ string) error { return nil }
+func (f *fakeRuntime) Stop(_ context.Context, sessionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stops = append(f.stops, sessionID)
+	f.modelLive = false
+	return nil
+}
+
+// StartedModelRef is the optional capability the model-switch path needs.
+func (f *fakeRuntime) StartedModelRef(_ string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.modelLive {
+		return "", false
+	}
+	return f.startedModel, true
+}
 
 func (f *fakeRuntime) Prompt(_ context.Context, req contracts.PromptRequest) (contracts.PromptResult, error) {
 	f.mu.Lock()

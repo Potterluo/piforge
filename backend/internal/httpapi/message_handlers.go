@@ -137,6 +137,14 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		spec.Worktree = root
 	}
 
+	// The composer's model picker writes the session row; a live process keeps
+	// the model it resolved at startup, so the two have to be reconciled before
+	// the next turn or the picker is decoration (QA-14, MAJOR).
+	if _, err := s.restartForModelSwitch(r.Context(), user.ID, sess); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
 	// Starting the process and submitting the prompt are the two steps whose
 	// effects must survive the client going away, so they run detached from the
 	// request's cancellation (but still bounded).

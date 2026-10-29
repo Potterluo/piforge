@@ -88,16 +88,23 @@ func (h *hub) ensure(ctx context.Context, userID string, spec contracts.SessionS
 	if err != nil {
 		return err
 	}
-	go h.pump(userID, spec.SessionID, events)
+	go h.pump(userID, spec.SessionID, sub, events)
 	return nil
 }
 
 // pump persists one session's event stream until it closes. It is the only
 // writer of runtime events, so `seq` ordering follows arrival order.
-func (h *hub) pump(userID, sessionID string, events <-chan contracts.Event) {
+//
+// The subscription is passed in rather than looked up by session id: a session
+// can be stopped and restarted (a model switch does exactly that), and the old
+// pump exiting late would otherwise delete the *new* subscription and leave the
+// next Start spawning a second process for the same session.
+func (h *hub) pump(userID, sessionID string, sub *subscription, events <-chan contracts.Event) {
 	defer func() {
 		h.mu.Lock()
-		delete(h.subs, sessionID)
+		if h.subs[sessionID] == sub {
+			delete(h.subs, sessionID)
+		}
 		h.mu.Unlock()
 	}()
 

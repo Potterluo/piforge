@@ -78,6 +78,12 @@ export interface ComposerProps {
   models?: ModelOption[];
   compact?: boolean;
   disabled?: boolean;
+  /**
+   * The account has no provider that can answer (disabled, no key or no models).
+   * The workbench owns the explanation bar; the composer only accepts the flag so
+   * the two stay in step about what the session can do.
+   */
+  noModel?: boolean;
   placeholder?: string;
   className?: string;
   /** The sidecar reuses this composer with its own e2e hooks. */
@@ -468,9 +474,20 @@ export function Composer({
                   return;
                 }
                 setModelOverride(next);
-                if (next !== "inherit") {
-                  void persistSetting({ model_ref: next });
-                }
+                // "inherit" is a choice too: it clears the session's pinned
+                // model, and leaving the old ref in the row made the header and
+                // the picker disagree.
+                void persistSetting({ model_ref: next === "inherit" ? "" : next });
+                // A model switch cannot be applied to a live agent process: Pi
+                // resolves the model at spawn (models.json + the session's
+                // gateway token). Saying so is the difference between a control
+                // that works and one that only looks like it does.
+                toast.info("已切换模型", {
+                  description:
+                    next === "inherit"
+                      ? "下一次发送会用默认模型重启这个会话的 agent。"
+                      : `下一次发送会用 ${next} 重启这个会话的 agent。`,
+                });
               }}
             >
               <SelectTrigger
@@ -562,6 +579,9 @@ export function Composer({
                 const next = customModel.trim();
                 setModelOverride(next);
                 void persistSetting({ model_ref: next });
+                toast.info("已切换模型", {
+                  description: `下一次发送会用 ${next} 重启这个会话的 agent。`,
+                });
                 setCustomOpen(false);
               }}
             >
