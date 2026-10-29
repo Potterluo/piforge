@@ -536,6 +536,13 @@ export const admin = {
     ),
   shareProvider: (input: CreateProviderInput) =>
     request<{ provider: Provider }>("/v1/admin/providers", { method: "POST", body: input }),
+  /**
+   * Edits a shared provider in place. The row id and name stay the same, which is
+   * what keeps every session pinned to "provider/model" working; an absent
+   * `api_key` keeps the stored secret.
+   */
+  updateProvider: (id: string, input: UpdateProviderInput) =>
+    request<{ provider: Provider }>(`/v1/admin/providers/${id}`, { method: "PATCH", body: input }),
   unshareProvider: (id: string) =>
     request<{ ok: boolean }>(`/v1/admin/providers/${id}`, { method: "DELETE" }),
   createUser: (input: CreateUserInput) =>

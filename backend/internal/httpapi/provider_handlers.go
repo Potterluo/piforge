@@ -238,3 +238,57 @@ func (s *server) handleAdminDeleteProvider(w http.ResponseWriter, r *http.Reques
 	}
 	writeOK(w)
 }
+
+// handleAdminUpdateProvider patches a shared provider in place.
+//
+// Editing rather than delete-and-recreate is the whole point: every session pins
+// "provider/model", so a recreated row breaks all of them. An empty api_key
+// keeps the stored key — rotating an endpoint must not demand the secret again —
+// and a non-empty one replaces it.
+func (s *server) handleAdminUpdateProvider(w http.ResponseWriter, r *http.Request) {
+	user := auth.MustUser(r.Context())
+	if user.Role != contracts.RoleAdmin {
+		s.fail(w, r, apiErr(contracts.ErrForbidden, "admin role required"))
+		return
+	}
+
+	var in struct {
+		API      *string               `json:"api"`
+		BaseURL  *string               `json:"base_url"`
+		Models   []contracts.ModelSpec `json:"models"`
+		APIKey   string                `json:"api_key"`
+		ClearKey bool                  `json:"clear_key"`
+		Enabled  *bool                 `json:"enabled"`
+	}
+	if err := decodeJSON(r, &in); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	patch := store.ProviderPatch{
+		API:      in.API,
+		BaseURL:  in.BaseURL,
+		Models:   in.Models,
+		ClearKey: in.ClearKey,
+		Enabled:  in.Enabled,
+	}
+	if in.APIKey != "" {
+		if s.deps.Secrets == nil {
+			s.fail(w, r, apiErr(contracts.ErrInternal, "secret storage is not configured on this server"))
+			return
+		}
+		sealed, err := s.deps.Secrets.SealString(in.APIKey)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		patch.KeyCipher = sealed
+	}
+
+	provider, err := s.deps.Store.AdminUpdateProvider(r.Context(), user.ID, pathID(r), patch)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, providerResponse{Provider: provider})
+}

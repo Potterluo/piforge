@@ -229,6 +229,163 @@ func TestSendWithoutAModelSaysWhereToFixIt(t *testing.T) {
 	env.mustErr(rec, http.StatusInternalServerError, contracts.ErrInternal)
 }
 
+// Editing a shared provider in place: the endpoint, the model list and the key
+// are all fixable without deleting the row. Delete-and-recreate was the only way
+// back when a shared key was wrong, and it changes the id every session pins
+// ("provider/model") — so the fix broke exactly the sessions it was meant to
+// repair (QA-16, FIX A).
+func TestAdminEditsASharedProviderWithAndWithoutANewKey(t *testing.T) {
+	env := newTestEnv(t)
+	env.mkUser("admin@piforge.local", "adminpw", contracts.RoleAdmin)
+	admin := env.login("admin@piforge.local", "adminpw")
+	devUser := env.mkUser("dev@piforge.local", "devpw", contracts.RoleUser)
+	dev := env.login("dev@piforge.local", "devpw")
+
+	shared := env.doAuthed(http.MethodPost, "/v1/admin/providers", map[string]any{
+		"name":     "shared-house",
+		"api":      "openai-compat",
+		"base_url": "https://house-one.example/v1",
+		"api_key":  "sk-house-first",
+		"models":   []map[string]string{{"id": "house-model"}},
+	}, admin)
+	if shared.Code != http.StatusOK {
+		t.Fatalf("share: %d %s", shared.Code, shared.Body.String())
+	}
+	var created struct {
+		Provider contracts.Provider `json:"provider"`
+	}
+	env.mustJSON(shared, &created)
+
+	p, err := env.store.CreateProject(t.Context(), devUser.ID, store.NewProject{Name: "pinned", DefaultBranch: "main"})
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	sess, err := env.store.CreateSession(t.Context(), devUser.ID, store.NewSession{
+		ProjectID: p.ID, Kind: contracts.KindMain, Title: "pinned", ModelRef: "shared-house/house-model",
+	})
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+
+	// An endpoint + model edit with no key in the body keeps the stored key. The
+	// pinned model stays in the list because a session references it.
+	edited := env.doAuthed(http.MethodPatch, "/v1/admin/providers/"+created.Provider.ID, map[string]any{
+		"base_url": "https://house-two.example/v1",
+		"models":   []map[string]string{{"id": "house-model"}, {"id": "house-model-2"}},
+	}, admin)
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit without a key: %d %s", edited.Code, edited.Body.String())
+	}
+	var after struct {
+		Provider contracts.Provider `json:"provider"`
+	}
+	env.mustJSON(edited, &after)
+	if after.Provider.ID != created.Provider.ID {
+		t.Fatalf("the edit replaced the row: id %q -> %q", created.Provider.ID, after.Provider.ID)
+	}
+	if after.Provider.Name != "shared-house" {
+		t.Fatalf("name = %q; a rename would break every pinned session", after.Provider.Name)
+	}
+	if after.Provider.BaseURL != "https://house-two.example/v1" {
+		t.Fatalf("base url = %q", after.Provider.BaseURL)
+	}
+	if len(after.Provider.Models) != 2 {
+		t.Fatalf("models = %+v", after.Provider.Models)
+	}
+	if !after.Provider.HasKey {
+		t.Fatal("editing without a key dropped the stored key")
+	}
+	sealed, err := env.store.ProviderSecret(t.Context(), admin.user.ID, created.Provider.ID)
+	if err != nil {
+		t.Fatalf("secret: %v", err)
+	}
+	secret, err := env.deps.Secrets.OpenString(sealed)
+	if err != nil {
+		t.Fatalf("open secret: %v", err)
+	}
+	if secret != "sk-house-first" {
+		t.Fatalf("stored key = %q, want the original", secret)
+	}
+
+	// The key is separately replaceable.
+	rekeyed := env.doAuthed(http.MethodPatch, "/v1/admin/providers/"+created.Provider.ID, map[string]any{
+		"api_key": "sk-house-second",
+	}, admin)
+	if rekeyed.Code != http.StatusOK {
+		t.Fatalf("edit with a key: %d %s", rekeyed.Code, rekeyed.Body.String())
+	}
+	sealed, err = env.store.ProviderSecret(t.Context(), admin.user.ID, created.Provider.ID)
+	if err != nil {
+		t.Fatalf("secret after rekey: %v", err)
+	}
+	secret, err = env.deps.Secrets.OpenString(sealed)
+	if err != nil {
+		t.Fatalf("open secret after rekey: %v", err)
+	}
+	if secret != "sk-house-second" {
+		t.Fatalf("stored key = %q, want the replacement", secret)
+	}
+	if strings.Contains(rekeyed.Body.String(), "sk-house-second") {
+		t.Fatal("the response echoed the key")
+	}
+
+	// The pinned session still resolves the provider it names, and still runs.
+	reloaded, err := env.store.Session(t.Context(), devUser.ID, sess.ID)
+	if err != nil {
+		t.Fatalf("reload session: %v", err)
+	}
+	if reloaded.ModelRef != "shared-house/house-model" {
+		t.Fatalf("the session's model reference changed to %q", reloaded.ModelRef)
+	}
+	resolved, _, err := env.store.ResolveProvider(t.Context(), devUser.ID, "shared-house")
+	if err != nil {
+		t.Fatalf("the pinned provider no longer resolves: %v", err)
+	}
+	if resolved.BaseURL != "https://house-two.example/v1" {
+		t.Fatalf("the session resolves the old endpoint %q", resolved.BaseURL)
+	}
+	if rec := env.doAuthed(http.MethodPost, "/v1/sessions/"+sess.ID+"/messages",
+		map[string]any{"client_msg_id": "cm_1", "text": "hi"}, dev); rec.Code != http.StatusOK {
+		t.Fatalf("a session pinned to the edited provider could not run: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A normal user cannot edit a shared provider, and a personal id is not
+	// editable through the admin path.
+	if rec := env.doAuthed(http.MethodPatch, "/v1/admin/providers/"+created.Provider.ID,
+		map[string]any{"base_url": "https://evil.example/v1"}, dev); rec.Code != http.StatusForbidden {
+		t.Fatalf("a normal user edited a shared provider: %d", rec.Code)
+	}
+	personal, err := env.store.CreateProvider(t.Context(), devUser.ID, store.ProviderInput{
+		Name: "personal", API: "openai-compat", BaseURL: "https://personal.example/v1",
+	})
+	if err != nil {
+		t.Fatalf("personal provider: %v", err)
+	}
+	if rec := env.doAuthed(http.MethodPatch, "/v1/admin/providers/"+personal.ID,
+		map[string]any{"base_url": "https://evil.example/v1"}, admin); rec.Code != http.StatusNotFound {
+		t.Fatalf("the admin path edited a personal provider: %d", rec.Code)
+	}
+}
+
+func TestAdminCannotEditASharedProviderIntoAnInvalidState(t *testing.T) {
+	env := newTestEnv(t)
+	env.mkUser("admin@piforge.local", "adminpw", contracts.RoleAdmin)
+	admin := env.login("admin@piforge.local", "adminpw")
+	shared := env.doAuthed(http.MethodPost, "/v1/admin/providers", map[string]any{
+		"name": "shared-house", "api": "openai-compat",
+		"base_url": "https://house.example/v1", "models": []map[string]string{{"id": "house-model"}},
+	}, admin)
+	var created struct {
+		Provider contracts.Provider `json:"provider"`
+	}
+	env.mustJSON(shared, &created)
+
+	if rec := env.doAuthed(http.MethodPatch, "/v1/admin/providers/"+created.Provider.ID,
+		map[string]any{"base_url": "   "}, admin); rec.Code != http.StatusBadRequest {
+		t.Fatalf("an empty endpoint was accepted: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func ptrString(v string) *string { return &v }
 
 // A shared provider is how a deployment gives everybody a model without handing

@@ -376,39 +376,9 @@ func (s *Store) UpdateProvider(ctx context.Context, userID, providerID string, i
 		return nil, fmt.Errorf("store: update provider %q: %w", providerID, ErrForbidden)
 	}
 
-	sets := []string{}
-	args := []any{}
-	if in.API != nil {
-		if strings.TrimSpace(*in.API) == "" {
-			return nil, fmt.Errorf("store: update provider: api is required: %w", ErrInvalid)
-		}
-		sets = append(sets, "api = ?")
-		args = append(args, *in.API)
-	}
-	if in.BaseURL != nil {
-		if strings.TrimSpace(*in.BaseURL) == "" {
-			return nil, fmt.Errorf("store: update provider: base url is required: %w", ErrInvalid)
-		}
-		sets = append(sets, "base_url = ?")
-		args = append(args, *in.BaseURL)
-	}
-	if in.Models != nil {
-		models, merr := json.Marshal(modelsOrEmpty(in.Models))
-		if merr != nil {
-			return nil, fmt.Errorf("store: update provider %q: encode models: %w", providerID, merr)
-		}
-		sets = append(sets, "models = ?")
-		args = append(args, string(models))
-	}
-	if len(in.KeyCipher) > 0 {
-		sets = append(sets, "key_cipher = ?")
-		args = append(args, in.KeyCipher)
-	} else if in.ClearKey {
-		sets = append(sets, "key_cipher = NULL")
-	}
-	if in.Enabled != nil {
-		sets = append(sets, "enabled = ?")
-		args = append(args, boolInt(*in.Enabled))
+	sets, args, err := providerPatchSets(in)
+	if err != nil {
+		return nil, err
 	}
 	if len(sets) == 0 {
 		return current, nil
@@ -427,6 +397,91 @@ func (s *Store) UpdateProvider(ctx context.Context, userID, providerID string, i
 		return nil, err
 	}
 	return s.Provider(ctx, userID, providerID)
+}
+
+// providerPatchSets turns a patch into SET clauses.
+//
+// Both the per-user and the shared update paths go through this, so "an empty
+// key keeps the stored one" cannot quietly mean two different things depending
+// on which row is being edited.
+func providerPatchSets(in ProviderPatch) ([]string, []any, error) {
+	sets := []string{}
+	args := []any{}
+	if in.API != nil {
+		if strings.TrimSpace(*in.API) == "" {
+			return nil, nil, fmt.Errorf("store: update provider: api is required: %w", ErrInvalid)
+		}
+		sets = append(sets, "api = ?")
+		args = append(args, *in.API)
+	}
+	if in.BaseURL != nil {
+		if strings.TrimSpace(*in.BaseURL) == "" {
+			return nil, nil, fmt.Errorf("store: update provider: base url is required: %w", ErrInvalid)
+		}
+		sets = append(sets, "base_url = ?")
+		args = append(args, *in.BaseURL)
+	}
+	if in.Models != nil {
+		models, err := json.Marshal(modelsOrEmpty(in.Models))
+		if err != nil {
+			return nil, nil, fmt.Errorf("store: update provider: encode models: %w", err)
+		}
+		sets = append(sets, "models = ?")
+		args = append(args, string(models))
+	}
+	if len(in.KeyCipher) > 0 {
+		sets = append(sets, "key_cipher = ?")
+		args = append(args, in.KeyCipher)
+	} else if in.ClearKey {
+		sets = append(sets, "key_cipher = NULL")
+	}
+	if in.Enabled != nil {
+		sets = append(sets, "enabled = ?")
+		args = append(args, boolInt(*in.Enabled))
+	}
+	return sets, args, nil
+}
+
+// AdminUpdateProvider patches a shared provider in place.
+//
+// AdminXxx: admin callers only, and scoped to `scope = 'admin'`. It exists
+// because the only other way to fix a shared provider's endpoint, model list or
+// key used to be delete-then-recreate, which changes the row id and drops the
+// provider every session pins (`provider/model`) — a wrong key turned into a
+// broken deployment. The patch leaves both id and name alone; a rename is not
+// supported here for the same reason.
+func (s *Store) AdminUpdateProvider(ctx context.Context, callerID, providerID string, in ProviderPatch) (*contracts.Provider, error) {
+	if err := s.requireAdmin(ctx, callerID); err != nil {
+		return nil, err
+	}
+	current, err := s.Provider(ctx, callerID, providerID)
+	if err != nil {
+		return nil, err
+	}
+	if current.Source != contracts.SourceInherited {
+		// A personal provider is not the admin's to edit through this path, and
+		// an id that is not shared answers 404 rather than leaking that it exists.
+		return nil, fmt.Errorf("store: update admin provider %q: %w", providerID, ErrNotFound)
+	}
+
+	sets, args, err := providerPatchSets(in)
+	if err != nil {
+		return nil, err
+	}
+	if len(sets) == 0 {
+		return current, nil
+	}
+	args = append(args, providerID)
+
+	res, err := s.w.ExecContext(ctx,
+		`UPDATE providers SET `+strings.Join(sets, ", ")+` WHERE id = ? AND scope = 'admin'`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: update admin provider %q: %w", providerID, err)
+	}
+	if err := requireOneRow(res, "store: update admin provider "+providerID); err != nil {
+		return nil, err
+	}
+	return s.Provider(ctx, callerID, providerID)
 }
 
 // ProviderPatch is a partial provider update; nil means "leave as is".

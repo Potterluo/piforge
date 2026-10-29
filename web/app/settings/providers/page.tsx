@@ -520,6 +520,16 @@ function SharedProviders({ onChanged }: { onChanged: () => void }) {
   const [apiKey, setApiKey] = useState("");
   const [modelsText, setModelsText] = useState("");
 
+  // Editing a shared provider is an edit of the same row, not a re-share: the id
+  // and the name stay put so every session pinned to "provider/model" keeps
+  // resolving. An empty key field means "leave the stored key alone".
+  const [editing, setEditing] = useState<Provider | null>(null);
+  const [editingModels, setEditingModels] = useState<{ id: string; name?: string }[]>([]);
+  const [editApi, setEditApi] = useState("openai-compat");
+  const [editBaseUrl, setEditBaseUrl] = useState("");
+  const [editModels, setEditModels] = useState("");
+  const [editKey, setEditKey] = useState("");
+
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: ["admin", "providers"] });
     onChanged();
@@ -557,6 +567,28 @@ function SharedProviders({ onChanged }: { onChanged: () => void }) {
     },
     onError: (error) =>
       toast.error("取消失败", {
+        description: humanizeError(error),
+      }),
+  });
+
+  const update = useMutation({
+    mutationFn: (input: { id: string; api: string; base_url: string; models: string; api_key: string }) =>
+      api.admin.updateProvider(input.id, {
+        api: input.api,
+        base_url: input.base_url,
+        models: mergeModelNames(parseModels(input.models), editingModels),
+        // Empty means "keep the stored key": rotating a model list must not ask
+        // for the secret again.
+        api_key: input.api_key.trim() || undefined,
+      }),
+    onSuccess: () => {
+      toast.success("共享 provider 已更新");
+      setEditing(null);
+      setEditKey("");
+      refresh();
+    },
+    onError: (error) =>
+      toast.error("更新失败", {
         description: humanizeError(error),
       }),
   });
@@ -606,6 +638,27 @@ function SharedProviders({ onChanged }: { onChanged: () => void }) {
                 </ItemDescription>
               </ItemContent>
               <ItemActions>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  data-testid="shared-provider-edit"
+                  aria-label="编辑共享 provider"
+                  onClick={() => {
+                    setEditing(provider);
+                    setEditApi(provider.api);
+                    setEditBaseUrl(provider.base_url ?? "");
+                    setEditModels(
+                      provider.models
+                        .map((model) => (model.name ? `${model.id} ${model.name}` : model.id))
+                        .join("\n"),
+                    );
+                    setEditingModels(provider.models);
+                    setEditKey("");
+                  }}
+                >
+                  <Pencil />
+                  编辑
+                </Button>
                 <Button
                   size="icon-xs"
                   variant="ghost"
@@ -706,6 +759,96 @@ function SharedProviders({ onChanged }: { onChanged: () => void }) {
               </Button>
               <Button type="submit" data-testid="shared-provider-submit" disabled={share.isPending}>
                 共享
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={editing !== null} onOpenChange={(open) => (open ? null : setEditing(null))}>
+        <DialogContent className="sm:max-w-lg" data-testid="shared-provider-edit-dialog">
+          <form
+            className="flex flex-col gap-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!editing) return;
+              update.mutate({
+                id: editing.id,
+                api: editApi,
+                base_url: editBaseUrl.trim(),
+                models: editModels,
+                api_key: editKey,
+              });
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>编辑共享「{editing?.name}」</DialogTitle>
+              <DialogDescription>
+                只改这个 provider 自己的端点、模型和 key，名字和引用都不变——钉在
+                「{editing?.name}/模型」上的会话继续可用。
+              </DialogDescription>
+            </DialogHeader>
+            <FieldGroup>
+              <Field>
+                <FieldLabel htmlFor="shared-edit-api">接口协议</FieldLabel>
+                <Select items={API_KINDS} value={editApi} onValueChange={(value) => setEditApi(String(value))}>
+                  <SelectTrigger id="shared-edit-api" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {API_KINDS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="shared-edit-base">Base URL</FieldLabel>
+                <Input
+                  id="shared-edit-base"
+                  data-testid="shared-provider-edit-base"
+                  value={editBaseUrl}
+                  onChange={(event) => setEditBaseUrl(event.target.value)}
+                  placeholder="https://api.example.com/v1"
+                  className="font-mono text-xs"
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="shared-edit-models">模型</FieldLabel>
+                <Textarea
+                  id="shared-edit-models"
+                  data-testid="shared-provider-edit-models"
+                  value={editModels}
+                  onChange={(event) => setEditModels(event.target.value)}
+                  rows={3}
+                  placeholder={"claude-sonnet-4\ngpt-4o"}
+                  className="font-mono text-xs"
+                />
+                <FieldDescription>
+                  每行一个模型 id。会话钉住的 id 要留在列表里，否则那条会话会找不到模型。
+                </FieldDescription>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="shared-edit-key">新的 API Key（可选）</FieldLabel>
+                <Input
+                  id="shared-edit-key"
+                  data-testid="shared-provider-edit-key"
+                  type="password"
+                  value={editKey}
+                  onChange={(event) => setEditKey(event.target.value)}
+                  placeholder="留空表示沿用已保存的 key"
+                  autoComplete="off"
+                />
+              </Field>
+            </FieldGroup>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setEditing(null)}>
+                取消
+              </Button>
+              <Button type="submit" data-testid="shared-provider-edit-submit" disabled={update.isPending}>
+                {update.isPending ? <Spinner /> : null}
+                保存
               </Button>
             </DialogFooter>
           </form>

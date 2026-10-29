@@ -284,6 +284,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /v1/support-notices/{id}/seen", s.mutatingBearer(s.handleSupportNoticeSeen))
 	mux.Handle("GET /v1/admin/providers", s.authed(s.handleAdminListProviders))
 	mux.Handle("POST /v1/admin/providers", s.mutatingBearer(s.handleAdminUpsertProvider))
+	mux.Handle("PATCH /v1/admin/providers/{id}", s.mutatingBearer(s.handleAdminUpdateProvider))
 	mux.Handle("DELETE /v1/admin/providers/{id}", s.mutatingBearer(s.handleAdminDeleteProvider))
 	mux.Handle("GET /v1/admin/users", s.authed(s.handleAdminUsers))
 	mux.Handle("POST /v1/admin/users", s.mutatingBearer(s.handleAdminCreateUser))
