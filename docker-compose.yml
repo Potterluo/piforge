@@ -19,8 +19,11 @@ services:
     # compose build it from this checkout.
     image: ${PIFORGE_IMAGE:-piforge:dev}
     container_name: piforge
-    # Reap the shells and agent processes the control plane spawns.
-    init: true
+    # The image's entrypoint is already tini (see Dockerfile), so it is PID 1 and
+    # reaps the shells and agent processes the control plane spawns. `init: true`
+    # here adds a *second* init in front of it: the entrypoint's tini then is not
+    # PID 1, logs "Tini is not running as PID 1 and isn't registered as a child
+    # subreaper", and only the outer one reaps. One init, and it is the image's.
     ports:
       - "7700:7700"
     environment:

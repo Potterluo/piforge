@@ -95,6 +95,13 @@ type checkoutShell interface {
 // API (see internal/workspaceremote).
 type Docker struct {
 	cfg DockerConfig
+	// volumePrefix is DataRoot's path inside WorkspaceVolume, slash-separated and
+	// relative to the volume's root (".", or "sandboxes" for a volume mounted at
+	// /data with the data root at /data/sandboxes). It is resolved once, at
+	// construction, because the subpath a sandbox mounts is volumePrefix plus the
+	// pair — and a container created with the wrong one shows a project an empty
+	// directory rather than an error.
+	volumePrefix string
 	// openCheckout builds the shell the checkout runs on. Nil means the
 	// container's published AIO endpoint; tests replace it to fake or record the
 	// commands, which also pins that no checkout command is a `docker exec`.
@@ -142,6 +149,35 @@ type DockerConfig struct {
 	// False keeps the single-host behaviour byte for byte: publish on a free
 	// loopback port and read it back from `docker port`.
 	ContainerEndpoint bool
+	// WorkspaceVolume names a Docker volume whose directory tree *is* DataRoot,
+	// for a deployment where this process cannot name a host path.
+	//
+	// A bind mount's source is resolved by the daemon, on the daemon's host. When
+	// the control plane and the runner are themselves containers, DataRoot is a
+	// path inside their mount namespace ("/data/sandboxes"), and the daemon
+	// resolves it against its own root: on Docker Desktop that is the VM's
+	// filesystem, not the volume the two services share. Docker creates the
+	// directory there without a word, so the sandbox gets an empty /workspace
+	// while the control plane keeps writing into the volume — the exact silent
+	// split the data-root check exists to catch, and one it cannot catch because
+	// both sides name the same string.
+	//
+	// With a volume the daemon resolves the mount itself, so no host path is
+	// involved: <WorkspaceVolume> is mounted at /workspace with the pair's
+	// directory — DataRoot/<userID>/<projectID>, expressed relative to the volume's
+	// root — as the volume subpath. The same volume is mounted at DataRoot in every
+	// container, which is what makes /data/sandboxes/<user>/<project> one directory
+	// on all three sides.
+	//
+	// Empty keeps the bind mount, which is the single-host shape and still the
+	// right one where this process is a host process.
+	WorkspaceVolume string
+	// WorkspaceVolumeRoot is where that volume is mounted in *this* process, so the
+	// subpath a sandbox needs can be computed: volume subpaths are relative to the
+	// volume's root, while DataRoot is a directory somewhere inside it
+	// ("/data/sandboxes" under a volume mounted at "/data"). Required with
+	// WorkspaceVolume, ignored without it.
+	WorkspaceVolumeRoot string
 }
 
 // NewDocker builds a container provider. It needs the Docker CLI and an image,
@@ -186,7 +222,26 @@ func newDocker(cfg DockerConfig) (*Docker, error) {
 		return nil, fmt.Errorf("sandbox: docker: abs data root %q: %w", cfg.DataRoot, err)
 	}
 	cfg.DataRoot = filepath.Clean(root)
-	return &Docker{cfg: cfg}, nil
+	d := &Docker{cfg: cfg}
+	if cfg.WorkspaceVolume != "" {
+		if strings.TrimSpace(cfg.WorkspaceVolumeRoot) == "" {
+			return nil, fmt.Errorf("sandbox: docker: workspace volume %q needs the path it is mounted at here (WorkspaceVolumeRoot)", cfg.WorkspaceVolume)
+		}
+		volumeRoot, err := filepath.Abs(cfg.WorkspaceVolumeRoot)
+		if err != nil {
+			return nil, fmt.Errorf("sandbox: docker: abs workspace volume root %q: %w", cfg.WorkspaceVolumeRoot, err)
+		}
+		d.cfg.WorkspaceVolumeRoot = filepath.Clean(volumeRoot)
+		rel, err := filepath.Rel(d.cfg.WorkspaceVolumeRoot, cfg.DataRoot)
+		if err != nil {
+			return nil, fmt.Errorf("sandbox: docker: data root %q relative to the workspace volume at %q: %w", cfg.DataRoot, d.cfg.WorkspaceVolumeRoot, err)
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("sandbox: docker: data root %q is not inside the workspace volume mounted at %q", cfg.DataRoot, d.cfg.WorkspaceVolumeRoot)
+		}
+		d.volumePrefix = filepath.ToSlash(rel)
+	}
+	return d, nil
 }
 
 // Name identifies the provider in the sandbox row.
@@ -224,6 +279,13 @@ func (d *Docker) workspacePath(userID, projectID string) (string, error) {
 		return "", fmt.Errorf("%w: workspace path escapes the data root", ErrInvalidID)
 	}
 	return p, nil
+}
+
+// volumeSubpath is this pair's directory relative to the workspace volume's root,
+// which is what `--mount volume-subpath=` takes. It is derived from the same two
+// segments as workspacePath, so the two shapes name one directory.
+func (d *Docker) volumeSubpath(userID, projectID string) string {
+	return path.Join(d.volumePrefix, userID, projectID)
 }
 
 // Ensure creates the container if it is missing and returns its state.
@@ -291,6 +353,14 @@ func (d *Docker) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 	case errors.Is(inspectErr, ErrNotFound):
 		created = true
 		if err := d.runContainer(ctx, name, userID, projectID, dir); err != nil {
+			// `docker run` can leave a container object behind in "created" state
+			// when the daemon refuses the mount (a volume subpath that does not
+			// exist, an image it cannot access): the object exists, so the next
+			// Ensure finds the right mount and the right key, retries
+			// `docker start`, and fails the same way — forever, while the leftover
+			// object also keeps the workspace volume from being removed. Remove
+			// what this attempt half-created.
+			_, _ = d.docker(ctx, "rm", "-f", name)
 			return nil, err
 		}
 	default:
@@ -367,9 +437,28 @@ func (d *Docker) containerArgs(name, userID, projectID, workspace, apiKey string
 		"--label", "piforge.user=" + userID,
 		"--label", "piforge.project=" + projectID,
 		"--workdir", containerWorkspace,
-		"-v", workspace + ":" + containerWorkspace,
-		"--restart", "unless-stopped",
 	}
+	if d.cfg.WorkspaceVolume != "" {
+		// The daemon resolves a volume itself; nothing here depends on a host
+		// path. The subpath is the pair's directory inside the shared volume,
+		// derived exactly like the bind mount's path (see workspacePath), so
+		// both shapes mount one project and only that project.
+		args = append(args, "--mount", fmt.Sprintf(
+			"type=volume,source=%s,target=%s,volume-subpath=%s",
+			d.cfg.WorkspaceVolume, containerWorkspace, d.volumeSubpath(userID, projectID)))
+	} else {
+		args = append(args, "-v", workspace+":"+containerWorkspace)
+	}
+	args = append(args, "--restart", "unless-stopped")
+	// The image treats $WORKSPACE as "the workspace directory (global for all
+	// services)" and chowns it to its sandbox user at startup (gem.sh:
+	// `mkdir -p "$WORKSPACE"; chown "$USER:$USER" "$WORKSPACE"`). Its default is
+	// /home/gem, while PiForge mounts the project at /workspace: without this the
+	// mount stays root-owned and the first `mkdir /workspace/repo` through the
+	// sandbox API fails with "Permission denied" — which is what a volume mount
+	// (correctly owned by root) does, and what a Windows bind mount only hides
+	// because it ignores ownership.
+	args = append(args, "-e", "WORKSPACE="+containerWorkspace)
 	if d.cfg.Network != "" {
 		args = append(args, "--network", d.cfg.Network)
 	}
@@ -1068,10 +1157,19 @@ func (d *Docker) lastArg(args []string) string {
 	return ""
 }
 
-// workspaceMount returns the host directory the container has mounted at
-// /workspace. It is the container's own statement of what it can see, which is
-// what Ensure compares against the pair's directory before reusing a container.
+// workspaceMount returns the directory the container has mounted at /workspace,
+// as this process names it. It is the container's own statement of what it can
+// see, which is what Ensure compares against the pair's directory before reusing
+// a container.
+//
+// A bind mount reports its source directly. A volume mount reports the volume and
+// the subpath it was given; the same volume is at DataRoot here, so the subpath
+// re-roots to the directory this process reads — the same string the bind shape
+// would have produced, which is what keeps Ensure's comparison one comparison.
 func (d *Docker) workspaceMount(ctx context.Context, name string) (string, error) {
+	if d.cfg.WorkspaceVolume != "" {
+		return d.volumeWorkspaceMount(ctx, name)
+	}
 	out, err := d.docker(ctx, "inspect", "--format", "{{json .Mounts}}", name)
 	if err != nil {
 		return "", err
@@ -1090,6 +1188,58 @@ func (d *Docker) workspaceMount(ctx context.Context, name string) (string, error
 		}
 	}
 	return "", fmt.Errorf("sandbox: docker: %s has no %s mount", name, containerWorkspace)
+}
+
+// volumeWorkspaceMount reads the mount *requested* for /workspace out of the
+// container's HostConfig, because inspect's runtime Mounts do not report a
+// volume's subpath. HostConfig is still the container's own record — written when
+// it was created, and the thing a later `docker start` preserves — so a container
+// from another project (or from the bind-mount shape) is still recognised and
+// still replaced rather than adopted.
+func (d *Docker) volumeWorkspaceMount(ctx context.Context, name string) (string, error) {
+	out, err := d.docker(ctx, "inspect", "--format", "{{json .HostConfig.Mounts}}", name)
+	if err != nil {
+		return "", err
+	}
+	return parseVolumeWorkspaceMount(out, d.cfg.WorkspaceVolume, d.cfg.WorkspaceVolumeRoot)
+}
+
+// parseVolumeWorkspaceMount is the half of the above that can be tested without a
+// daemon: given one HostConfig.Mounts document, which directory does this container
+// have at /workspace?
+func parseVolumeWorkspaceMount(out, volume, volumeRoot string) (string, error) {
+	var mounts []struct {
+		Type          string `json:"Type"`
+		Source        string `json:"Source"`
+		Target        string `json:"Target"`
+		VolumeOptions *struct {
+			Subpath string `json:"Subpath"`
+		} `json:"VolumeOptions"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &mounts); err != nil {
+		return "", fmt.Errorf("sandbox: docker: inspect mount config: %w", err)
+	}
+	for _, mount := range mounts {
+		if path.Clean(filepath.ToSlash(mount.Target)) != containerWorkspace {
+			continue
+		}
+		subpath := ""
+		if mount.VolumeOptions != nil {
+			subpath = strings.TrimSpace(mount.VolumeOptions.Subpath)
+		}
+		if mount.Type != "volume" || mount.Source != volume {
+			return "", fmt.Errorf("sandbox: docker: mounts %s %q at %s, want volume %q",
+				mount.Type, mount.Source, containerWorkspace, volume)
+		}
+		if subpath == "" {
+			// Every sandbox mounts its project's subdirectory, never the volume
+			// root: the root is every project's parent and must not be a workspace.
+			return "", fmt.Errorf("sandbox: docker: mounts volume %q at %s without a subpath",
+				mount.Source, containerWorkspace)
+		}
+		return filepath.Join(volumeRoot, filepath.FromSlash(path.Clean(subpath))), nil
+	}
+	return "", fmt.Errorf("sandbox: docker: no %s mount", containerWorkspace)
 }
 
 // sameHostDir reports whether two host paths name the same directory. Docker

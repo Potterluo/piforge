@@ -3,6 +3,7 @@ package sandboxrunner
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,6 +54,16 @@ type DockerOptions struct {
 	// Network instead of a published loopback port. Set it when the control plane
 	// is not a host process (see sandbox.DockerConfig.ContainerEndpoint).
 	ContainerEndpoint bool
+	// WorkspaceVolumeRoot is where that volume is mounted here, so the subpath a
+	// sandbox mounts can be computed from DataRoot (see
+	// sandbox.DockerConfig.WorkspaceVolumeRoot).
+	WorkspaceVolumeRoot string
+	// WorkspaceVolume names the Docker volume whose tree is DataRoot, for a
+	// deployment where this service is itself a container: the daemon resolves a
+	// bind mount's source on its own host, where DataRoot is not the volume the
+	// two services share (see sandbox.DockerConfig.WorkspaceVolume). Empty keeps
+	// the bind mount.
+	WorkspaceVolume string
 }
 
 // NewDockerProvider validates the runner's configuration.
@@ -89,7 +100,18 @@ func (p *DockerProvider) Ensure(ctx context.Context, request sandbox.RunnerReque
 	if err != nil {
 		return sandbox.RunnerRecord{}, err
 	}
-	return p.record(ctx, provider, sb)
+	record, err := p.record(ctx, provider, sb)
+	if err != nil {
+		return sandbox.RunnerRecord{}, err
+	}
+	// Say what this process did, not just that it answered a request: the runner is
+	// the only process in the deployment that can create a container, and its log
+	// is the only place that names the one it made (the key is not logged — it
+	// leaves through the create response, once).
+	slog.Info("sandbox container is up",
+		"container", record.ID, "user", request.UserID, "project", request.ProjectID,
+		"state", record.State, "root_dir", record.RootDir, "endpoint", record.Endpoint)
+	return record, nil
 }
 
 // Get reports the state of one container.
@@ -153,14 +175,16 @@ func (p *DockerProvider) creator(request sandbox.RunnerRequest) (*sandbox.Docker
 		return nil, fmt.Errorf("sandboxrunner: no image: the request carried none and the runner has no default (SANDBOX_IMAGE)")
 	}
 	return sandbox.NewDocker(sandbox.DockerConfig{
-		Image:             image,
-		Network:           firstNonEmpty(request.Network, p.opts.Network),
-		CPUs:              firstNonEmpty(request.CPUs, p.opts.CPUs),
-		Memory:            firstNonEmpty(request.Memory, p.opts.Memory),
-		DataRoot:          p.opts.DataRoot,
-		APIPort:           p.apiPort(request.APIPort),
-		APIKey:            firstNonEmpty(request.APIKey, p.opts.APIKey),
-		ContainerEndpoint: p.opts.ContainerEndpoint,
+		Image:               image,
+		Network:             firstNonEmpty(request.Network, p.opts.Network),
+		CPUs:                firstNonEmpty(request.CPUs, p.opts.CPUs),
+		Memory:              firstNonEmpty(request.Memory, p.opts.Memory),
+		DataRoot:            p.opts.DataRoot,
+		APIPort:             p.apiPort(request.APIPort),
+		APIKey:              firstNonEmpty(request.APIKey, p.opts.APIKey),
+		ContainerEndpoint:   p.opts.ContainerEndpoint,
+		WorkspaceVolume:     p.opts.WorkspaceVolume,
+		WorkspaceVolumeRoot: p.opts.WorkspaceVolumeRoot,
 	})
 }
 
@@ -169,11 +193,13 @@ func (p *DockerProvider) creator(request sandbox.RunnerRequest) (*sandbox.Docker
 // lookup (the checkout and worktree calls never spawn one).
 func (p *DockerProvider) api(apiKey string) (*sandbox.Docker, error) {
 	return sandbox.NewDockerAPI(sandbox.DockerConfig{
-		Network:           p.opts.Network,
-		DataRoot:          p.opts.DataRoot,
-		APIPort:           p.apiPort(0),
-		APIKey:            firstNonEmpty(apiKey, p.opts.APIKey),
-		ContainerEndpoint: p.opts.ContainerEndpoint,
+		Network:             p.opts.Network,
+		DataRoot:            p.opts.DataRoot,
+		APIPort:             p.apiPort(0),
+		APIKey:              firstNonEmpty(apiKey, p.opts.APIKey),
+		ContainerEndpoint:   p.opts.ContainerEndpoint,
+		WorkspaceVolume:     p.opts.WorkspaceVolume,
+		WorkspaceVolumeRoot: p.opts.WorkspaceVolumeRoot,
 	})
 }
 

@@ -1219,6 +1219,7 @@ func TestContainerArgs(t *testing.T) {
 	assertArgsContain(t, args, "-p", "127.0.0.1::8080")
 	assertArgsContain(t, args, "-e", "BROWSER_NO_SANDBOX=--no-sandbox")
 	assertArgsContain(t, args, "-e", "SANDBOX_API_KEY=sandbox-key")
+	assertArgsContain(t, args, "-e", "WORKSPACE=/workspace")
 	assertArgsContain(t, args, "--label", "piforge.user=usr_1")
 	assertArgsContain(t, args, "--label", "piforge.project=prj_1")
 	assertArgsAbsent(t, args, "--network")
@@ -1241,6 +1242,118 @@ func TestContainerArgs(t *testing.T) {
 	// reached, so they must survive the endpoint change.
 	assertArgsContain(t, args, "-e", "BROWSER_NO_SANDBOX=--no-sandbox")
 	assertArgsContain(t, args, "-e", "SANDBOX_API_KEY=sandbox-key")
+}
+
+// A containerised control plane cannot name a host path for a bind mount: the
+// daemon resolves it on its own host, where the shared volume is not at DataRoot.
+// The volume shape mounts the pair's subdirectory of a volume the daemon resolves
+// itself, so the argv must carry a volume mount and no -v at all.
+func TestContainerArgsVolumeWorkspace(t *testing.T) {
+	provider := &Docker{cfg: DockerConfig{
+		Image:               "sandbox:1.11.0",
+		DataRoot:            "/data/sandboxes",
+		Network:             "piforge-sandboxes",
+		APIPort:             8080,
+		APIKey:              "sandbox-key",
+		ContainerEndpoint:   true,
+		WorkspaceVolume:     "piforge-data",
+		WorkspaceVolumeRoot: "/data",
+	}, volumePrefix: "sandboxes"}
+	args := provider.containerArgs("piforge-abc", "usr_1", "prj_1", "/data/sandboxes/usr_1/prj_1", "sandbox-key")
+	// The subpath is relative to the volume's root, not to the data root: the
+	// daemon prepends the volume's mountpoint, and a "usr_1/prj_1" here would
+	// point at <volume>/usr_1/prj_1 instead of <volume>/sandboxes/usr_1/prj_1.
+	assertArgsContain(t, args, "--mount",
+		"type=volume,source=piforge-data,target=/workspace,volume-subpath=sandboxes/usr_1/prj_1")
+	assertArgsAbsent(t, args, "-v")
+	// The image chowns $WORKSPACE to its sandbox user; without this the mount stays
+	// root-owned and the checkout cannot be created as gem.
+	assertArgsContain(t, args, "-e", "WORKSPACE=/workspace")
+	assertArgsContain(t, args, "--network", "piforge-sandboxes")
+}
+
+// The subpath is derived from the volume mountpoint, and a data root outside it
+// has no subpath to name: refuse that at construction, not on a create.
+func TestNewDockerRefusesADataRootOutsideTheVolume(t *testing.T) {
+	_, err := NewDockerAPI(DockerConfig{
+		DataRoot:            "/srv/sandboxes",
+		APIPort:             8080,
+		WorkspaceVolume:     "piforge-data",
+		WorkspaceVolumeRoot: "/data",
+	})
+	if err == nil || !strings.Contains(err.Error(), "not inside the workspace volume") {
+		t.Fatalf("NewDockerAPI = %v, want an error naming the data root outside the volume", err)
+	}
+	_, err = NewDockerAPI(DockerConfig{
+		DataRoot:        "/data/sandboxes",
+		APIPort:         8080,
+		WorkspaceVolume: "piforge-data",
+	})
+	if err == nil || !strings.Contains(err.Error(), "WorkspaceVolumeRoot") {
+		t.Fatalf("NewDockerAPI = %v, want an error naming the missing volume root", err)
+	}
+}
+
+// The volume a container was created with is read back from its own HostConfig,
+// because inspect's runtime mounts do not carry a volume subpath. A container from
+// another project, or from the bind-mount shape, has to be recognised — it is the
+// difference between reusing a sandbox and showing one project another's tree.
+func TestParseVolumeWorkspaceMount(t *testing.T) {
+	const volume = "piforge-data"
+	cases := []struct {
+		name    string
+		out     string
+		want    string
+		wantErr string
+	}{
+		{
+			name: "this project's subpath",
+			out:  `[{"Type":"volume","Source":"piforge-data","Target":"/workspace","VolumeOptions":{"Subpath":"sandboxes/usr_1/prj_1"}}]`,
+			want: "/data/sandboxes/usr_1/prj_1",
+		},
+		{
+			name: "another project's subpath is reported as itself, so Ensure replaces the container",
+			out:  `[{"Type":"volume","Source":"piforge-data","Target":"/workspace","VolumeOptions":{"Subpath":"sandboxes/usr_1/prj_2"}}]`,
+			want: "/data/sandboxes/usr_1/prj_2",
+		},
+		{
+			name:    "the volume root is not a workspace",
+			out:     `[{"Type":"volume","Source":"piforge-data","Target":"/workspace"}]`,
+			wantErr: "without a subpath",
+		},
+		{
+			name:    "a bind mount is not this shape",
+			out:     `[{"Type":"bind","Source":"/data/sandboxes/usr_1/prj_1","Target":"/workspace"}]`,
+			wantErr: "want volume",
+		},
+		{
+			name:    "a different volume is not this shape",
+			out:     `[{"Type":"volume","Source":"other","Target":"/workspace","VolumeOptions":{"Subpath":"sandboxes/usr_1/prj_1"}}]`,
+			wantErr: "want volume",
+		},
+		{
+			name:    "no /workspace mount at all",
+			out:     `[{"Type":"volume","Source":"piforge-data","Target":"/data","VolumeOptions":{"Subpath":"sandboxes/usr_1/prj_1"}}]`,
+			wantErr: "no /workspace mount",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseVolumeWorkspaceMount(tc.out, volume, "/data")
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("parseVolumeWorkspaceMount = %q, %v; want an error containing %q", got, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseVolumeWorkspaceMount: %v", err)
+			}
+			if filepath.ToSlash(got) != tc.want {
+				t.Fatalf("parseVolumeWorkspaceMount = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 // A container endpoint without a network would be a hostname nothing can resolve;

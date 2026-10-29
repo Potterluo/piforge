@@ -16,19 +16,36 @@
 #
 # Why the data volume is on both services, at the same path:
 #
-#   a sandbox's workspace is a *bind mount* from the host, and Docker resolves the
-#   source path on the daemon's host. The runner creates the container, so it must
-#   name the path the daemon can see; the control plane runs host git, writes
-#   skills/MCP files and (with -sandbox-files remote) maps those paths into the
-#   container, so it must name the *same* path. Mounting one volume at /data in
-#   both services is what makes `/data/sandboxes/<user>/<project>` mean one
-#   directory. If the two paths differ, nothing errors: Docker quietly creates an
-#   empty directory and both sides write trees the other never reads.
+#   a sandbox's workspace is a *directory* that has to mean one thing to three
+#   processes: the control plane writes skills/MCP files into it, the runner hands
+#   it to the daemon when it creates the container, and the sandbox sees it at
+#   /workspace. Mounting one volume at /data in both services is the "same
+#   directory" half of that; the other half is that the daemon must be able to
+#   resolve it, and it cannot resolve a path that only exists inside these two
+#   containers. A bind mount source is resolved on the *daemon's* host, so
+#   `-v /data/sandboxes/<u>/<p>` from inside the runner creates an empty directory
+#   on the daemon's filesystem (on Docker Desktop, inside its VM) and the sandbox
+#   gets an empty /workspace while the control plane keeps writing into the
+#   volume. Nothing errors: both sides name the same string, which is why the
+#   provider's own data-root check cannot see it either.
+#
+#   So sandboxes mount the volume itself, with each project's directory as the
+#   volume subpath (`--mount type=volume,...,volume-subpath=sandboxes/<u>/<p>`,
+#   relative to the volume's root, which is /data here). That needs
+#   SANDBOX_WORKSPACE_VOLUME below, a named volume (the `name:` on the volume —
+#   the daemon resolves the name, not a path), and Docker Engine 25+ for the
+#   subpath. It works unchanged on Linux hosts and on Docker Desktop.
 #
 # Sandbox containers join `piforge-sandboxes` and are addressed by container name
 # (SANDBOX_CONTAINER_ENDPOINT=1), so no sandbox port is published on the host.
 # piforge joins that network to reach them; the runner joins it too because the
 # checkout it performs runs from the runner process, against the container's API.
+#
+# The volume and networks are named explicitly, so they are not prefixed with the
+# compose project name: the volume name is what the runner passes to the daemon,
+# and the network name is what SANDBOX_NETWORK refers to. A prefixed name would
+# still work as long as both sides used it, but a `name:` makes the three
+# references (daemon, runner, control plane) one string that cannot drift.
 
 services:
   piforge:
@@ -73,6 +90,13 @@ services:
       # Report http://piforge-<hash8>:8080 instead of a published loopback port:
       # piforged is a container here, so 127.0.0.1:<port> would be its own loopback.
       SANDBOX_CONTAINER_ENDPOINT: "1"
+      # Give each sandbox its project's directory out of the volume the daemon
+      # already knows, instead of a bind source that only exists in here. The name
+      # is the `name:` of the volume below; the root is where that volume is
+      # mounted here, which is what turns /data/sandboxes/<u>/<p> into the
+      # volume-relative subpath `sandboxes/<u>/<p>` a sandbox mount takes.
+      SANDBOX_WORKSPACE_VOLUME: piforge-data
+      SANDBOX_WORKSPACE_VOLUME_ROOT: /data
     volumes:
       # The only mount of the daemon socket in this deployment. It is deliberately
       # not `:ro`: a socket mount's read-only flag does not restrict the API, and
@@ -93,4 +117,7 @@ networks:
     name: piforge-sandboxes
 
 volumes:
+  # Named, and the same name in the single-container deployment: the sandbox mount
+  # refers to the daemon's volume by name, so this string is a contract.
   piforge-data:
+    name: piforge-data

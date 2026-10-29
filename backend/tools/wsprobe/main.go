@@ -5,6 +5,10 @@
 // Usage:
 //
 //	go run ./tools/wsprobe -session ses_xxx -cookie <pf_session value> [-cmd "echo hi"]
+//
+// -cmd is typed once the PTY reports ready, and the tool then keeps reading for
+// -grace: a terminal echoes what you type, so "stop when the command appears in
+// the output" would stop on the echo and never show the answer.
 package main
 
 import (
@@ -26,6 +30,7 @@ func main() {
 	tab := flag.String("tab", "probe", "terminal tab id")
 	command := flag.String("cmd", "", "command to type once the PTY is ready")
 	origin := flag.String("origin", "", "Origin header to send")
+	grace := flag.Duration("grace", 3*time.Second, "how long to keep reading after the command is typed")
 	wait := flag.Duration("timeout", 20*time.Second, "overall timeout")
 	flag.Parse()
 
@@ -53,22 +58,30 @@ func main() {
 
 	var output strings.Builder
 	sent := false
+	var readBy time.Time
 	for {
-		kind, data, err := conn.Read(ctx)
+		// Before the command is typed there is no deadline of our own; after it,
+		// the read is bounded by the grace window so the output is printed.
+		readCtx, readCancel := context.WithTimeout(ctx, 15*time.Second)
+		if sent {
+			readCtx, readCancel = context.WithDeadline(ctx, readBy)
+		}
+		kind, data, err := conn.Read(readCtx)
+		readCancel()
 		if err != nil {
-			fmt.Printf("READ_ERROR: %v\n", err)
 			break
 		}
 		if kind == websocket.MessageText {
 			fmt.Printf("CTRL: %s\n", string(data))
 			if strings.Contains(string(data), `"ready"`) && !sent && *command != "" {
-				_ = conn.Write(ctx, websocket.MessageBinary, []byte(*command+"\r"))
+				_ = conn.Write(ctx, websocket.MessageBinary, []byte(*command+"\n"))
 				sent = true
+				readBy = time.Now().Add(*grace)
 			}
 			continue
 		}
 		output.Write(data)
-		if *command != "" && strings.Contains(output.String(), strings.Fields(*command)[len(strings.Fields(*command))-1]) {
+		if sent && !time.Now().Before(readBy) {
 			break
 		}
 	}

@@ -501,3 +501,23 @@ workspaceremote 的单测覆盖，PNG 和文本都能原样取回。
 
 沙箱粒度是 `(project, user)`，容器边界必须和它一致。一个共享容器等于把多租户隔离交给
 进程权限和运气；一个租户把自己的容器跑挂，不会影响别人，这是这个设计唯一的意义。
+
+## 选型：六个候选，一张表
+
+细节见 `SANDBOX-DEPLOY.md`（部署形态）、`SANDBOX-GENET.md`、`SANDBOX-BOXLITE.md`、`SANDBOX-K8S-AGENTSANDBOX.md`（三份源码级评估）。
+
+| 候选 | 隔离 | 面板三件（浏览器/shell/文件） | 工作区 | 每沙箱密钥 | 结论 |
+|---|---|---|---|---|---|
+| local（目录） | 无 | 宿主侧具备 | 宿主目录 | n/a | 单机开发 |
+| docker（一项目一容器） | 容器 | 具备（AIO 镜像） | bind mount | 已实现 | 今天的默认 |
+| runner（HTTP 六动作） | 容器 | 具备 | bind mount | 已实现 | 生产默认 |
+| k8s 自写 Pod+PVC+Service | 容器 / gVisor | 具备 | PVC | 可自定 | 多租户目标形态 |
+| agent-sandbox | 容器（默认 runc） | 它只建 Pod | PVC | **没有位置** | 只买 warm pool |
+| BoxLite | microVM（真内核） | 只有 PTY，无 CDP，文件仅 tar | 盘快照（无内存） | 单把部署级 key | 只试点隔离层 |
+| E2B | microVM（他人机房） | 需模板内置 | 无 bind | 部分 | 工作区模型改造后再议 |
+
+三条一句话结论：
+
+1. **agent-sandbox 的 warm pool 是真的**（claim p50 92ms vs 冷启 42–50s），但它没有放每沙箱凭据的位置，模板默认也只允许 router 入站、阻断内网与集群 DNS——用了它，凭据与网络策略都得自己补。
+2. **BoxLite 的隔离是真的**（libkrun + KVM），但本地 serve 不发布端口、无 CDP、文件只有 tar，且 `apps/` 是 AGPL-3.0（不可碰）。它替代不了面板沙箱。
+3. **Genet 唯一值得抄的是顺序**：先固化、后释放（已落进 `internal/reaper`）。它的 `nerdctl commit` 当 Pause 对我们是有害的——工作区在 bind mount 里，不在容器可写层。

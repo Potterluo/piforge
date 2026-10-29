@@ -231,10 +231,16 @@ services:
       SANDBOX_DATA_ROOT: /data/sandboxes
       SANDBOX_NETWORK: piforge-sandboxes
       SANDBOX_CONTAINER_ENDPOINT: "1"
+      SANDBOX_WORKSPACE_VOLUME: piforge-data        # ← 见下面第 2 条
+      SANDBOX_WORKSPACE_VOLUME_ROOT: /data          # ← 见下面第 2 条
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - piforge-data:/data
     networks: [sandbox-control, piforge-sandboxes]
+
+volumes:
+  piforge-data:
+    name: piforge-data
 ```
 
 四个必须一起成立的细节：
@@ -242,12 +248,20 @@ services:
 1. **socket 只给 runner，而且不写 `:ro`**。socket 的只读挂载不限制通过它发起的 API
    调用，写成 `:ro` 只会制造"已经限制住了"的错觉。（早先这一节写的是 `:ro`，那是错的：
    它既没挡住什么，又让人以为挡住了。）
-2. **数据卷两边同一个路径**。工作区是 bind mount，Docker 在 daemon 主机上解析源路径；
-   两个服务路径不一致时**不会报错**，Docker 会静默建一个空目录，两边各写一棵对方看不见
-   的树。所以两个服务都 `piforge-data:/data`，runner 的 `SANDBOX_DATA_ROOT=/data/sandboxes`，
-   控制面 `-data /data` 推出的 sandbox 根也是 `/data/sandboxes`。控制面启动时会把
-   runner 报回的 `root_dir` 与自己算的路径比一次，不一致就发一条 WARN——这是唯一能在
-   动手写文件之前发现它的地方。
+2. **数据卷两边同一个路径，而且沙箱从"卷"里挂，不从路径里挂**。两个服务都
+   `piforge-data:/data`，`SANDBOX_DATA_ROOT=/data/sandboxes`，控制面 `-data /data`
+   推出的 sandbox 根也是 `/data/sandboxes` —— 这只解决了三边命名一致。**bind mount 的源
+   路径是 daemon 在它自己的宿主上解析的**，而 `/data` 只在这两个容器的挂载命名空间里存在：
+   `-v /data/sandboxes/<u>/<p>` 会让 daemon 在它自己的根上静默建一个空目录（Docker Desktop
+   上是它的 VM），沙箱于是看到一个空 `/workspace`，控制面继续往卷里写。两边**名字相同**，
+   所以控制面那条 `root_dir` 比对也发现不了。
+   所以沙箱容器挂的是**卷本身**加子路径：
+   `--mount type=volume,source=piforge-data,target=/workspace,volume-subpath=sandboxes/<u>/<p>`
+   （`SANDBOX_WORKSPACE_VOLUME` = 卷名，`SANDBOX_WORKSPACE_VOLUME_ROOT` = 这个卷在本进程里
+   的挂载点，用来把 `/data/sandboxes/<u>/<p>` 换算成卷内相对路径）。daemon 自己解析卷，
+   宿主路径完全不出现在这条链路上；Linux 宿主和 Docker Desktop 上是同一份配置。
+   代价是一个硬性版本要求：**Engine ≥ 25（API 1.45）才有 `volume-subpath`**，更老的引擎
+   会在 `docker run` 时直接报错（不是静默降级）。
 3. **不发布沙箱端口**。`SANDBOX_CONTAINER_ENDPOINT=1` 让 runner 返回
    `http://piforge-<hash8>:8080`（容器名 + Docker DNS），控制面加入 `piforge-sandboxes`
    就能连。runner 也必须在这个网络上：它自己做 checkout 时要访问这个地址。这一条同时
@@ -255,10 +269,131 @@ services:
 4. **7801 不发布**，只放在 `sandbox-control` 上。控制面与 runner 之间没有 TLS——token 是
    唯一的认证，别把这个端口发到宿主或跨主机直连（§7 的"还没做"）。
 
+还有一条是镜像的事，但在部署里必须显式给：**容器里的 `/workspace` 要让沙箱用户能写**。
+AIO 镜像的 `gem.sh` 对它自己的 `$WORKSPACE` 做 `mkdir -p` + `chown $USER:$USER`，而
+`$WORKSPACE` 默认是 `/home/gem`；PiForge 把项目挂在 `/workspace`，不告诉镜像的话那个
+目录保持 root:root 0755，第一次 `mkdir /workspace/repo` 就是
+`Permission denied`。所以 `containerArgs` 固定带 `-e WORKSPACE=/workspace`，让镜像按它自己
+的契约去 chown。Windows 上的宿主 bind mount 会忽略属主，所以这条在单机 bind 形态下一直是
+"看不见的 bug"；换成卷（或任何 Linux 宿主）就当场暴露 —— 这一节下面有实测记录。
+
 旧的 `-sandbox docker` 逐字节不变：不设 network 时仍然 `-p 127.0.0.1:<随机端口>` 并从
-`docker port` 读回。`-sandbox runner` 与它共用 `resolveSandboxPlacement`（三个面板默认
-`remote`，显式 `host` 仍然允许并告警），而 `-sandbox runner` 缺 URL/token、或
-`-sandbox local`/`docker` 却给了 runner 参数，都是启动错误。
+`docker port` 读回（额外多了 `-e WORKSPACE=/workspace`）。`-sandbox runner` 与它共用
+`resolveSandboxPlacement`（三个面板默认 `remote`，显式 `host` 仍然允许并告警），而
+`-sandbox runner` 缺 URL/token、或 `-sandbox local`/`docker` 却给了 runner 参数，都是启动
+错误。
+
+### 1.4.1 实测：这套 compose 在 Docker Desktop 上真的跑起来了吗
+
+**2026-10-29 之前，这一节只有 `docker compose config` 的验证**：镜像没 build 过，
+`compose up` 没跑过。下面是实际跑一遍的记录（Windows 11 + Docker Desktop 4.97.0，
+Engine 29.9.2，Linux 容器），包括第一次跑时坏掉的三处。
+
+**跑的命令**（仓库根目录；`.env` 见下）：
+
+```powershell
+docker build -f deploy/Dockerfile.runner -t piforge/sandbox-runner:dev .
+pwsh scripts/build-app-image.ps1 -Tag piforge:verify      # 控制面镜像（约 90s，比完整 Dockerfile 快）
+docker compose -f docker-compose.yml -f docker-compose.runner.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.runner.yml ps
+```
+
+`.env`（compose 自动读取，已在 `.gitignore` 里；两个 `:?` 变量必须有值）：
+
+```dotenv
+SANDBOX_RUNNER_TOKEN=<64 位随机串>
+PIFORGE_SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0
+PIFORGE_IMAGE=piforge:verify
+PIFORGE_RUNNER_IMAGE=piforge/sandbox-runner:dev
+```
+
+`docker compose ps` 起来之后：
+
+```
+NAME                     IMAGE                        SERVICE          STATUS                    PORTS
+piforge                  piforge:verify               piforge           Up (healthy)              0.0.0.0:7700->7700/tcp
+piforge-sandbox-runner   piforge/sandbox-runner:dev   sandbox-runner    Up
+```
+
+**第一次按原样跑，坏在这些地方**（每条都是实测输出，不是猜的）：
+
+| # | 现象 | 原因 | 修法 |
+|---|---|---|---|
+| 1 | `POST /v1/sandboxes` 500：`sandbox: docker: prepare /workspace/repo: exit 1: mkdir: cannot create directory '/workspace/repo': Permission denied` | `/workspace` 挂进去是 root:root，沙箱用户是 `gem`（uid 1000）。镜像只 chown 它自己的 `$WORKSPACE`（默认 `/home/gem`） | `containerArgs` 加 `-e WORKSPACE=/workspace` |
+| 2 | 修完 1 之后：checkout 成功但沙箱 `/workspace` 是**空**的，控制面写的文件沙箱看不见 | bind mount 源路径由 daemon 在**它的**宿主上解析；`/data/...` 只在这两个容器里存在，daemon 静默建了个空目录 | 沙箱改用 `--mount type=volume,...,volume-subpath=...`（见上第 2 条） |
+| 3 | `docker run` 报 `cannot access path /var/lib/docker/volumes/piforge-data/_data/usr_.../prj_...: lstat ...: no such file or directory` | `volume-subpath` 是**相对卷根**的，不是相对 `SANDBOX_DATA_ROOT`；我第一版写成 `usr_.../prj_...`，少了 `sandboxes/` | `SANDBOX_WORKSPACE_VOLUME_ROOT=/data`，provider 用 `filepath.Rel` 算出 `sandboxes/<u>/<p>` |
+| 4 | `docker compose down -v` 报 `Volume piforge-data Resource is still in use`，卷删不掉 | 第 3 条那次失败的 `docker run` 留下一个 `Created` 状态的容器，下次 `Ensure` 会认领它并重试 `docker start`，永远失败，还一直占着卷 | `Ensure` 在 `runContainer` 失败时 `docker rm -f` 掉这次半创建的对象 |
+| 5 | 每次启动都有 `[WARN tini] Tini is not running as PID 1 ...` | 镜像 `ENTRYPOINT` 已经是 tini，`docker-compose.yml` 的 `init: true` 又在它前面加了一个 init，所以里面的 tini 不是 PID 1 | 删掉 `docker-compose.yml` 的 `init: true`（只留镜像里那个） |
+
+**验证方式**：全部走部署出来的栈（`http://127.0.0.1:7700`，不跑本地二进制），
+`PIFORGE_SEED_*` 用 base compose 的默认值（`admin@piforge.local` / `piforge-admin-123`）。
+脚本化的一遍在 `.real/verify.ps1`（不进仓库），核心步骤与结果：
+
+```powershell
+# 登录 → 建项目 → 建会话 → 发一条消息（provisioning 在这一步发生）
+$r = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:7700/v1/auth/login -SessionVariable s `
+      -ContentType application/json -Body '{"email":"admin@piforge.local","password":"piforge-admin-123"}'
+```
+
+| 验证 | 结果 |
+|---|---|
+| runner 日志说容器是它建的 | `msg="sandbox container is up" container=piforge-f986b66f3f575804 ... root_dir=/data/sandboxes/<user>/<proj> endpoint=http://piforge-f986b66f3f575804:8080` |
+| 容器在，无宿主端口 | `docker ps` 有 `piforge-<hash16>`；`docker port` 输出为空；`ports=[8080/tcp]` 只是 EXPOSE |
+| 两边同一个数据目录 | piforged 里 `/data/sandboxes/<u>/<p>/repo/payload.txt` 与沙箱里 `/workspace/repo/payload.txt` inode 相同（`331248 == 331248`） |
+| `PUT /files` 后沙箱里字节一致 | `PUT /files?path=payload.txt -> 200`；沙箱里 `od -An -tx1` 的十六进制与写入完全相同（48 字节） |
+| git status/stage/commit | 全部 `200`；`git log -1 --format=%ae` = `sandbox@piforge.local`（提交身份是容器用户 `PiForge Sandbox <sandbox@piforge.local>`） |
+| 浏览器截图是 PNG | `POST /browser/screenshot -> 201 {"bytes":29598,"path":"screenshots/20261029-085333.png"}`；沙箱里 `head -c 8` = `89 50 4e 47 0d 0a 1a 0a` |
+| 终端 WS 的 hostname | 用仓库自己的工具（见下）：`CTRL: {..."shell":"aio","type":"ready"}`，`OUTPUT: "hostname\r\na59aa7b1df2c\n"`；`docker exec <container> hostname` 也是 `a59aa7b1df2c` |
+| 控制面没有 socket | `docker inspect piforge` 的 `.Mounts` 只有 `piforge-data -> /data`；容器里 `ls /var/run/docker.sock` → `No such file or directory`；`command -v docker` → 空（`exit 127`） |
+| socket 只在 runner | `docker inspect piforge-sandbox-runner` 有 `/var/run/docker.sock`；runner 里 `docker version` 能拿到 Server 29.9.2 |
+| 按容器名可达（`SANDBOX_CONTAINER_ENDPOINT` 这条路） | 在 `piforge` 容器里：`getent hosts piforge-f986b66f3f575804` → `172.24.0.4`；`curl http://piforge-<hash>:8080/v1/browser/info` 不带 key → `401`，带该沙箱的 key → `200` |
+
+终端这一步的原始命令（`pf_session` 从登录响应里取，见下面的 `Invoke-RestMethod` 那行）：
+
+```powershell
+cd backend
+go run ./tools/wsprobe -base ws://127.0.0.1:7700 -session <session id> `
+    -cookie <pf_session> -cmd "hostname" -grace 8s
+# CTRL: {"end":0,"pid":0,"shell":"aio","start":0,"tab":"...:probe","type":"ready"}
+# BYTES: 23
+# OUTPUT: "hostname\r\na59aa7b1df2c\n"
+```
+
+这个工具在这次验证里也修了两处：`-cmd` 之后是等一个 `-grace` 窗口再把输出打出来（原来
+"输出里出现命令的最后一个词就停"，而终端会把命令本身回显一遍，于是永远停在回显上、看不到
+答案）；发给沙箱的行是 `\n` 而不是 `\r`（AIO 的行式会话认 `\n`，`\r` 只会被回显、不执行）。
+**Docker Desktop / Windows 的注意事项**（都是这台机器上的实测结论）：
+
+1. **socket 能用，但它是 Desktop 的代理**。compose 里写的是
+   `/var/run/docker.sock:/var/run/docker.sock`，Desktop 会把它接到自己的
+   `docker.proxy.sock` 上；容器里 `docker version` 正常（Server 29.9.2），`docker run`
+   也真的在 Desktop 的 Linux VM 里起容器。**不需要** `DOCKER_HOST=tcp://host.docker.internal:2375`，
+   也不该悄悄换成它：那会绕过 Desktop 的 socket 代理，并把一个没有 TLS 的 daemon 端口暴露出去。
+2. **不需要、也不应该尝试"把宿主路径传给沙箱"**。`/run/desktop/mnt/host/c/...` 在这台机器上
+   确实能被 daemon 解析（实测可行），但那是 Docker Desktop 的内部路径，换一台机器/一个
+   版本就可能变；卷 + `volume-subpath` 在 Linux 宿主和 Desktop 上是同一条路径，所以选它。
+3. **`docker compose down -v` 不一定能删掉卷**。沙箱容器不归 compose 管（§1.5），只要还有
+   一个 `piforge-*` 容器（哪怕是 `Created`/`Exited`）挂着这个卷，compose 就只会打印
+   `Volume piforge-data Resource is still in use` 然后继续，退出码仍是 0。清理顺序是
+   `docker rm -f piforge-*`（只删你认识的）再 `docker compose ... down -v`。
+4. **`container_name` 会撞车**。两份 compose 都写死 `container_name: piforge`：先起过单容器
+   部署、再起叠加部署（或反过来），第二个 `up` 会直接
+   `Conflict. The container name "/piforge" is already in use`。切换前先 `down`。
+5. **镜像 tag 要自己给**。`PIFORGE_IMAGE`/`PIFORGE_RUNNER_IMAGE` 不给就会用
+   `piforge:dev` / `piforge/sandbox-runner:dev`，而 `docker compose up -d` 在没有
+   `--build` 时**不会**替你 build。第一次跑记得先 build（上面的命令），或者加 `--build`。
+
+**这台机器上仍然没有验证的**（不要当成已验证）：
+
+- **Linux 宿主机**。这份文档里的命令只在 Docker Desktop（Windows）上跑过；卷 + subpath 的
+  行为在 Linux 上应当一致（daemon 就在本机，`-v` 那条也一样成立），但没有第二台机器实测。
+  特别地，单机 bind 形态（不带 `SANDBOX_WORKSPACE_VOLUME`）在 Linux 宿主上会因为第 1 条
+  的属主问题需要 `-e WORKSPACE=/workspace`——这条已经加到 `containerArgs`，但同样只在
+  Windows 上跑过。
+- **K8s**：§2 全是设计，没有任何一个对象在这台机器上 apply 过。
+- **升级路径**：从没有 `SANDBOX_API_KEY` 的旧容器升级（`Ensure` 会重建）没有实测，
+  只有单元测试覆盖。
+
 
 为什么是它：
 
@@ -280,9 +415,9 @@ services:
 | 事件 | 会发生什么 | 缓解 |
 |---|---|---|
 | **控制面重启** | 沙箱容器还在（`--restart unless-stopped`）。容器名由 `(user, project)` 派生，`docker inspect` 能找回；端口由 `docker port` 重读，`sandbox_files.go` 的客户端缓存 30s 过期后自愈。runner 模式下端点由 runner 的 `GET /v1/sandboxes/{id}` 重问，同样自愈 | 已经是现状，没问题。但**沙箱里的进程**（Chromium、AIO 的 shell 会话）在 daemon 重启时全丢，终端会断 |
-| **daemon 在远程机器** | `-v` 的源路径在 daemon 主机解析（Docker 文档原话：bind mount "created to the Docker daemon host"，[Bind mounts](https://docs.docker.com/engine/storage/bind-mounts/)）。`-v` 会**静默创建一个空目录**，于是容器看到空 `/workspace`，控制面往自己磁盘写，两边都不报错。`workspaceMount` 比较的是字符串，两台机器上的 `/data/sandboxes/u/p` 完全相同，比较通过 —— 检测不到 | runner 与 daemon 同机，且与控制面共享同一个卷、同一个路径（§1.4 第 2 条）。控制面在 `Ensure` 时把 runner 报的 `root_dir` 与自己算的路径比一次，不一致就 WARN；这是唯一能在写文件之前发现它的地方。跨机器仍然只能换 named volume，不要靠 SSH 建目录 |
+| **daemon 在远程机器** | `-v` 的源路径在 daemon 主机解析（Docker 文档原话：bind mount "created to the Docker daemon host"，[Bind mounts](https://docs.docker.com/engine/storage/bind-mounts/)）。`-v` 会**静默创建一个空目录**，于是容器看到空 `/workspace`，控制面往自己磁盘写，两边都不报错。`workspaceMount` 比较的是字符串，两台机器上的 `/data/sandboxes/u/p` 完全相同，比较通过 —— 检测不到 | runner 与 daemon 同机；compose 叠加层让沙箱直接挂**卷+子路径**（`SANDBOX_WORKSPACE_VOLUME`，§1.4 第 2 条），宿主路径根本不进这条链路，daemon 在哪台机器上都不影响。控制面仍在 `Ensure` 时把 runner 报的 `root_dir` 与自己算的路径比一次并 WARN —— 但注意它比的是**字符串**：bind 形态下"两边名字相同、实际是两棵树"这件事它看不出来（§1.4.1 第 2 条就是这么坏的）。跨机器时不要靠 SSH 建目录 |
 | **控制面在容器里，沙箱也在容器里** | `127.0.0.1:<published>` 是控制面自己的 loopback，连不上沙箱。`-sandbox docker` 仍然发布 `127.0.0.1:<port>` 并从 `docker port` 读回 | **已解决**：`SANDBOX_CONTAINER_ENDPOINT=1` 让 runner 不发布端口、返回 `http://piforge-<hash8>:8080`（Docker 内建 DNS），控制面与 runner 都加入 `piforge-sandboxes`。**这一步同时去掉了宿主上的 8080 暴露面** |
-| **`docker compose down`** | 沙箱容器不是 compose 管的，不会跟着删；`down -v` 也不会删它们（它们挂的是宿主目录，不是 compose 卷）。runner 停掉也不删容器（无状态） | 明确写出"沙箱要单独清理"；runner 尚未实现按 label 对账（`POST` 只会建/复用，不会回收孤儿） |
+| **`docker compose down`** | 沙箱容器不是 compose 管的，不会跟着删；runner 停掉也不删容器（无状态）。`down -v` 会尝试删卷，但只要还有**任意**一个 `piforge-*` 容器（包括 `Created`/`Exited`）挂着它，就只打印 `Volume piforge-data Resource is still in use` 并继续，退出码仍是 0（§1.4.1 实测） | 清理顺序：先 `docker rm -f piforge-*`（只删你认识的），再 `docker compose ... down -v`，然后确认 `docker volume ls` 里没有 `piforge-data`。runner 尚未实现按 label 对账（`POST` 只会建/复用，不会回收孤儿）；`Ensure` 现在会在 `docker run` 失败时删掉自己半创建的对象，但已经存在的孤儿仍要手工清 |
 | **网络回连** | 沙箱里的 agent 要访问模型网关（控制面），`127.0.0.1` 在沙箱里不是控制面 | 沙箱加入 `sandbox-control` 网络，网关地址用服务名；`gateway-url` 已经是可配置项。现在的 compose 把沙箱放在 `piforge-sandboxes`，**还没有**把它接到网关；多服务部署时要把 `-gateway-url` 指到控制面的服务名并把两个网络连通 |
 | **镜像里没有 docker CLI** | `NewDocker` 直接返回 `sandbox: docker: the docker CLI is not on PATH` | 要么加 CLI，要么走 runner。`-sandbox runner` 已经让这条路在 compose 里跑起来：CLI 只在 runner 镜像里（`deploy/Dockerfile.runner`） |
 

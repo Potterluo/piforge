@@ -42,3 +42,9 @@ dist/
 
 # QA screenshots
 shot-*.png
+
+# compose secrets: docker compose reads .env for ${SANDBOX_RUNNER_TOKEN} and the
+# image tags (docs/SANDBOX-DEPLOY.md §1.4.1). It holds a bearer token, so it is
+# never committed; copy the block out of that section into .env.
+.env
+

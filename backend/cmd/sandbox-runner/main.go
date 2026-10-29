@@ -61,6 +61,10 @@ func run() error {
 			"fixed SANDBOX_API_KEY for every container and for reaching their API (debugging override; empty gives each container its own key)")
 		containerEndpoint = flag.Bool("container-endpoint", envBool("SANDBOX_CONTAINER_ENDPOINT", false),
 			"report http://<container>:<api-port> on the sandbox network instead of a published loopback port")
+		workspaceVolume = flag.String("workspace-volume", envOr("SANDBOX_WORKSPACE_VOLUME", ""),
+			"Docker volume that holds the data root; mounts each sandbox's directory from it instead of bind-mounting a host path (required when this process is itself a container)")
+		workspaceVolumeRoot = flag.String("workspace-volume-root", envOr("SANDBOX_WORKSPACE_VOLUME_ROOT", ""),
+			"where that volume is mounted in this process, so a sandbox's subpath can be computed (required with -workspace-volume)")
 	)
 	flag.Parse()
 
@@ -72,14 +76,16 @@ func run() error {
 	}
 
 	provider, err := sandboxrunner.NewDockerProvider(sandboxrunner.DockerOptions{
-		DataRoot:          *dataRoot,
-		Image:             *image,
-		Network:           *network,
-		CPUs:              *cpus,
-		Memory:            *memory,
-		APIPort:           *apiPort,
-		APIKey:            *apiKey,
-		ContainerEndpoint: *containerEndpoint,
+		DataRoot:            *dataRoot,
+		Image:               *image,
+		Network:             *network,
+		CPUs:                *cpus,
+		Memory:              *memory,
+		APIPort:             *apiPort,
+		APIKey:              *apiKey,
+		ContainerEndpoint:   *containerEndpoint,
+		WorkspaceVolume:     *workspaceVolume,
+		WorkspaceVolumeRoot: *workspaceVolumeRoot,
 	})
 	if err != nil {
 		return err
