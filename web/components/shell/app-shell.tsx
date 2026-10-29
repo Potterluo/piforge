@@ -97,7 +97,10 @@ function AppShellFrame({ children }: { children: ReactNode }) {
   }
 
   return (
-    <SidebarProvider>
+    // h-svh and overflow-hidden are load-bearing: with `min-h-svh` the provider grew with
+    // the page, which pushed the sidebar footer — the account menu — below the fold and
+    // out of reach.
+    <SidebarProvider className="h-svh overflow-hidden">
       <AppSidebar
         onNewProject={() => setNewProjectOpen(true)}
         onNewSession={() => setNewSessionOpen(true)}

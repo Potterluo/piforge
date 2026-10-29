@@ -9,7 +9,16 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Columns2, GlobeIcon, TerminalIcon, X } from "lucide-react";
+import {
+  Columns2,
+  FileDiffIcon,
+  GitBranchIcon,
+  GlobeIcon,
+  PanelRightCloseIcon,
+  PanelRightOpenIcon,
+  TerminalIcon,
+  X,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { GitProvider } from "@/components/workspace/git-data";
@@ -57,6 +66,10 @@ export function WorkspacePanels({
   // screenshot today): the file tree refetches and the preview can open the result.
   const [revision, setRevision] = React.useState(0);
   const [openPath, setOpenPath] = React.useState<string | null>(null);
+  // A full-width toggle: the panel strip can be folded away entirely, leaving a rail of
+  // icons. Closing one tab at a time was the only option before, which is not the same
+  // thing as getting the panel out of the way.
+  const [collapsed, setCollapsed] = React.useState(false);
   const [revealTarget, setRevealTarget] = React.useState<string | null>(null);
 
   const handleOpenFile = React.useCallback((path: string) => {
@@ -96,6 +109,42 @@ export function WorkspacePanels({
     const command = buildCdCommand(path);
     if (command) coverageRef.current?.send(asPTYInput(command));
   }, []);
+
+  if (collapsed) {
+    return (
+      <div
+        data-testid="workspace-rail"
+        className="flex h-full w-11 min-h-0 shrink-0 flex-col items-center gap-1 border-s bg-background py-1"
+      >
+        <Button
+          size="icon-xs"
+          variant="ghost"
+          aria-label="展开面板"
+          data-testid="panel-expand"
+          onClick={() => setCollapsed(false)}
+        >
+          <PanelRightOpenIcon />
+        </Button>
+        <div className="my-1 h-px w-6 bg-border" />
+        {PANELS.map((panel) => (
+          <Button
+            key={panel.id}
+            size="icon-xs"
+            variant="ghost"
+            aria-label={panel.label}
+            title={panel.label}
+            data-testid={`rail-${panel.id}`}
+            onClick={() => {
+              setTab(panel.id);
+              setCollapsed(false);
+            }}
+          >
+            {panel.icon}
+          </Button>
+        ))}
+      </div>
+    );
+  }
 
   return (
     <div
@@ -151,6 +200,16 @@ export function WorkspacePanels({
                 onClick={() => setSplit((current) => (current ? null : otherPanel(tab)))}
               >
                 <Columns2 />
+              </Button>
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                aria-label="收起面板"
+                title="收起面板"
+                data-testid="panel-collapse"
+                onClick={() => setCollapsed(true)}
+              >
+                <PanelRightCloseIcon />
               </Button>
             </div>
           </TabsList>
@@ -212,7 +271,7 @@ export function WorkspacePanels({
             <FollowTerminal chunks={followChunks ?? []} className="min-h-0 flex-1" />
           </TabsContent>
         </Tabs>
-        </div>
+        {/* The second pane belongs to the same row as the tabs. It used to be rendered after the row was closed, which stacked it under the panel at 45% width — the "split below instead of beside" bug. */}
         {split ? (
           <div
             className="flex h-full min-h-0 w-[45%] min-w-0 flex-col"
@@ -258,6 +317,7 @@ export function WorkspacePanels({
             </div>
           </div>
         ) : null}
+        </div>
       </GitProvider>
     </div>
   );
@@ -265,10 +325,10 @@ export function WorkspacePanels({
 
 /** The panels the second pane can host. Files is excluded: it is itself a split. */
 const PANELS = [
-  { id: "changes", label: "变更" },
-  { id: "git", label: "Git" },
-  { id: "browser", label: "浏览器" },
-  { id: "terminal", label: "终端" },
+  { id: "changes", label: "变更", icon: <FileDiffIcon className="size-3.5" /> },
+  { id: "git", label: "Git", icon: <GitBranchIcon className="size-3.5" /> },
+  { id: "browser", label: "浏览器", icon: <GlobeIcon className="size-3.5" /> },
+  { id: "terminal", label: "终端", icon: <TerminalIcon className="size-3.5" /> },
 ] as const;
 
 /** A sensible partner for the panel you are looking at. */

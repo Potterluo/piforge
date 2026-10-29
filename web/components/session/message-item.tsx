@@ -18,7 +18,7 @@ import type { Turn } from "@/lib/session/reduce";
 import { cn } from "@/lib/utils";
 
 import { ThinkingTrace } from "./thinking-trace";
-import { ToolTrace } from "./tool-trace";
+import { ToolGroup } from "./tool-trace";
 
 function plainText(turn: Turn): string {
   return turn.blocks
@@ -32,6 +32,61 @@ function plainText(turn: Turn): string {
  * tool calls appear exactly where they happened instead of being hoisted into
  * a separate panel (PRD §10.4.1 "全部就地折叠").
  */
+/**
+ * Renders a turn's blocks with tool calls collapsed into one row.
+ *
+ * The transcript is for what was said. A run that shells out twelve times used to put
+ * twelve rows of machinery between the question and the answer; now it puts one, and the
+ * calls are behind it. Nothing is hidden — the detail is one click away — but the shape of
+ * the conversation stays readable.
+ */
+function renderBlocks(
+  blocks: Turn["blocks"],
+  streaming: boolean,
+  isUser: boolean,
+  compact: boolean | undefined,
+  onFork: ((entryId: string) => void) | undefined,
+  forkEntryId: string | undefined,
+  canFork: boolean,
+) {
+  const out: React.ReactNode[] = [];
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index];
+    if (block.kind === "thinking") {
+      out.push(<ThinkingTrace key={`thinking-${index}`} text={block.text} running={streaming} />);
+      continue;
+    }
+    if (block.kind === "tool") {
+      const group: (typeof blocks)[number][] = [block];
+      while (index + 1 < blocks.length && blocks[index + 1].kind === "tool") {
+        index += 1;
+        group.push(blocks[index]);
+      }
+      out.push(<ToolGroup key={`tools-${index}`} blocks={group as never} />);
+      continue;
+    }
+    out.push(
+      isUser ? (
+        <Bubble key={`text-${index}`} variant="secondary" align="end">
+          <BubbleContent className={compact ? "px-2.5 py-1.5 text-xs" : undefined}>
+            <p className="whitespace-pre-wrap">{block.text}</p>
+          </BubbleContent>
+        </Bubble>
+      ) : (
+        <Bubble key={`text-${index}`} variant="ghost">
+          <BubbleContent>
+            <Markdown text={block.text} />
+          </BubbleContent>
+        </Bubble>
+      ),
+    );
+  }
+  void onFork;
+  void forkEntryId;
+  void canFork;
+  return out;
+}
+
 export function MessageItem({
   turn,
   compact = false,
@@ -98,29 +153,7 @@ export function MessageItem({
             ) : null}
           </MessageHeader>
 
-          {turn.blocks.map((block, index) => {
-            if (block.kind === "thinking") {
-              return (
-                <ThinkingTrace key={`thinking-${index}`} text={block.text} running={turn.streaming} />
-              );
-            }
-            if (block.kind === "tool") {
-              return <ToolTrace key={`tool-${block.id}`} block={block} />;
-            }
-            return isUser ? (
-              <Bubble key={`text-${index}`} variant="secondary" align="end">
-                <BubbleContent className={compact ? "px-2.5 py-1.5 text-xs" : undefined}>
-                  <p className="whitespace-pre-wrap">{block.text}</p>
-                </BubbleContent>
-              </Bubble>
-            ) : (
-              <Bubble key={`text-${index}`} variant="ghost">
-                <BubbleContent>
-                  <Markdown text={block.text} />
-                </BubbleContent>
-              </Bubble>
-            );
-          })}
+          {renderBlocks(turn.blocks, turn.streaming, isUser, compact, onFork, forkEntryId, canFork)}
 
           {!hasBlocks && turn.streaming ? (
             <p className="animate-pulse text-xs text-muted-foreground">正在思考…</p>

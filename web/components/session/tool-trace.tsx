@@ -178,3 +178,50 @@ export function ToolTrace({ block }: { block: ToolBlock }) {
     </Trace>
   );
 }
+/**
+ * One line for a whole group of tool calls.
+ *
+ * The transcript is for reading what was said; a run that shells out twelve times put
+ * twelve rows of machinery in the middle of it. The calls still exist and still open,
+ * but they are summarised into one row, and the detail lives behind it.
+ */
+export function ToolGroup({ blocks }: { blocks: ToolBlock[] }) {
+  const [open, setOpen] = useState(false);
+  if (blocks.length === 0) return null;
+
+  const failed = blocks.filter((block) => block.isError).length;
+  const running = blocks.filter((block) => !block.done).length;
+  const totalMs = blocks.reduce((sum, block) => sum + (block.durationMs ?? 0), 0);
+  const names = Array.from(new Set(blocks.map((block) => toolMeta(block.name).label)));
+  const label = names.length <= 2 ? names.join("、") : `${names[0]} 等 ${names.length} 类`;
+
+  return (
+    <Trace>
+      <TraceCollapsible open={open} onOpenChange={setOpen}>
+        <TraceCollapsibleTrigger data-testid="tool-group">
+          <TraceLine status={running > 0 ? "running" : failed > 0 ? "error" : undefined}>
+            <TraceIcon>
+              <Wrench />
+            </TraceIcon>
+            <TraceTitle className="font-medium">{blocks.length} 个工具调用</TraceTitle>
+            <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">{label}</span>
+            {failed > 0 ? (
+              <span className="shrink-0 text-[11px] text-destructive">{failed} 个失败</span>
+            ) : null}
+            {running > 0 ? (
+              <span className="shrink-0 text-[11px] text-muted-foreground">{running} 个运行中</span>
+            ) : null}
+            {totalMs > 0 ? <TraceDescription>{formatDuration(totalMs)}</TraceDescription> : null}
+          </TraceLine>
+        </TraceCollapsibleTrigger>
+        <TraceCollapsibleContent>
+          <div className="flex flex-col gap-1.5">
+            {blocks.map((block) => (
+              <ToolTrace key={block.id} block={block} />
+            ))}
+          </div>
+        </TraceCollapsibleContent>
+      </TraceCollapsible>
+    </Trace>
+  );
+}

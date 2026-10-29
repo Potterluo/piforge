@@ -1,5 +1,6 @@
 "use client";
 
+import * as React from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
@@ -170,6 +171,7 @@ export function AppSidebar({
   onNewProject: () => void;
   onNewSession: () => void;
 }) {
+  const [accountOpen, setAccountOpen] = React.useState(false);
   const pathname = usePathname();
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -214,41 +216,29 @@ export function AppSidebar({
             <SidebarTrigger data-testid="sidebar-collapse" className="ml-auto" aria-label="收起侧边栏" />
           </SidebarMenuItem>
           <SidebarMenuItem>
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                render={<SidebarMenuButton size="lg" className="data-[popup-open]:bg-sidebar-accent" />}
-              >
-                <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-                  <FolderGit2 className="size-4" />
-                </div>
-                <div className="grid min-w-0 flex-1 text-left leading-tight">
-                  <span className="truncate text-sm font-medium">
-                    {project?.name ?? "PiForge"}
-                  </span>
-                  <span className="truncate text-xs text-muted-foreground">
-                    {project ? `沙箱 · ${sandboxLabel(project.sandbox_state)}` : "选择一个项目"}
-                  </span>
-                </div>
-                <ChevronsUpDown className="ml-auto size-4" />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-56">
-                <DropdownMenuLabel>项目</DropdownMenuLabel>
-                {(projects.data?.projects ?? []).map((item) => (
-                  <DropdownMenuItem key={item.id} onClick={() => router.push(`/p/${item.id}`)}>
-                    <FolderGit2 />
-                    <span className="truncate">{item.name}</span>
-                  </DropdownMenuItem>
-                ))}
-                {projects.data && projects.data.projects.length === 0 ? (
-                  <DropdownMenuItem disabled>还没有项目</DropdownMenuItem>
-                ) : null}
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={onNewProject}>
-                  <Plus />
-                  新建项目…
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            {/*
+              The header used to be a dropdown that opened nothing and swallowed the click.
+              A list of projects inside a menu with one item per project is also a second
+              copy of the list right below it, so this is a plain link to the project list:
+              one target, always the same behaviour.
+            */}
+            <SidebarMenuButton
+              size="lg"
+              tooltip="所有项目"
+              data-testid="project-switcher"
+              render={<Link href="/" />}
+            >
+              <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
+                <FolderGit2 className="size-4" />
+              </div>
+              <div className="grid min-w-0 flex-1 text-left leading-tight">
+                <span className="truncate text-sm font-medium">{project?.name ?? "PiForge"}</span>
+                <span className="truncate text-xs text-muted-foreground">
+                  {project ? `沙箱 · ${sandboxLabel(project.sandbox_state)}` : "所有项目"}
+                </span>
+              </div>
+              <ChevronsUpDown className="ml-auto size-4" />
+            </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>
@@ -454,40 +444,62 @@ export function AppSidebar({
               </SidebarMenuItem>
             </>
           ) : null}
-          <SidebarMenuItem>
-            <DropdownMenu>
-              <DropdownMenuTrigger render={<SidebarMenuButton size="lg" />}>
-                <Avatar className="size-8 rounded-lg">
-                  <AvatarFallback>
-                    {(user?.display_name || user?.email || "?").slice(0, 1).toUpperCase()}
-                  </AvatarFallback>
-                </Avatar>
-                <div className="grid min-w-0 flex-1 text-left leading-tight">
-                  <span className="truncate text-sm font-medium">
-                    {user?.display_name || "未登录"}
-                  </span>
-                  <span
-                    data-testid="user-email"
-                    className="truncate text-xs text-muted-foreground"
-                  >
-                    {user?.email ?? ""}
-                  </span>
-                </div>
-                {isAdmin ? (
-                  <Badge variant="outline" className="group-data-[collapsible=icon]:hidden">
-                    管理员
-                  </Badge>
-                ) : null}
-              </DropdownMenuTrigger>
-              <DropdownMenuContent side="top" align="start" className="w-56">
-                <DropdownMenuLabel className="truncate">{user?.email}</DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem variant="destructive" onClick={() => void logout()}>
+          <SidebarMenuItem className="relative">
+            {/*
+              The account control is a plain button with a panel beside it, not a popup
+              menu: the menu version opened nothing and left the trigger detached from the
+              DOM, which is what "clicking my avatar does nothing" looked like from outside.
+            */}
+            <SidebarMenuButton
+              size="lg"
+              aria-expanded={accountOpen}
+              data-testid="account-menu"
+              onClick={() => setAccountOpen((open) => !open)}
+            >
+              <Avatar className="size-8 rounded-lg">
+                <AvatarFallback>
+                  {(user?.display_name || user?.email || "?").slice(0, 1).toUpperCase()}
+                </AvatarFallback>
+              </Avatar>
+              <div className="grid min-w-0 flex-1 text-left leading-tight">
+                <span className="truncate text-sm font-medium">
+                  {user?.display_name || "未登录"}
+                </span>
+                <span data-testid="user-email" className="truncate text-xs text-muted-foreground">
+                  {user?.email ?? ""}
+                </span>
+              </div>
+              {isAdmin ? (
+                <Badge variant="outline" className="group-data-[collapsible=icon]:hidden">
+                  管理员
+                </Badge>
+              ) : null}
+            </SidebarMenuButton>
+            {accountOpen ? (
+              <div
+                data-testid="account-panel"
+                className="absolute bottom-full start-0 z-50 mb-1 w-56 rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
+              >
+                <p className="truncate px-2 py-1.5 text-xs text-muted-foreground">{user?.email}</p>
+                <Link
+                  href="/settings/providers"
+                  className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent"
+                  onClick={() => setAccountOpen(false)}
+                >
+                  <Settings />
+                  设置
+                </Link>
+                <button
+                  type="button"
+                  data-testid="logout"
+                  className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-destructive hover:bg-accent"
+                  onClick={() => void logout()}
+                >
                   <LogOut />
                   退出登录
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                </button>
+              </div>
+            ) : null}
           </SidebarMenuItem>
         </SidebarMenu>
         <div className="px-2 py-1 text-[11px] text-muted-foreground group-data-[collapsible=icon]:hidden">
