@@ -8,14 +8,56 @@ agent、浏览器、终端指过去。这条不变量在任何 provider 上都�
 | | `local`（默认） | `docker` |
 |---|---|---|
 | 隔离边界 | 一个目录 | 一个容器 |
-| 浏览器 | 宿主 Chrome，按沙箱复用 profile | 容器内 Chromium（`-sandbox-browser remote`） |
-| 终端 | 宿主进程 + PTY | 容器内 shell 会话（`-sandbox-terminal remote`） |
-| 面板文件读写 | 宿主目录（`fsx`） | 容器文件 API（`-sandbox-files remote`） |
+| 浏览器 | 宿主 Chrome，按沙箱复用 profile | 容器内 Chromium（默认 `remote`） |
+| 终端 | 宿主进程 + PTY | 容器内 shell 会话（默认 `remote`） |
+| 面板文件读写 | 宿主目录（`fsx`，仅 `-sandbox-files host` 显式指定） | 容器文件 API（默认 `remote`） |
 | 适合 | 单机自托管、开发 | 多租户、需要真实边界 |
 | 启用 | 默认 | `-sandbox docker -sandbox-image <image>` |
 
 `PIFORGE_SANDBOX=docker`、`PIFORGE_SANDBOX_IMAGE`、`PIFORGE_SANDBOX_NETWORK`、
 `PIFORGE_SANDBOX_CPUS`、`PIFORGE_SANDBOX_MEMORY` 是等价的环境变量。
+
+## 三个功能开关：默认跟随 provider
+
+浏览器、终端、面板文件读写各自还有一个 `host` / `remote` 开关。它们的默认值是 `auto`，
+意思是"由 provider 决定"，而不是写死 `host`：
+
+| flag | 环境变量 | 取值 | `-sandbox local` | `-sandbox docker` |
+|---|---|---|---|---|
+| `-sandbox` | `PIFORGE_SANDBOX` | `local`（默认）/ `docker` | 目录沙箱 | 容器沙箱 |
+| `-sandbox-browser` | `PIFORGE_SANDBOX_BROWSER` | `auto`（默认）/ `host` / `remote` | `auto` → `host` | `auto` → `remote` |
+| `-sandbox-terminal` | `PIFORGE_SANDBOX_TERMINAL` | `auto`（默认）/ `host` / `remote` | `auto` → `host` | `auto` → `remote` |
+| `-sandbox-files` | `PIFORGE_SANDBOX_FILES` | `auto`（默认）/ `host` / `remote` | `auto` → `host` | `auto` → `remote` |
+
+其余 docker 参数不变：`-sandbox-image`、`-sandbox-network`、`-sandbox-cpus`、
+`-sandbox-memory`、`-sandbox-api-key`。
+
+三个开关在启动时一次解析完，日志里直接给出结果，所以看日志就知道这个部署长什么样：
+
+```
+level=INFO msg="sandbox placement resolved" sandbox=docker browser=remote terminal=remote files=remote
+```
+
+`-sandbox local` 下写 `remote` 是**启动错误**，不是运行时降级：没有容器可连，"远程"就不是
+一个可选项。报错会点名那个 flag 并说明原因，而不是等到第一次请求才失败。
+
+## 为什么默认是"全在容器里"
+
+三个开关只开一部分，是最难诊断的那种部署：浏览器在容器里、文件面板在宿主机上，面板看到的是
+绑定目录里的另一份视图——同一个工作区、两个读者，谁也不知道对方看见了什么。所以
+`-sandbox docker` 默认把三个都放进容器：agent、浏览器、终端、文件面板是同一台机器、同一个
+`/workspace`。默认值不该产生一个没人会主动挑选的组合。
+
+混合部署仍然允许——确实有人想让宿主机的 Chrome 连容器里的工作区来调镜像——但它必须是
+显式写出来的（`-sandbox-files host`），而且启动时会有一条 WARN，把留在宿主机上的功能全部
+列出来，日志本身就能说明这个部署到底是什么：
+
+```
+level=WARN msg="sandbox placement is mixed: these features still run on the host" sandbox=docker host=files remote="browser, terminal" detail="the agent works inside the container, so a host-side panel is a second view of one workspace; pass remote for every feature, or use -sandbox local for all of them"
+```
+
+`cmd/piforged/sandbox_placement_test.go` 钉住三件事：docker 默认全 `remote`、显式 `host` 被
+遵守且被报告、`local` + `remote` 启动报错。
 
 ## docker provider 现在做了什么
 
@@ -59,7 +101,8 @@ FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:207] Check failed
 **容器**的系统调用面，前者只关掉浏览器进程内部的沙箱，渲染器仍然在容器边界之内——这条边界才是
 这个 provider 承诺的那条。
 
-启用方式：
+启用方式（`-sandbox docker` 现在默认就是 `remote`；显式写出仍然有效，也仍然被推荐给
+要固定配置的部署）：
 
 ```bash
 piforged -sandbox docker \
@@ -104,7 +147,8 @@ piforged -sandbox docker \
          -sandbox-terminal remote
 ```
 
-只有 `-sandbox docker` 下才有意义；不设时仍是宿主 PTY，行为不变。docker provider 会因此
+只有 `-sandbox docker` 下才有意义，并且 docker 下默认就是它（`-sandbox local` 下写 `remote`
+会启动失败，见上面的开关表）。docker provider 会因此
 发布容器的 8080 端口（`Endpoint` 从 `docker port` 读回实际端口），并把
 `-sandbox-api-key` 作为 `SANDBOX_API_KEY` 传给容器。工作区的宿主路径由
 `Docker.ContainerPath` 映射到容器里的 `/workspace`，shell 就从该 worktree 启动。
@@ -156,8 +200,8 @@ WS   /v1/sessions/<id>/pty               "echo e2e-docker-ok\r\n" + "e2e-docker-
 
 ## 文件：面板的文件树、预览和编辑走容器
 
-`-sandbox-files remote`（等价 `PIFORGE_SANDBOX_FILES=remote`，只在 `-sandbox docker` 下有意义）
-把 `contracts.Workspace` 换成 `internal/workspaceremote`：
+`-sandbox-files remote`（等价 `PIFORGE_SANDBOX_FILES=remote`，只在 `-sandbox docker` 下可用，
+并且现在是 docker 的默认值）把 `contracts.Workspace` 换成 `internal/workspaceremote`：
 
 - 文件树、预览、编辑、搜索走容器的 `/v1/file/*`（list / read / write / glob / grep）。
   没有 delete 端点，删除是唯一一条 shell 命令（`rm -rf`，并区分"本来就不存在"）；
@@ -171,8 +215,9 @@ WS   /v1/sessions/<id>/pty               "echo e2e-docker-ok\r\n" + "e2e-docker-
   root 所有，而沙箱 shell 是 `gem`，git 2.34 因此拒绝这个仓库
   （`fatal: detected dubious ownership`）。执行器给每条 git 命令加
   `-c safe.directory=<容器内根>`：只信任这个工作区，而不是 `safe.directory=*`；
-- 关闭时（默认 `host`）行为与之前逐字节一致；`-sandbox-files remote` 配 `-sandbox local`
-  直接报错，而不是悄悄退回宿主目录。
+- 显式写 `-sandbox-files host` 时行为与之前逐字节一致（这是混合部署，启动时会有一条
+  WARN 点名 files）；`-sandbox-files remote` 配 `-sandbox local` 直接报错——没有容器可连，
+  而不是悄悄退回宿主目录。
 
 2026-10-29 实测（piforged 自己起的容器 `piforge-750aee4547df7564`，`127.0.0.1:46635->8080`）：
 

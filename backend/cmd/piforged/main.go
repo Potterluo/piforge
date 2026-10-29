@@ -83,13 +83,14 @@ type options struct {
 	browserProxy string
 	// agentIdleTTL is how long an agent process may sit unused before it is stopped.
 	agentIdleTTL time.Duration
-	// sandboxBrowser is "host" (default) or "remote": remote uses the browser inside a
-	// docker sandbox instead of a local Chrome.
+	// sandboxBrowser is "auto" (the flag's default), "host" or "remote". It holds
+	// the resolved placement by the time anything reads it: auto follows the
+	// provider, which is remote under docker and host under local.
 	sandboxBrowser string
-	// sandboxTerminal is "host" (default) or "remote": remote runs the shell
-	// inside the docker sandbox instead of on the host.
+	// sandboxTerminal behaves like sandboxBrowser: remote runs the shell inside the
+	// docker sandbox instead of on the host.
 	sandboxTerminal string
-	// sandboxFiles is "host" (default) or "remote": remote reads and writes the
+	// sandboxFiles behaves like sandboxBrowser: remote reads and writes the
 	// workspace through the sandbox's file API instead of the host directory.
 	sandboxFiles  string
 	sandboxAPIKey string
@@ -126,12 +127,12 @@ func run() error {
 		"stop an agent process after it has been idle this long")
 	flag.StringVar(&opt.sandboxKind, "sandbox", envOr("PIFORGE_SANDBOX", "local"),
 		"sandbox provider: local (directories) or docker (one container per project)")
-	flag.StringVar(&opt.sandboxBrowser, "sandbox-browser", envOr("PIFORGE_SANDBOX_BROWSER", "host"),
-		"browser placement: host, or remote (inside the docker sandbox)")
-	flag.StringVar(&opt.sandboxTerminal, "sandbox-terminal", envOr("PIFORGE_SANDBOX_TERMINAL", "host"),
-		"terminal placement: host, or remote (inside the docker sandbox)")
-	flag.StringVar(&opt.sandboxFiles, "sandbox-files", envOr("PIFORGE_SANDBOX_FILES", "host"),
-		"workspace files: host, or remote (read and written through the docker sandbox)")
+	flag.StringVar(&opt.sandboxBrowser, "sandbox-browser", envOr("PIFORGE_SANDBOX_BROWSER", "auto"),
+		"browser placement: auto (docker: remote, local: host), host, or remote (inside the docker sandbox)")
+	flag.StringVar(&opt.sandboxTerminal, "sandbox-terminal", envOr("PIFORGE_SANDBOX_TERMINAL", "auto"),
+		"terminal placement: auto (docker: remote, local: host), host, or remote (inside the docker sandbox)")
+	flag.StringVar(&opt.sandboxFiles, "sandbox-files", envOr("PIFORGE_SANDBOX_FILES", "auto"),
+		"workspace files: auto (docker: remote, local: host), host, or remote (read and written through the docker sandbox)")
 	flag.StringVar(&opt.sandboxAPIKey, "sandbox-api-key", envOr("PIFORGE_SANDBOX_API_KEY", ""),
 		"API key the sandbox container was started with")
 	flag.StringVar(&opt.sandboxImage, "sandbox-image", envOr("PIFORGE_SANDBOX_IMAGE", ""),
@@ -154,6 +155,24 @@ func run() error {
 		"explicit path to the jail launcher")
 	flag.Parse()
 
+	// Normalise the provider name before anything compares it: placement resolution
+	// ignores case, and the wiring below does not, so "-sandbox Docker" must mean
+	// the same thing in both places.
+	opt.sandboxKind = normalizedSandboxKind(opt.sandboxKind)
+
+	// Where the browser, the terminal and the file panel look is one decision, not
+	// three. Resolve it before anything is created: a contradictory combination
+	// must fail here, not surface later as a panel that disagrees with the agent
+	// about what is in the workspace.
+	resolved, err := resolveSandboxPlacement(opt.sandboxKind, opt.sandboxBrowser, opt.sandboxTerminal, opt.sandboxFiles)
+	if err != nil {
+		return err
+	}
+	// From here on the three fields hold resolved values, so every later check is
+	// about where a feature actually is, never about how it was requested.
+	opt.sandboxBrowser, opt.sandboxTerminal, opt.sandboxFiles =
+		string(resolved.Browser), string(resolved.Terminal), string(resolved.Files)
+
 	if err := os.MkdirAll(opt.dataDir, 0o755); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
 	}
@@ -161,6 +180,21 @@ func run() error {
 	logger := newLogger(opt)
 	logger.Info("starting piforged",
 		"addr", opt.addr, "data", abs(opt.dataDir), "dev", opt.dev, "fake_pi", opt.useFakePi)
+	logger.Info("sandbox placement resolved",
+		"sandbox", opt.sandboxKind,
+		"browser", opt.sandboxBrowser,
+		"terminal", opt.sandboxTerminal,
+		"files", opt.sandboxFiles)
+	// A mixed deployment is allowed, never accidental. Saying it out loud is the
+	// difference between a bug report about "the panel shows the wrong file" and a
+	// log line that described the deployment before it did any work.
+	if resolved.Mixed() {
+		logger.Warn("sandbox placement is mixed: these features still run on the host",
+			"sandbox", opt.sandboxKind,
+			"host", strings.Join(resolved.HostFeatures(), ", "),
+			"remote", strings.Join(resolved.RemoteFeatures(), ", "),
+			"detail", "the agent works inside the container, so a host-side panel is a second view of one workspace; pass remote for every feature, or use -sandbox local for all of them")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -255,14 +289,17 @@ func run() error {
 	})
 
 	// The panel's file tree, preview and editor read the host directory unless
-	// asked otherwise. With a docker sandbox, "otherwise" is the point: the agent
+	// asked otherwise. With a docker sandbox, "otherwise" is the default: the agent
 	// edits files inside the container, so the panel must ask the container too
 	// or the two views drift. Git goes through the same bridge, because the two
 	// sides disagreeing about what is staged is the same bug one layer up.
+	//
+	// resolveSandboxPlacement already rejected remote without a container, so the
+	// only thing left to guard is the provider itself.
 	var files contracts.Workspace = fs
 	if opt.sandboxFiles == "remote" {
-		if opt.sandboxKind != "docker" || dockerSB == nil {
-			return fmt.Errorf("-sandbox-files remote needs -sandbox docker: there is no sandbox file API to talk to")
+		if dockerSB == nil {
+			return fmt.Errorf("remote workspace files need the docker sandbox provider")
 		}
 		fileBackend := &sandboxFileBackend{provider: dockerSB, store: st, apiKey: opt.sandboxAPIKey}
 		executor := workspaceremote.ShellExecutor{Backend: fileBackend}
@@ -423,8 +460,9 @@ func run() error {
 	}
 	// With a docker sandbox that runs an AIO image, the browser lives in that container:
 	// the panel then shows the same machine the agent edits, which is the whole point of
-	// moving the sandbox into a container.
-	if opt.sandboxKind == "docker" && opt.sandboxBrowser == "remote" {
+	// moving the sandbox into a container. This is the resolved placement, so it is
+	// remote by default under docker — not only when the flag is spelled out.
+	if opt.sandboxBrowser == "remote" {
 		browserCfg.RemoteAPIKey = opt.sandboxAPIKey
 		browserCfg.Remote = func(ctx context.Context, sandboxID string) (string, string, error) {
 			if dockerSB == nil {
@@ -449,8 +487,8 @@ func run() error {
 	defer browsers.CloseAll()
 
 	// With a docker sandbox that runs an AIO image, the terminal lives in that
-	// container too: the shell sees the same filesystem the agent edits. The
-	// host PTY remains the default when the flag is not set.
+	// container too: the shell sees the same filesystem the agent edits. Like the
+	// browser, this is the resolved placement, so docker gets it by default.
 	termCfg := term.Config{
 		RingBytes: 4 << 20,
 		Launcher:  launcher,
@@ -460,7 +498,7 @@ func run() error {
 			return st.WorktreePathByID(ctx, worktreeID)
 		},
 	}
-	if opt.sandboxKind == "docker" && opt.sandboxTerminal == "remote" {
+	if opt.sandboxTerminal == "remote" {
 		termCfg.Remote = func(ctx context.Context, worktreeID string) (*aio.Client, string, string, error) {
 			if dockerSB == nil {
 				return nil, "", "", fmt.Errorf("remote terminal needs the docker sandbox provider")
