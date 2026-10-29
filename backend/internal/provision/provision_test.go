@@ -148,8 +148,12 @@ func TestEnsureWorktreeBranchGetsItsOwnCheckout(t *testing.T) {
 		t.Fatalf("branch: %v", err)
 	}
 
-	if brWT.Branch != "piforge/fix-cache" {
-		t.Fatalf("branch = %q, want piforge/fix-cache", brWT.Branch)
+	wantBranch := BranchFor(p, branch)
+	if brWT.Branch != wantBranch {
+		t.Fatalf("branch = %q, want %q", brWT.Branch, wantBranch)
+	}
+	if !strings.HasPrefix(brWT.Branch, "piforge/fix-cache-") {
+		t.Fatalf("branch = %q, want a namespaced name with a session suffix", brWT.Branch)
 	}
 	if brWT.Path == mainWT.Path {
 		t.Fatalf("branch reused the main checkout at %s", brWT.Path)
@@ -221,7 +225,7 @@ func TestBranchFor(t *testing.T) {
 
 	cases := []struct{ name, got, want string }{
 		{"main uses the project branch", BranchFor(project, main), "develop"},
-		{"branch is namespaced and slugged", BranchFor(project, branchLabeled), "piforge/fix-cache-race"},
+		{"branch is namespaced, slugged and suffixed", BranchFor(project, branchLabeled), "piforge/fix-cache-race-yzabcdef"},
 		{"bare branch falls back to the id tail", BranchFor(project, branchBare), "piforge/yzabcdef"},
 		{"empty project branch defaults to main", BranchFor(&contracts.Project{}, main), "main"},
 	}
@@ -229,6 +233,175 @@ func TestBranchFor(t *testing.T) {
 		if c.got != c.want {
 			t.Errorf("%s: got %q want %q", c.name, c.got, c.want)
 		}
+	}
+}
+
+// FR-2.7: two clones of one session carry the same title, so a title-derived
+// branch name gave them one branch and one worktree — the second clone wrote
+// into the first clone's files. The name has to be unique per session.
+func TestTwoClonesOfOneSessionGetDistinctWorktrees(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	p := e.project()
+
+	main := e.session(p, contracts.KindMain, "", "")
+	if _, err := e.svc.EnsureWorktree(ctx, e.user.ID, p, main); err != nil {
+		t.Fatalf("main worktree: %v", err)
+	}
+
+	// Exactly what handleCloneSession builds: kind branch, and a label derived
+	// from the source's title, identical for both clones.
+	const cloneLabel = "fix cache 的副本"
+	first := e.session(p, contracts.KindBranch, cloneLabel, main.ID)
+	second := e.session(p, contracts.KindBranch, cloneLabel, main.ID)
+
+	wtFirst, err := e.svc.EnsureWorktree(ctx, e.user.ID, p, first)
+	if err != nil {
+		t.Fatalf("first clone worktree: %v", err)
+	}
+	wtSecond, err := e.svc.EnsureWorktree(ctx, e.user.ID, p, second)
+	if err != nil {
+		t.Fatalf("second clone worktree: %v", err)
+	}
+
+	if wtFirst.ID == wtSecond.ID {
+		t.Fatalf("both clones share worktree %s", wtFirst.ID)
+	}
+	if wtFirst.Path == wtSecond.Path {
+		t.Fatalf("both clones share the checkout at %s", wtFirst.Path)
+	}
+	if wtFirst.Branch == wtSecond.Branch {
+		t.Fatalf("both clones share branch %q", wtFirst.Branch)
+	}
+	for _, wt := range []*contracts.Worktree{wtFirst, wtSecond} {
+		if !strings.HasPrefix(wt.Branch, "piforge/fix-cache-") {
+			t.Fatalf("branch %q is not namespaced under the clone label", wt.Branch)
+		}
+		if _, err := os.Stat(filepath.Join(wt.Path, ".git")); err != nil {
+			t.Fatalf("%s is not a checkout: %v", wt.Path, err)
+		}
+	}
+
+	// The branches really exist in git, and each worktree is on its own one.
+	for _, wt := range []*contracts.Worktree{wtFirst, wtSecond} {
+		out, err := exec.Command("git", "-C", wt.Path, "rev-parse", "--abbrev-ref", "HEAD").CombinedOutput()
+		if err != nil {
+			t.Fatalf("rev-parse in %s: %v: %s", wt.Path, err, out)
+		}
+		if got := strings.TrimSpace(string(out)); got != wt.Branch {
+			t.Fatalf("%s is on %q, want %q", wt.Path, got, wt.Branch)
+		}
+	}
+
+	// Each session points at its own row, which is what the workspace and the
+	// agent use to find their files.
+	for _, pair := range []struct {
+		session string
+		want    string
+	}{{first.ID, wtFirst.ID}, {second.ID, wtSecond.ID}} {
+		got, err := e.store.Session(ctx, e.user.ID, pair.session)
+		if err != nil {
+			t.Fatalf("reload %s: %v", pair.session, err)
+		}
+		if got.WorktreeID != pair.want {
+			t.Fatalf("session %s -> worktree %q, want %q", pair.session, got.WorktreeID, pair.want)
+		}
+	}
+}
+
+// Provisioning is idempotent *per session*: the same session asked twice keeps
+// one slug, one branch and one worktree, however many times it is asked. The
+// second call must not mint a new name (which is what a random suffix would do).
+func TestProvisioningOneSessionTwiceKeepsOneSlug(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	p := e.project()
+
+	main := e.session(p, contracts.KindMain, "", "")
+	if _, err := e.svc.EnsureWorktree(ctx, e.user.ID, p, main); err != nil {
+		t.Fatalf("main worktree: %v", err)
+	}
+	sess := e.session(p, contracts.KindBranch, "retry me", main.ID)
+
+	branchA := BranchFor(p, sess)
+	branchB := BranchFor(p, sess)
+	if branchA != branchB {
+		t.Fatalf("the branch name is not stable: %q then %q", branchA, branchB)
+	}
+
+	first, err := e.svc.EnsureWorktree(ctx, e.user.ID, p, sess)
+	if err != nil {
+		t.Fatalf("first EnsureWorktree: %v", err)
+	}
+
+	// The HTTP layer calls EnsureWorktree again on the first prompt, with a
+	// session value it loaded before the first call attached a worktree.
+	again, err := e.svc.EnsureWorktree(ctx, e.user.ID, p, sess)
+	if err != nil {
+		t.Fatalf("second EnsureWorktree: %v", err)
+	}
+	if again.ID != first.ID || again.Path != first.Path || again.Branch != first.Branch {
+		t.Fatalf("second provision changed the worktree: %+v vs %+v", again, first)
+	}
+	if again.Branch != branchA {
+		t.Fatalf("worktree branch = %q, want the stable %q", again.Branch, branchA)
+	}
+
+	list, err := e.store.ListWorktrees(ctx, e.user.ID, first.SandboxID)
+	if err != nil {
+		t.Fatalf("list worktrees: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("worktrees = %d, want 2 (main + one branch)", len(list))
+	}
+}
+
+// A worktree path that is already taken is a collision, never a silent reuse.
+// Before FR-2.7 was fixed, the second clone found the first clone's row at the
+// same path and was attached to it; a stray directory was reused the same way.
+func TestProvisionRefusesAWorktreePathItDoesNotOwn(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	p := e.project()
+
+	main := e.session(p, contracts.KindMain, "", "")
+	mainWT, err := e.svc.EnsureWorktree(ctx, e.user.ID, p, main)
+	if err != nil {
+		t.Fatalf("main worktree: %v", err)
+	}
+	sb, err := e.store.Sandbox(ctx, e.user.ID, mainWT.SandboxID)
+	if err != nil {
+		t.Fatalf("load sandbox: %v", err)
+	}
+
+	// (a) A row at this session's path that belongs to somebody else: the old
+	// code attached the new session to it and both wrote the same files.
+	taken := e.session(p, contracts.KindBranch, "taken", main.ID)
+	takenPath := defaultWorktreePath(sb, branchSlug(BranchFor(p, taken)))
+	if _, err := e.store.CreateWorktree(ctx, e.user.ID, store.NewWorktree{
+		SandboxID: sb.ID,
+		Path:      takenPath,
+		Branch:    "piforge/legacy-row",
+	}); err != nil {
+		t.Fatalf("seed conflicting worktree row: %v", err)
+	}
+	if _, err := e.svc.EnsureWorktree(ctx, e.user.ID, p, taken); err == nil {
+		t.Fatal("a worktree row owned by another session was reused silently")
+	} else if !strings.Contains(err.Error(), "already belongs to another session") {
+		t.Fatalf("error = %v, want a collision, not a different failure", err)
+	}
+
+	// (b) A directory with no row at all: `git worktree add` must not be allowed
+	// to adopt whatever is inside it.
+	stray := e.session(p, contracts.KindBranch, "stray", main.ID)
+	strayPath := defaultWorktreePath(sb, branchSlug(BranchFor(p, stray)))
+	if err := os.MkdirAll(strayPath, 0o755); err != nil {
+		t.Fatalf("create stray dir: %v", err)
+	}
+	if _, err := e.svc.EnsureWorktree(ctx, e.user.ID, p, stray); err == nil {
+		t.Fatal("an existing directory was reused as a checkout")
+	} else if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("error = %v, want an explicit path collision", err)
 	}
 }
 
@@ -515,15 +688,17 @@ func TestBranchWorktreeUsesTheProvider(t *testing.T) {
 	if filepath.Clean(call.repoDir) != filepath.Join(root, "repo") {
 		t.Fatalf("repo dir = %q, want the main checkout inside the sandbox", call.repoDir)
 	}
-	wantPath := filepath.Join(root, "worktrees", "fix-cache")
+	wantBranch := BranchFor(project, branch)
+	wantSlug := branchSlug(wantBranch)
+	wantPath := filepath.Join(root, "worktrees", wantSlug)
 	if filepath.Clean(call.path) != wantPath {
 		t.Fatalf("worktree path = %q, want %q", call.path, wantPath)
 	}
-	if call.branch != "piforge/fix-cache" {
-		t.Fatalf("branch = %q, want the namespaced branch", call.branch)
+	if call.branch != wantBranch {
+		t.Fatalf("branch = %q, want the namespaced branch %q", call.branch, wantBranch)
 	}
-	if filepath.Clean(wt.Path) != wantPath || wt.Branch != "piforge/fix-cache" {
-		t.Fatalf("recorded worktree = %+v, want path %q on piforge/fix-cache", wt, wantPath)
+	if filepath.Clean(wt.Path) != wantPath || wt.Branch != wantBranch {
+		t.Fatalf("recorded worktree = %+v, want path %q on %s", wt, wantPath, wantBranch)
 	}
 	// The host git never touched the workspace: no host-side checkout appeared.
 	if _, err := os.Stat(wt.Path); !os.IsNotExist(err) {
@@ -611,14 +786,16 @@ func TestBranchWorktreeInDockerStagesAndCommitsAsGem(t *testing.T) {
 
 	const (
 		containerRepo = "/workspace/repo"
-		containerWT   = "/workspace/worktrees/docker-branch"
 	)
-	wantPath := filepath.Join(filepath.Dir(mainWT.Path), "worktrees", "docker-branch")
+	wantBranch := BranchFor(project, branch)
+	slug := branchSlug(wantBranch)
+	containerWT := "/workspace/worktrees/" + slug
+	wantPath := filepath.Join(filepath.Dir(mainWT.Path), "worktrees", slug)
 	if filepath.Clean(brWT.Path) != filepath.Clean(wantPath) {
 		t.Fatalf("branch worktree path = %q, want %q", brWT.Path, wantPath)
 	}
-	if brWT.Branch != "piforge/docker-branch" {
-		t.Fatalf("branch = %q, want piforge/docker-branch", brWT.Branch)
+	if brWT.Branch != wantBranch {
+		t.Fatalf("branch = %q, want %s", brWT.Branch, wantBranch)
 	}
 	if brWT.SandboxID != mainWT.SandboxID {
 		t.Fatalf("branch used sandbox %q, want the project's %q", brWT.SandboxID, mainWT.SandboxID)
@@ -642,13 +819,13 @@ func TestBranchWorktreeInDockerStagesAndCommitsAsGem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the worktree's .git file: %v", err)
 	}
-	if !strings.Contains(string(gitFile), containerRepo+"/.git/worktrees/docker-branch") {
+	if !strings.Contains(string(gitFile), containerRepo+"/.git/worktrees/"+slug) {
 		t.Fatalf(".git = %q, want the container's gitdir", strings.TrimSpace(string(gitFile)))
 	}
 
 	// Ownership is the defect: these two directories are written by the panel's
 	// git, which runs as gem.
-	for _, dir := range []string{containerRepo + "/.git/worktrees/docker-branch", containerWT} {
+	for _, dir := range []string{containerRepo + "/.git/worktrees/" + slug, containerWT} {
 		owner, err := dockerAsGem(t, brWT.SandboxID, "stat", "-c", "%U", dir)
 		if err != nil {
 			t.Fatalf("stat %s: %v: %s", dir, err, owner)
@@ -676,8 +853,8 @@ func TestBranchWorktreeInDockerStagesAndCommitsAsGem(t *testing.T) {
 	if status, err := dockerAsGem(t, brWT.SandboxID, "git", "-C", containerWT, "status", "--porcelain"); err != nil || status != "" {
 		t.Fatalf("status after commit = %q, %v; want a clean worktree", status, err)
 	}
-	if name, err := dockerAsGem(t, brWT.SandboxID, "git", "-C", containerWT, "rev-parse", "--abbrev-ref", "HEAD"); err != nil || name != "piforge/docker-branch" {
-		t.Fatalf("HEAD branch = %q, %v; want piforge/docker-branch", name, err)
+	if name, err := dockerAsGem(t, brWT.SandboxID, "git", "-C", containerWT, "rev-parse", "--abbrev-ref", "HEAD"); err != nil || name != wantBranch {
+		t.Fatalf("HEAD branch = %q, %v; want %s", name, err, wantBranch)
 	}
 
 	// Existing sessions are not silently rewritten: asking again returns the same

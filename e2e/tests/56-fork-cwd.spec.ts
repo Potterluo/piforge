@@ -43,11 +43,13 @@ test.describe("a branch's agent cwd", () => {
     expect(forkCwd).toMatch(/[\\/]worktrees[\\/]/);
     expect(forkCwd).toContain(label);
 
-    // The checkout behind that cwd really is the branch the UI names.
+    // The checkout behind that cwd really is the branch the UI names. The branch
+    // carries a short session-id suffix, so two forks of one session cannot
+    // collide on a title (FR-2.7).
     const status = await page.request.get(`/v1/sessions/${forkId}/git/status`);
     expect(status.status()).toBe(200);
     const branch = (await status.json()) as { branch: string };
-    expect(branch.branch).toBe(`piforge/${label}`);
+    expect(branch.branch).toMatch(new RegExp(`^piforge/${label}-[a-z0-9]+$`));
   });
 
   test("a clone runs in its own worktree, not the parent's repo", async ({ page }) => {

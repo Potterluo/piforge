@@ -190,7 +190,11 @@ func (s *Service) EnsureWorktree(
 		return wt, nil
 	}
 
-	slug := Slug(branch)
+	// The slug is the branch name without its namespace. Slug() must not run
+	// again here: it truncates at 48 characters, which would cut off the
+	// session-id suffix that makes the name unique and put two sessions back on
+	// one path.
+	slug := branchSlug(branch)
 	path := s.cfg.WorktreePath(sb, slug)
 
 	// Reuse an existing row for this path before touching git, so a retry does
@@ -198,6 +202,20 @@ func (s *Service) EnsureWorktree(
 	if existing, err := s.findWorktreeByPath(ctx, userID, sb.ID, path); err != nil {
 		return nil, err
 	} else if existing != nil {
+		// Only *this* session's own row is a retry. A row at this path owned by
+		// another session is a collision, and silently attaching to it is the
+		// bug that made a second clone of one session share the first clone's
+		// checkout: both derived `piforge/<label>` from the same title, so both
+		// got one worktree and one set of files (FR-2.7).
+		current, cerr := s.cfg.Store.Session(ctx, userID, sess.ID)
+		if cerr != nil {
+			return nil, fmt.Errorf("provision: reload session: %w", cerr)
+		}
+		if current.WorktreeID != existing.ID {
+			return nil, fmt.Errorf(
+				"provision: worktree path %q already belongs to another session (branch %q); refusing to share a checkout",
+				existing.Path, existing.Branch)
+		}
 		if err := s.attach(ctx, userID, sess.ID, existing.ID); err != nil {
 			return nil, err
 		}
@@ -210,8 +228,15 @@ func (s *Service) EnsureWorktree(
 		return existing, nil
 	}
 
+	// A directory with no row is not a worktree this service made: reusing it
+	// would put two sessions in whatever files happen to be there. Report it
+	// rather than letting `git worktree add` fail with its own phrasing.
+	if _, err := os.Stat(path); err == nil {
+		return nil, fmt.Errorf("provision: worktree path %q already exists; refusing to reuse it", path)
+	}
+
 	if err := s.addWorktree(ctx, sb, RepoDir(sb), path, branch); err != nil {
-		return nil, fmt.Errorf("provision: add worktree %s: %w", branch, err)
+		return nil, fmt.Errorf("provision: add worktree %s at %s: %w", branch, path, err)
 	}
 
 	base := ""
@@ -424,6 +449,13 @@ func (s *Service) attach(ctx context.Context, userID, sessionID, worktreeID stri
 // Main sessions use the project's default branch so their commits land where a
 // user expects. Branches get a namespaced name so they can never collide with
 // a human branch and are recognisable in `git branch` output.
+//
+// A branch name must be unique per *session*, not per title: two clones of one
+// session both carry the title "‹label› 的副本" and used to derive the same
+// `piforge/<label>`, so the second clone reused the first clone's worktree and
+// its files (FR-2.7). The session id is unique, so a short tail of it is mixed
+// into the name. The result is stable for one session — provisioning twice
+// yields the same branch — which is what makes EnsureWorktree idempotent.
 func BranchFor(project *contracts.Project, sess *contracts.Session) string {
 	if sess.Kind != contracts.KindBranch {
 		if project.DefaultBranch != "" {
@@ -431,14 +463,45 @@ func BranchFor(project *contracts.Project, sess *contracts.Session) string {
 		}
 		return "main"
 	}
-	if sess.Label != "" {
-		return "piforge/" + Slug(sess.Label)
+	tail := sessionSuffix(sess.ID)
+	base := Slug(sess.Label)
+	if strings.TrimSpace(sess.Label) == "" || base == "session" {
+		// Nothing usable in the label (empty, punctuation-only, or a title made
+		// entirely of characters the slug drops). The id alone still says which
+		// attempt this is.
+		return "piforge/" + tail
 	}
-	short := sess.ID
-	if len(short) > 8 {
-		short = short[len(short)-8:]
+	return "piforge/" + base + "-" + tail
+}
+
+// branchSlug is the part of a branch name that becomes a directory name.
+func branchSlug(branch string) string {
+	if rest, ok := strings.CutPrefix(branch, "piforge/"); ok {
+		return rest
 	}
-	return "piforge/" + Slug(short)
+	return Slug(branch)
+}
+
+// sessionSuffix is the last few characters of a session id, restricted to
+// characters that are safe in a ref and a directory name.
+//
+// Session ids are unique; their tails are random, so the suffix distinguishes
+// two clones that share a title without lengthening the name with the whole id.
+func sessionSuffix(id string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(id)) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	s := b.String()
+	if len(s) > 8 {
+		s = s[len(s)-8:]
+	}
+	if s == "" {
+		return "session"
+	}
+	return s
 }
 
 var slugUnsafe = regexp.MustCompile(`[^a-z0-9]+`)
