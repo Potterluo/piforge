@@ -14,11 +14,31 @@ export interface SessionEventsResult {
   status: StreamStatus;
   /** Pi's current leaf entry, kept current by every resync; branch UI highlights it. */
   leafEntryId: string | null;
+  /**
+   * Bumped whenever an event says the checkout may have changed.
+   *
+   * The file tree and the change list hang their refetch off this instead of
+   * polling: a tool call that wrote a file ends the moment the write landed,
+   * which is exactly when a tree that still says 目录为空 starts lying. It is
+   * deliberately not every event — message deltas arrive per token.
+   */
+  workspace: number;
 }
 
 const MAX_RESYNCS = 2;
 const BASE_DELAY_MS = 1_000;
 const MAX_DELAY_MS = 15_000;
+
+/**
+ * Events that can mean a file on disk changed.
+ *
+ * `tool.ended` is the precise one: the agent's write/edit/bash call has
+ * finished, so whatever it wrote is there. `run.settled` is the backstop for a
+ * run that ends without a tool event being reported. Everything else (deltas,
+ * usage, queue changes) cannot touch the checkout, and refetching on it would
+ * turn a streaming answer into a request per token.
+ */
+const WORKSPACE_EVENT_TYPES = new Set<string>(["tool.ended", "run.settled"]);
 
 /**
  * Every named event the server can emit.
@@ -79,6 +99,7 @@ export function useSessionEvents(sessionId: string | null): SessionEventsResult 
   const [state, dispatch] = useReducer(sessionReducer, initialSessionState);
   const [status, setStatus] = useState<StreamStatus>("connecting");
   const [leafEntryId, setLeafEntryId] = useState<string | null>(null);
+  const [workspace, setWorkspace] = useState(0);
   const [generation, setGeneration] = useState(0);
 
   const lastSeqRef = useRef(0);
@@ -167,6 +188,10 @@ export function useSessionEvents(sessionId: string | null): SessionEventsResult 
 
         lastSeqRef.current = event.seq;
         dispatch({ type: "event", event });
+
+        if (WORKSPACE_EVENT_TYPES.has(event.type)) {
+          setWorkspace((value) => value + 1);
+        }
       };
 
       // Named events carry their type in the `event:` field, so they never
@@ -197,5 +222,5 @@ export function useSessionEvents(sessionId: string | null): SessionEventsResult 
     };
   }, [sessionId, generation]);
 
-  return { state, status, leafEntryId };
+  return { state, status, leafEntryId, workspace };
 }

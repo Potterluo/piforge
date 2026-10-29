@@ -25,8 +25,8 @@ import api from "@/lib/api/client";
 import { toast } from "sonner";
 import type { DiffScope } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { ChangeGroups } from "@/components/workspace/git-changes";
-import { useGitData } from "@/components/workspace/git-data";
+import { ChangeList } from "@/components/workspace/git-changes";
+import { changeRows, useGitData } from "@/components/workspace/git-data";
 import { GitDiffView } from "@/components/workspace/git-diff";
 import { PanelError, PanelSkeleton } from "@/components/workspace/panel-state";
 import { useAsync } from "@/components/workspace/use-async";
@@ -129,9 +129,12 @@ export function GitChangesPanel() {
 
   const status = git.status.data;
   const changes = React.useMemo(() => status?.changes ?? [], [status]);
+  // One row per path; `stagedPaths` is derived from the same model, so the
+  // commit button and the list can never disagree about what is in the index.
+  const rows = React.useMemo(() => changeRows(changes), [changes]);
   const stagedPaths = React.useMemo(
-    () => changes.filter((change) => change.index !== " " && change.index !== "?").map((c) => c.path),
-    [changes],
+    () => rows.filter((row) => row.canUnstage).map((row) => row.path),
+    [rows],
   );
 
   const mutate = React.useCallback(
@@ -192,7 +195,7 @@ export function GitChangesPanel() {
 
   // `?.` on the array too: a null `changes` from an older server must not
   // crash the whole panel.
-  const dirty = (status?.changes?.length ?? 0) > 0;
+  const dirty = rows.length > 0;
 
   return (
     <div data-testid="git-panel" className="flex h-full min-h-0 min-w-0 flex-col">
@@ -218,7 +221,7 @@ export function GitChangesPanel() {
             dirty ? "bg-amber-500/10 text-amber-600 dark:text-amber-400" : "bg-muted text-muted-foreground",
           )}
         >
-          {dirty ? `${changes.length} 个改动` : "干净"}
+          {dirty ? `${rows.length} 个改动` : "干净"}
         </span>
 
         <div className="ms-auto flex items-center gap-1">
@@ -251,8 +254,8 @@ export function GitChangesPanel() {
               ) : git.status.error ? (
                 <PanelError message={git.status.error} onRetry={git.status.reload} />
               ) : (
-                <ChangeGroups
-                  changes={changes}
+                <ChangeList
+                  rows={rows}
                   selectedPath={selectedPath}
                   onSelect={setSelectedPath}
                   onStage={stage}

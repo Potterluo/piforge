@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { useDebouncedCallback } from "@/hooks/use-debounced-callback";
 import { GitProvider } from "@/components/workspace/git-data";
 import { QuickOpen } from "@/components/workspace/quick-open";
 import { FilePreview } from "@/components/workspace/file-preview";
@@ -81,6 +82,18 @@ export function WorkspacePanels({
     setRevision((value) => value + 1);
     setOpenPath(path);
     setTab("files");
+  }, []);
+
+  // A shell command is a real write path, and the session event stream does not
+  // carry it. The PTY's output is the signal that something ran, so it bumps the
+  // revision the file tree refetches on — coalesced, because a single command
+  // prints many chunks.
+  const handleTerminalOutput = useDebouncedCallback(() => {
+    setRevision((value) => value + 1);
+  }, 400);
+
+  const handleSaved = React.useCallback(() => {
+    setRevision((value) => value + 1);
   }, []);
 
   const coverageRef = React.useRef<TerminalPaneHandle | null>(null);
@@ -232,6 +245,7 @@ export function WorkspacePanels({
                   key={sessionId}
                   sessionId={sessionId}
                   path={openPath}
+                  onSaved={handleSaved}
                   onClose={() => setOpenPath(null)}
                 />
               </ResizablePanel>
@@ -263,7 +277,12 @@ export function WorkspacePanels({
                   </MarkerContent>
                 </Marker>
               ) : null}
-              <TerminalPane ref={coverageRef} sessionId={sessionId} className="min-h-0 flex-1" />
+              <TerminalPane
+                ref={coverageRef}
+                sessionId={sessionId}
+                className="min-h-0 flex-1"
+                onOutput={handleTerminalOutput}
+              />
             </div>
           </TabsContent>
 
@@ -310,6 +329,7 @@ export function WorkspacePanels({
                 onOpenFile={handleOpenFile}
                 onRevealInTerminal={handleRevealInTerminal}
                 onCaptured={handleCaptured}
+                onTerminalOutput={handleTerminalOutput}
                 coverageRef={coverageRef}
                 revealTarget={revealTarget}
                 sessionKey={`split-${sessionId}`}
@@ -350,6 +370,7 @@ function SharedPanel({
   onOpenFile,
   onRevealInTerminal,
   onCaptured,
+  onTerminalOutput,
   coverageRef,
   revealTarget,
   sessionKey,
@@ -360,6 +381,8 @@ function SharedPanel({
   onOpenFile: (path: string) => void;
   onRevealInTerminal: (path: string) => void;
   onCaptured: (path: string) => void;
+  /** The same coalesced "the shell printed something" signal as the primary pane. */
+  onTerminalOutput: () => void;
   coverageRef: React.RefObject<TerminalPaneHandle | null>;
   revealTarget: string | null;
   sessionKey: string;
@@ -397,6 +420,7 @@ function SharedPanel({
             ref={coverageRef}
             sessionId={sessionId}
             className="min-h-0 flex-1"
+            onOutput={onTerminalOutput}
           />
         </div>
       );

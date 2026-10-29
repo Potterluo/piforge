@@ -142,11 +142,20 @@ export interface TerminalPaneProps {
   /** Tab name inside the session; several terminals may coexist. */
   tab?: string;
   onData?: (chunk: string) => void;
+  /**
+   * Fired for every chunk the shell prints.
+   *
+   * This is the workspace's only signal that a *terminal* command ran: the
+   * session event stream carries the agent's tool calls, not this PTY, so a
+   * file created with `echo > file` would otherwise stay invisible to the file
+   * tree until someone clicked refresh.
+   */
+  onOutput?: (chunk: string) => void;
   className?: string;
 }
 
 export const TerminalPane = React.forwardRef<TerminalPaneHandle, TerminalPaneProps>(
-  function TerminalPane({ sessionId, connected, tab = "main", onData, className }, ref) {
+  function TerminalPane({ sessionId, connected, tab = "main", onData, onOutput, className }, ref) {
     const surfaceRef = React.useRef<TerminalSurfaceHandle | null>(null);
     const [fontSize, setFontSize] = React.useState(12);
     const pty = usePtySession({ sessionId, tab, enabled: connected !== false });
@@ -165,9 +174,19 @@ export const TerminalPane = React.forwardRef<TerminalPaneHandle, TerminalPanePro
       [],
     );
 
+    // Read through a ref: the caller passes an inline callback, and resubscribing
+    // to the socket on every render would drop bytes that arrived in between.
+    const outputRef = React.useRef(onOutput);
+    React.useEffect(() => {
+      outputRef.current = onOutput;
+    });
+
     // Feed every byte the relay delivers into the terminal.
     React.useEffect(() => {
-      return pty.onData((chunk) => surfaceRef.current?.write(chunk));
+      return pty.onData((chunk) => {
+        surfaceRef.current?.write(chunk);
+        outputRef.current?.(chunk);
+      });
     }, [pty]);
 
     const handleSearch = React.useCallback((term: string) => {

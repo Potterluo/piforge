@@ -64,37 +64,68 @@ export function useGitData(): GitData {
   return value;
 }
 
-export interface ChangeGroups {
-  staged: GitChange[];
-  unstaged: GitChange[];
-  untracked: GitChange[];
+export type ChangeState = "staged" | "unstaged" | "partial" | "untracked";
+
+export interface ChangeRowModel {
+  path: string;
+  change: GitChange;
+  /** Exactly one of the four states, so a path is described once. */
+  state: ChangeState;
+  /** Staging the rest of this path is a meaningful action. */
+  canStage: boolean;
+  /** Taking it back out of the index is a meaningful action. */
+  canUnstage: boolean;
 }
 
-/**
- * Splits porcelain `XY` into the three groups the PRD asks for.
- *
- * `X` is the index column, `Y` the worktree column. `??` is untracked, and a
- * file can legitimately appear in both staged and unstaged (stage part of it,
- * keep editing) — that is why these are three lists, not a partition.
- */
-export function groupChanges(changes: GitChange[]): ChangeGroups {
-  const staged: GitChange[] = [];
-  const unstaged: GitChange[] = [];
-  const untracked: GitChange[] = [];
+/** A status letter that means "unchanged in this column". */
+const UNCHANGED = new Set([" ", ".", ""]);
 
-  for (const change of changes) {
+/**
+ * One row per path, with the state it is in.
+ *
+ * `git status --porcelain=v2` writes `.` in an unchanged column, not a space.
+ * Comparing against a space made every fully staged file look modified in the
+ * worktree as well, so 全部暂存 produced four rows under 已暂存 *and* the same
+ * four under 未暂存, each labelled 部分暂存 — eight rows for four changes, and no
+ * way to tell what the commit would contain.
+ *
+ * Rows are keyed by path and never repeated: a partly staged file is one row
+ * whose state is `partial`, not two rows that each tell half the story.
+ */
+export function changeRows(changes: GitChange[]): ChangeRowModel[] {
+  const rows: ChangeRowModel[] = [];
+  const seen = new Set<string>();
+
+  for (const change of changes ?? []) {
+    const path = change?.path;
+    // A duplicate path would be a second row for the same file; the server
+    // reports one, and a client that repeats it is the bug this fixes.
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+
     const index = change.index ?? " ";
     const worktree = change.worktree ?? " ";
+    const untracked = index === "?" || worktree === "?";
+    const staged = !untracked && !UNCHANGED.has(index);
+    const unstaged = !untracked && !UNCHANGED.has(worktree);
 
-    if (index === "?" || worktree === "?") {
-      untracked.push(change);
-      continue;
-    }
-    if (index !== " ") staged.push(change);
-    if (worktree !== " ") unstaged.push(change);
+    rows.push({
+      path,
+      change,
+      state: untracked ? "untracked" : staged && unstaged ? "partial" : staged ? "staged" : "unstaged",
+      canStage: untracked || unstaged,
+      canUnstage: staged,
+    });
   }
 
-  return { staged, unstaged, untracked };
+  return rows;
+}
+
+/** Paths already in the index — what a plain `git commit` would take. */
+export function stagedPaths(changes: GitChange[]): string[] {
+  return changeRows(changes)
+    .filter((row) => row.canUnstage)
+    .map((row) => row.path);
 }
 
 /** Status letter for a change row, mirroring the file tree's chips. */

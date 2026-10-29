@@ -91,6 +91,12 @@ export default defineConfig({
         // start timing out. Reaping is a product behaviour; the harness uses a short
         // TTL so it doubles as the thing that keeps the run honest.
         PIFORGE_AGENT_IDLE_TTL: "45s",
+        // A PTY outlives the socket that opened it (that is how a reconnect
+        // replays scrollback), so one long-lived server accumulates a terminal
+        // per tab this suite ever opened. The node default is 64; a full run
+        // opens more than that, and the 65th terminal spec then failed with
+        // "term: too many sessions" depending only on test order.
+        PIFORGE_TERM_MAX_SESSIONS: "256",
       },
     },
     {

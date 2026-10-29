@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
@@ -23,6 +25,7 @@ func (r *Runner) Diff(ctx context.Context, root string, req contracts.DiffReques
 		return nil, err
 	}
 	args := []string{"diff", "--no-color", "--no-ext-diff", "--find-renames", "-U3", "--submodule=short"}
+	var relPath string
 
 	switch req.Scope {
 	case "", contracts.ScopeUnstaged:
@@ -56,6 +59,7 @@ func (r *Runner) Diff(ctx context.Context, root string, req contracts.DiffReques
 		if perr != nil {
 			return nil, perr
 		}
+		relPath = rel
 		args = append(args, "--", rel)
 	}
 
@@ -64,10 +68,57 @@ func (r *Runner) Diff(ctx context.Context, root string, req contracts.DiffReques
 		return nil, fmt.Errorf("gitx: diff %s: %w", dir, err)
 	}
 	files := ParsePatch(res.Stdout)
+	// `git diff` says nothing about a path the index has never seen, so a brand
+	// new file reviewed before staging reported "no difference" — the one file a
+	// reviewer most wants to read. `--no-index` against the null device prints
+	// the same patch git would print once the file were added.
+	if len(files) == 0 && relPath != "" && (req.Scope == "" || req.Scope == contracts.ScopeUnstaged) {
+		files = r.untrackedDiff(ctx, dir, relPath)
+	}
 	if files == nil {
 		files = []contracts.FileDiff{}
 	}
 	return files, nil
+}
+
+// untrackedDiff renders a never-added file as an addition.
+//
+// Only a path git reports as untracked is eligible: a tracked file with no diff
+// is genuinely unchanged, and `--no-index` would happily invent a patch for it.
+// The file must also be a regular file — status collapses an untracked
+// directory into a single "dir/" row, and diffing a directory against the null
+// device fails with "Could not access".
+func (r *Runner) untrackedDiff(ctx context.Context, dir, rel string) []contracts.FileDiff {
+	if rel == "" {
+		return nil
+	}
+	info, err := os.Stat(filepath.Join(dir, rel))
+	if err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	listed, err := r.Run(ctx, dir, "ls-files", "--others", "--exclude-standard", "--", rel)
+	if err != nil || strings.TrimSpace(listed.Stdout) == "" {
+		return nil
+	}
+	// `--no-index` exits 1 whenever the two sides differ, which is the expected
+	// outcome here; only any other failure means the diff could not be produced.
+	res, err := r.Run(ctx, dir,
+		"diff", "--no-color", "--no-ext-diff", "--no-index", "-U3",
+		"--", os.DevNull, rel)
+	if err != nil && ExitCode(err) != 1 {
+		return nil
+	}
+	files := ParsePatch(res.Stdout)
+	for i := range files {
+		// A file that is not in the index can only be an addition, whatever the
+		// patch header happened to call it.
+		files[i].Status = "added"
+		files[i].OldPath = ""
+		// `--no-index` is given OS paths and echoes them back with the local
+		// separator; every other path in this package is slash-separated.
+		files[i].Path = filepath.ToSlash(files[i].Path)
+	}
+	return files
 }
 
 // DiffPatch returns the raw unified diff for the same scopes as Diff.

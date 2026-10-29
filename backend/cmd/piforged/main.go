@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -574,6 +575,12 @@ func run() error {
 	termCfg := term.Config{
 		RingBytes: 4 << 20,
 		Launcher:  launcher,
+		// A terminal outlives the socket that opened it — that is what lets a
+		// reconnect replay its scrollback — so a long-lived process accumulates
+		// one per tab ever opened. The default cap (64) is a per-node safety
+		// limit; the e2e suite opens far more terminals than that in one run,
+		// hence the knob.
+		MaxSessions: envInt("PIFORGE_TERM_MAX_SESSIONS", 0),
 		// The key is a worktree id: the HTTP layer already proved that the
 		// caller owns the session which owns this worktree.
 		WorkDir: func(ctx context.Context, worktreeID string) (string, error) {
@@ -1097,6 +1104,18 @@ func envDuration(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
+		}
+	}
+	return def
+}
+
+// envInt reads a positive integer from the environment, falling back to def
+// when it is missing, unparseable or not positive. Zero means "unset", which is
+// what the config structs treat as "use the default".
+func envInt(key string, def int) int {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
 		}
 	}
 	return def

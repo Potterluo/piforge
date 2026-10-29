@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api, type CreateProjectInput, type CreateSessionInput, type SendMessageInput } from "@/lib/api/client";
-import type { Session } from "@/lib/types";
+import { ApiError, type Session } from "@/lib/types";
 
 /** Query keys live in one place so invalidation cannot drift from fetching. */
 export const qk = {
@@ -65,6 +65,9 @@ export function useSession(sessionId: string) {
     queryKey: qk.session(sessionId),
     queryFn: () => api.sessions.get(sessionId),
     enabled: sessionId.length > 0,
+    // A 404 means the session does not exist; retrying it three times only
+    // delays the not-found page. Every other failure keeps its retries.
+    retry: (attempt, error) => !(error instanceof ApiError && error.status === 404) && attempt < 2,
   });
 }
 

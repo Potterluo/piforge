@@ -44,6 +44,12 @@ import {
 export interface FilePreviewProps {
   sessionId: string;
   path: string | null;
+  /**
+   * Called after a save lands. The tree refetches on it: creating a file from
+   * this editor and leaving the tree one row behind is the same lie as a stale
+   * tree, just smaller.
+   */
+  onSaved?: () => void;
   onClose?: () => void;
 }
 
@@ -69,7 +75,7 @@ function toImageSrc(content: FileContent): string | null {
  * `preview/`, which is what keeps this file readable at ~200 lines and makes
  * adding pdf/pdfjs later a one-line change.
  */
-export function FilePreview({ sessionId, path, onClose }: FilePreviewProps) {
+export function FilePreview({ sessionId, path, onSaved, onClose }: FilePreviewProps) {
   // Editing is a plain textarea on purpose: this is a coding tool whose real editor
   // is the agent, and a half-wired Monaco would be a bigger promise than it keeps.
   // What matters is that a one-line fix does not require leaving the page (FR-7.1).
@@ -100,12 +106,13 @@ export function FilePreview({ sessionId, path, onClose }: FilePreviewProps) {
       setEditing(false);
       setDraft("");
       file.reload();
+      onSaved?.();
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : "保存失败");
     } finally {
       setSaving(false);
     }
-  }, [draft, file, path, sessionId]);
+  }, [draft, file, onSaved, path, sessionId]);
 
   const inlineUrl = React.useMemo(
     () => (path ? api.files.inlineUrl(sessionId, path) : ""),

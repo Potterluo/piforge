@@ -6,6 +6,7 @@ import {
   ArrowDownIcon,
   ArrowUpIcon,
   FolderOpenIcon,
+  PlusIcon,
   RefreshCwIcon,
   SearchIcon,
 } from "lucide-react";
@@ -22,13 +23,29 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import api from "@/lib/api/client";
 import { baseName, gitLetterMap } from "@/lib/fs/file-kind";
 import type { FileNode } from "@/lib/types";
+import { useDebouncedCallback } from "@/hooks/use-debounced-callback";
 import { PanelError, PanelSkeleton } from "@/components/workspace/panel-state";
 import { useAsync } from "@/components/workspace/use-async";
 import { useOptionalSessionEventState } from "@/components/session/session-events-provider";
@@ -77,19 +94,89 @@ export function FileTree({ sessionId, revision = 0, activePath, onOpenFile, onRe
   const [loadingDirs, setLoadingDirs] = React.useState<string[]>([]);
   const [pending, setPending] = React.useState<PendingDelete | null>(null);
   const [actionError, setActionError] = React.useState<string | null>(null);
+  const [newFileOpen, setNewFileOpen] = React.useState(false);
+  const [newPath, setNewPath] = React.useState("");
+  const [creating, setCreating] = React.useState(false);
+  const [createError, setCreateError] = React.useState<string | null>(null);
 
-  // The switch is part of the query key: the server decides what to list, so
-  // flipping it has to refetch rather than hide rows the client already has.
-  // The agent writes files during a run; a tree that waits for a click is wrong
-  // about the workspace for as long as the user trusts it.
-  const settled = useOptionalSessionEventState()?.state.settled ?? 0;
+  // Bumped when something says the checkout changed; it is part of the query
+  // keys below, so a bump refetches. Coalesced, because several signals can
+  // describe one change (a tool ends, the run settles, the window gets focus).
+  const [sync, setSync] = React.useState(0);
 
-  const tree = useAsync(`files:${sessionId}:${showIgnored ? "all" : "tracked"}:${settled}:${revision}`, async () => {
-    const response = await api.files.tree(sessionId, "", 2, showIgnored);
-    return { nodes: response.nodes, dirs: collectDirs(response.nodes) };
+  // The agent writes files during a run and the terminal writes them whenever
+  // the user types a command; a tree that waits for a click is wrong about the
+  // workspace for as long as the user trusts it.
+  const events = useOptionalSessionEventState();
+  const workspace = events?.workspace ?? 0;
+  const settled = events?.state.settled ?? 0;
+
+  // `extraDirs` is read through a ref inside the refresh callback so a re-render
+  // does not re-create the debounced function (which would restart its timer).
+  const extraDirsRef = React.useRef(extraDirs);
+  React.useEffect(() => {
+    extraDirsRef.current = extraDirs;
   });
 
-  const status = useAsync(`git-status:${sessionId}`, () => api.git.status(sessionId));
+  const refreshTree = React.useCallback(async () => {
+    setSync((value) => value + 1);
+    // Directories the user expanded are loaded separately from the root
+    // response, so a refresh that only re-read the root would leave them stale.
+    // They are few (one per expansion) and the whole thing is debounced.
+    const paths = Object.keys(extraDirsRef.current);
+    if (paths.length === 0) return;
+    const refreshed = await Promise.all(
+      paths.map(async (path) => {
+        try {
+          const response = await api.files.tree(sessionId, path, 1, showIgnored);
+          return [path, response.nodes] as const;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    const next: Record<string, FileNode[]> = {};
+    for (const entry of refreshed) {
+      if (entry) next[entry[0]] = entry[1];
+    }
+    if (Object.keys(next).length > 0) {
+      setExtraDirs((previous) => ({ ...previous, ...next }));
+    }
+  }, [sessionId, showIgnored]);
+
+  const scheduleRefresh = useDebouncedCallback(refreshTree, 400);
+
+  // Every signal is a *reason to think* the checkout changed; none of them is a
+  // reason to fetch on its own, which is what the debounce is for.
+  React.useEffect(() => {
+    if (workspace === 0 && settled === 0 && revision === 0) return;
+    scheduleRefresh();
+  }, [workspace, settled, revision, scheduleRefresh]);
+
+  // Coming back to the tab is the one signal the event stream cannot give: a
+  // command run while the window was in the background still has to show up.
+  React.useEffect(() => {
+    const onFocus = () => scheduleRefresh();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") scheduleRefresh();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [scheduleRefresh]);
+
+  const tree = useAsync(
+    `files:${sessionId}:${showIgnored ? "all" : "tracked"}:${sync}`,
+    async () => {
+      const response = await api.files.tree(sessionId, "", 2, showIgnored);
+      return { nodes: response.nodes, dirs: collectDirs(response.nodes) };
+    },
+  );
+
+  const status = useAsync(`git-status:${sessionId}:${sync}`, () => api.git.status(sessionId));
 
   const dirs = React.useMemo(
     () => ({ ...(tree.data?.dirs ?? {}), ...extraDirs }),
@@ -178,6 +265,37 @@ export function FileTree({ sessionId, revision = 0, activePath, onOpenFile, onRe
       setActionError(error instanceof Error ? error.message : "删除失败");
     }
   }, [pending, sessionId, tree]);
+
+  const openNewFile = React.useCallback(() => {
+    setNewPath("");
+    setCreateError(null);
+    setNewFileOpen(true);
+  }, []);
+
+  // The empty state used to be a dead end: it described the workspace and
+  // offered nothing to do about it. Creating the file is the action a user
+  // staring at an empty directory actually wants (FR-7.1).
+  const handleCreateFile = React.useCallback(async () => {
+    const path = newPath.trim();
+    if (!path) {
+      setCreateError("请输入文件路径");
+      return;
+    }
+    setCreating(true);
+    setCreateError(null);
+    try {
+      await api.files.write(sessionId, path, "");
+      setNewFileOpen(false);
+      setNewPath("");
+      setExtraDirs({});
+      tree.reload();
+      onOpenFile(path);
+    } catch (error) {
+      setCreateError(error instanceof Error ? error.message : "创建失败");
+    } finally {
+      setCreating(false);
+    }
+  }, [newPath, onOpenFile, sessionId, tree]);
 
   const loading = tree.loading && !tree.data;
   const error = tree.error;
@@ -270,6 +388,14 @@ export function FileTree({ sessionId, revision = 0, activePath, onOpenFile, onRe
               {filter ? "筛选只覆盖已经展开过的目录。" : "这个工作目录里还没有文件。"}
             </EmptyDescription>
           </EmptyHeader>
+          {filter ? null : (
+            <EmptyContent>
+              <Button size="sm" data-testid="file-create" onClick={openNewFile}>
+                <PlusIcon />
+                新建文件
+              </Button>
+            </EmptyContent>
+          )}
         </Empty>
       ) : null}
 
@@ -302,6 +428,47 @@ export function FileTree({ sessionId, revision = 0, activePath, onOpenFile, onRe
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <Dialog open={newFileOpen} onOpenChange={setNewFileOpen}>
+        <DialogContent data-testid="file-create-dialog">
+          <DialogHeader>
+            <DialogTitle>新建文件</DialogTitle>
+            <DialogDescription>
+              路径相对于工作目录，可以用 / 建子目录（例如 src/main.ts）。创建后会直接打开。
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            autoFocus
+            value={newPath}
+            data-testid="file-create-path"
+            aria-label="新文件路径"
+            placeholder="src/main.ts"
+            className="font-mono text-xs"
+            onChange={(event) => setNewPath(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void handleCreateFile();
+            }}
+          />
+          {createError ? (
+            <p className="text-[11px] text-destructive" data-testid="file-create-error">
+              {createError}
+            </p>
+          ) : null}
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setNewFileOpen(false)}>
+              取消
+            </Button>
+            <Button
+              size="sm"
+              data-testid="file-create-submit"
+              disabled={creating}
+              onClick={() => void handleCreateFile()}
+            >
+              {creating ? "创建中…" : "创建"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

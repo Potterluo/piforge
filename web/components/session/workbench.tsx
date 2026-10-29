@@ -2,11 +2,20 @@
 
 import * as React from "react";
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { GitBranch, LoaderCircle, PanelRight, ScrollText } from "lucide-react";
+import { AlertTriangleIcon, GitBranch, LoaderCircle, PanelRight, ScrollText } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import {
   ResizableHandle,
   ResizablePanel,
@@ -22,6 +31,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { WorkspacePanels } from "@/components/workspace/workspace-panels";
 import { api } from "@/lib/api/client";
+import { ApiError } from "@/lib/types";
 import { toast } from "sonner";
 import { sessionKindLabel, shortModel } from "@/lib/session/format";
 import { qk, useProject, useProviders, useSession } from "@/lib/session/queries";
@@ -79,9 +89,68 @@ function ConnectionBadge({ status }: { status: StreamStatus }) {
   );
 }
 
-function WorkbenchBody({ sessionId, projectId }: { sessionId: string; projectId: string }) {
+/**
+ * The page for a session id the server does not know.
+ *
+ * A deleted or mistyped id used to render the whole live workbench: an enabled
+ * composer pointed at nothing, 重连中 forever while the event stream retried a
+ * 404, and every workspace panel firing its own 404. There is nothing to type
+ * into, so this says what happened and offers the two ways back.
+ */
+export function SessionNotFound({
+  sessionId,
+  projectId,
+}: {
+  sessionId: string;
+  projectId: string;
+}) {
+  return (
+    <div
+      data-testid="session-not-found"
+      className="flex h-full min-h-0 flex-1 items-center justify-center p-6"
+    >
+      <Empty className="max-w-md border border-dashed border-border">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <AlertTriangleIcon />
+          </EmptyMedia>
+          <EmptyTitle>会话不存在</EmptyTitle>
+          <EmptyDescription>
+            这个会话可能已经被删除，或者链接里的 id 不对（<code className="font-mono">{sessionId}</code>
+            ）。没有可以继续对话的内容。
+          </EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent>
+          <Button size="sm" data-testid="session-not-found-project" render={<Link href={`/p/${projectId}`} />}>
+            返回项目
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            data-testid="session-not-found-home"
+            render={<Link href="/" />}
+          >
+            所有项目
+          </Button>
+        </EmptyContent>
+      </Empty>
+    </div>
+  );
+}
+
+/** The session query, passed down so the page reads the session exactly once. */
+type SessionQuery = ReturnType<typeof useSession>;
+
+function WorkbenchBody({
+  sessionId,
+  projectId,
+  session,
+}: {
+  sessionId: string;
+  projectId: string;
+  session: SessionQuery;
+}) {
   const { state, status } = useSessionEventState();
-  const session = useSession(sessionId);
   // The first message names an untitled session on the server. Nothing pushes
   // that title, so a settled run is the cue to re-read it.
   const queryClient = useQueryClient();
@@ -273,11 +342,23 @@ function WorkbenchBody({ sessionId, projectId }: { sessionId: string; projectId:
 /**
  * The workbench: transcript + composer on the left, workspace panels on the
  * right, sidecar as an overlay dock. One SSE subscription feeds all of them.
+ *
+ * The session row is read *before* anything that assumes a session exists: an
+ * unknown id must not mount the event stream, the composer or the panels.
  */
 export function Workbench({ sessionId, projectId }: { sessionId: string; projectId: string }) {
+  const session = useSession(sessionId);
+
+  if (session.error instanceof ApiError && session.error.status === 404) {
+    return <SessionNotFound sessionId={sessionId} projectId={projectId} />;
+  }
+  // First paint only. A non-404 failure still renders the workbench, which has
+  // its own error states, rather than a skeleton that never resolves.
+  if (!session.data && !session.error) return <WorkbenchSkeleton />;
+
   return (
     <SessionEventsProvider sessionId={sessionId}>
-      <WorkbenchBody sessionId={sessionId} projectId={projectId} />
+      <WorkbenchBody sessionId={sessionId} projectId={projectId} session={session} />
     </SessionEventsProvider>
   );
 }
