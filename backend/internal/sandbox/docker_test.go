@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -135,5 +136,29 @@ func TestDockerProviderPublishesTheAPIPort(t *testing.T) {
 	}
 	if strings.HasSuffix(endpoint, ":8080") {
 		t.Logf("the published port happens to be 8080; that is fine, it is still read back")
+	}
+}
+
+// The terminal has a host worktree path and needs the path the container sees.
+func TestContainerPath(t *testing.T) {
+	root := t.TempDir()
+	provider := &Docker{cfg: DockerConfig{DataRoot: root}}
+
+	got, err := provider.ContainerPath(filepath.Join(root, "sbx", "repo", "worktrees", "feat"))
+	if err != nil {
+		t.Fatalf("ContainerPath: %v", err)
+	}
+	if got != "/workspace/sbx/repo/worktrees/feat" {
+		t.Fatalf("mapped = %q", got)
+	}
+
+	// A sandbox record may already carry the container path.
+	got, err = provider.ContainerPath("/workspace/repo")
+	if err != nil || got != "/workspace/repo" {
+		t.Fatalf("already-mapped = %q, %v", got, err)
+	}
+
+	if _, err := provider.ContainerPath(t.TempDir()); err == nil {
+		t.Fatal("a path outside the mounted workspace was accepted")
 	}
 }

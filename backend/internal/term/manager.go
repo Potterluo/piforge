@@ -22,12 +22,20 @@
 // Unix uses github.com/creack/pty for a real TTY (vim, htop, top work).
 // Windows falls back to stdin/stdout pipes: echo-level behaviour works, TUI
 // semantics and resize do not. Both satisfy the same ptyProcess interface.
+//
+// # Remote sessions
+//
+// A Manager can instead place a tab inside an AIO Sandbox container (Config
+// Remote). That shell is command-oriented rather than a PTY stream, so
+// RemoteSession adapts it to the same ring buffer and byte surface; see
+// remote.go. The host PTY remains the default when Remote is nil.
 package term
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/piforge/piforge/backend/internal/aio"
 	"github.com/piforge/piforge/backend/internal/isolate"
 	"sort"
 	"strings"
@@ -75,6 +83,18 @@ type Config struct {
 	// WorkDir resolves the working directory for a sandbox. Returning an error
 	// fails Open. When nil the current process directory is used.
 	WorkDir func(ctx context.Context, sandboxID string) (string, error)
+	// Remote, when set, can place the terminal inside an AIO Sandbox container
+	// instead of starting a host PTY. It returns the sandbox client, the shell
+	// session id to create, and the directory that session should start in.
+	//
+	// The id is whatever Open was passed. The HTTP layer currently passes a
+	// worktree id, so a resolver has to map it to its sandbox.
+	//
+	// Returning an error, or a nil client, falls back to the host PTY: nil is
+	// the default path and stays untouched. When a client is returned but the
+	// container refuses to create the session, Open fails instead of silently
+	// running the terminal on the wrong machine.
+	Remote func(ctx context.Context, sandboxID string) (client *aio.Client, sessionID string, cwd string, err error)
 }
 
 func (c Config) normalise() Config {
@@ -155,12 +175,19 @@ type Manager struct {
 
 	mu       sync.RWMutex
 	sessions map[string]*session
-	closed   bool
+	// remotes are tabs whose shell lives in an AIO Sandbox container. They
+	// keep the same key and replay semantics as host PTYs.
+	remotes map[string]*RemoteSession
+	closed  bool
 }
 
 // New builds a Manager.
 func New(cfg Config) *Manager {
-	return &Manager{cfg: cfg.normalise(), sessions: make(map[string]*session)}
+	return &Manager{
+		cfg:      cfg.normalise(),
+		sessions: make(map[string]*session),
+		remotes:  make(map[string]*RemoteSession),
+	}
 }
 
 // Config returns the effective configuration.
@@ -187,7 +214,21 @@ func (m *Manager) Open(ctx context.Context, sandboxID, tabID, shell string) (*In
 		m.mu.RUnlock()
 		return &info, nil
 	}
+	if r, ok := m.remotes[tabID]; ok && !r.isClosed() {
+		info, _ := r.Info(tabID)
+		m.mu.RUnlock()
+		return &info, nil
+	}
 	m.mu.RUnlock()
+
+	// A docker-backed terminal is opened in the container and never resolves a
+	// host shell: the machine that matters is the one holding the files.
+	if m.cfg.Remote != nil {
+		client, sessionID, cwd, rerr := m.cfg.Remote(ctx, sandboxID)
+		if rerr == nil && client != nil {
+			return m.openRemote(ctx, sandboxID, tabID, client, sessionID, cwd)
+		}
+	}
 
 	shellPath, err := resolveShell(firstNonEmpty(shell, m.cfg.Shell))
 	if err != nil {
@@ -204,6 +245,11 @@ func (m *Manager) Open(ctx context.Context, sandboxID, tabID, shell string) (*In
 	m.mu.Lock()
 	if s, ok := m.sessions[tabID]; ok && !s.isClosed() {
 		info := s.info()
+		m.mu.Unlock()
+		return &info, nil
+	}
+	if r, ok := m.remotes[tabID]; ok && !r.isClosed() {
+		info, _ := r.Info(tabID)
 		m.mu.Unlock()
 		return &info, nil
 	}
@@ -242,8 +288,70 @@ func (m *Manager) Open(ctx context.Context, sandboxID, tabID, shell string) (*In
 	return &info, nil
 }
 
+// openRemote creates the container-side shell and registers it under tabID.
+//
+// The session is inserted before Start so that a failed CreateShellSession can
+// be removed by identity rather than racing another Open for the same tab.
+func (m *Manager) openRemote(ctx context.Context, sandboxID, tabID string, client *aio.Client, sessionID, cwd string) (*Info, error) {
+	remote, err := NewRemoteSession(RemoteConfig{
+		Client:    client,
+		SandboxID: sandboxID,
+		TabID:     tabID,
+		SessionID: sessionID,
+		Cwd:       cwd,
+		RingBytes: m.cfg.RingBytes,
+		ReadChunk: m.cfg.ReadChunk,
+		Cols:      m.cfg.Cols,
+		Rows:      m.cfg.Rows,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	m.mu.Lock()
+	if s, ok := m.sessions[tabID]; ok && !s.isClosed() {
+		info := s.info()
+		m.mu.Unlock()
+		_ = remote.Close(tabID)
+		return &info, nil
+	}
+	if r, ok := m.remotes[tabID]; ok && !r.isClosed() {
+		info, _ := r.Info(tabID)
+		m.mu.Unlock()
+		_ = remote.Close(tabID)
+		return &info, nil
+	}
+	if m.closed {
+		m.mu.Unlock()
+		_ = remote.Close(tabID)
+		return nil, ErrClosed
+	}
+	if live := m.liveCountLocked(); live >= m.cfg.MaxSessions {
+		m.mu.Unlock()
+		_ = remote.Close(tabID)
+		return nil, fmt.Errorf("%w: %d live sessions", ErrTooManySessions, live)
+	}
+	m.remotes[tabID] = remote
+	m.mu.Unlock()
+
+	info, err := remote.Start(ctx)
+	if err != nil {
+		m.mu.Lock()
+		if m.remotes[tabID] == remote {
+			delete(m.remotes, tabID)
+		}
+		m.mu.Unlock()
+		_ = remote.Close(tabID)
+		return nil, err
+	}
+	return info, nil
+}
+
 // Write sends bytes to the shell.
 func (m *Manager) Write(tabID string, p []byte) error {
+	if r := m.remote(tabID); r != nil {
+		return r.Write(tabID, p)
+	}
 	s := m.session(tabID)
 	if s == nil {
 		return fmt.Errorf("%w: %s", ErrNoSession, tabID)
@@ -263,6 +371,9 @@ func (m *Manager) Write(tabID string, p []byte) error {
 // Resize sets the window size and forwards it to the PTY. It always records the
 // size, even on Windows where the underlying pipe has no window size.
 func (m *Manager) Resize(tabID string, cols, rows int) error {
+	if r := m.remote(tabID); r != nil {
+		return r.Resize(tabID, cols, rows)
+	}
 	s := m.session(tabID)
 	if s == nil {
 		return fmt.Errorf("%w: %s", ErrNoSession, tabID)
@@ -294,11 +405,17 @@ func (m *Manager) Close(tabID string) error {
 	if ok {
 		delete(m.sessions, tabID)
 	}
-	m.mu.Unlock()
-	if !ok {
-		return nil
+	r, remote := m.remotes[tabID]
+	if remote {
+		delete(m.remotes, tabID)
 	}
-	s.close()
+	m.mu.Unlock()
+	if ok {
+		s.close()
+	}
+	if remote {
+		_ = r.Close(tabID)
+	}
 	return nil
 }
 
@@ -309,6 +426,9 @@ func (m *Manager) Close(tabID string) error {
 // offset is older than the ring's window the oldest available byte is returned
 // instead and the session is flagged lossy.
 func (m *Manager) Read(tabID string, fromOffset int64) (data []byte, next int64, eof bool) {
+	if r := m.remote(tabID); r != nil {
+		return r.Read(tabID, fromOffset)
+	}
 	s := m.session(tabID)
 	if s == nil {
 		return nil, fromOffset, true
@@ -330,6 +450,9 @@ func (m *Manager) Read(tabID string, fromOffset int64) (data []byte, next int64,
 
 // Info returns a snapshot for one tab.
 func (m *Manager) Info(tabID string) (Info, bool) {
+	if r := m.remote(tabID); r != nil {
+		return r.Info(tabID)
+	}
 	s := m.session(tabID)
 	if s == nil {
 		return Info{}, false
@@ -340,12 +463,19 @@ func (m *Manager) Info(tabID string) (Info, bool) {
 // List returns every session of a sandbox (all sessions when sandboxID is "").
 func (m *Manager) List(sandboxID string) []Info {
 	m.mu.RLock()
-	out := make([]Info, 0, len(m.sessions))
+	out := make([]Info, 0, len(m.sessions)+len(m.remotes))
 	for _, s := range m.sessions {
 		if sandboxID != "" && s.sandboxID != sandboxID {
 			continue
 		}
 		out = append(out, s.info())
+	}
+	for _, r := range m.remotes {
+		info, _ := r.Info(r.tabID)
+		if sandboxID != "" && info.SandboxID != sandboxID {
+			continue
+		}
+		out = append(out, info)
 	}
 	m.mu.RUnlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].Started.Before(out[j].Started) })
@@ -355,6 +485,9 @@ func (m *Manager) List(sandboxID string) []Info {
 // Wake returns a channel that is closed when new output arrives for the tab.
 // Call it again after each wakeup to get the next notification.
 func (m *Manager) Wake(tabID string) <-chan struct{} {
+	if r := m.remote(tabID); r != nil {
+		return r.Wake(tabID)
+	}
 	s := m.session(tabID)
 	if s == nil {
 		ch := make(chan struct{})
@@ -379,6 +512,11 @@ func (m *Manager) CloseSandbox(sandboxID string) int {
 			ids = append(ids, tabID)
 		}
 	}
+	for tabID, r := range m.remotes {
+		if r.sandboxID == sandboxID {
+			ids = append(ids, tabID)
+		}
+	}
 	m.mu.RUnlock()
 	for _, id := range ids {
 		_ = m.Close(id)
@@ -390,8 +528,11 @@ func (m *Manager) CloseSandbox(sandboxID string) int {
 func (m *Manager) CloseAll() {
 	m.mu.Lock()
 	m.closed = true
-	ids := make([]string, 0, len(m.sessions))
+	ids := make([]string, 0, len(m.sessions)+len(m.remotes))
 	for tabID := range m.sessions {
+		ids = append(ids, tabID)
+	}
+	for tabID := range m.remotes {
 		ids = append(ids, tabID)
 	}
 	m.mu.Unlock()
@@ -414,6 +555,11 @@ func (m *Manager) liveCountLocked() int {
 			n++
 		}
 	}
+	for _, r := range m.remotes {
+		if !r.isClosed() {
+			n++
+		}
+	}
 	return n
 }
 
@@ -422,6 +568,13 @@ func (m *Manager) session(tabID string) *session {
 	s := m.sessions[tabID]
 	m.mu.RUnlock()
 	return s
+}
+
+func (m *Manager) remote(tabID string) *RemoteSession {
+	m.mu.RLock()
+	r := m.remotes[tabID]
+	m.mu.RUnlock()
+	return r
 }
 
 // ---------------------------------------------------------------------------

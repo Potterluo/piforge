@@ -277,7 +277,25 @@ func (s *Store) CreateWorktree(ctx context.Context, userID string, in NewWorktre
 	return s.Worktree(ctx, userID, id)
 }
 
-// Worktree loads one worktree owned by the caller.
+// WorktreeByID resolves a worktree without a user check.
+//
+// It exists for the same reason WorktreePathByID does: callbacks receive a
+// worktree id that a session already scoped to the caller, and they run after
+// that check. Prefer Worktree() anywhere the caller's identity is not already
+// established.
+func (s *Store) WorktreeByID(ctx context.Context, worktreeID string) (*contracts.Worktree, error) {
+	row := s.r.QueryRowContext(ctx,
+		`SELECT `+worktreeCols+` FROM worktrees WHERE id = ?`, worktreeID)
+	wt, err := scanWorktree(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: worktree %q: %w", worktreeID, err)
+	}
+	return wt, nil
+}
+
 // WorktreePathByID resolves a worktree's on-disk path without a user check.
 //
 // It exists for the terminal relay, which receives a worktree id that a session
@@ -296,6 +314,7 @@ func (s *Store) WorktreePathByID(ctx context.Context, worktreeID string) (string
 	return path, nil
 }
 
+// Worktree loads one worktree owned by the caller.
 func (s *Store) Worktree(ctx context.Context, userID, worktreeID string) (*contracts.Worktree, error) {
 	row := s.r.QueryRowContext(ctx,
 		`SELECT `+worktreeCols+` FROM worktrees WHERE id = ? AND user_id = ?`, worktreeID, userID)

@@ -85,7 +85,10 @@ type options struct {
 	// sandboxBrowser is "host" (default) or "remote": remote uses the browser inside a
 	// docker sandbox instead of a local Chrome.
 	sandboxBrowser string
-	sandboxAPIKey  string
+	// sandboxTerminal is "host" (default) or "remote": remote runs the shell
+	// inside the docker sandbox instead of on the host.
+	sandboxTerminal string
+	sandboxAPIKey   string
 	// sandboxKind picks the sandbox provider: "local" (directories) or "docker".
 	sandboxKind    string
 	sandboxImage   string
@@ -121,6 +124,8 @@ func run() error {
 		"sandbox provider: local (directories) or docker (one container per project)")
 	flag.StringVar(&opt.sandboxBrowser, "sandbox-browser", envOr("PIFORGE_SANDBOX_BROWSER", "host"),
 		"browser placement: host, or remote (inside the docker sandbox)")
+	flag.StringVar(&opt.sandboxTerminal, "sandbox-terminal", envOr("PIFORGE_SANDBOX_TERMINAL", "host"),
+		"terminal placement: host, or remote (inside the docker sandbox)")
 	flag.StringVar(&opt.sandboxAPIKey, "sandbox-api-key", envOr("PIFORGE_SANDBOX_API_KEY", ""),
 		"API key the sandbox container was started with")
 	flag.StringVar(&opt.sandboxImage, "sandbox-image", envOr("PIFORGE_SANDBOX_IMAGE", ""),
@@ -199,14 +204,20 @@ func run() error {
 	var dockerSB *sandbox.Docker
 	if opt.sandboxKind == "docker" {
 		// One container per (user, project): the isolation boundary matches the tenancy
-		// boundary the rest of the product already uses. Lifecycle only for now — the
-		// browser and the terminal still run on the host, and docs/SANDBOX.md says so.
+		// boundary the rest of the product already uses. The AIO image publishes one
+		// HTTP port; the browser and terminal reach it through that published port.
+		apiPort := 0
+		if opt.sandboxBrowser == "remote" || opt.sandboxTerminal == "remote" {
+			apiPort = 8080
+		}
 		dockerProvider, derr := sandbox.NewDocker(sandbox.DockerConfig{
 			Image:    opt.sandboxImage,
 			Network:  opt.sandboxNetwork,
 			CPUs:     opt.sandboxCPUs,
 			Memory:   opt.sandboxMemory,
 			DataRoot: filepath.Join(opt.dataDir, "sandboxes"),
+			APIPort:  apiPort,
+			APIKey:   opt.sandboxAPIKey,
 		})
 		if derr != nil {
 			return fmt.Errorf("init docker sandbox provider: %w", derr)
@@ -403,7 +414,10 @@ func run() error {
 	browsers := browser.NewManager(browserCfg)
 	defer browsers.CloseAll()
 
-	terminals := term.New(term.Config{
+	// With a docker sandbox that runs an AIO image, the terminal lives in that
+	// container too: the shell sees the same filesystem the agent edits. The
+	// host PTY remains the default when the flag is not set.
+	termCfg := term.Config{
 		RingBytes: 4 << 20,
 		Launcher:  launcher,
 		// The key is a worktree id: the HTTP layer already proved that the
@@ -411,7 +425,50 @@ func run() error {
 		WorkDir: func(ctx context.Context, worktreeID string) (string, error) {
 			return st.WorktreePathByID(ctx, worktreeID)
 		},
-	})
+	}
+	if opt.sandboxKind == "docker" && opt.sandboxTerminal == "remote" {
+		termCfg.Remote = func(ctx context.Context, worktreeID string) (*aio.Client, string, string, error) {
+			if dockerSB == nil {
+				return nil, "", "", fmt.Errorf("remote terminal needs the docker sandbox provider")
+			}
+			worktree, werr := st.WorktreeByID(ctx, worktreeID)
+			if werr != nil {
+				logger.Warn("cannot resolve the worktree for a remote terminal",
+					"worktree", worktreeID, "error", werr.Error())
+				return nil, "", "", werr
+			}
+			endpoint, eerr := dockerSB.Endpoint(ctx, worktree.SandboxID)
+			if eerr != nil {
+				logger.Warn("cannot reach the sandbox for a remote terminal; falling back to a host PTY",
+					"sandbox", worktree.SandboxID, "error", eerr.Error())
+				return nil, "", "", eerr
+			}
+			cwd, cerr := dockerSB.ContainerPath(worktree.Path)
+			if cerr != nil {
+				logger.Warn("cannot map the worktree into the sandbox; falling back to a host PTY",
+					"worktree", worktree.Path, "error", cerr.Error())
+				return nil, "", "", cerr
+			}
+			client, aerr := aio.New(aio.Config{
+				BaseURL: endpoint,
+				APIKey:  opt.sandboxAPIKey,
+				Root:    "/workspace",
+			})
+			if aerr != nil {
+				logger.Warn("cannot build the sandbox terminal client", "error", aerr.Error())
+				return nil, "", "", aerr
+			}
+			// A fresh id per tab: the image treats create as idempotent and keeps
+			// an exited session wedged, so reusing a tab's old id would replay
+			// stale output or a dead shell.
+			suffix := make([]byte, 8)
+			if _, rerr := rand.Read(suffix); rerr != nil {
+				return nil, "", "", fmt.Errorf("remote terminal session id: %w", rerr)
+			}
+			return client, "pf-term-" + hex.EncodeToString(suffix), cwd, nil
+		}
+	}
+	terminals := term.New(termCfg)
 	defer terminals.CloseAll()
 
 	// 6. Working directories.

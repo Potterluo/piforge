@@ -7,11 +7,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
 )
+
+// containerWorkspace is where DockerConfig.DataRoot is mounted.
+const containerWorkspace = "/workspace"
 
 // Docker is a sandbox provider that runs each (user, project) in its own container.
 //
@@ -25,9 +30,9 @@ import (
 // container gets a short-lived per-session token rather than a provider key.
 //
 // Scope of this provider: the lifecycle (create / pause / resume / destroy / exec) and
-// the workspace layout. The browser and terminal still run on the host in this build;
-// pointing them at the container's services is the next step, and pretending otherwise
-// would be the kind of claim this project keeps having to walk back.
+// the workspace layout. The browser and terminal can attach to the container's services
+// (see internal/browser and internal/term); the control plane's own workspace IO still
+// reads the bind-mounted host directory.
 type Docker struct {
 	cfg DockerConfig
 }
@@ -97,8 +102,8 @@ func (d *Docker) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 		"--name", name,
 		"--label", "piforge.user=" + userID,
 		"--label", "piforge.project=" + projectID,
-		"--workdir", "/workspace",
-		"-v", d.cfg.DataRoot + ":/workspace",
+		"--workdir", containerWorkspace,
+		"-v", d.cfg.DataRoot + ":" + containerWorkspace,
 		"--restart", "unless-stopped",
 	}
 	if d.cfg.Network != "" {
@@ -143,7 +148,7 @@ func (d *Docker) Get(ctx context.Context, sandboxID string) (*contracts.Sandbox,
 		ID:       name,
 		Provider: d.Name(),
 		Image:    d.cfg.Image,
-		RootDir:  "/workspace",
+		RootDir:  containerWorkspace,
 	}
 	out.State = dockerState(state)
 	return out, nil
@@ -206,7 +211,7 @@ func (d *Docker) describe(ctx context.Context, userID, projectID, name string) (
 		State:        dockerState(state),
 		Provider:     d.Name(),
 		Image:        d.cfg.Image,
-		RootDir:      "/workspace",
+		RootDir:      containerWorkspace,
 		CreatedAt:    time.Now().UTC(),
 		LastActiveAt: time.Now().UTC(),
 	}, nil
@@ -300,4 +305,39 @@ func (d *Docker) Endpoint(ctx context.Context, sandboxID string) (string, error)
 		return "", fmt.Errorf("sandbox: docker: %s publishes nothing on %d", name, d.cfg.APIPort)
 	}
 	return "http://127.0.0.1:" + address, nil
+}
+
+// ContainerPath maps a host path under DataRoot to the path the same file has
+// inside the container.
+//
+// The terminal needs it: the store knows a worktree's host path, while the
+// container shell must start in the mounted path. Anything outside the mount is
+// an error rather than a best guess.
+func (d *Docker) ContainerPath(hostPath string) (string, error) {
+	// A sandbox record may already carry a container path: provision lays out
+	// repositories from RootDir, which is containerWorkspace.
+	if clean := path.Clean(filepath.ToSlash(strings.TrimSpace(hostPath))); clean == containerWorkspace ||
+		strings.HasPrefix(clean, containerWorkspace+"/") {
+		return clean, nil
+	}
+
+	root, err := filepath.Abs(d.cfg.DataRoot)
+	if err != nil {
+		return "", fmt.Errorf("sandbox: docker: data root %q: %w", d.cfg.DataRoot, err)
+	}
+	abs, err := filepath.Abs(hostPath)
+	if err != nil {
+		return "", fmt.Errorf("sandbox: docker: path %q: %w", hostPath, err)
+	}
+	rel, err := filepath.Rel(root, abs)
+	if err != nil {
+		return "", fmt.Errorf("sandbox: docker: %q relative to %q: %w", abs, root, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("sandbox: docker: %q is outside the workspace %q", abs, root)
+	}
+	if rel == "." {
+		return containerWorkspace, nil
+	}
+	return path.Join(containerWorkspace, filepath.ToSlash(rel)), nil
 }

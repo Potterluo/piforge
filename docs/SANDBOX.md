@@ -8,8 +8,8 @@ agent、浏览器、终端指过去。这条不变量在任何 provider 上都�
 | | `local`（默认） | `docker` |
 |---|---|---|
 | 隔离边界 | 一个目录 | 一个容器 |
-| 浏览器 | 宿主 Chrome，按沙箱复用 profile | 仍在宿主（见下） |
-| 终端 | 宿主进程 + PTY | 仍在宿主（见下） |
+| 浏览器 | 宿主 Chrome，按沙箱复用 profile | 容器内 Chromium（`-sandbox-browser remote`） |
+| 终端 | 宿主进程 + PTY | 容器内 shell 会话（`-sandbox-terminal remote`） |
 | 适合 | 单机自托管、开发 | 多租户、需要真实边界 |
 | 启用 | 默认 | `-sandbox docker -sandbox-image <image>` |
 
@@ -49,36 +49,64 @@ piforged -sandbox docker \
          -sandbox-browser remote
 ```
 
-## 终端：壳子已验证，桥还没写
+## 终端：已经能跑在容器里
 
-沙箱的终端不是 PTY，是**命令会话**：`sessions/create` → `write`（input + press_enter）→
-`view`（拿 output）。对着真容器跑过：
+AIO 的 shell 不是 PTY，是**命令会话**：`sessions/create` → `write`（input + press_enter）→
+`view`（拿 output）。`internal/term/remote.go` 把它接成了和宿主 PTY 相同的字节流：
+同一个 ring buffer、同样的 `Write/Read/Info/Close`，所以 WebSocket 那一层不用改。
+
+对着真镜像（1.11.0）验证过：
 
 ```
-create → {"session_id":"pf-probe","working_dir":"/home/gem"}
-write  → {"status":"running"}
-view   → {"output":"terminal-in-container","status":"completed","exit_code":0}
+write  echo remote-terminal-ok
+view   "echo remote-terminal-ok\r\nremote-terminal-ok\n"
 ```
 
-`internal/aio` 已经把这三个调用封装好（`CreateShellSession` / `WriteShell` / `ViewShell`）。
+终端桥做的几件具体事：
 
-**还没做**：`term.Manager` 的 `session` 是 PTY 专用的（`ptyProcess` + ring buffer），
-把远程会话塞进去需要一个新的 session 类型和轮询泵。这是下一步，不是已完成。
+- **按行缓冲输入**：`write` 每次调用都会立即执行，`press_enter:false` 也不会只“输入不回车”，
+  所以半行绝不能发出去。退格键（`\x7f`）只改本地缓冲，并且回显 `\b \b`；
+- **本地回显**：容器不回显用户输入，不回显的话终端看起来像死了。输入、换行、退格都由
+  桥自己写进 ring；
+- **轮询增量**：每 175ms 调一次 `view`，只把 `output` 比上次多出来的后缀写进 ring；
+  `view` 返回的是累计全文，不能整段重放；
+- **补换行**：镜像把多条命令的输出直接粘在一起（`foo` + `bar` = `foobar`），所以一条命令
+  从 `running` 变成 `completed` 时补一个 `\n`，且只补一次；
+- **resize 只记录不转发**：它没有 PTY，也没有窗口大小这个概念；
+- **Close 只停轮询**：不发送 `exit`。实测镜像在 `exit` 之后会把同一个 session id 卡住
+  （后续 write 返回成功但永远不执行），而每个 tab 用的是新 id，容器生命周期负责回收 shell。
+
+启用方式（`PIFORGE_SANDBOX_TERMINAL=remote` 等价）：
+
+```bash
+piforged -sandbox docker \
+         -sandbox-image <all-in-one-sandbox:1.11.0> \
+         -sandbox-api-key <key> \
+         -sandbox-terminal remote
+```
+
+只有 `-sandbox docker` 下才有意义；不设时仍是宿主 PTY，行为不变。docker provider 会因此
+发布容器的 8080 端口（`Endpoint` 从 `docker port` 读回实际端口），并把
+`-sandbox-api-key` 作为 `SANDBOX_API_KEY` 传给容器。工作区的宿主路径由
+`Docker.ContainerPath` 映射到容器里的 `/workspace`，shell 就从该 worktree 启动。
+
+测试分两层：`internal/term/remote_test.go` 用 httptest 钉住“只追加新后缀”和“退格不发出去”；
+`internal/term/remote_live_test.go` 用 `PIFORGE_AIO_URL` / `PIFORGE_AIO_KEY` 对着真容器跑，
+没有环境变量时干净跳过。
 
 ## 还没做的（这一节是重点）
 
-**浏览器和终端仍然跑在宿主上。** 也就是说：换成 docker provider 之后，agent 改的文件
-在容器里，而你看的页面、你敲的终端在宿主上——两边没有真正对齐。
+浏览器和终端已经能连容器，**但工作区的文件读写与 git 仍然走宿主目录**。单机部署下 bind
+mount 让两边看到同一批文件；控制面部署在别处、只有 Docker daemon 可达时，这条还不成立。
+下一步是把 `Workspace` 的读写切到容器的文件服务。
 
-这需要下一步：
+终端本身也还有边界，应该明确：
 
-1. 用 all-in-one 镜像（浏览器 + shell + 文件服务都在容器里），
-2. 让 `browser.Manager` 连容器内 Chrome 的 CDP 端口（不是 `exec` 一个宿主 Chrome），
-3. 让 `term.Manager` 通过容器里的 shell 服务或 `docker exec -it` 起 PTY，
-4. 把 `Workspace` 的读写切到容器内的文件服务（现在是宿主目录的直接 IO）。
-
-在此之前，docker provider 的价值是：**边界先立起来**，以及验证"容器生命周期能对上我们的
-状态机"。这不是完成，是第一步。
+1. 它是**行式终端**，不是 TTY：vim/htop、作业控制、窗口 resize 都不可用；
+2. 一条命令的输出如果跨了多次轮询且错过了 `running` 状态，命令之间的分隔只能尽力而为；
+3. 容器端点解析失败时，`Manager` 会记录 warning 并回退到宿主 PTY——如果终端看起来在本机，
+   先看日志里的 `falling back to a host PTY`；
+4. 关闭终端不会删除容器里的 shell 会话，容器停掉/删除时才一起消失。
 
 ## 为什么不是一个共享容器
 
