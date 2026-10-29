@@ -86,6 +86,88 @@ func writeRecord(t *testing.T, w http.ResponseWriter, record RunnerRecord) {
 	}
 }
 
+// The runner creates the container, so it creates the key too and reports it once
+// in the create answer. This provider has to put it where the store can persist it
+// — on the contract — and nowhere near JSON.
+func TestRunnerEnsureReturnsThePerSandboxKey(t *testing.T) {
+	const key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	provider, _ := startTestRunner(t, t.TempDir(), func(w http.ResponseWriter, r *http.Request) {
+		writeRecord(t, w, RunnerRecord{
+			ID:                "piforge-0123456789abcdef",
+			State:             contracts.SandboxReady,
+			RootDir:           "/tmp/sandboxes/usr_1/prj_1",
+			ContainerPathRoot: ContainerWorkspace,
+			Endpoint:          "http://127.0.0.1:49153",
+			APIKey:            key,
+		})
+	})
+	sb, err := provider.Ensure(context.Background(), "usr_1", "prj_1", "", "main")
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if sb.SandboxAPIKey != key {
+		t.Fatalf("SandboxAPIKey = %q, want the key the runner reported", sb.SandboxAPIKey)
+	}
+	raw, err := json.Marshal(sb)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), key) {
+		t.Fatalf("the contract serialized the sandbox API key: %s", raw)
+	}
+}
+
+// -sandbox-api-key is still an override: a deployment that sets it must see that
+// exact key on every create and every worktree request, and the answer it gets back
+// is the same value (the runner uses what it was told).
+func TestRunnerSendsTheFixedAPIKeyOverride(t *testing.T) {
+	const fixed = "fixed-debug-key"
+	provider, log := startTestRunner(t, t.TempDir(), func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/worktrees") {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		writeRecord(t, w, RunnerRecord{
+			ID:                "piforge-0123456789abcdef",
+			State:             contracts.SandboxReady,
+			RootDir:           "/tmp/sandboxes/usr_1/prj_1",
+			ContainerPathRoot: ContainerWorkspace,
+			APIKey:            fixed,
+		})
+	})
+	provider.cfg.APIKey = fixed
+
+	sb, err := provider.Ensure(context.Background(), "usr_1", "prj_1", "", "main")
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if sb.SandboxAPIKey != fixed {
+		t.Fatalf("SandboxAPIKey = %q, want the fixed override", sb.SandboxAPIKey)
+	}
+	if err := provider.AddWorktree(context.Background(), sb.ID, "/w/repo", "/w/worktrees/x", "piforge/x"); err != nil {
+		t.Fatalf("AddWorktree: %v", err)
+	}
+
+	var creates, worktrees int
+	for _, request := range log.all() {
+		switch {
+		case request.Method == http.MethodPost && request.Path == "/v1/sandboxes":
+			creates++
+			if !strings.Contains(request.Body, `"api_key":"`+fixed+`"`) {
+				t.Fatalf("create body does not carry the fixed key: %s", request.Body)
+			}
+		case strings.HasSuffix(request.Path, "/worktrees"):
+			worktrees++
+			if !strings.Contains(request.Body, `"api_key":"`+fixed+`"`) {
+				t.Fatalf("worktree body does not carry the fixed key: %s", request.Body)
+			}
+		}
+	}
+	if creates != 1 || worktrees != 1 {
+		t.Fatalf("requests = %+v, want one create and one worktree", log.all())
+	}
+}
+
 // A create has to carry the whole request, because the runner is stateless and
 // this is the only description of the sandbox it gets.
 func TestRunnerEnsureSendsTheContainerRequest(t *testing.T) {

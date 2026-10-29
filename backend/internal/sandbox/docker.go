@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -121,8 +122,14 @@ type DockerConfig struct {
 	// lifecycle-only calls, and Ensure then reports that no API is published
 	// rather than falling back to `docker exec`.
 	APIPort int
-	// APIKey is passed to the container as SANDBOX_API_KEY when non-empty, so every
-	// service in it requires the header.
+	// APIKey is a *fixed* API key for every container this provider creates, and
+	// the key used to reach a container whose own key cannot be read (a container
+	// from a build that predates per-sandbox keys). Empty — the default — means
+	// each container gets a fresh key from crypto/rand when it is created; see
+	// key.go for why the key is per sandbox rather than per deployment.
+	//
+	// Empty is the secure default and the value a production deployment should
+	// use. A fixed value is for debugging one deployment, never for a tenant.
 	APIKey string
 	// ContainerEndpoint reports a sandbox's address as http://<container>:<APIPort>
 	// on Network instead of reading back a host port. It is what a multi-service
@@ -225,6 +232,13 @@ func (d *Docker) workspacePath(userID, projectID string) (string, error) {
 // The checkout is part of the sandbox, not something a later panel request can be
 // allowed to discover is missing: without .git, every git endpoint answers 500,
 // and the failure surfaces far from the step that caused it.
+//
+// The returned sandbox carries the key the container's API was started with, so
+// the control plane can persist it with the row. A container that has no key (one
+// created before per-sandbox keys) is replaced rather than adopted: its API
+// accepts anything that can reach it, and "it was already like that" is not a
+// reason to keep calling it unauthenticated. The workspace is a bind mount, so
+// replacing the container keeps every file.
 func (d *Docker) Ensure(ctx context.Context, userID, projectID, repoURL, branch string) (*contracts.Sandbox, error) {
 	dir, err := d.workspacePath(userID, projectID)
 	if err != nil {
@@ -240,7 +254,9 @@ func (d *Docker) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 	switch {
 	case inspectErr == nil:
 		mount, mountErr := d.workspaceMount(ctx, name)
-		if mountErr != nil || !sameHostDir(mount, dir) {
+		key, keyErr := d.containerAPIKey(ctx, name)
+		switch {
+		case mountErr != nil || !sameHostDir(mount, dir):
 			// A container created before this provider gave each pair its own
 			// directory mounts the shared data root (or something else entirely).
 			// Reusing it would show this project another tenant's working tree, so
@@ -251,14 +267,23 @@ func (d *Docker) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 				"want", dir,
 				"got", mount,
 				"mount_error", mountErr)
-			if _, err := d.docker(ctx, "rm", "-f", name); err != nil {
+			if err := d.replaceContainer(ctx, name, userID, projectID, dir); err != nil {
 				return nil, err
 			}
 			created = true
-			if err := d.runContainer(ctx, name, userID, projectID, dir); err != nil {
+		case keyErr != nil:
+			return nil, keyErr
+		case key == "":
+			// No SANDBOX_API_KEY in the container's environment: its API is open
+			// to anything that can reach it, which on a shared network is every
+			// other sandbox. Replace it with a keyed one; the workspace survives.
+			slog.Warn("sandbox: docker: container was started without an API key; recreating it with a per-sandbox key",
+				"container", name)
+			if err := d.replaceContainer(ctx, name, userID, projectID, dir); err != nil {
 				return nil, err
 			}
-		} else if state != "running" {
+			created = true
+		case state != "running":
 			if _, err := d.docker(ctx, "start", name); err != nil {
 				return nil, err
 			}
@@ -272,9 +297,21 @@ func (d *Docker) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 		return nil, inspectErr
 	}
 
+	// Read the key back from the container instead of remembering the one just
+	// generated: a container adopted from an earlier control plane, or created
+	// with the fixed -sandbox-api-key override, has to be addressed with the key
+	// it actually runs with.
+	apiKey, err := d.containerAPIKey(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey == "" {
+		return nil, fmt.Errorf("sandbox: docker: container %s has no %s; refusing to call its API unauthenticated", name, SandboxAPIKeyEnv)
+	}
+
 	// Idempotent by construction (see planCheckout), so a container adopted after a
 	// control-plane restart, or started by an older build, gets the same treatment.
-	if err := d.ensureCheckout(ctx, name, repoURL, branch); err != nil {
+	if err := d.ensureCheckout(ctx, name, apiKey, repoURL, branch); err != nil {
 		if created {
 			// A container whose checkout could not be provisioned is not a sandbox:
 			// remove it so the next Ensure starts from a clean one instead of
@@ -283,25 +320,47 @@ func (d *Docker) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 		}
 		return nil, err
 	}
-	return d.describe(ctx, userID, projectID, name)
+	return d.describe(ctx, userID, projectID, name, apiKey)
+}
+
+// replaceContainer removes a container and starts it again with a fresh key (or
+// the fixed override). The workspace is a bind mount, so only the container — and
+// the processes in it — is replaced.
+func (d *Docker) replaceContainer(ctx context.Context, name, userID, projectID, workspace string) error {
+	if _, err := d.docker(ctx, "rm", "-f", name); err != nil {
+		return err
+	}
+	return d.runContainer(ctx, name, userID, projectID, workspace)
 }
 
 // runContainer starts the per-(user, project) container, mounting only that pair's
 // host directory at /workspace.
 func (d *Docker) runContainer(ctx context.Context, name, userID, projectID, workspace string) error {
-	_, err := d.docker(ctx, d.containerArgs(name, userID, projectID, workspace)...)
+	apiKey := strings.TrimSpace(d.cfg.APIKey)
+	if apiKey == "" {
+		generated, err := NewAPIKey()
+		if err != nil {
+			return err
+		}
+		apiKey = generated
+	}
+	_, err := d.docker(ctx, d.containerArgs(name, userID, projectID, workspace, apiKey)...)
 	return err
 }
 
 // containerArgs is the `docker run` argv for one sandbox.
 //
-// It is a function of the config alone so the two endpoint shapes — a published
-// loopback port, or a name on a shared network — are pinned by a test that needs
-// no daemon. Everything else here is a rule with a bug behind it: the mount is one
-// pair's directory, the labels are how an orphan is found after a crash, and
-// BROWSER_NO_SANDBOX is why the image's Chromium starts under the default seccomp
-// profile.
-func (d *Docker) containerArgs(name, userID, projectID, workspace string) []string {
+// It is a function of the config, the pair and the key alone so the two endpoint
+// shapes — a published loopback port, or a name on a shared network — are pinned
+// by a test that needs no daemon. Everything else here is a rule with a bug
+// behind it: the mount is one pair's directory, the labels are how an orphan is
+// found after a crash, and BROWSER_NO_SANDBOX is why the image's Chromium starts
+// under the default seccomp profile.
+//
+// apiKey is the key this container's API will require. It is a parameter rather
+// than a field because every container gets its own, and a value remembered on
+// the provider would be one container's key handed to the next.
+func (d *Docker) containerArgs(name, userID, projectID, workspace, apiKey string) []string {
 	args := []string{
 		"run", "-d",
 		"--name", name,
@@ -339,8 +398,11 @@ func (d *Docker) containerArgs(name, userID, projectID, workspace string) []stri
 		// promises.
 		args = append(args, "-e", "BROWSER_NO_SANDBOX=--no-sandbox")
 	}
-	if d.cfg.APIKey != "" {
-		args = append(args, "-e", "SANDBOX_API_KEY="+d.cfg.APIKey)
+	if apiKey = strings.TrimSpace(apiKey); apiKey != "" {
+		// One key per container. The image requires it as X-AIO-API-Key on every
+		// request, which is what keeps a sibling sandbox on the shared network out
+		// (see key.go).
+		args = append(args, "-e", SandboxAPIKeyEnv+"="+apiKey)
 	}
 	args = append(args, d.cfg.Image)
 	// The image may or may not have an entrypoint that idles; a sandbox has to stay up
@@ -461,8 +523,8 @@ func planBranchWorktree(ready bool, repoDir, worktreeDir, branch string) ([]sand
 // There is deliberately no `docker exec` fallback: a deployment that cannot
 // reach the API gets a clear failure instead of a checkout that only works on
 // the machine holding the daemon.
-func (d *Docker) ensureCheckout(ctx context.Context, name, repoURL, branch string) error {
-	shell, ready, err := d.waitForCheckoutShell(ctx, name)
+func (d *Docker) ensureCheckout(ctx context.Context, name, apiKey, repoURL, branch string) error {
+	shell, ready, err := d.waitForCheckoutShell(ctx, name, apiKey)
 	if err != nil {
 		return fmt.Errorf("sandbox: docker: checkout %s: %w", containerRepoDir, err)
 	}
@@ -528,7 +590,7 @@ func (d *Docker) AddWorktree(ctx context.Context, sandboxID, repoDir, path, bran
 
 	// The worktree is created through the sandbox API, so the endpoint has to
 	// answer first; an already-running container answers immediately.
-	shell, err := d.waitForSandboxShell(ctx, name, probeSandboxAPI)
+	shell, err := d.waitForSandboxShell(ctx, name, "", probeSandboxAPI)
 	if err != nil {
 		return fmt.Errorf("sandbox: docker: add worktree %s: %w", worktree, err)
 	}
@@ -595,9 +657,9 @@ func probeSandboxAPI(ctx context.Context, shell checkoutShell) error {
 // just executed by the sandbox's own shell this time. The retry window itself is
 // waitForSandboxShell's: `docker run -d` returns before the image's services are
 // listening.
-func (d *Docker) waitForCheckoutShell(ctx context.Context, name string) (checkoutShell, bool, error) {
+func (d *Docker) waitForCheckoutShell(ctx context.Context, name, apiKey string) (checkoutShell, bool, error) {
 	var ready bool
-	shell, err := d.waitForSandboxShell(ctx, name, func(probeCtx context.Context, shell checkoutShell) error {
+	shell, err := d.waitForSandboxShell(ctx, name, apiKey, func(probeCtx context.Context, shell checkoutShell) error {
 		isReady, probeErr := probeCheckoutReady(probeCtx, shell)
 		if probeErr != nil {
 			return probeErr
@@ -620,7 +682,7 @@ func (d *Docker) waitForCheckoutShell(ctx context.Context, name string) (checkou
 // calls can fail with connection refused. Only that startup window is retried,
 // and it is bounded: a container that never serves the API is an error naming the
 // step, not an invitation to shell out to Docker.
-func (d *Docker) waitForSandboxShell(ctx context.Context, name string, probe func(context.Context, checkoutShell) error) (checkoutShell, error) {
+func (d *Docker) waitForSandboxShell(ctx context.Context, name, apiKey string, probe func(context.Context, checkoutShell) error) (checkoutShell, error) {
 	if d.cfg.APIPort <= 0 && d.openCheckout == nil {
 		return nil, fmt.Errorf("the checkout runs through the sandbox API, but this provider publishes no api port (DockerConfig.APIPort); " +
 			"the docker CLI is not a fallback")
@@ -634,7 +696,7 @@ func (d *Docker) waitForSandboxShell(ctx context.Context, name string, probe fun
 		// call: retrying the probe must not spawn one every 250ms while the
 		// image's services come up.
 		if shell == nil {
-			opened, err := d.shellFor(ctx, name)
+			opened, err := d.shellFor(ctx, name, apiKey)
 			if err == nil {
 				shell = opened
 			} else {
@@ -737,11 +799,11 @@ func commandFailure(res aio.ShellResult) string {
 
 // shellFor returns the command runner for a container: the injected one in a
 // test, otherwise a client pointed at the container's published AIO endpoint.
-func (d *Docker) shellFor(ctx context.Context, sandboxID string) (checkoutShell, error) {
+func (d *Docker) shellFor(ctx context.Context, sandboxID, apiKey string) (checkoutShell, error) {
 	if d.openCheckout != nil {
 		return d.openCheckout(ctx, sandboxID)
 	}
-	return d.sandboxShell(ctx, sandboxID)
+	return d.sandboxShell(ctx, sandboxID, apiKey)
 }
 
 // sandboxShell builds the AIO client for one container.
@@ -749,14 +811,22 @@ func (d *Docker) shellFor(ctx context.Context, sandboxID string) (checkoutShell,
 // It asks Endpoint() rather than remembering a port: the published port is
 // assigned at creation and survives a control-plane restart, and a number kept
 // in memory would be wrong after either.
-func (d *Docker) sandboxShell(ctx context.Context, sandboxID string) (checkoutShell, error) {
+func (d *Docker) sandboxShell(ctx context.Context, sandboxID, apiKey string) (checkoutShell, error) {
 	endpoint, err := d.Endpoint(ctx, sandboxID)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s has no reachable API endpoint: %w", sandboxID, err)
 	}
+	if strings.TrimSpace(apiKey) == "" {
+		// A caller with no key in hand (the branch-worktree path) still has the
+		// container: read the key it was started with rather than calling it open.
+		apiKey, err = d.apiKeyFor(ctx, d.resolve(sandboxID))
+		if err != nil {
+			return nil, err
+		}
+	}
 	client, err := aio.New(aio.Config{
 		BaseURL: endpoint,
-		APIKey:  d.cfg.APIKey,
+		APIKey:  apiKey,
 		Root:    containerWorkspace,
 		Timeout: checkoutRequestTimeout,
 	})
@@ -834,8 +904,65 @@ func (d *Docker) Exec(ctx context.Context, sandboxID string, argv []string, dir 
 	return d.docker(ctx, args...)
 }
 
+// containerAPIKey reads the SANDBOX_API_KEY a container was started with, out of
+// its own environment.
+//
+// The container is the authority: a control plane that restarted, a provider
+// adopting a container it did not create, and a runner asked for a branch
+// worktree all have to address the container with the key it actually runs with,
+// and the only place that survives every restart is `docker inspect .Config.Env`.
+// Empty means the container predates per-sandbox keys (or was created by
+// something that did not set one), which Ensure repairs by recreating it.
+func (d *Docker) containerAPIKey(ctx context.Context, name string) (string, error) {
+	out, err := d.docker(ctx, "inspect", "--format", "{{range .Config.Env}}{{println .}}{{end}}", name)
+	if err != nil {
+		return "", err
+	}
+	return parseSandboxAPIKeyEnv(out), nil
+}
+
+// parseSandboxAPIKeyEnv picks SANDBOX_API_KEY out of the one-variable-per-line
+// output of `docker inspect .Config.Env`. It is pure so the parsing is pinned
+// without a daemon; a key may legitimately contain '=' (hex does not, but the
+// operator's fixed override might), so only the first one splits.
+func parseSandboxAPIKeyEnv(out string) string {
+	prefix := SandboxAPIKeyEnv + "="
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	return ""
+}
+
+// apiKeyFor resolves the key for a container's API when the caller has none in
+// hand (the branch-worktree path, where the runner is stateless and only knows
+// the sandbox id).
+//
+// The container's own value wins over the configured one: a fixed override only
+// applies to containers this provider started, and an adopted container may
+// carry a per-sandbox key from before the override was set.
+func (d *Docker) apiKeyFor(ctx context.Context, name string) (string, error) {
+	key, err := d.containerAPIKey(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	if key != "" {
+		return key, nil
+	}
+	if fixed := strings.TrimSpace(d.cfg.APIKey); fixed != "" {
+		return fixed, nil
+	}
+	return "", fmt.Errorf("sandbox: docker: container %s has no %s; refusing to call its API unauthenticated (recreate the sandbox, or set -sandbox-api-key for a fixed key)", name, SandboxAPIKeyEnv)
+}
+
 // describe builds the sandbox record the store keeps.
-func (d *Docker) describe(ctx context.Context, userID, projectID, name string) (*contracts.Sandbox, error) {
+//
+// apiKey is reported in contracts.Sandbox.SandboxAPIKey so the control plane can
+// persist it with the row; the field is json:"-" and never leaves the process as
+// JSON (store.NewSandbox seals it at rest).
+func (d *Docker) describe(ctx context.Context, userID, projectID, name, apiKey string) (*contracts.Sandbox, error) {
 	state, err := d.inspect(ctx, name)
 	if err != nil {
 		return nil, err
@@ -845,12 +972,13 @@ func (d *Docker) describe(ctx context.Context, userID, projectID, name string) (
 		return nil, err
 	}
 	return &contracts.Sandbox{
-		ID:        name,
-		UserID:    userID,
-		ProjectID: projectID,
-		State:     dockerState(state),
-		Provider:  d.Name(),
-		Image:     d.cfg.Image,
+		ID:            name,
+		UserID:        userID,
+		ProjectID:     projectID,
+		State:         dockerState(state),
+		Provider:      d.Name(),
+		Image:         d.cfg.Image,
+		SandboxAPIKey: apiKey,
 		// RootDir is the host side of this pair's bind mount, because the control
 		// plane's own git and file IO runs here and has to write where the container
 		// looks. Reporting the shared DataRoot (the old behaviour) made every project
@@ -903,9 +1031,32 @@ func (d *Docker) docker(ctx context.Context, args ...string) (string, error) {
 		if strings.Contains(lower, "no such object") || strings.Contains(lower, "no such container") {
 			return "", fmt.Errorf("%w: %s", ErrNotFound, d.lastArg(args))
 		}
-		return "", fmt.Errorf("sandbox: docker %s: %w: %s", strings.Join(args, " "), err, text)
+		return "", dockerFailure(args, text, err)
 	}
 	return text, nil
+}
+
+// sandboxKeyPattern matches one SANDBOX_API_KEY=... assignment. The value runs to
+// whitespace because `docker run` argv is space-joined in the error below.
+var sandboxKeyPattern = regexp.MustCompile(SandboxAPIKeyEnv + `=[^\s"']+`)
+
+// redactSandboxKeys removes key values from text that may be logged or returned.
+// Sandbox keys travel in `docker run`'s argv, so any error that echoes the command
+// would otherwise print one — in the runner's log, in the runner's HTTP error, and
+// from there in the control plane's error.
+func redactSandboxKeys(text string) string {
+	if !strings.Contains(text, SandboxAPIKeyEnv+"=") {
+		return text
+	}
+	return sandboxKeyPattern.ReplaceAllString(text, SandboxAPIKeyEnv+"=<redacted>")
+}
+
+// dockerFailure renders a failed `docker` invocation. It is a separate function so
+// the redaction is pinned by a test without a daemon: the argv of a create contains
+// the sandbox key.
+func dockerFailure(args []string, output string, err error) error {
+	return fmt.Errorf("sandbox: docker %s: %w: %s",
+		redactSandboxKeys(strings.Join(args, " ")), err, redactSandboxKeys(output))
 }
 
 func (d *Docker) lastArg(args []string) string {

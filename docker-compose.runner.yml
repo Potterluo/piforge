@@ -36,9 +36,11 @@ services:
       PIFORGE_SANDBOX: runner
       PIFORGE_SANDBOX_RUNNER_URL: http://sandbox-runner:7801
       PIFORGE_SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:?set SANDBOX_RUNNER_TOKEN to a long random string}
-      # The runner starts containers with this image and this key; the control
-      # plane presents the same key to each sandbox's API.
       PIFORGE_SANDBOX_IMAGE: ${PIFORGE_SANDBOX_IMAGE:?set PIFORGE_SANDBOX_IMAGE to the all-in-one sandbox image}
+      # Each sandbox gets its own API key: the runner generates it when it creates
+      # the container and reports it once, and piforged seals it in the sandbox row.
+      # PIFORGE_SANDBOX_API_KEY is only a *fixed* override for debugging one
+      # deployment (all sandboxes share it); leave it empty for tenants.
       PIFORGE_SANDBOX_API_KEY: ${PIFORGE_SANDBOX_API_KEY:-}
       PIFORGE_SANDBOX_NETWORK: piforge-sandboxes
     networks:
@@ -64,6 +66,8 @@ services:
       SANDBOX_RUNNER_ADDR: 0.0.0.0:7801
       SANDBOX_DATA_ROOT: /data/sandboxes
       SANDBOX_IMAGE: ${PIFORGE_SANDBOX_IMAGE:?set PIFORGE_SANDBOX_IMAGE to the all-in-one sandbox image}
+      # Empty is the default and the secure value: sandbox.Docker then generates a
+      # 32-byte key per container. Set it only to pin one key for debugging.
       SANDBOX_API_KEY: ${PIFORGE_SANDBOX_API_KEY:-}
       SANDBOX_NETWORK: piforge-sandboxes
       # Report http://piforge-<hash8>:8080 instead of a published loopback port:

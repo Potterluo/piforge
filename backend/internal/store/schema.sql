@@ -73,6 +73,11 @@ CREATE TABLE IF NOT EXISTS sandboxes (
     last_active_at TEXT NOT NULL,
     created_at     TEXT NOT NULL,
     expires_at     TEXT,
+    -- The key this sandbox's own HTTP API requires, sealed with the deployment's
+    -- secret box (AES-GCM; store/secrets.go). One key per container: a deployment
+    -- key would open every tenant's shell once sandboxes are addressable by name
+    -- on a shared network. Never selected by sandboxCols.
+    api_key_cipher BLOB,
     UNIQUE (project_id)
 );
 

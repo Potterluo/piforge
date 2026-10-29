@@ -55,7 +55,15 @@ type Config struct {
 	Now func() time.Time
 	// RemoteAPIKey is sent on the devtools handshake when Remote is used, because the
 	// sandbox proxies CDP and guards it with the same key as its HTTP API.
+	//
+	// It is the static fallback; production sets RemoteKey instead, because each
+	// sandbox has its own key (see internal/sandbox/key.go).
 	RemoteAPIKey string
+	// RemoteKey resolves the key of one sandbox's API. When it is set it wins over
+	// RemoteAPIKey: a sandbox's CDP endpoint is guarded by that sandbox's key, and
+	// presenting a deployment-wide one would either be rejected or — worse — be
+	// the same value an attacker already has.
+	RemoteKey func(ctx context.Context, sandboxID string) (string, error)
 	// Remote resolves a CDP websocket for a sandbox instead of launching one.
 	//
 	// This is the AIO Sandbox integration: the browser lives in the sandbox container,
@@ -697,7 +705,11 @@ func captureOn(ctx context.Context, client *cdp) ([]byte, error) {
 // talk to Target.*, so a page session is attached here too. What differs is ownership:
 // Stop() closes the connection and leaves the process alone.
 func (m *Manager) attachRemote(ctx context.Context, sandboxID, profile, wsURL, debugHTTP string) (*Session, error) {
-	client, err := dialCDP(ctx, wsURL, m.remoteHeaders())
+	apiKey, err := m.remoteKey(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	client, err := dialCDP(ctx, wsURL, remoteHeaders(apiKey))
 	if err != nil {
 		return nil, err
 	}
@@ -711,7 +723,7 @@ func (m *Manager) attachRemote(ctx context.Context, sandboxID, profile, wsURL, d
 		WSURL:      wsURL,
 		Started:    m.cfg.Now(),
 		remote:     true,
-		apiKey:     m.cfg.RemoteAPIKey,
+		apiKey:     apiKey,
 		client:     client,
 		stopped:    make(chan struct{}),
 		tabs:       map[string]*cdp{},
@@ -720,12 +732,25 @@ func (m *Manager) attachRemote(ctx context.Context, sandboxID, profile, wsURL, d
 	}, nil
 }
 
+// remoteKey resolves the key the sandbox's CDP proxy expects. The per-sandbox
+// resolver wins; the static value is the fallback for a configured one.
+func (m *Manager) remoteKey(ctx context.Context, sandboxID string) (string, error) {
+	if m.cfg.RemoteKey != nil {
+		key, err := m.cfg.RemoteKey(ctx, sandboxID)
+		if err != nil {
+			return "", fmt.Errorf("browser: sandbox %s: %w", sandboxID, err)
+		}
+		return key, nil
+	}
+	return m.cfg.RemoteAPIKey, nil
+}
+
 // remoteHeaders are the headers a remote devtools handshake needs.
-func (m *Manager) remoteHeaders() http.Header {
-	if strings.TrimSpace(m.cfg.RemoteAPIKey) == "" {
+func remoteHeaders(apiKey string) http.Header {
+	if strings.TrimSpace(apiKey) == "" {
 		return nil
 	}
 	header := http.Header{}
-	header.Set("X-AIO-API-Key", m.cfg.RemoteAPIKey)
+	header.Set("X-AIO-API-Key", apiKey)
 	return header
 }

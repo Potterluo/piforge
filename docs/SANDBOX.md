@@ -38,8 +38,35 @@ runner 的形状与 compose 交付见 `docs/SANDBOX-DEPLOY.md` §1.4。
 同样启动即失败。
 
 其余容器参数不变：`-sandbox-image`、`-sandbox-network`、`-sandbox-cpus`、
-`-sandbox-memory`、`-sandbox-api-key`。runner 下这些值随每个 create 请求发给 runner，
-由 runner 决定落成 `docker run` 的哪几个参数。
+`-sandbox-memory`。runner 下这些值随每个 create 请求发给 runner，由 runner 决定落成
+`docker run` 的哪几个参数。
+
+## 每个沙箱一个 key
+
+`-sandbox-api-key`（`PIFORGE_SANDBOX_API_KEY`）现在**不再是必需的**，也不再是默认形态：
+留空时每个容器在创建时拿到 32 字节 `crypto/rand` 的随机 key（hex，64 字符），作为
+`SANDBOX_API_KEY` 传给容器；runner 在 create 的响应里把 key 回报一次，控制面用部署已有的
+AES-GCM secret box 加密存进 `sandboxes.api_key_cipher`，之后文件面板、终端、浏览器、
+分支 worktree 都从这一列取 key 放进 `X-AIO-API-Key`。
+
+为什么必须改：runner 把沙箱端点从 `127.0.0.1:<随机端口>` 变成
+`http://piforge-<hash8>:8080`（`SANDBOX_CONTAINER_ENDPOINT=1`），同一个网络上的任何进程
+都能访问每个 8080。以前"端口是随机的"充当了秘密；现在端点公开，一个部署级 key 就是
+**一个 key 开所有租户的浏览器、shell 和文件**。每沙箱一个 key 之后，A 的 key 打 B 的容器
+是 401（`scripts/verify-runner-sandbox.ps1` 会直接发这两个请求并比对状态码）。
+
+设置 `-sandbox-api-key` 仍然是**固定覆盖**：所有容器用它、所有调用也用它，适合调试一个
+部署（例如手工 `docker run` 一个容器来对照）。它不是租户部署该用的值。
+
+兼容性：升级前创建的沙箱行没有 key。这类行在有 `-sandbox-api-key` 时回退到它；没有时
+**明确报错**（"refusing to call its API unauthenticated"），不会退回"不带 key 直接调"。
+升级前创建的、没有 `SANDBOX_API_KEY` 的容器会在下一次 `Ensure` 时被重建（工作区是
+bind mount，文件保留）。
+
+key 不会出现在任何 HTTP 响应、日志或错误信息里：`contracts.Sandbox` 的该字段是
+`json:"-"`，`sandboxes.api_key_cipher` 也不在 `sandboxCols` 投影里。测试：
+`TestSandboxAPIKeyNeverAppearsInAnAPIResponse`、`TestRunnerReturnsTheKeyOnceAndNeverLogsIt`、
+`TestSandboxAPIKeyIsPerSandboxAndSealed`、`TestDockerProviderPerSandboxAPIKey`。
 
 三个开关在启动时一次解析完，日志里直接给出结果，所以看日志就知道这个部署长什么样：
 
@@ -275,7 +302,6 @@ FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:207] Check failed
 ```bash
 piforged -sandbox docker \
          -sandbox-image <all-in-one-sandbox:1.11.0> \
-         -sandbox-api-key <key> \
          -sandbox-browser remote
 ```
 
@@ -311,14 +337,13 @@ view   "echo remote-terminal-ok\r\nremote-terminal-ok\n"
 ```bash
 piforged -sandbox docker \
          -sandbox-image <all-in-one-sandbox:1.11.0> \
-         -sandbox-api-key <key> \
          -sandbox-terminal remote
 ```
 
 只有 `-sandbox docker` 下才有意义，并且 docker 下默认就是它（`-sandbox local` 下写 `remote`
 会启动失败，见上面的开关表）。docker provider 会因此
-发布容器的 8080 端口（`Endpoint` 从 `docker port` 读回实际端口），并把
-`-sandbox-api-key` 作为 `SANDBOX_API_KEY` 传给容器。工作区的宿主路径由
+发布容器的 8080 端口（`Endpoint` 从 `docker port` 读回实际端口），并把**这个容器自己的**
+key 作为 `SANDBOX_API_KEY` 传给容器（见上一节）。工作区的宿主路径由
 `Docker.ContainerPath` 映射到容器里的 `/workspace`，shell 就从该 worktree 启动。
 
 测试分两层：`internal/term/remote_test.go` 用 httptest 钉住“只追加新后缀”和“退格不发出去”；
@@ -333,7 +358,7 @@ piforged -sandbox docker \
 ```
 piforged -addr 127.0.0.1:8090 -data <tmp> -dev -fake-pi \
          -sandbox docker -sandbox-image <all-in-one-sandbox:1.11.0> \
-         -sandbox-api-key <key> -sandbox-browser remote -sandbox-terminal remote
+         -sandbox-browser remote -sandbox-terminal remote
 ```
 
 全程只走 HTTP API（cookie 登录 + `X-PF-CSRF`）：建项目 → 建会话 → 发一条消息让 provision 跑。

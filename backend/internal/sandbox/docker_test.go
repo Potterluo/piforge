@@ -616,7 +616,7 @@ func TestDockerProviderCheckoutUsesTheSandboxAPI(t *testing.T) {
 	t.Run("a fresh checkout", func(t *testing.T) {
 		shell := &fakeCheckoutShell{}
 		provider := newProvider(t, shell)
-		if err := provider.ensureCheckout(context.Background(), name, "", "main"); err != nil {
+		if err := provider.ensureCheckout(context.Background(), name, "sandbox-key", "", "main"); err != nil {
 			t.Fatalf("ensureCheckout: %v", err)
 		}
 		calls := shell.calls
@@ -660,7 +660,7 @@ func TestDockerProviderCheckoutUsesTheSandboxAPI(t *testing.T) {
 	t.Run("a repository with a commit is left alone", func(t *testing.T) {
 		shell := &fakeCheckoutShell{ready: true}
 		provider := newProvider(t, shell)
-		if err := provider.ensureCheckout(context.Background(), name, "", "main"); err != nil {
+		if err := provider.ensureCheckout(context.Background(), name, "sandbox-key", "", "main"); err != nil {
 			t.Fatalf("ensureCheckout: %v", err)
 		}
 		if len(shell.calls) != 1 || !strings.Contains(shell.calls[0].command, "echo ready") {
@@ -670,7 +670,7 @@ func TestDockerProviderCheckoutUsesTheSandboxAPI(t *testing.T) {
 
 	t.Run("no published API port fails instead of shelling out", func(t *testing.T) {
 		provider := &Docker{cfg: DockerConfig{DataRoot: filepath.Join(t.TempDir(), "sandboxes")}}
-		err := provider.ensureCheckout(context.Background(), name, "", "main")
+		err := provider.ensureCheckout(context.Background(), name, "sandbox-key", "", "main")
 		if err == nil || !strings.Contains(err.Error(), "no api port") {
 			t.Fatalf("ensureCheckout = %v, want the missing API port named", err)
 		}
@@ -692,7 +692,7 @@ func TestDockerProviderCheckoutCrossesTheSandboxAPI(t *testing.T) {
 	var mu sync.Mutex
 	var calls []recordedShellCall
 	provider.openCheckout = func(ctx context.Context, sandboxID string) (checkoutShell, error) {
-		inner, err := provider.sandboxShell(ctx, sandboxID)
+		inner, err := provider.sandboxShell(ctx, sandboxID, "")
 		if err != nil {
 			return nil, err
 		}
@@ -1214,7 +1214,7 @@ func TestContainerArgs(t *testing.T) {
 		APIPort:  8080,
 		APIKey:   "sandbox-key",
 	}}
-	args := single.containerArgs("piforge-abc", "usr_1", "prj_1", "/data/sandboxes/usr_1/prj_1")
+	args := single.containerArgs("piforge-abc", "usr_1", "prj_1", "/data/sandboxes/usr_1/prj_1", "sandbox-key")
 	assertArgsContain(t, args, "-v", "/data/sandboxes/usr_1/prj_1:/workspace")
 	assertArgsContain(t, args, "-p", "127.0.0.1::8080")
 	assertArgsContain(t, args, "-e", "BROWSER_NO_SANDBOX=--no-sandbox")
@@ -1234,7 +1234,7 @@ func TestContainerArgs(t *testing.T) {
 		APIKey:            "sandbox-key",
 		ContainerEndpoint: true,
 	}}
-	args = shared.containerArgs("piforge-abc", "usr_1", "prj_1", "/data/sandboxes/usr_1/prj_1")
+	args = shared.containerArgs("piforge-abc", "usr_1", "prj_1", "/data/sandboxes/usr_1/prj_1", "sandbox-key")
 	assertArgsAbsent(t, args, "-p")
 	assertArgsContain(t, args, "--network", "piforge-sandboxes")
 	// The browser switch and the key are about the image, not about how the API is

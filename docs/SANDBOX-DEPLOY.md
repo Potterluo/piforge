@@ -15,7 +15,7 @@ daemon 同机、控制面是宿主进程"时才成立的事。先把这六件事
 | 2 | 工作区是控制面本机的 bind mount 源 `<DataRoot>/<userID>/<projectID>` | `docker.go:152`、`docker.go:242` | daemon 在另一台机器时，源路径在**那台**机器上解析，控制面写自己磁盘，两边从此不是同一棵树。runner 与 daemon 同机、与控制面共享同一个数据卷、同一个路径（§1.4） |
 | 3 | `RootDir` 是宿主路径，控制面用它跑宿主 git | `docker.go:519`、`provision.go:200`（`AddWorktree(RepoDir(sb))`）、`provision.go:243`（`materialize.Mount`） | Pod 里没有"宿主路径"这回事，`provision` 立刻失效。runner 模式下 `RootDir` 仍是共享卷上的路径，所以 compose 成立；K8s 仍要改 |
 | 4 | 端点 = `docker port` 读回的随机端口，拼成 `http://127.0.0.1:<port>` | `docker.go:257`（`-p 127.0.0.1::8080`）、`docker.go:661` | 控制面在容器里时 `127.0.0.1` 是它自己的 loopback；K8s 里没有"发布端口"。**已解决**：`DockerConfig.ContainerEndpoint`（compose 里 `SANDBOX_CONTAINER_ENDPOINT=1`）改为容器名 `http://piforge-<hash8>:8080`，compose 与 K8s 形状一致 |
-| 5 | 一个部署级 `-sandbox-api-key`，原样传给**每个**容器 | `main.go:260`、`docker.go:268` | 端点一旦跨租户可达，一个 key 就是所有沙箱的 key。runner 没有改变这一点，只是把它收进了内网（§1.4） |
+| 5 | 每个沙箱一个 `SANDBOX_API_KEY`，随沙箱行加密落库；`-sandbox-api-key` 只剩调试用的固定覆盖 | `sandbox/key.go`、`sandbox/docker.go`（`runContainer`/`containerAPIKey`）、`provision.go`（`ensureSandbox`） | **已解决**。runner 把端点变成容器名之后，端点不再是秘密，key 才是：每个容器 32 字节随机 key，项目 A 的 key 打项目 B 的容器是 401（§1.4 末与 `scripts/verify-runner-sandbox.ps1`） |
 | 6 | 生产代码从不调用 `SandboxProvider.Exec`；沙箱内的命令走 AIO 的 `/v1/shell/exec` | `workspaceremote/exec.go:103`、`workspaceremote/files.go:362`；`Exec` 只被测试调用 | K8s 不需要 `pods/exec` 也能跑面板 git —— 这条是好消息，别把它当坏消息一起搬。runner 因此**不提供** exec 端点，`sandbox.Runner.Exec` 直接报错而不是假装有 |
 
 还有一条容易被忽略、但决定了整套端点设计：
@@ -162,16 +162,42 @@ services:
 | DELETE | `/v1/sandboxes/{id}` | — | `204`（删容器，**不删工作区**） | `Destroy` |
 | POST | `/v1/sandboxes/{id}/worktrees` | `{repo_dir, path, branch}`（可选 `api_key`） | `204` | `AddWorktree` |
 
-record 是 `{id, state, root_dir, container_path_root, endpoint}`：`id` 仍然是
+record 是 `{id, state, root_dir, container_path_root, endpoint, api_key?}`：`id` 仍然是
 `piforge-<sha256(user/project) 前 8 字节>`，`root_dir` 是共享卷上
 `<SANDBOX_DATA_ROOT>/<user>/<project>`，`container_path_root` 是 `/workspace`（控制面据此
-校验两侧对挂载点的一致理解），`endpoint` 是控制面可达的沙箱 API 地址。
+校验两侧对挂载点的一致理解），`endpoint` 是控制面可达的沙箱 API 地址，`api_key` **只在
+create 的响应里出现一次**（见下）。
 
 **没有第七个端点**：没有 health、没有 exec、没有文件读写。"在沙箱里跑命令"继续走沙箱
-自己的 `/v1/shell/exec` 与文件 API（§0 第 6 条），runner 不复制它。`POST …/worktrees`
-的可选 `api_key` 是唯一一处扩展字段：创建 worktree 要在容器内以沙箱用户跑 git，而
-runner 无状态，记不住某次 create 传过的 key；控制面把它带上，缺省时用 runner 的
-`SANDBOX_API_KEY`。
+自己的 `/v1/shell/exec` 与文件 API（§0 第 6 条），runner 不复制它。
+
+### 每个沙箱一个 key（替代部署级 `SANDBOX_API_KEY`）
+
+端点从 `127.0.0.1:<随机端口>` 变成 `http://piforge-<hash8>:8080` 之后，"端点本身是秘密"
+这层遮挡就没有了：同一个网络上的任何进程都能访问每个沙箱的 8080。所以 key 必须每沙箱一个：
+
+1. **生成**：容器创建点（`sandbox.Docker.runContainer`）用 `crypto/rand` 取 32 字节、hex
+   编码（64 字符）作为该容器的 `SANDBOX_API_KEY`；本地 provider 没有 API，不涉及。
+   设置 `-sandbox-api-key` 时它作为**固定覆盖**原样使用（调试一个部署用，不是租户用）。
+2. **上报**：runner 把生成结果放进 create 的 record（`api_key`），经
+   `Authorization: Bearer <RUNNER_TOKEN>` 的内部通道**只返回一次**。选"在 runner 生成、
+   上报一次"而不是"控制面生成、每次下发"，原因有二：控制面生成意味着密钥在每次 create
+   时都上线，且 runner 仍无法回答"它接管的那个容器用的是哪个 key"（runner 无状态）；
+   在创建点生成则密钥只向上走一次。
+3. **落库**：控制面把 key 交给 `store.CreateSandbox`，用部署已有的 AES-GCM secret box
+   （`store/secrets.go`，与 MCP 凭据同一套密钥来源 `PIFORGE_SECRET_KEY` 或库旁 0600 文件）
+   加密进 `sandboxes.api_key_cipher`。它**不在** `sandboxCols` 里，只能经
+   `store.SandboxAPIKey` 读出；`contracts.Sandbox.SandboxAPIKey` 是 `json:"-"`，任何
+   HTTP 响应、日志行、错误串都拿不到它。
+4. **使用**：文件面板、终端、浏览器、分支 worktree 每次调用都按 sandbox id 解析 key
+   （`cmd/piforged/sandbox_keys.go`），放进 `X-AIO-API-Key` 头，**从不放进 URL**。
+   `POST …/worktrees` 的可选 `api_key` 仍然接受固定覆盖；为空时 runner 自己从容器环境
+   读回（`docker inspect .Config.Env`），这正是它保持无状态的方式。
+5. **旧行**：没有 key 的行（升级前创建）在 `-sandbox-api-key` 存在时回退到它，否则明确
+   报错并让调用失败——**不会**退回"不带 key 直接调"。旧的、没有 `SANDBOX_API_KEY` 的
+   容器在 `Ensure` 时会被重建（工作区是 bind mount，文件不丢）。
+6. **仍未做**：resume 时不轮换 key（容器重启用的还是创建时那个）；没有 key 轮换接口，
+   没有按会话分发/撤销。要轮换只能重建沙箱。
 
 **鉴权**：`Authorization: Bearer <RUNNER_TOKEN>`，控制面与 runner 两侧都必需
 （runner 没有 token 直接拒绝启动）。比较在 SHA-256 摘要上做
@@ -296,6 +322,9 @@ spec:
     - name: sandbox
       image: <aio-sandbox:1.11.0>
       env:
+        # 每沙箱一个 key，由创建 Pod 的那一方生成并写进这个 Secret（不是部署级共用）。
+        # 现在是 runner 在 create 时生成、经内部 API 回报一次；K8s 下同样必须由"创建者"
+        # 注入，而不是从一份所有沙箱共享的 Secret 里读。
         - name: SANDBOX_API_KEY
           valueFrom: { secretKeyRef: { name: pf-81042b4b, key: api-key } }
         - { name: BROWSER_NO_SANDBOX, value: "--no-sandbox" }   # 见 2.5(f)
@@ -376,8 +405,9 @@ Succeeded/Failed→PAUSED/ERROR）。
   §3.2，其原始来源是项目的 `docs/performance-tuning.md`）。**warm pool 不是优化，是产品**：
   没有它，"新建会话"就是 40 秒。
 - **陷阱**：`SandboxClaim` 一旦带 `spec.env` 或 `spec.volumeClaimTemplates`，就会
-  **绕过 warm pool 直接冷启动**（同一份 briefing §3.2）。我们这个产品每个会话都要传
-  `SANDBOX_API_KEY` —— 如果照搬，池子等于白建，必须把 key 做进模板/由 router 注入。
+  **绕过 warm pool 直接冷启动**（同一份 briefing §3.2）。我们这个产品每个沙箱都要一个
+  自己的 `SANDBOX_API_KEY` —— 如果照搬"每个 claim 带 spec.env"，池子等于白建，必须把
+  "分配 key" 做进 claim/adoption 那一步（现在由 runner 在创建容器时生成）。
 - 版本：文档示例写 `agents.x-k8s.io/v1beta1`，源码分析文档写 `v1alpha1`，
   **以你要装的那个 release 为准（未核实）**。它是 2025 年 KubeCon 上启动的新项目，
   不是 GA 级依赖，引入前先评估"控制器停更了怎么办"。
@@ -582,9 +612,9 @@ AIO 镜像是 GB 级（一篇实测记录里 `agent-infra/sandbox` 在本地是 
 - **工具链**：agent 需要的东西（git、node、python、playwright 依赖、CJK 字体）必须在
   **模板里预装**。每到一个新沙箱再 `apt install` 一遍，等于把冷启动从秒级推到分钟级，也
   把外部仓库当成了启动依赖。
-- **一个 key 的问题在这里更严重**：`getHost(port)` 给的是**公网域名**。如果还沿用"一个
-  部署级 `SANDBOX_API_KEY`"，那就是"公网可达 + 所有沙箱同一个口令"。必须改成每沙箱一个
-  token，且只发给有权访问那个沙箱的会话。
+- **key 已经不是问题了，端点仍是**：`getHost(port)` 给的是**公网域名**。本仓库现在每个
+  沙箱一个 key（§1.4），所以公网可达不再等于"一个口令开所有沙箱"；但把 8080 发布到公网
+  依然把爆破面、DoS 面和镜像自身的漏洞一起送出去了。E2B 这条路仍应只让控制面访问。
 
 ### 4.4 时延、数据落地、成本
 
@@ -740,10 +770,12 @@ Pod 没有"暂停"。三种候选，逐个排除：
 - **bind mount + 远程 daemon**。路径在 daemon 主机解析，`-v` 会静默建一个空目录，控制面
   和沙箱从此各写各的，而且不报错。要跨机器就换 named volume，或者让 runner 和 daemon 同机。
 - **在多租户集群里发布 8080 / 给每个沙箱开 Ingress**。用户浏览器不需要直连沙箱（§0 第 7
-  条），所以每一个"方便调试"的暴露面，都是纯风险、没有收益。配合"一个部署级 API key"，
-  它等于把任意沙箱的 shell 发给任何拿到 key 的人。
-- **继续用一个共享的 `SANDBOX_API_KEY` 而端点跨租户可达**。现在是"靠 127.0.0.1 发布"
-  挡住了这个问题；一旦端点变成 Service/DNS/getHost，这层遮挡就没了。必须每沙箱一个 token。
+  条），所以每一个"方便调试"的暴露面，都是纯风险、没有收益。key 虽然已经是每沙箱一个，
+  发布端口仍然把爆破面、DoS 面和镜像漏洞送出去，收益为零。
+- **再用一个共享的 `SANDBOX_API_KEY`**（`-sandbox-api-key` 的固定覆盖）配一个跨租户可达
+  的端点。这条曾经是这套设计里最危险的一处，现在默认已经不成立：每沙箱一个 key，A 的 key
+  打 B 是 401（`scripts/verify-runner-sandbox.ps1` 会直接打这两个请求）。固定覆盖只应出现
+  在调试一个部署的时候。
 - **用 `pods/portforward` 当生产数据面**。每条连接过 API server，Pod 重启即断，截图流
   走这里会把控制面拖垮。它只用于调试。
 - **用 Job 表达长期沙箱**。Job 的成功条件是"退出"，沙箱的成功条件是"活着"。

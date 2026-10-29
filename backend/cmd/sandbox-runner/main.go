@@ -58,7 +58,7 @@ func run() error {
 		apiPort = flag.Int("api-port", envInt("SANDBOX_API_PORT", 8080),
 			"container port that serves the sandbox HTTP API")
 		apiKey = flag.String("api-key", envOr("SANDBOX_API_KEY", ""),
-			"default SANDBOX_API_KEY for containers and for reaching their API")
+			"fixed SANDBOX_API_KEY for every container and for reaching their API (debugging override; empty gives each container its own key)")
 		containerEndpoint = flag.Bool("container-endpoint", envBool("SANDBOX_CONTAINER_ENDPOINT", false),
 			"report http://<container>:<api-port> on the sandbox network instead of a published loopback port")
 	)

@@ -316,6 +316,10 @@ func (s *Service) ensureSandbox(
 		Image:     live.Image,
 		RootDir:   live.RootDir,
 		ExpiresAt: live.ExpiresAt,
+		// One key per sandbox, generated where the container was created (or the
+		// fixed -sandbox-api-key override). It is sealed by the store and used for
+		// every later call to this sandbox's API.
+		APIKey: live.SandboxAPIKey,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("provision: record sandbox: %w", err)

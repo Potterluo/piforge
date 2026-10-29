@@ -154,7 +154,7 @@ func run() error {
 	flag.StringVar(&opt.sandboxFiles, "sandbox-files", envOr("PIFORGE_SANDBOX_FILES", "auto"),
 		"workspace files: auto (container providers: remote, local: host), host, or remote (read and written through the sandbox)")
 	flag.StringVar(&opt.sandboxAPIKey, "sandbox-api-key", envOr("PIFORGE_SANDBOX_API_KEY", ""),
-		"API key the sandbox container was started with")
+		"fixed API key for every sandbox (debugging override; empty gives each sandbox its own key)")
 	flag.StringVar(&opt.sandboxImage, "sandbox-image", envOr("PIFORGE_SANDBOX_IMAGE", ""),
 		"image for the docker sandbox provider")
 	flag.StringVar(&opt.sandboxNetwork, "sandbox-network", envOr("PIFORGE_SANDBOX_NETWORK", ""),
@@ -362,7 +362,7 @@ func run() error {
 		if remoteSB == nil {
 			return fmt.Errorf("remote workspace files need a container sandbox provider (-sandbox docker or -sandbox runner)")
 		}
-		fileBackend := &sandboxFileBackend{provider: remoteSB, store: st, apiKey: opt.sandboxAPIKey}
+		fileBackend := &sandboxFileBackend{provider: remoteSB, store: st, keys: sandboxKeys{store: st, fixed: opt.sandboxAPIKey}}
 		executor := workspaceremote.ShellExecutor{Backend: fileBackend}
 		remoteFiles, rerr := workspaceremote.New(workspaceremote.Config{
 			Backend: fileBackend,
@@ -519,12 +519,29 @@ func run() error {
 		Proxy:    opt.browserProxy,
 		Launcher: launcher,
 	}
+	// One resolver for every sandbox API call this process makes: the file panel,
+	// the terminal, the browser and the worktree request all present the same key
+	// the container was created with.
+	keys := sandboxKeys{store: st, fixed: opt.sandboxAPIKey}
+	if remoteSB != nil {
+		if strings.TrimSpace(opt.sandboxAPIKey) != "" {
+			logger.Warn("sandbox API keys are fixed by -sandbox-api-key for every sandbox; this is for debugging one deployment, not for tenants",
+				"sandbox", opt.sandboxKind,
+				"detail", "leave -sandbox-api-key empty to let each sandbox get its own key, which is what keeps one leaked key from opening every tenant")
+		} else {
+			logger.Info("sandbox API keys are per sandbox",
+				"sandbox", opt.sandboxKind,
+				"detail", "each container gets a 32-byte random key at creation, sealed in the sandboxes row")
+		}
+	}
+
 	// With a docker sandbox that runs an AIO image, the browser lives in that container:
 	// the panel then shows the same machine the agent edits, which is the whole point of
 	// moving the sandbox into a container. This is the resolved placement, so it is
 	// remote by default under docker — not only when the flag is spelled out.
 	if opt.sandboxBrowser == "remote" {
 		browserCfg.RemoteAPIKey = opt.sandboxAPIKey
+		browserCfg.RemoteKey = keys.For
 		browserCfg.Remote = func(ctx context.Context, sandboxID string) (string, string, error) {
 			if remoteSB == nil {
 				return "", "", fmt.Errorf("remote browser needs a container sandbox provider")
@@ -533,7 +550,11 @@ func run() error {
 			if err != nil {
 				return "", "", err
 			}
-			client, cerr := aio.New(aio.Config{BaseURL: endpoint, APIKey: opt.sandboxAPIKey})
+			apiKey, kerr := keys.For(ctx, sandboxID)
+			if kerr != nil {
+				return "", "", kerr
+			}
+			client, cerr := aio.New(aio.Config{BaseURL: endpoint, APIKey: apiKey})
 			if cerr != nil {
 				return "", "", cerr
 			}
@@ -582,9 +603,15 @@ func run() error {
 					"worktree", worktree.Path, "error", cerr.Error())
 				return nil, "", "", cerr
 			}
+			apiKey, kerr := keys.For(ctx, worktree.SandboxID)
+			if kerr != nil {
+				logger.Warn("cannot resolve the sandbox's API key; falling back to a host PTY",
+					"sandbox", worktree.SandboxID, "error", kerr.Error())
+				return nil, "", "", kerr
+			}
 			client, aerr := aio.New(aio.Config{
 				BaseURL: endpoint,
-				APIKey:  opt.sandboxAPIKey,
+				APIKey:  apiKey,
 				Root:    "/workspace",
 			})
 			if aerr != nil {

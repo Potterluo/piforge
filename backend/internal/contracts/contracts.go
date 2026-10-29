@@ -533,6 +533,14 @@ type Sandbox struct {
 	CreatedAt    time.Time    `json:"created_at"`
 	ExpiresAt    *time.Time   `json:"expires_at,omitempty"`
 	Message      string       `json:"message,omitempty"`
+
+	// SandboxAPIKey is the key the sandbox's own HTTP API requires, as reported
+	// by the provider that created the container. It is a secret: json:"-" keeps
+	// it out of every API response and every log field that marshals a sandbox,
+	// and the store persists it sealed (store.CreateSandbox / SandboxAPIKey).
+	// It is only populated on the provider's create answer, which is the one
+	// moment the control plane does not already know it.
+	SandboxAPIKey string `json:"-"`
 }
 
 // SandboxProvider creates and destroys sandboxes.

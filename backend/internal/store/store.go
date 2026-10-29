@@ -183,6 +183,12 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if err := addColumn(ctx, db, "sessions", "ephemeral", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
+	// Per-sandbox API keys (docs/SANDBOX.md). A row created before this column
+	// existed reads back empty, which the control plane treats as "recreate it or
+	// use the fixed override" rather than "call the sandbox unauthenticated".
+	if err := addColumn(ctx, db, "sandboxes", "api_key_cipher", "BLOB"); err != nil {
+		return fmt.Errorf("store: migrate: %w", err)
+	}
 	return nil
 }
 

@@ -152,6 +152,10 @@ type NewSandbox struct {
 	Image     string
 	RootDir   string
 	Message   string
+	// APIKey is the key the sandbox's own API requires (per-sandbox, generated
+	// where the container was created). It is sealed before it is written: the
+	// sandboxes table is a file on disk like any other.
+	APIKey    string
 	CPUMilli  int
 	MemMB     int
 	DiskGB    int
@@ -173,12 +177,18 @@ func (s *Store) CreateSandbox(ctx context.Context, userID string, in NewSandbox)
 		id = NewID("sbx")
 	}
 	now := s.now()
+	keyCipher, err := s.sealSandboxAPIKey(in.APIKey)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := s.w.ExecContext(ctx,
 		`INSERT INTO sandboxes (id, user_id, project_id, state, provider, node, image, root_dir,
-		                        message, cpu_milli, mem_mb, disk_gb, last_active_at, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		                        message, cpu_milli, mem_mb, disk_gb, last_active_at, created_at, expires_at,
+		                        api_key_cipher)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, userID, in.ProjectID, string(state), in.Provider, in.Node, in.Image, in.RootDir,
-		in.Message, in.CPUMilli, in.MemMB, in.DiskGB, formatTime(now), formatTime(now), nullTime(in.ExpiresAt)); err != nil {
+		in.Message, in.CPUMilli, in.MemMB, in.DiskGB, formatTime(now), formatTime(now), nullTime(in.ExpiresAt),
+		keyCipher); err != nil {
 		if isUniqueViolation(err) {
 			return nil, fmt.Errorf("store: create sandbox for project %q: %w", in.ProjectID, ErrConflict)
 		}
@@ -199,6 +209,26 @@ func (s *Store) Sandbox(ctx context.Context, userID, sandboxID string) (*contrac
 		return nil, fmt.Errorf("store: sandbox %q: %w", sandboxID, err)
 	}
 	return sb, nil
+}
+
+// SandboxAPIKey returns the key one sandbox's HTTP API requires, decrypted.
+//
+// It is deliberately not part of contracts.Sandbox and not reachable from the HTTP
+// layer: the only callers are the control plane's own sandbox clients (files,
+// terminal, browser, worktree), which hold a sandbox id and nothing else. An empty
+// answer means the row predates per-sandbox keys; the caller decides between the
+// fixed override and a clear failure — never "call it unauthenticated".
+func (s *Store) SandboxAPIKey(ctx context.Context, sandboxID string) (string, error) {
+	var blob []byte
+	err := s.r.QueryRowContext(ctx,
+		`SELECT api_key_cipher FROM sandboxes WHERE id = ?`, sandboxID).Scan(&blob)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("store: sandbox %q: %w", sandboxID, ErrNotFound)
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: sandbox %q: read api key: %w", sandboxID, err)
+	}
+	return s.openSandboxAPIKey(blob)
 }
 
 // SandboxForProject loads the caller's sandbox for a project.

@@ -93,9 +93,13 @@ type RunnerConfig struct {
 	DataRoot string
 	// Image is reported in contracts.Sandbox.Image and sent with every create.
 	Image string
-	// APIKey is the key the sandbox containers were started with. It is sent with
-	// every create (the container enforces it, and this process presents the same
-	// key to the container's API) and with a worktree request.
+	// APIKey is an optional *fixed* key for every sandbox this deployment creates
+	// (-sandbox-api-key). Empty — the default — means the runner generates a key
+	// per container and reports it in the create record, which is what makes one
+	// leaked key useless against another tenant (see key.go).
+	//
+	// A fixed value is for debugging one deployment, not for tenants: it is sent
+	// with every create and with a worktree request.
 	APIKey string
 	// CPUs and Memory cap the container per sandbox; empty leaves the runner's
 	// deployment defaults in charge.
@@ -200,6 +204,10 @@ func (r *Runner) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 		return nil, err
 	}
 	sb.UserID, sb.ProjectID = userID, projectID
+	// The key the runner's provider created the container with. It is persisted
+	// with the sandbox row (sealed) and is the only copy this process will ever
+	// need: every later call presents it to the container.
+	sb.SandboxAPIKey = record.APIKey
 	now := time.Now().UTC()
 	sb.CreatedAt, sb.LastActiveAt = now, now
 	r.warnAboutDataRoot(record, userID, projectID)
@@ -452,8 +460,10 @@ type RunnerRequest struct {
 	Branch string `json:"branch,omitempty"`
 	// APIPort is the container port that serves the sandbox API.
 	APIPort int `json:"api_port,omitempty"`
-	// APIKey is passed to the container as SANDBOX_API_KEY. Empty leaves the
-	// runner's default in charge.
+	// APIKey is an optional fixed SANDBOX_API_KEY for this create
+	// (-sandbox-api-key). Empty means "give this container its own key"; the
+	// runner reports the key it used back in the record, because a stateless
+	// runner cannot remember it and the control plane must persist it.
 	APIKey string `json:"api_key,omitempty"`
 	// CPUs and Memory cap the container; empty means "no limit".
 	CPUs   string `json:"cpus,omitempty"`
@@ -466,9 +476,9 @@ type RunnerRequest struct {
 //
 // APIKey is the one addition to the lifecycle fields: creating a worktree runs
 // git inside the container through its own API, so the runner has to present that
-// container's key. A stateless runner cannot remember the key an earlier create
-// carried; sending it here keeps that statelessness. When it is empty the
-// runner's configured default is used.
+// container's key. Empty is the normal case with per-sandbox keys: the runner
+// reads the key out of the container's own environment (`docker inspect`), which
+// is what keeps it stateless. A non-empty value is the fixed override.
 type RunnerWorktreeRequest struct {
 	RepoDir string `json:"repo_dir"`
 	Path    string `json:"path"`
@@ -477,6 +487,11 @@ type RunnerWorktreeRequest struct {
 }
 
 // RunnerRecord is what every lifecycle call answers with.
+//
+// APIKey is present only on a create's answer: it is the key the container was
+// started with, returned once so the control plane can persist it. The channel is
+// the runner's bearer-token-protected internal API, and the secret is not logged
+// (see sandboxrunner's logRequests).
 type RunnerRecord struct {
 	// ID is the container name, derived from (user, project) by the runner.
 	ID string `json:"id"`
@@ -490,4 +505,7 @@ type RunnerRecord struct {
 	// Endpoint is the base URL of the sandbox API, or empty when the runner
 	// published none.
 	Endpoint string `json:"endpoint,omitempty"`
+	// APIKey is the SANDBOX_API_KEY the container was created with. It is
+	// returned once, on create, and never logged.
+	APIKey string `json:"api_key,omitempty"`
 }

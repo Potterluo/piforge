@@ -17,7 +17,12 @@
 #   4. `docker ps` shows the piforge-* container the runner created, its /workspace
 #      bind mount is the shared data path, and `.git/worktrees/<slug>` is owned by
 #      `gem` (the worktree was created inside the container, through the runner);
-#   5. cleanup: both processes stopped, `docker rm -f` only the containers this
+#   5. keys: by default each sandbox gets its own key. The script reads both keys
+#      out of the containers (`docker inspect`), shows they differ, and shows that
+#      project A's key is 401 against project B's container while B's own key is
+#      200 — and the reverse. `-LegacySharedKey` runs the same flow with one fixed
+#      -sandbox-api-key / -api-key and proves that override still works;
+#   6. cleanup: both processes stopped, `docker rm -f` only the containers this
 #      script recorded (never `pf-local`/`piforge`), temp dirs removed, and
 #      `docker ps -a` has the same number of rows it had before the run.
 #
@@ -29,7 +34,10 @@ param(
     [int]$RunnerPort = 8111,
     [int]$ServerPort = 8112,
     [string]$RunnerToken = "",
-    [int]$StartTimeoutSec = 120
+    [int]$StartTimeoutSec = 120,
+    # Run the deployment-wide key path instead: one fixed SANDBOX_API_KEY for both
+    # services. It is the compatibility check for -sandbox-api-key, not the default.
+    [switch]$LegacySharedKey
 )
 
 $ErrorActionPreference = "Stop"
@@ -441,17 +449,23 @@ try {
     # -----------------------------------------------------------------------
     # sandbox-runner on 127.0.0.1:8111
     # -----------------------------------------------------------------------
+    # Per-sandbox keys are the default: neither process is told a key, so the
+    # provider generates one per container and the runner reports it once.
+    # -LegacySharedKey restores the old deployment-wide key on purpose.
+    $sandboxAPIKey = ""
     $runnerArgs = @(
         "-addr", "127.0.0.1:$RunnerPort",
         "-token", $RunnerToken,
         "-data-root", (Quote-Arg $sandboxRoot),
         "-image", (Quote-Arg $Image),
-        "-api-port", "8080",
-        "-api-key", "sandbox-key-" + [guid]::NewGuid().ToString("N")
+        "-api-port", "8080"
     )
-    $sandboxAPIKey = $runnerArgs[-1]
+    if ($LegacySharedKey) {
+        $sandboxAPIKey = "sandbox-key-" + [guid]::NewGuid().ToString("N")
+        $runnerArgs += @("-api-key", $sandboxAPIKey)
+    }
     Write-Host "starting sandbox-runner on 127.0.0.1:$RunnerPort (data root $sandboxRoot)"
-    Write-Host ("  sandbox-runner -addr 127.0.0.1:$RunnerPort -token <redacted> -data-root `"$sandboxRoot`" -image `"$Image`" -api-port 8080 -api-key <redacted>") -ForegroundColor DarkGray
+    Write-Host ("  sandbox-runner -addr 127.0.0.1:$RunnerPort -token <redacted> -data-root `"$sandboxRoot`" -image `"$Image`" -api-port 8080 " + $(if ($LegacySharedKey) { "-api-key <redacted>" } else { "" })) -ForegroundColor DarkGray
     $script:runnerProc = Start-Process -FilePath (Join-Path $bin "sandbox-runner.exe") `
         -ArgumentList $runnerArgs -WorkingDirectory $root `
         -RedirectStandardOutput $script:runnerLog -RedirectStandardError $script:runnerErrLog `
@@ -519,8 +533,12 @@ try {
         "-sandbox", "runner",
         "-sandbox-runner-url", "http://127.0.0.1:$RunnerPort",
         "-sandbox-runner-token", $RunnerToken,
-        "-sandbox-image", (Quote-Arg $Image),
-        "-sandbox-api-key", $sandboxAPIKey,
+        "-sandbox-image", (Quote-Arg $Image)
+    )
+    if ($LegacySharedKey) {
+        $serverArgs += @("-sandbox-api-key", $sandboxAPIKey)
+    }
+    $serverArgs += @(
         "-fake-pi",
         "-dev",
         "-addr", "127.0.0.1:$ServerPort",
@@ -528,7 +546,7 @@ try {
     )
     try {
         Write-Host "starting piforged on $($script:base) with -sandbox runner"
-        Write-Host ("  piforged -sandbox runner -sandbox-runner-url http://127.0.0.1:$RunnerPort -sandbox-runner-token <redacted> -sandbox-image `"$Image`" -sandbox-api-key <redacted> -fake-pi -dev -addr 127.0.0.1:$ServerPort -data `"$($script:data)`"") -ForegroundColor DarkGray
+        Write-Host ("  piforged -sandbox runner -sandbox-runner-url http://127.0.0.1:$RunnerPort -sandbox-runner-token <redacted> -sandbox-image `"$Image`" " + $(if ($LegacySharedKey) { "-sandbox-api-key <redacted> " } else { "" }) + "-fake-pi -dev -addr 127.0.0.1:$ServerPort -data `"$($script:data)`"") -ForegroundColor DarkGray
         $env:PATH = $restrictedPath
         $script:proc = Start-Process -FilePath (Join-Path $bin "piforged.exe") `
             -ArgumentList $serverArgs -WorkingDirectory $root `
@@ -705,6 +723,138 @@ try {
         if ($owner -ne "gem") { throw "$wtMeta is owned by '$owner', want gem (created inside the container)" }
         $list = Invoke-Docker @("exec", "-u", "gem", $cA, "git", "-c", "safe.directory=$repoA", "-C", $repoA, "worktree", "list", "--porcelain")
         "stat %U -> $owner; worktree list:`n$($list.Output.Trim())"
+    }
+
+    # -----------------------------------------------------------------------
+    # Project B: a second tenant, and the key that must not open it
+    # -----------------------------------------------------------------------
+    $projB = New-PfProject "verify-runner-b"
+    $sessB = New-PfSession $projB "main"
+    if ([string]::IsNullOrWhiteSpace($sessB.worktree_id)) {
+        throw "project B's session has no worktree; provisioning failed (see the piforged log)"
+    }
+    $sandboxB = Get-PfSandbox $sessB.id
+    $cB = $sandboxB.id
+    if ($cB -eq $cA) { throw "projects A and B resolved to the same container '$cA'" }
+    if ($sandboxB.state -ne "READY") { throw "project B's sandbox state is '$($sandboxB.state)', want READY" }
+    Add-Result "project B: a second tenant has its own container" $true ("state=$($sandboxB.state) id=$cB")
+
+    function Get-ContainerAPIKey {
+        param([string]$Container)
+        $r = Invoke-Docker @("inspect", "--format", '{{range .Config.Env}}{{println .}}{{end}}', $Container)
+        if ($r.Code -ne 0) { throw "docker inspect $Container failed: $($r.Output)" }
+        foreach ($line in ($r.Output -split "`n")) {
+            $trimmed = $line.Trim()
+            if ($trimmed.StartsWith("SANDBOX_API_KEY=")) {
+                return $trimmed.Substring("SANDBOX_API_KEY=".Length)
+            }
+        }
+        return ""
+    }
+
+    function Get-ContainerEndpoint {
+        param([string]$Container)
+        $r = Invoke-Docker @("port", $Container, "8080/tcp")
+        if ($r.Code -ne 0) { throw "docker port $Container failed: $($r.Output)" }
+        $line = @($r.Output -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1)
+        if ($line.Count -eq 0) { throw "$Container publishes no 8080 port" }
+        return "http://" + $line[0].Trim()
+    }
+
+    # Direct against the container, not through piforged: the question is whether the
+    # sandbox itself enforces its key, not whether the control plane does.
+    function Invoke-SandboxAPI {
+        param([string]$Endpoint, [string]$Key, [string]$Path = "/v1/browser/info")
+        $headers = @{}
+        if (-not [string]::IsNullOrWhiteSpace($Key)) { $headers["X-AIO-API-Key"] = $Key }
+        $r = Invoke-WebRequest -Uri "$Endpoint$Path" -Headers $headers -SkipHttpErrorCheck -NoProxy -TimeoutSec 20
+        return [int]$r.StatusCode
+    }
+
+    $keyA = Get-ContainerAPIKey $cA
+    $keyB = Get-ContainerAPIKey $cB
+    $endpointA = Get-ContainerEndpoint $cA
+    $endpointB = Get-ContainerEndpoint $cB
+
+    if ($LegacySharedKey) {
+        Invoke-Check "keys: -sandbox-api-key is the key both containers run with" {
+            if ($keyA -ne $sandboxAPIKey) { throw "A runs with a different key than the -sandbox-api-key override" }
+            if ($keyB -ne $sandboxAPIKey) { throw "B runs with a different key than the -sandbox-api-key override" }
+            "both containers carry the fixed SANDBOX_API_KEY from the flag ($($keyA.Length) characters)"
+        }
+        Invoke-Check "keys: the fixed key opens both containers" {
+            foreach ($endpoint in @($endpointA, $endpointB)) {
+                $status = Invoke-SandboxAPI $endpoint $sandboxAPIKey
+                if ($status -ne 200) { throw "GET $endpoint/v1/browser/info with the fixed key -> $status, want 200" }
+            }
+            "GET /v1/browser/info with the fixed key -> 200 on A and B"
+        }
+        Invoke-Check "keys: a wrong key is rejected even in the fixed-key deployment" {
+            $status = Invoke-SandboxAPI $endpointA ("not-" + $sandboxAPIKey)
+            if ($status -ne 401) { throw "GET A with a wrong key -> $status, want 401" }
+            "GET /v1/browser/info on A with a wrong key -> 401"
+        }
+    }
+    else {
+        Invoke-Check "keys: each container has its own 64-hex SANDBOX_API_KEY" {
+            if ($keyA -notmatch '^[0-9a-f]{64}$') { throw "A's key is not 64 hex characters: '$keyA'" }
+            if ($keyB -notmatch '^[0-9a-f]{64}$') { throw "B's key is not 64 hex characters: '$keyB'" }
+            if ($keyA -eq $keyB) { throw "A and B share one key, which is the bug this change removes" }
+            "A and B have different 64-hex keys (A ...$($keyA.Substring(56)), B ...$($keyB.Substring(56)))"
+        }
+
+        Invoke-Check "cross-tenant: A's key against B -> 401, B's own key against B -> 200" {
+            $cross = Invoke-SandboxAPI $endpointB $keyA
+            $own = Invoke-SandboxAPI $endpointB $keyB
+            if ($cross -ne 401) { throw "GET B/v1/browser/info with A's key -> $cross, want 401" }
+            if ($own -ne 200) { throw "GET B/v1/browser/info with B's key -> $own, want 200" }
+            "GET B/v1/browser/info with A's key -> 401; with B's key -> 200"
+        }
+
+        Invoke-Check "cross-tenant: B's key against A -> 401, A's own key against A -> 200" {
+            $cross = Invoke-SandboxAPI $endpointA $keyB
+            $own = Invoke-SandboxAPI $endpointA $keyA
+            if ($cross -ne 401) { throw "GET A/v1/browser/info with B's key -> $cross, want 401" }
+            if ($own -ne 200) { throw "GET A/v1/browser/info with A's key -> $own, want 200" }
+            "GET A/v1/browser/info with B's key -> 401; with A's key -> 200"
+        }
+
+        Invoke-Check "cross-tenant: no key at all -> 401" {
+            $status = Invoke-SandboxAPI $endpointA ""
+            if ($status -ne 401) { throw "GET A/v1/browser/info without a key -> $status, want 401" }
+            "GET /v1/browser/info on A without X-AIO-API-Key -> 401"
+        }
+
+        Invoke-Check "keys: the control plane API never returns the sandbox key" {
+            $bodies = @(
+                (Invoke-Api -Method Get -Path "/v1/sessions/$($sessA.id)/sandbox" -TimeoutSec 60).Content,
+                (Invoke-Api -Method Get -Path "/v1/projects" -TimeoutSec 60).Content,
+                (Invoke-Api -Method Get -Path "/v1/sessions/$($sessA.id)" -TimeoutSec 60).Content
+            )
+            foreach ($body in $bodies) {
+                if (([string]$body).Contains($keyA)) { throw "an API response contains A's sandbox API key" }
+                if (([string]$body).Contains($keyB)) { throw "an API response contains B's sandbox API key" }
+            }
+            "GET session/sandbox, projects and session -> 200, no key in any body"
+        }
+
+        Invoke-Check "keys: neither process logged the sandbox key" {
+            $serverLog = [string](Get-ServerLog)
+            if ($serverLog.Contains($keyA) -or $serverLog.Contains($keyB)) {
+                throw "the piforged log contains a sandbox API key"
+            }
+            $texts = @()
+            foreach ($file in @($script:runnerLog, $script:runnerErrLog)) {
+                if (-not [string]::IsNullOrWhiteSpace($file) -and (Test-Path -LiteralPath $file)) {
+                    $texts += [string](Get-Content -LiteralPath $file -Raw -ErrorAction SilentlyContinue)
+                }
+            }
+            $runnerText = $texts -join "`n"
+            if ($runnerText.Contains($keyA) -or $runnerText.Contains($keyB)) {
+                throw "the runner log contains a sandbox API key"
+            }
+            "the key appears in no piforged or runner log line ($($serverLog.Length) + $($runnerText.Length) characters checked)"
+        }
     }
 
     # -----------------------------------------------------------------------

@@ -44,8 +44,10 @@ type DockerOptions struct {
 	Memory string
 	// APIPort is the default container port that serves the sandbox API (8080).
 	APIPort int
-	// APIKey is the default SANDBOX_API_KEY for new containers, and the key used
-	// to reach an existing container's API when a request does not carry one.
+	// APIKey is a fixed SANDBOX_API_KEY for every container this runner creates,
+	// and the key used to reach a container whose own key cannot be read. Empty is
+	// the secure default: sandbox.Docker then generates one key per container and
+	// reports it in the create record.
 	APIKey string
 	// ContainerEndpoint makes the provider report http://<container>:<APIPort> on
 	// Network instead of a published loopback port. Set it when the control plane
@@ -186,12 +188,22 @@ func (p *DockerProvider) apiPort(requested int) int {
 // the provider rather than from a remembered port: the address is assigned at
 // creation and survives a restart, and a copy kept in memory would be wrong after
 // either.
+//
+// APIKey is copied from the create's answer and returned to the control plane over
+// its bearer-protected internal API, once. The control plane is the only place the
+// key can live: this service is stateless, so a later worktree request re-reads the
+// key from the container's environment instead of remembering it. The alternative
+// (the control plane generates the key and pushes it down on every create) puts the
+// secret on the wire repeatedly and still leaves the runner guessing for a container
+// it adopted, so generating where the container is created and reporting upward once
+// is the smaller exposure.
 func (p *DockerProvider) record(ctx context.Context, provider *sandbox.Docker, sb *contracts.Sandbox) (sandbox.RunnerRecord, error) {
 	record := sandbox.RunnerRecord{
 		ID:                sb.ID,
 		State:             sb.State,
 		RootDir:           sb.RootDir,
 		ContainerPathRoot: sandbox.ContainerWorkspace,
+		APIKey:            sb.SandboxAPIKey,
 	}
 	endpoint, err := provider.Endpoint(ctx, sb.ID)
 	if err != nil {

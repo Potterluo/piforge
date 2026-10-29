@@ -23,7 +23,10 @@ import (
 type sandboxFileBackend struct {
 	provider sandbox.Remote
 	store    *store.Store
-	apiKey   string
+	// keys resolves the key of the sandbox that owns the worktree, per call: the
+	// panel must present the same key the container was created with, and one
+	// deployment-wide value would be wrong for every sandbox but one.
+	keys sandboxKeys
 
 	mu    sync.Mutex
 	cache map[string]cachedSandboxClient
@@ -71,9 +74,13 @@ func (b *sandboxFileBackend) client(ctx context.Context, sandboxID string) (*aio
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s has no reachable endpoint: %w", sandboxID, err)
 	}
+	apiKey, err := b.keys.For(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
 	client, err := aio.New(aio.Config{
 		BaseURL: endpoint,
-		APIKey:  b.apiKey,
+		APIKey:  apiKey,
 		Root:    "/workspace",
 	})
 	if err != nil {

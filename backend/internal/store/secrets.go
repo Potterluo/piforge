@@ -130,6 +130,45 @@ func (s *Store) setMCPServerSecrets(ctx context.Context, userID, serverID, plain
 	return nil
 }
 
+// sealSandboxAPIKey encrypts one sandbox's API key for the sandboxes table.
+//
+// The per-sandbox key is the same kind of secret as an MCP credential, so it uses
+// the same box (AES-GCM, key from PIFORGE_SECRET_KEY or a 0600 file next to the
+// database) rather than a second mechanism with its own key file to back up. Empty
+// stays empty: a row with no key is a sandbox created before per-sandbox keys, and
+// the callers fall back to the fixed override or refuse to call it at all.
+func (s *Store) sealSandboxAPIKey(key string) ([]byte, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil, nil
+	}
+	box, err := secretBoxFor(filepath.Dir(s.path))
+	if err != nil {
+		return nil, err
+	}
+	blob, err := box.seal(key)
+	if err != nil {
+		return nil, fmt.Errorf("store: seal sandbox api key: %w", err)
+	}
+	return blob, nil
+}
+
+// openSandboxAPIKey decrypts one blob produced by sealSandboxAPIKey.
+func (s *Store) openSandboxAPIKey(blob []byte) (string, error) {
+	if len(blob) == 0 {
+		return "", nil
+	}
+	box, err := secretBoxFor(filepath.Dir(s.path))
+	if err != nil {
+		return "", err
+	}
+	key, err := box.open(blob)
+	if err != nil {
+		return "", fmt.Errorf("store: open sandbox api key: %w", err)
+	}
+	return key, nil
+}
+
 // MCPServerSecrets decrypts one server's blob for the launcher that has to hand it to
 // the process. It is deliberately not part of the API surface: nothing HTTP-facing can
 // read a credential back (FR-15.2).
