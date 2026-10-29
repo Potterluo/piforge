@@ -13,6 +13,7 @@ export const qk = {
   sessions: (projectId: string) => ["sessions", projectId] as const,
   session: (id: string) => ["session", id] as const,
   stats: (id: string) => ["stats", id] as const,
+  sandbox: (id: string) => ["sandbox", id] as const,
   providers: ["providers"] as const,
   skills: ["skills"] as const,
   mcp: ["mcp"] as const,

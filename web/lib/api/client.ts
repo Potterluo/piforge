@@ -315,6 +315,12 @@ export const git = {
       method: "POST",
       body: { path },
     }),
+  sandbox: (sessionId: string) =>
+    request<{ id: string; state: string; message?: string }>(`/v1/sessions/${sessionId}/sandbox`),
+  pauseSandbox: (sessionId: string) =>
+    request<{ state: string }>(`/v1/sessions/${sessionId}/sandbox/pause`, { method: "POST" }),
+  resumeSandbox: (sessionId: string) =>
+    request<{ state: string }>(`/v1/sessions/${sessionId}/sandbox/resume`, { method: "POST" }),
   remote: (sessionId: string) =>
     request<{ remote: boolean; ahead: number; behind: number }>(
       `/v1/sessions/${sessionId}/git/remote`,

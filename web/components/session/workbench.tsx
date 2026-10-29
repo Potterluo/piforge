@@ -1,5 +1,6 @@
 "use client";
 
+import * as React from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { GitBranch, LoaderCircle, PanelRight, ScrollText } from "lucide-react";
@@ -21,6 +22,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { WorkspacePanels } from "@/components/workspace/workspace-panels";
 import { api } from "@/lib/api/client";
+import { toast } from "sonner";
 import { sessionKindLabel, shortModel } from "@/lib/session/format";
 import { qk, useProject, useProviders, useSession } from "@/lib/session/queries";
 import { collectBashOutput, runningToolCount, selectTimeline, type Turn } from "@/lib/session/reduce";

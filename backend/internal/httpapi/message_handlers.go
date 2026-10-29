@@ -10,6 +10,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/sandbox"
 	"github.com/piforge/piforge/backend/internal/store"
 )
 
@@ -63,6 +64,11 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "text or images are required"))
 		return
 	}
+	// FR-5.2: using a session wakes its sandbox. This is the second place it can happen
+	// (the first is provisioning a new checkout), and it is the one that matters for a
+	// session that already existed when the sandbox was paused.
+	s.wakeSandbox(r, user.ID, sess)
+
 	switch in.StreamingBehavior {
 	case "", "steer", "follow_up":
 	default:
@@ -348,4 +354,28 @@ func (s *server) recordPausedSiblings(r *http.Request, userID string, sess *cont
 			s.log.WarnContext(r.Context(), "could not record a paused sibling", "session", id, "error", err.Error())
 		}
 	}
+}
+
+// wakeSandbox resumes a paused sandbox before a message runs.
+//
+// A pause is meant to free resources, not to make the session unusable: the user's next
+// message is an unambiguous request to use it. A sandbox that is missing or terminated is
+// left alone — waking it is not something a message can do.
+func (s *server) wakeSandbox(r *http.Request, userID string, sess *contracts.Session) {
+	if sess.WorktreeID == "" || s.deps.Sandbox == nil {
+		return
+	}
+	wt, err := s.deps.Store.Worktree(r.Context(), userID, sess.WorktreeID)
+	if err != nil {
+		return
+	}
+	sb, err := s.deps.Store.Sandbox(r.Context(), userID, wt.SandboxID)
+	if err != nil || sb.State != contracts.SandboxPaused {
+		return
+	}
+	live, rerr := s.deps.Sandbox.Resume(r.Context(), sandbox.ID(sb.UserID, sb.ProjectID))
+	if rerr != nil {
+		return
+	}
+	_ = s.deps.Store.UpdateSandboxState(r.Context(), userID, sb.ID, live.State, "")
 }

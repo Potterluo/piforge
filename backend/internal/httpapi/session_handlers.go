@@ -297,7 +297,7 @@ func (s *server) handleForkPoints(w http.ResponseWriter, r *http.Request) {
 	}
 	points, err := rt.ForkPoints(r.Context(), sess.ID)
 	if err != nil {
-		if noLiveProcess(err) {
+		if agentGone(rt, sess.ID, err) {
 			// Forking stops the parent's process (Pi rebinds it to the branch), so a
 			// second fork used to find no process and no points — one fork per
 			// session. Restart the parent from its stored row and ask again; the
@@ -653,6 +653,22 @@ func (s *server) provisionSession(ctx context.Context, w http.ResponseWriter, us
 func noLiveProcess(err error) bool {
 	var apiErr *contracts.APIError
 	return errors.As(err, &apiErr) && apiErr.Code == contracts.ErrNotFound
+}
+
+// agentGone reports whether a failed call happened because there is no live agent.
+//
+// The runtime words this two ways: `not_found` when the session was never started in
+// this process, and `bridge closed` when a process that existed died. Matching only the
+// first left every fork-points request after a crash answering 500, on a page that loads
+// it every time.
+func agentGone(rt contracts.AgentRuntime, sessionID string, err error) bool {
+	if noLiveProcess(err) {
+		return true
+	}
+	if alive, ok := rt.(interface{ Alive(string) bool }); ok && !alive.Alive(sessionID) {
+		return true
+	}
+	return false
 }
 
 // deepestLeaf walks the last child of each node to find the tip of the tree.

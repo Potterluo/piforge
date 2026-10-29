@@ -257,6 +257,17 @@ func (s *Service) ensureSandbox(
 	project *contracts.Project,
 ) (*contracts.Sandbox, error) {
 	if sb, err := s.cfg.Store.SandboxForProject(ctx, userID, project.ID); err == nil {
+		// FR-5.2: opening a session wakes its sandbox. A paused sandbox is resumed here
+		// rather than reported as an error, because the user's intent — "show me this
+		// session" — is unambiguous, and making them find a wake button first is a
+		// round trip that teaches nothing.
+		if sb.State == contracts.SandboxPaused {
+			if live, rerr := s.cfg.Sandbox.Resume(ctx, sb.ID); rerr == nil {
+				if uerr := s.cfg.Store.UpdateSandboxState(ctx, userID, sb.ID, live.State, ""); uerr == nil {
+					sb.State = live.State
+				}
+			}
+		}
 		return sb, nil
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, fmt.Errorf("provision: load sandbox: %w", err)
