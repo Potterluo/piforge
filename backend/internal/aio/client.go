@@ -294,3 +294,58 @@ func decodeBase64Image(encoded string) ([]byte, error) {
 	}
 	return base64.StdEncoding.DecodeString(encoded)
 }
+
+// Shell sessions are the container's terminal.
+//
+// Unlike a PTY this is a command-oriented session: you write input, then read what the
+// session printed. That is enough for the panel — the terminal sends a line and echoes
+// output — and it is what the image actually offers.
+
+// ShellSession is one long-lived shell inside the sandbox.
+type ShellSession struct {
+	ID      string `json:"id"`
+	Cwd     string `json:"-"`
+	Command string `json:"command"`
+	Output  string `json:"output"`
+	Status  string `json:"status"`
+	Exit    *int   `json:"exit_code"`
+}
+
+// CreateShellSession opens a shell session in dir.
+func (c *Client) CreateShellSession(ctx context.Context, id, dir string) (ShellSession, error) {
+	body := map[string]any{"id": id}
+	if strings.TrimSpace(dir) != "" {
+		body["exec_dir"] = dir
+	}
+	var out struct {
+		Data ShellSession `json:"data"`
+	}
+	if err := c.request(ctx, http.MethodPost, "/v1/shell/sessions/create", body, &out); err != nil {
+		return ShellSession{}, err
+	}
+	if out.Data.ID == "" {
+		out.Data.ID = id
+	}
+	return out.Data, nil
+}
+
+// WriteShell sends input to a session. An empty input with pressEnter runs the line the
+// user typed.
+func (c *Client) WriteShell(ctx context.Context, id, input string, pressEnter bool) error {
+	return c.request(ctx, http.MethodPost, "/v1/shell/write", map[string]any{
+		"id":          id,
+		"input":       input,
+		"press_enter": pressEnter,
+	}, nil)
+}
+
+// ViewShell reads what a session has printed so far.
+func (c *Client) ViewShell(ctx context.Context, id string) (ShellSession, error) {
+	var out struct {
+		Data ShellSession `json:"data"`
+	}
+	if err := c.request(ctx, http.MethodPost, "/v1/shell/view", map[string]any{"id": id}, &out); err != nil {
+		return ShellSession{}, err
+	}
+	return out.Data, nil
+}

@@ -49,6 +49,22 @@ piforged -sandbox docker \
          -sandbox-browser remote
 ```
 
+## 终端：壳子已验证，桥还没写
+
+沙箱的终端不是 PTY，是**命令会话**：`sessions/create` → `write`（input + press_enter）→
+`view`（拿 output）。对着真容器跑过：
+
+```
+create → {"session_id":"pf-probe","working_dir":"/home/gem"}
+write  → {"status":"running"}
+view   → {"output":"terminal-in-container","status":"completed","exit_code":0}
+```
+
+`internal/aio` 已经把这三个调用封装好（`CreateShellSession` / `WriteShell` / `ViewShell`）。
+
+**还没做**：`term.Manager` 的 `session` 是 PTY 专用的（`ptyProcess` + ring buffer），
+把远程会话塞进去需要一个新的 session 类型和轮询泵。这是下一步，不是已完成。
+
 ## 还没做的（这一节是重点）
 
 **浏览器和终端仍然跑在宿主上。** 也就是说：换成 docker provider 之后，agent 改的文件
