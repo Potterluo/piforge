@@ -42,7 +42,7 @@ func (s *server) handleListBrowserTabs(w http.ResponseWriter, r *http.Request) {
 	if s.featureDenied(w, r, user.ID, string(store.FeatureBrowser)) {
 		return
 	}
-	if s.deps.Browser == nil || !s.deps.Browser.Configured() {
+	if s.deps.Browser == nil || !s.deps.Browser.Available() {
 		s.fail(w, r, apiErr(contracts.ErrSandboxUnavail, "no chrome binary is configured on this server"))
 		return
 	}

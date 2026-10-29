@@ -279,6 +279,10 @@ func (s *Service) ensureSandbox(
 	}
 
 	sb, err := s.cfg.Store.CreateSandbox(ctx, userID, store.NewSandbox{
+		// The provider's id is the handle every later lifecycle call (pause, resume,
+		// destroy, endpoint, exec) takes. Keeping the store's own id here made the
+		// docker provider look for a container named after a uuid it had never seen.
+		ID:        live.ID,
 		ProjectID: project.ID,
 		State:     live.State,
 		Provider:  live.Provider,

@@ -138,6 +138,11 @@ const sandboxCols = `id, user_id, project_id, state, provider, node, image, root
 // NewSandbox is the input for CreateSandbox. The sandbox manager
 // (internal/sandbox) owns the lifecycle; the store only records it.
 type NewSandbox struct {
+	// ID is the provider's own handle for the sandbox. Empty means "invent one".
+	// A provider that has to find the same container again after a request (docker
+	// names it from the pair, and its lifecycle calls take that name) reports the
+	// id it uses, so the row has to keep it instead of inventing an unrelated one.
+	ID        string
 	ProjectID string
 	State     contracts.SandboxState
 	Provider  string
@@ -161,7 +166,10 @@ func (s *Store) CreateSandbox(ctx context.Context, userID string, in NewSandbox)
 	if state == "" {
 		state = contracts.SandboxCreating
 	}
-	id := NewID("sbx")
+	id := strings.TrimSpace(in.ID)
+	if id == "" {
+		id = NewID("sbx")
+	}
 	now := s.now()
 	if _, err := s.w.ExecContext(ctx,
 		`INSERT INTO sandboxes (id, user_id, project_id, state, provider, node, image, root_dir,

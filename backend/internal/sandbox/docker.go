@@ -119,6 +119,15 @@ func (d *Docker) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 		// Publish on a free host port: two sandboxes on one machine must not fight over
 		// 8080, and the control plane reads the assigned port back from `docker port`.
 		args = append(args, "-p", fmt.Sprintf("127.0.0.1::%d", d.cfg.APIPort))
+		// The image starts its Chromium under Docker's default seccomp profile, and the
+		// browser dies before CDP opens: "Failed to move to new namespace ... Operation
+		// not permitted" (zygote_host_impl_linux.cc:207). BROWSER_NO_SANDBOX is the
+		// image's own switch (gem.sh folds it into BROWSER_EXTRA_ARGS), and turning
+		// Chrome's sandbox off is the smaller change than --security-opt
+		// seccomp=unconfined: the container keeps its syscall filter, and the renderer
+		// stays behind the container boundary, which is the boundary this provider
+		// promises.
+		args = append(args, "-e", "BROWSER_NO_SANDBOX=--no-sandbox")
 	}
 	if d.cfg.APIKey != "" {
 		args = append(args, "-e", "SANDBOX_API_KEY="+d.cfg.APIKey)
@@ -148,7 +157,7 @@ func (d *Docker) Get(ctx context.Context, sandboxID string) (*contracts.Sandbox,
 		ID:       name,
 		Provider: d.Name(),
 		Image:    d.cfg.Image,
-		RootDir:  containerWorkspace,
+		RootDir:  d.cfg.DataRoot,
 	}
 	out.State = dockerState(state)
 	return out, nil
@@ -205,13 +214,19 @@ func (d *Docker) describe(ctx context.Context, userID, projectID, name string) (
 		return nil, err
 	}
 	return &contracts.Sandbox{
-		ID:           name,
-		UserID:       userID,
-		ProjectID:    projectID,
-		State:        dockerState(state),
-		Provider:     d.Name(),
-		Image:        d.cfg.Image,
-		RootDir:      containerWorkspace,
+		ID:        name,
+		UserID:    userID,
+		ProjectID: projectID,
+		State:     dockerState(state),
+		Provider:  d.Name(),
+		Image:     d.cfg.Image,
+		// RootDir is the host side of the bind mount, because the control plane's own
+		// git and file IO runs here and has to write where the container looks.
+		// ContainerPath translates it to /workspace for anything that speaks to the
+		// container. Reporting the container path made provisioning create the repo
+		// on the host at "/workspace", i.e. outside the mount: the container then saw
+		// an empty workspace.
+		RootDir:      d.cfg.DataRoot,
 		CreatedAt:    time.Now().UTC(),
 		LastActiveAt: time.Now().UTC(),
 	}, nil

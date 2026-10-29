@@ -20,6 +20,10 @@ agent、浏览器、终端指过去。这条不变量在任何 provider 上都�
 
 - `Ensure`：按 `(user, project)` 派生容器名 `piforge-<hash8>`，不存在就 `docker run -d`，
   存在就复用；`/workspace` 绑定到数据目录，暂停/重启不丢工作区；
+- `RootDir`：**宿主侧**那个绑定目录，不是容器里的 `/workspace`。控制面自己的 git/文件读写跑在
+  宿主上，写的位置必须正好是容器看到的位置；`ContainerPath` 负责把它翻译成 `/workspace/...`；
+- 沙箱记录用容器名当 id：后续的 pause/resume/destroy/endpoint/exec 都拿这个 id 去找容器，
+  记录里另造一个 uuid 会让它们全都找不到人；
 - `Get`：`docker inspect` 的 `.State` 映射到 `READY / PAUSED / MISSING`；
 - `Pause`：`docker stop`（停容器，不是删）；
 - `Resume`：`docker start`；
@@ -39,6 +43,20 @@ daemon 不可达时**跳过并说明原因**，不会假装通过。
 - **截图也通了**：`Page.captureScreenshot` 需要先在该 session 上 `Page.enable`，
   否则 Chrome 回的是 "Not attached to an active page"——听起来像 attach 失败，其实不是。
   实测 28498 字节 PNG。
+
+容器里的 Chromium 还要一个启动条件：Docker 默认 seccomp 下它连自己的命名空间都建不起来，
+浏览器在 CDP 打开之前就死了——
+
+```
+Failed to move to new namespace: PID namespaces supported, Network namespace supported,
+but failed: errno = Operation not permitted
+FATAL:content/browser/zygote_host/zygote_host_impl_linux.cc:207] Check failed
+```
+
+`docker provider` 因此给开了服务端口的容器传 `BROWSER_NO_SANDBOX=--no-sandbox`（镜像自己的开关，
+`gem.sh` 把它折进 `BROWSER_EXTRA_ARGS`）。为什么不是 `--security-opt seccomp=unconfined`：后者放宽的是
+**容器**的系统调用面，前者只关掉浏览器进程内部的沙箱，渲染器仍然在容器边界之内——这条边界才是
+这个 provider 承诺的那条。
 
 启用方式：
 
@@ -93,6 +111,34 @@ piforged -sandbox docker \
 测试分两层：`internal/term/remote_test.go` 用 httptest 钉住“只追加新后缀”和“退格不发出去”；
 `internal/term/remote_live_test.go` 用 `PIFORGE_AIO_URL` / `PIFORGE_AIO_KEY` 对着真容器跑，
 没有环境变量时干净跳过。
+
+## 端到端：走 piforged 自己起的容器
+
+前面的验证都是"直接 `docker run` 一个镜像"。真正会出问题的是 `piforged` 创建的那个容器，
+所以现在按下面的方式验证过一遍：
+
+```
+piforged -addr 127.0.0.1:8090 -data <tmp> -dev -fake-pi \
+         -sandbox docker -sandbox-image <all-in-one-sandbox:1.11.0> \
+         -sandbox-api-key <key> -sandbox-browser remote -sandbox-terminal remote
+```
+
+全程只走 HTTP API（cookie 登录 + `X-PF-CSRF`）：建项目 → 建会话 → 发一条消息让 provision 跑。
+
+```
+docker ps   piforge-c23e36153abed8ee   127.0.0.1:46249->8080/tcp
+
+GET  /v1/sessions/<id>/browser          ready 帧 urls = ws://127.0.0.1:46249/cdp/...
+                                        首个二进制帧 14434 字节 JPEG（ff d8 ff e0），1280x885
+POST /v1/sessions/<id>/browser/screenshot
+                                        201 {"bytes":30230,"path":"screenshots/....png"}
+                                        文件头 89 50 4e 47 0d 0a 1a 0a
+WS   /v1/sessions/<id>/pty               "echo e2e-docker-ok\r\n" + "e2e-docker-ok\n"
+                                         "uname -sr; hostname" → Linux ...-microsoft-standard-WSL2 / <容器 id>
+```
+
+容器里 `ls /workspace` 能看到 provision 写下的 `repo`，截图也落在容器的同一路径下：宿主目录和
+容器目录现在是同一个目录，不是两份各写各的。
 
 ## 还没做的（这一节是重点）
 

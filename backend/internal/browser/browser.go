@@ -126,6 +126,13 @@ func NewManager(cfg Config) *Manager {
 // Configured reports whether a binary is available.
 func (m *Manager) Configured() bool { return strings.TrimSpace(m.cfg.Binary) != "" }
 
+// Available reports whether this manager can produce a browser at all: a local
+// binary, or a Remote resolver that attaches to one inside a sandbox. The HTTP
+// layer gates the panel on this, not on Configured: with -sandbox-browser remote
+// there is no local binary by design, and requiring one rejected every request
+// for a browser the container was already running.
+func (m *Manager) Available() bool { return m.Configured() || m.cfg.Remote != nil }
+
 // Ensure returns the sandbox's browser, starting it when necessary.
 //
 // profileRoot is the directory the profile lives in — always inside the
@@ -227,8 +234,14 @@ func (m *Manager) launch(ctx context.Context, sandboxID, profileRoot string) (*S
 	// A remote browser is attached to, not started: the sandbox owns the process, and
 	// killing it here would kill the user's browser.
 	if m.cfg.Remote != nil {
-		if wsURL, debugHTTP, rerr := m.cfg.Remote(ctx, sandboxID); rerr == nil && wsURL != "" {
+		wsURL, debugHTTP, rerr := m.cfg.Remote(ctx, sandboxID)
+		if rerr == nil && wsURL != "" {
 			return m.attachRemote(ctx, sandboxID, profile, wsURL, debugHTTP)
+		}
+		if rerr != nil && !m.Configured() {
+			// There is no local binary to fall back to, and "exec: no command" would
+			// blame this process instead of the sandbox that did not answer.
+			return nil, fmt.Errorf("browser: sandbox %s: %w", sandboxID, rerr)
 		}
 	}
 
