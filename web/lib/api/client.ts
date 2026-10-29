@@ -159,6 +159,16 @@ export interface SendMessageInput {
   streaming_behavior?: "steer" | "follow_up";
 }
 
+export const browser = {
+  mode: (sessionId: string) =>
+    request<{ mode: string }>(`/v1/sessions/${sessionId}/browser/mode`),
+  setMode: (sessionId: string, mode: "observe" | "takeover") =>
+    request<{ mode: string }>(`/v1/sessions/${sessionId}/browser/mode`, {
+      method: "POST",
+      body: { mode },
+    }),
+};
+
 export const sessions = {
   list: (params: { project?: string } = {}) => {
     const q = params.project ? `?project=${encodeURIComponent(params.project)}` : "";
@@ -497,5 +507,19 @@ export const apiKeys = {
     request<{ api_key: APIKey }>(`/v1/api-keys/${id}`, { method: "DELETE" }),
 };
 
-export const api = { auth, projects, sessions, files, git, providers, skills, mcp, admin, support, features, apiKeys };
+export const api = {
+  auth,
+  projects,
+  sessions,
+  browser,
+  files,
+  git,
+  providers,
+  skills,
+  mcp,
+  admin,
+  support,
+  features,
+  apiKeys,
+};
 export default api;

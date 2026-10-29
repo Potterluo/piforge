@@ -34,8 +34,10 @@ const log = {
   ],
 };
 
-vi.mock("@/lib/api/client", () => ({
-  default: {
+vi.mock("@/lib/api/client", () => {
+  // One object, exported both ways: the panels import the named `api`, and older
+  // tests use the default.
+  const api = {
     files: {
       tree: vi.fn(async () => ({
         nodes: [
@@ -65,11 +67,17 @@ vi.mock("@/lib/api/client", () => ({
       unstage: vi.fn(async () => ({ ok: true })),
       commit: vi.fn(async () => ({ commit: "ccccccc" })),
       remote: vi.fn(async () => ({ remote: false, ahead: 0, behind: 0 })),
+      sandbox: vi.fn(async () => ({ id: "sbx", state: "READY" })),
       push: vi.fn(async () => ({ branch: "main", commit: "ccccccc" })),
       pull: vi.fn(async () => ({ branch: "main", commit: "ccccccc", changed: false })),
     },
-  },
-}));
+    browser: {
+      mode: vi.fn(async () => ({ mode: "observe" })),
+      setMode: vi.fn(async () => ({ mode: "takeover" })),
+    },
+  };
+  return { api, default: api };
+});
 
 import { WorkspacePanels } from "@/components/workspace/workspace-panels";
 

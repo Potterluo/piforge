@@ -172,6 +172,14 @@ func (s *server) handleSessionBrowser(w http.ResponseWriter, r *http.Request) {
 			}
 		case "input":
 			if cmd.Input != nil {
+				// FR-11.2 / FR-11.4: observation is the default, and input is dropped
+				// rather than queued. A viewer who clicks in a read-only panel should see
+				// nothing happen — with the mode switch right there saying why.
+				if browserModeOf(sess.ID) != browserModeTakeover {
+					s.log.DebugContext(ctx, "browser input ignored in observe mode",
+						"session", sess.ID)
+					break
+				}
 				if err := session.TabDispatch(ctx, tabID, *cmd.Input); err != nil {
 					s.log.DebugContext(ctx, "browser input failed", "error", err.Error())
 				}

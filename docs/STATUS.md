@@ -103,9 +103,9 @@
 | FR-10.7 沙箱暂停 → 终端变灰只读 + 唤醒后回放 | MISSING | 无暂停态 UI；`terminal-pane.tsx` 只有 socket 断开覆盖层，不是沙箱暂停 |
 | FR-10.8 与 agent 共享文件系统 | DONE | 终端 cwd 取自 `worktreeRoot(sess)`，与 agent 的 `spec.Worktree` 同目录（`pty_handlers.go` vs `runtime.go spawn` `cfg.Dir`）；`03-workspace.spec.ts` |
 | FR-11.1 画面投屏（screencast → WS → canvas） | DONE | `browser.go` `Screencast`/`Page.startScreencast` + `browser_handlers.go` + `browser-panel.tsx` canvas；`08-browser.spec.ts`、`browser_test.go` `TestScreencastForwardsFramesAndAcks` |
-| FR-11.2 观察模式（默认不可输入） | MISSING | `browser_handlers.go` 收到 `input` 一律 `TabDispatch`；`browser-panel.tsx` 的 click/key/wheel 始终发送，无只读模式 |
+| FR-11.2 观察模式（默认不可输入） | DONE | 默认 `observe`；`browser_handlers.go` 在 observe 下丢弃输入（服务端判定，不靠面板自觉）；`browser_mode_test.go`、`43-browser-mode.spec.ts` |
 | FR-11.3 接管模式（输入 + 暂停 agent 浏览器工具） | PARTIAL | 输入注入可用（`Session.TabDispatch` → `Input.dispatch*`，`browser_test.go`）；没有「接管时拦截 `mcp__playwright__*`」的浏览器锁 |
-| FR-11.4 模式互斥 + 「谁在控制」标识 + 确认 | MISSING | 无 mode 状态机（OBSERVE 或 TAKEOVER）、无确认弹窗、无标识 |
+| FR-11.4 模式互斥 + 「谁在控制」标识 | PARTIAL（切换与标识有，确认弹窗没有） | `GET/POST …/browser/mode`；进入 takeover 会中断 agent 的当前运行；面板按钮显示「观察 / 控制中」并带说明 |
 | FR-11.5 地址栏 + 前进/后退/刷新 + 端口快捷入口 | PARTIAL | `browser-panel.tsx` 有 URL `Input` 与刷新/导航；无前进/后退，无端口列表下拉 |
 | FR-11.6 agent 侧通过 Playwright MCP 驱动同一 chromium | MISSING | 无 Playwright MCP 预设或 CDP 端点下发（`materialize.mcpEntry` 只写用户自己填的 command/url） |
 | FR-11.7 多 tab（≥3，tab 条 + 缩略图） | DONE | `browser/tabs.go` + `handleListBrowserTabs`/`handleOpenBrowserTab`/`handleCloseBrowserTab` + `browser-panel.tsx` tab 条；`26-browser-tabs.spec.ts`、`tabs_test.go` |

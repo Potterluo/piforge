@@ -198,6 +198,8 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /v1/sessions/{id}/browser/tabs", s.mutatingBearer(s.handleOpenBrowserTab))
 	mux.Handle("DELETE /v1/sessions/{id}/browser/tabs/{tab}", s.mutatingBearer(s.handleCloseBrowserTab))
 	mux.Handle("POST /v1/sessions/{id}/browser/screenshot", s.mutatingBearer(s.handleBrowserScreenshot))
+	mux.Handle("GET /v1/sessions/{id}/browser/mode", s.authed(s.handleBrowserMode))
+	mux.Handle("POST /v1/sessions/{id}/browser/mode", s.mutatingBearer(s.handleBrowserMode))
 	mux.Handle("POST /v1/sessions/{id}/messages", s.mutatingBearer(s.handlePostMessage))
 	mux.Handle("POST /v1/sessions/{id}/interrupt", s.mutatingBearer(s.handleInterrupt))
 	mux.Handle("GET /v1/sessions/{id}/events", s.authed(s.handleEvents))

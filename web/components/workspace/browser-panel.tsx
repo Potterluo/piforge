@@ -61,9 +61,40 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
   // socket opened but whose screencast never produced a frame said 已连接 over an
   // empty canvas — exactly how a broken tab target looked healthy.
   const [painted, setPainted] = React.useState(false);
+  // FR-11.2/11.4: observation by default. The server enforces this too — the panel only
+  // decides what it offers, not what is allowed.
+  const [takeover, setTakeover] = React.useState(false);
   // A disabled feature is not a broken socket: say which one it is instead of
   // looping 连接中 → 已断开 → 重新连接 forever.
   const browserEnabled = useFeature("browser");
+  React.useEffect(() => {
+    let cancelled = false;
+    void api.browser
+      .mode(sessionId)
+      .then((result) => {
+        if (!cancelled) setTakeover(result.mode === "takeover");
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
+  const setMode = React.useCallback(
+    async (next: "observe" | "takeover") => {
+      try {
+        const result = await api.browser.setMode(sessionId, next);
+        setTakeover(result.mode === "takeover");
+        // Saying it out loud matters: a click that does nothing in observe mode looks
+        // like a broken panel, and the reason is not visible anywhere else.
+        if (next === "takeover") toast.success("你正在控制浏览器", { description: "agent 的浏览器操作已暂停。" });
+        else toast.info("已切回观察模式", { description: "点击与键盘不再发送到页面。" });
+      } catch (error) {
+        toast.error("切换失败", { description: error instanceof Error ? error.message : undefined });
+      }
+    },
+    [sessionId],
+  );
   const [error, setError] = React.useState<string | null>(null);
   const [meta, setMeta] = React.useState<FrameMeta | null>(null);
   const [url, setUrl] = React.useState("https://example.com");
@@ -390,6 +421,21 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
           onClick={() => void capture()}
         >
           {capturing ? <Spinner /> : <CameraIcon />}
+        </Button>
+        <Button
+          size="xs"
+          variant={takeover ? "default" : "outline"}
+          data-testid="browser-mode"
+          aria-pressed={takeover}
+          title={
+            takeover
+              ? "你正在控制页面；agent 的浏览器操作会被打断"
+              : "只观察：点击与键盘不会发到页面"
+          }
+          className="text-[10px]"
+          onClick={() => void setMode(takeover ? "observe" : "takeover")}
+        >
+          {takeover ? "控制中" : "观察"}
         </Button>
         <Badge
           variant={live ? "secondary" : "outline"}
