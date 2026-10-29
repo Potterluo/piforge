@@ -105,8 +105,16 @@ export function useSessionEvents(sessionId: string | null): SessionEventsResult 
   }, [sessionId]);
 
   useEffect(() => {
-    if (!state.needsResync) return;
+    if (!state.needsResync) {
+      // A gap that has been repaired means the stream is healthy again. Without this
+      // reset, two resyncs early in a session latched the badge at 已断开 for the rest
+      // of the page's life while events kept arriving.
+      resyncsRef.current = 0;
+      return;
+    }
     if (resyncsRef.current >= MAX_RESYNCS) {
+      // Out of automatic repairs: say so once, and let the reconnect path (which sets
+      // its own status) take over rather than declaring the stream dead forever.
       setStatus("offline");
       return;
     }
@@ -146,6 +154,10 @@ export function useSessionEvents(sessionId: string | null): SessionEventsResult 
       const handle = (message: MessageEvent<string>) => {
         const parsed = parseEvent(message.data);
         if (!parsed) return;
+        // Anything arriving proves the stream works: a badge that still says 已断开
+        // while events land is worse than no badge at all.
+        resyncsRef.current = 0;
+        setStatus((current) => (current === "open" ? current : "open"));
 
         // Prefer the SSE id when the server sent one: it is what the browser
         // would replay with, so the two cursors must not disagree.

@@ -325,10 +325,25 @@ func cleanRels(paths []string) ([]string, error) {
 // answer "nothing to commit" instead of a 500 with git's own wording inside it.
 var ErrNothingToCommit = errors.New("gitx: nothing to commit")
 
-// classifyCommit turns git's "nothing to commit" into a sentinel.
+// classifyCommit turns git's "there is nothing to commit" into a sentinel.
+//
+// Git words this three ways depending on what else is lying around:
+//   - "nothing to commit, working tree clean" (everything committed)
+//   - "nothing added to commit but untracked files present" (the common case: an agent
+//     left files behind and the user pressed commit)
+//   - "no changes added to commit"
+//
+// Matching only the first made the friendly 409 unreachable exactly when it mattered.
 func classifyCommit(err error) error {
-	if strings.Contains(StderrOf(err)+err.Error(), "nothing to commit") {
-		return ErrNothingToCommit
+	text := StderrOf(err) + err.Error()
+	for _, phrase := range []string{
+		"nothing to commit",
+		"nothing added to commit",
+		"no changes added to commit",
+	} {
+		if strings.Contains(text, phrase) {
+			return ErrNothingToCommit
+		}
 	}
 	return err
 }

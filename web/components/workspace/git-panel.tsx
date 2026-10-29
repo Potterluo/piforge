@@ -22,6 +22,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import api from "@/lib/api/client";
+import { toast } from "sonner";
 import type { DiffScope } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { ChangeGroups } from "@/components/workspace/git-changes";
@@ -218,16 +219,6 @@ export function GitChangesPanel() {
             提交
           </Button>
           <RemoteActions />
-          <Tooltip>
-            <TooltipTrigger
-              render={<span className="inline-flex" />}
-            >
-              <Button size="xs" variant="outline" disabled>
-                推送
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">需配置远端凭据</TooltipContent>
-          </Tooltip>
         </div>
       </header>
 
@@ -325,7 +316,7 @@ export function GitChangesPanel() {
  */
 function RemoteActions() {
   const git = useGitData();
-  const remote = useAsync(`remote:${git.sessionId}`, () => api.git.remote(git.sessionId));
+  const remote = useAsync(`remote:${git.sessionId}:${git.revision}`, () => api.git.remote(git.sessionId));
   const [busy, setBusy] = React.useState<"push" | "pull" | null>(null);
   const [error, setError] = React.useState<string | null>(null);
 
@@ -335,8 +326,16 @@ function RemoteActions() {
     setBusy(which);
     setError(null);
     try {
-      if (which === "push") await api.git.push(git.sessionId);
-      else await api.git.pull(git.sessionId);
+      if (which === "push") {
+        await api.git.push(git.sessionId);
+        toast.success("已推送");
+      } else {
+        const result = await api.git.pull(git.sessionId);
+        // `changed` is the difference between "pulled" and "pulled something": a
+        // fast-forward that brought nothing is not worth a toast.
+        if (result.changed) toast.success("已拉取远端改动");
+        else toast.info("已经是最新的");
+      }
       git.refresh();
       remote.reload();
     } catch (cause) {

@@ -126,6 +126,12 @@ export function SessionStream({
                       onFork={onFork}
                     />
                   </MessageScrollerItem>
+                ) : item.kind === "note" ? (
+                  <MessageScrollerItem key={item.key}>
+                    <Marker data-testid="session-note">
+                      <MarkerContent>{item.text}</MarkerContent>
+                    </Marker>
+                  </MessageScrollerItem>
                 ) : (
                   <MessageScrollerItem key={item.key}>
                     <CompactionMarker marker={item.marker} />

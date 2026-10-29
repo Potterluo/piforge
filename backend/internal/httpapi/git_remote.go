@@ -91,6 +91,12 @@ func (s *server) handleGitRemote(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := detach(r.Context(), 30*time.Second)
 	defer cancel()
 
+	// Fetch first, because ahead/behind is computed against the *tracking* ref: without
+	// it, a remote commit nobody has fetched reads as "nothing behind" forever, and the
+	// pull button always looks like it would do nothing. A failed fetch (offline, no
+	// credentials) is not fatal — the numbers are then what the last fetch knows.
+	_ = s.deps.Workspace.Fetch(ctx, root)
+
 	ahead, behind, err := s.deps.Workspace.AheadBehind(ctx, root)
 	if errors.Is(err, gitx.ErrNoRemote) {
 		writeJSON(w, http.StatusOK, map[string]any{"remote": false, "ahead": 0, "behind": 0})

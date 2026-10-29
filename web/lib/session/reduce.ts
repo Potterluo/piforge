@@ -79,6 +79,12 @@ export interface LiveUsage {
 export interface SessionState {
   turns: Turn[];
   markers: ContextMarker[];
+  /**
+   * One-line facts that happened to the session from outside the conversation — a push,
+   * a pull. They are recorded as events, and an event nobody renders is a claim nobody
+   * can check.
+   */
+  notes: NoteMarker[];
   queue: QueuedPrompt[];
   usage?: LiveUsage;
   /** True between run.started and run.settled. */
@@ -104,9 +110,18 @@ export interface SessionState {
   activeMessageId?: string;
 }
 
+/** A short factual line in the timeline, distinct from a compaction marker. */
+export interface NoteMarker {
+  id: string;
+  seq: number;
+  ts: string;
+  text: string;
+}
+
 export const initialSessionState: SessionState = {
   turns: [],
   markers: [],
+  notes: [],
   queue: [],
   running: false,
   streaming: false,
@@ -528,6 +543,18 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
       return { ...state, markers: [...state.markers, marker] };
     }
 
+    case "git.pushed":
+    case "git.pulled": {
+      const detail = str(payload.detail) ?? "";
+      const note: NoteMarker = {
+        id: `${event.type}-${event.seq}`,
+        seq: event.seq,
+        ts: event.ts,
+        text: `${event.type === "git.pushed" ? "已推送" : "已拉取"}${detail ? ` ${detail}` : ""}`,
+      };
+      return { ...state, notes: [...state.notes, note] };
+    }
+
     case EV.contextUsage: {
       // Two shapes: `{context_tokens, context_window, context_percent}` from
       // lib/types.ts and `{usage:{input,cacheRead,cacheWrite}, context_window,
@@ -658,7 +685,8 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
 
 export type TimelineItem =
   | { kind: "turn"; key: string; ts: string; turn: Turn }
-  | { kind: "marker"; key: string; ts: string; marker: ContextMarker };
+  | { kind: "marker"; key: string; ts: string; marker: ContextMarker }
+  | { kind: "note"; key: string; ts: string; text: string };
 
 /**
  * Interleaves compaction markers with turns. Turn order is the arrival order
@@ -668,6 +696,10 @@ export type TimelineItem =
 export function selectTimeline(state: SessionState): TimelineItem[] {
   const items: TimelineItem[] = [];
   const pending = state.markers.slice();
+  // Notes interleave with turns on their timestamp, which is all either kind has in
+  // common. They are merged here rather than in a second pass so the order a person
+  // reads matches the order things happened.
+  const pendingNotes = state.notes.slice();
   const take = (limit: number) => {
     while (pending.length > 0) {
       const ts = Date.parse(pending[0].ts);
@@ -683,6 +715,16 @@ export function selectTimeline(state: SessionState): TimelineItem[] {
   for (const turn of state.turns) {
     const ts = Date.parse(turn.ts);
     take(Number.isFinite(ts) ? ts : Number.POSITIVE_INFINITY);
+    const turnTs = Number.isFinite(ts) ? ts : Number.POSITIVE_INFINITY;
+    while (pendingNotes.length > 0) {
+      const noteTs = Date.parse(pendingNotes[0].ts);
+      if (Number.isFinite(noteTs) && noteTs <= turnTs) {
+        const note = pendingNotes.shift() as NoteMarker;
+        items.push({ kind: "note", key: note.id, ts: note.ts, text: note.text });
+        continue;
+      }
+      break;
+    }
     // Pi retries a failed provider call on its own, and every attempt lands as
     // its own empty assistant message. Four identical boxes say less than one
     // that admits it kept trying, so consecutive failures of the same kind
@@ -703,6 +745,9 @@ export function selectTimeline(state: SessionState): TimelineItem[] {
     items.push({ kind: "turn", key: turn.id, ts: turn.ts, turn });
   }
   take(Number.POSITIVE_INFINITY);
+  for (const note of pendingNotes) {
+    items.push({ kind: "note", key: note.id, ts: note.ts, text: note.text });
+  }
   return items;
 }
 

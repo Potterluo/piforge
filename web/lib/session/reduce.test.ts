@@ -382,7 +382,11 @@ describe("selectors", () => {
     const state = reduceAll(events);
     const timeline = selectTimeline(state);
 
-    expect(timeline.map((item) => (item.kind === "turn" ? item.turn.id : item.marker.reason))).toEqual([
+    expect(
+      timeline.map((item) =>
+        item.kind === "turn" ? item.turn.id : item.kind === "note" ? item.text : item.marker.reason,
+      ),
+    ).toEqual([
       "u1",
       "manual",
       "a1",
@@ -609,4 +613,18 @@ describe("model attribution", () => {
 
     expect(state.turns[0].model).toBe("p/m");
   });
+});
+// A push is a fact about the session that happened outside the conversation. Recording
+// it as an event and never rendering it is a claim nobody can check.
+it("turns git events into timeline notes", () => {
+  const state = reduceAll([
+    event(EV.msgStarted, { message_id: "u1", role: "user" }, { seq: 1, ts: "2026-01-01T00:00:01.000Z" }),
+    event("git.pushed" as never, { detail: "main abc1234" }, { seq: 2, ts: "2026-01-01T00:00:02.000Z" }),
+    event("git.pulled" as never, { detail: "main def5678" }, { seq: 3, ts: "2026-01-01T00:00:03.000Z" }),
+  ]);
+  const notes = selectTimeline(state).filter((item) => item.kind === "note");
+  expect(notes.map((item) => (item.kind === "note" ? item.text : ""))).toEqual([
+    "已推送 main abc1234",
+    "已拉取 main def5678",
+  ]);
 });

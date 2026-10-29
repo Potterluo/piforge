@@ -20,6 +20,12 @@ export interface GitData {
   log: AsyncResult<GitGraph>;
   /** Refreshes both halves after a mutating operation. */
   refresh: () => void;
+  /**
+   * Bumps on every refresh. Anything derived from git — ahead/behind included — hangs
+   * its cache key off this, so a commit made in the panel cannot leave the remote
+   * counts stale until a page reload.
+   */
+  revision: number;
 }
 
 const GitDataContext = React.createContext<GitData | null>(null);
@@ -31,6 +37,7 @@ export function GitProvider({
   sessionId: string;
   children: React.ReactNode;
 }) {
+  const [revision, setRevision] = React.useState(0);
   const status = useAsync(`git-status:${sessionId}`, () => api.git.status(sessionId));
   const log = useAsync(`git-log:${sessionId}`, () => api.git.log(sessionId, 200));
 
@@ -40,9 +47,11 @@ export function GitProvider({
     sessionId,
     status,
     log,
+    revision,
     refresh: () => {
       status.reload();
       log.reload();
+      setRevision((current) => current + 1);
     },
   };
 
