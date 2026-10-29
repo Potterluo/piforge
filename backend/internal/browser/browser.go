@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -126,6 +127,13 @@ type Config struct {
 	// presenting a deployment-wide one would either be rejected or — worse — be
 	// the same value an attacker already has.
 	RemoteKey func(ctx context.Context, sandboxID string) (string, error)
+	// IdleTimeout is how long a browser may stay alive with no client attached
+	// before the manager stops it. Zero means DefaultIdleTimeout; a negative
+	// value disables the policy (the panel still lazy-mounts, but nothing is
+	// reaped — only useful for a deployment that wants a warm browser).
+	IdleTimeout time.Duration
+	// Logger receives one line per browser the idle policy stops. Nil is quiet.
+	Logger *slog.Logger
 	// Remote resolves a CDP websocket for a sandbox instead of launching one.
 	//
 	// This is the AIO Sandbox integration: the browser lives in the sandbox container,
@@ -173,6 +181,13 @@ type Snapshot struct {
 	URL       string `json:"url"`
 }
 
+// DefaultIdleTimeout is the shipped idle policy: a sandbox browser that no
+// viewer has been attached to for a minute is stopped. It is long enough that
+// switching tabs inside the panel, or reloading the page, does not pay for a
+// fresh Chromium; short enough that a session left open overnight does not pin
+// a browser forever.
+const DefaultIdleTimeout = 60 * time.Second
+
 // maxLaunchTime bounds one launch when the caller that started it goes away.
 // waitForDevTools has its own 30s budget, so this only has to cover a browser
 // that gets past that and then hangs in the handshake.
@@ -189,6 +204,23 @@ type Manager struct {
 	// same sandbox must not.
 	launches map[string]*pendingLaunch
 	closed   bool
+
+	// clients counts the callers currently attached to a sandbox's browser: a
+	// viewer socket, a tab list, a screenshot. A browser is a candidate for the
+	// idle policy only when its count is zero, which is what makes "switching
+	// away" measurable instead of guessed from websocket close timing.
+	clients map[string]int
+	// lastRelease is when the last client detached. It is deliberately later
+	// than Started: a browser that a script asked for and nobody watched is
+	// still swept, one IdleTimeout after the operation ended.
+	lastRelease map[string]time.Time
+	idle        time.Duration
+	log         *slog.Logger
+
+	reapOnce     sync.Once
+	reapStop     chan struct{}
+	reapDone     chan struct{}
+	stopReapOnce sync.Once
 
 	// start launches one browser. It is a field so the launch serialisation can be
 	// tested without a browser; NewManager wires the real launch.
@@ -211,12 +243,171 @@ func NewManager(cfg Config) *Manager {
 		cfg.Now = time.Now
 	}
 	m := &Manager{
-		cfg:      cfg,
-		sessions: map[string]*Session{},
-		launches: map[string]*pendingLaunch{},
+		cfg:         cfg,
+		sessions:    map[string]*Session{},
+		launches:    map[string]*pendingLaunch{},
+		clients:     map[string]int{},
+		lastRelease: map[string]time.Time{},
+		idle:        cfg.IdleTimeout,
+		log:         cfg.Logger,
+	}
+	if m.idle == 0 {
+		m.idle = DefaultIdleTimeout
+	}
+	// A negative timeout is the documented way to disable the policy; keeping it
+	// negative would make every comparison true, so normalise it to zero.
+	if m.idle < 0 {
+		m.idle = 0
 	}
 	m.start = m.launch
 	return m
+}
+
+// StartIdleReaper starts the background sweep that enforces Config.IdleTimeout.
+//
+// It is explicit rather than automatic in NewManager for one reason: a manager
+// built in a test must not grow a goroutine that outlives the test, and the
+// production wiring is a single call in cmd/piforged. Calling it twice is a
+// no-op, and a manager with the policy disabled does nothing.
+func (m *Manager) StartIdleReaper() {
+	if m.idle <= 0 {
+		return
+	}
+	m.reapOnce.Do(func() {
+		m.reapStop = make(chan struct{})
+		m.reapDone = make(chan struct{})
+		interval := m.idle / 2
+		if interval < time.Second {
+			interval = time.Second
+		}
+		if interval > 5*time.Second {
+			interval = 5 * time.Second
+		}
+		go func() {
+			defer close(m.reapDone)
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-m.reapStop:
+					return
+				case <-ticker.C:
+					m.SweepIdle(m.cfg.Now())
+				}
+			}
+		}()
+	})
+}
+
+// IdleTimeout reports the effective policy, which is what a status page and a
+// test both need to print instead of re-deriving the default.
+func (m *Manager) IdleTimeout() time.Duration { return m.idle }
+
+// Acquire hands out the sandbox's browser together with the release function
+// the caller must run when it is done with it.
+//
+// Every path that talks to the browser goes through here, not Ensure: the idle
+// policy's whole input is "is anyone attached", and a viewer socket that opened
+// without registering would look exactly like an abandoned browser. The
+// reservation happens *before* the launch so a slow start cannot be swept out
+// from under the caller that asked for it.
+func (m *Manager) Acquire(ctx context.Context, sandboxID, profileRoot string) (*Session, func(), error) {
+	if err := m.reserve(sandboxID); err != nil {
+		return nil, nil, err
+	}
+	session, err := m.Ensure(ctx, sandboxID, profileRoot)
+	if err != nil {
+		m.release(sandboxID)
+		return nil, nil, err
+	}
+	var once sync.Once
+	return session, func() { once.Do(func() { m.release(sandboxID) }) }, nil
+}
+
+func (m *Manager) reserve(sandboxID string) error {
+	if strings.TrimSpace(sandboxID) == "" {
+		return errors.New("browser: sandbox id is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return ErrClosed
+	}
+	m.clients[sandboxID]++
+	delete(m.lastRelease, sandboxID)
+	return nil
+}
+
+func (m *Manager) release(sandboxID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.clients[sandboxID] > 1 {
+		m.clients[sandboxID]--
+		return
+	}
+	delete(m.clients, sandboxID)
+	m.lastRelease[sandboxID] = m.cfg.Now()
+}
+
+// SweepIdle stops every browser that has had no client for longer than the idle
+// timeout, and returns how many it stopped. now is a parameter so the policy can
+// be tested against a fake clock instead of a sleep.
+//
+// A browser that never had a client is measured from its Start, so a launch
+// nobody ended up watching is still collected. The stops run concurrently: a
+// deployment that accumulated hundreds of leaked browsers must drain in seconds
+// (the shutdown of one hung Chromium is bounded by Stop's own waits), not one
+// two-second timeout at a time.
+func (m *Manager) SweepIdle(now time.Time) int {
+	if m.idle <= 0 {
+		return 0
+	}
+	type victim struct {
+		id      string
+		session *Session
+		since   time.Time
+	}
+	var victims []victim
+
+	m.mu.Lock()
+	for sandboxID, session := range m.sessions {
+		if m.clients[sandboxID] > 0 {
+			continue
+		}
+		since := session.Started
+		if released, ok := m.lastRelease[sandboxID]; ok && released.After(since) {
+			since = released
+		}
+		if now.Sub(since) < m.idle {
+			continue
+		}
+		delete(m.sessions, sandboxID)
+		delete(m.lastRelease, sandboxID)
+		victims = append(victims, victim{id: sandboxID, session: session, since: since})
+	}
+	m.mu.Unlock()
+
+	if len(victims) == 0 {
+		return 0
+	}
+	var wg sync.WaitGroup
+	for _, v := range victims {
+		wg.Add(1)
+		go func(v victim) {
+			defer wg.Done()
+			v.session.Stop()
+			if m.log != nil {
+				// Exactly one line per stopped browser: this is the observable the
+				// leak ticket asks for, and a per-frame or per-poll log would bury it.
+				m.log.Info("stopped an idle sandbox browser",
+					"sandbox", v.id,
+					"idle_for", now.Sub(v.since).Round(time.Second).String(),
+					"idle_timeout", m.idle.String())
+			}
+		}(v)
+	}
+	wg.Wait()
+	return len(victims)
 }
 
 // Configured reports whether a binary is available.
@@ -859,6 +1050,8 @@ func (m *Manager) Close(sandboxID string) bool {
 	m.mu.Lock()
 	session, ok := m.sessions[sandboxID]
 	delete(m.sessions, sandboxID)
+	delete(m.clients, sandboxID)
+	delete(m.lastRelease, sandboxID)
 	if pending, inFlight := m.launches[sandboxID]; inFlight {
 		pending.cancelled = true
 		ok = true
@@ -872,10 +1065,18 @@ func (m *Manager) Close(sandboxID string) bool {
 
 // CloseAll shuts every browser down.
 func (m *Manager) CloseAll() {
+	m.stopReapOnce.Do(func() {
+		if m.reapStop != nil {
+			close(m.reapStop)
+			<-m.reapDone
+		}
+	})
 	m.mu.Lock()
 	m.closed = true
 	sessions := m.sessions
 	m.sessions = map[string]*Session{}
+	m.clients = map[string]int{}
+	m.lastRelease = map[string]time.Time{}
 	m.mu.Unlock()
 	for _, session := range sessions {
 		session.Stop()
@@ -898,6 +1099,20 @@ func (m *Manager) Len() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.sessions)
+}
+
+// SandboxIDs lists the sandboxes that currently have a browser. It is what
+// makes the admin status specific: a count alone cannot say whether the browser
+// the operator is looking at belongs to the session they are debugging.
+func (m *Manager) SandboxIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]string, 0, len(m.sessions))
+	for sandboxID := range m.sessions {
+		ids = append(ids, sandboxID)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // decodeBase64 decodes a frame payload, returning nil on malformed input so a

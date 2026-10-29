@@ -13,18 +13,22 @@ import (
 
 // browserFor resolves the sandbox's browser session for a request, the same way the
 // socket handler does: one Chrome per sandbox, profile outside the checkout.
-func (s *server) browserFor(r *http.Request) (*browser.Session, string, error) {
+//
+// The returned release must be called when the request is done with the browser.
+// It is what tells the idle policy that this operation was not a viewer that
+// left: a tab list is a short attach, not a reason to keep Chromium alive.
+func (s *server) browserFor(r *http.Request) (*browser.Session, string, func(), error) {
 	user := auth.MustUser(r.Context())
 	sess, err := s.deps.Store.Session(r.Context(), user.ID, pathID(r))
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	if sess.WorktreeID == "" {
-		return nil, "", apiErr(contracts.ErrSandboxUnavail, "the session has no checkout yet")
+		return nil, "", nil, apiErr(contracts.ErrSandboxUnavail, "the session has no checkout yet")
 	}
 	worktree, err := s.deps.Store.Worktree(r.Context(), user.ID, sess.WorktreeID)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	profileRoot := filepath.Dir(worktree.Path)
 	if sb, sbErr := s.deps.Store.Sandbox(r.Context(), user.ID, worktree.SandboxID); sbErr == nil && sb.RootDir != "" {
@@ -32,8 +36,11 @@ func (s *server) browserFor(r *http.Request) (*browser.Session, string, error) {
 	}
 	ctx, cancel := detach(r.Context(), 25*time.Second)
 	defer cancel()
-	bn, err := s.deps.Browser.Ensure(ctx, worktree.SandboxID, profileRoot)
-	return bn, worktree.SandboxID, err
+	bn, release, err := s.deps.Browser.Acquire(ctx, worktree.SandboxID, profileRoot)
+	if err != nil {
+		return nil, worktree.SandboxID, nil, err
+	}
+	return bn, worktree.SandboxID, release, nil
 }
 
 // handleListBrowserTabs lists the pages of the sandbox browser (PRD FR-11.7).
@@ -46,11 +53,12 @@ func (s *server) handleListBrowserTabs(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, apiErr(contracts.ErrSandboxUnavail, "no chrome binary is configured on this server"))
 		return
 	}
-	bn, _, err := s.browserFor(r)
+	bn, _, release, err := s.browserFor(r)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
+	defer release()
 	ctx, cancel := detach(r.Context(), 10*time.Second)
 	defer cancel()
 	tabs, err := bn.Tabs(ctx)
@@ -88,12 +96,13 @@ func (s *server) handleOpenBrowserTab(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, apiErr(contracts.ErrSandboxUnavail, "no chrome binary is configured on this server"))
 		return
 	}
-	bn, _, err := s.browserFor(r)
+	bn, _, release, err := s.browserFor(r)
 	if err != nil {
 		s.log.WarnContext(r.Context(), "browser unavailable for a new tab", "error", err.Error())
 		s.fail(w, r, apiErr(contracts.ErrSandboxUnavail, "浏览器没能启动，稍后再试"))
 		return
 	}
+	defer release()
 	ctx, cancel := detach(r.Context(), 20*time.Second)
 	defer cancel()
 	tab, err := bn.OpenTab(ctx, in.URL)
@@ -115,11 +124,12 @@ func (s *server) handleCloseBrowserTab(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "which tab?"))
 		return
 	}
-	bn, _, err := s.browserFor(r)
+	bn, _, release, err := s.browserFor(r)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
+	defer release()
 	ctx, cancel := detach(r.Context(), 10*time.Second)
 	defer cancel()
 	if err := bn.CloseTab(ctx, tabID); err != nil {

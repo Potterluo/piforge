@@ -125,6 +125,7 @@ Drop `-fake-pi` once `pi` is installed and configured; nothing else changes.
 | `-pi` | `pi` on PATH | A specific Pi binary. |
 | `-chrome` | unset | Enables the browser panel. Unset is a supported state: the API answers 422 with a reason. |
 | `-headless-browser` | on | Turn off to watch the sandbox browser on a real display. |
+| `-browser-idle-timeout` | `60s` | Stop a sandbox browser after this long with no panel viewer attached. `0` keeps the 60s default; a negative value disables the policy. |
 | `-gateway-url` | `http://<addr>` | The base URL handed to agents for model traffic. Must be reachable *from inside* the sandbox. |
 | `-default-provider` | `shared-anthropic` | Which provider a session uses when it pins no model. |
 | `-secure-cookies` | off | Required when serving over TLS. |
@@ -134,6 +135,8 @@ Environment: `PIFORGE_MASTER_KEY` (base64/hex/32 raw bytes) seals provider keys;
 without it a `master.key` is generated in the data directory on first boot.
 `PIFORGE_ALLOWED_ORIGINS` pins the exact origins allowed to open a terminal or
 browser socket when TLS is terminated in front of the app.
+`PIFORGE_BROWSER_IDLE_TIMEOUT` is the same knob as `-browser-idle-timeout` (a Go
+duration, e.g. `90s`).
 
 ## How the moving parts fit
 

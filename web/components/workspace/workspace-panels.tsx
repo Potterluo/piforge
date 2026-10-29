@@ -100,6 +100,23 @@ export function WorkspacePanels({
   );
   const [revealTarget, setRevealTarget] = React.useState<string | null>(null);
 
+  /**
+   * Is the browser panel on screen right now?
+   *
+   * It is mounted only while it is: mounting it opens the screencast socket,
+   * and the server starts one sandbox Chrome per socket. The panel used to be
+   * kept mounted like the file tree, so every session page started a browser
+   * nobody asked for (QA-16: 465 leaked Chromes). A tab that is merely
+   * configured with that panel is not "shown"; leaving it unmounted is what
+   * makes the server's idle policy — no client attached for N seconds — able
+   * to collect the browser instead of it living as long as the tab.
+   *
+   * Switching away therefore closes the socket (and the browser is stopped
+   * after the idle window); selecting the panel again remounts and reconnects
+   * to the same browser if it is still warm, or starts a fresh one.
+   */
+  const browserVisible = tab === "browser" || split === "browser";
+
   const handleOpenFile = React.useCallback((path: string) => {
     setOpenLine(null);
     setOpenPath(path);
@@ -337,8 +354,11 @@ export function WorkspacePanels({
           </TabsContent>
 
           <TabsContent value="browser" keepMounted={split !== "browser"} className="min-h-0 min-w-0 flex-1">
-        <BrowserPanel sessionId={sessionId} className="min-h-0 flex-1" onCaptured={handleCaptured} />
-      </TabsContent>
+            {/* Lazy mount: no BrowserPanel, no socket, no sandbox Chrome. */}
+            {browserVisible ? (
+              <BrowserPanel sessionId={sessionId} className="min-h-0 flex-1" onCaptured={handleCaptured} />
+            ) : null}
+          </TabsContent>
 
       <TabsContent value="terminal" keepMounted={split !== "terminal"} className="min-h-0 min-w-0 flex-1">
             <div className="flex h-full min-h-0 min-w-0 flex-col">

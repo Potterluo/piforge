@@ -186,6 +186,19 @@ func (s *server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		running = s.hub.liveCount()
 	}
 
+	// Sandbox browsers are processes, not sessions: a leaked one is invisible in
+	// every count above. Reporting both the number and the sandboxes is what lets
+	// an operator tell "the panel I am looking at" from "a browser nobody closed"
+	// (QA-16). A deployment without the browser feature reports zero.
+	browsersRunning := 0
+	browserSandboxes := []string{}
+	browserIdleTimeout := ""
+	if s.deps.Browser != nil {
+		browsersRunning = s.deps.Browser.Len()
+		browserSandboxes = s.deps.Browser.SandboxIDs()
+		browserIdleTimeout = s.deps.Browser.IdleTimeout().String()
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"users":          stats.Users,
 		"users_active":   stats.UsersActive,
@@ -199,6 +212,11 @@ func (s *server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		"skills":         stats.Skills,
 		"mcp_servers":    stats.MCP,
 		"events":         stats.Events,
+		// The lazy-mount fix makes this count meaningful: it stays at zero until a
+		// human selects the browser panel, and drops back after the idle timeout.
+		"browsers_running":   browsersRunning,
+		"browser_sandboxes":  browserSandboxes,
+		"browser_idle_after": browserIdleTimeout,
 		// FR-3.3: the effective cap, not the compile-time default. "What is it set
 		// to" has to have an answer that does not involve reading the flag.
 		"parallel_limit":     s.parallelLimit(),

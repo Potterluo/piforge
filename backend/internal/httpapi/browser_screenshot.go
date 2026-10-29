@@ -64,7 +64,7 @@ func (s *server) handleBrowserScreenshot(w http.ResponseWriter, r *http.Request)
 
 	ctx, cancel := detach(r.Context(), 20*time.Second)
 	defer cancel()
-	shot, err := s.deps.Browser.Ensure(ctx, worktree.SandboxID, profileRoot)
+	shot, release, err := s.deps.Browser.Acquire(ctx, worktree.SandboxID, profileRoot)
 	if err != nil {
 		if errors.Is(err, browser.ErrNotConfigured) {
 			s.fail(w, r, apiErr(contracts.ErrSandboxUnavail, "no chrome binary is configured on this server"))
@@ -76,6 +76,9 @@ func (s *server) handleBrowserScreenshot(w http.ResponseWriter, r *http.Request)
 		s.fail(w, r, apiErr(contracts.ErrSandboxUnavail, "浏览器没能启动，稍后再试"))
 		return
 	}
+	// The capture is a short attach; when it ends the idle policy may collect the
+	// browser again unless a viewer is still watching it.
+	defer release()
 	// The page the panel is showing, not the target Chrome attached to at launch.
 	// The viewer passes its tab explicitly; a bare POST still follows the tab the
 	// panel last showed, because the socket handler records it.

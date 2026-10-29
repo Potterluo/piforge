@@ -84,6 +84,9 @@ type options struct {
 	isolationBinary string
 	// browserProxy is handed to Chrome via --proxy-server.
 	browserProxy string
+	// browserIdleTimeout stops a sandbox browser that no viewer has been
+	// attached to for this long. Zero uses the manager's 60s default.
+	browserIdleTimeout time.Duration
 	// agentIdleTTL is how long an agent process may sit unused before it is stopped.
 	agentIdleTTL time.Duration
 	// sandboxIdlePause / sandboxReclaimAfter are the two FR-5.3 thresholds.
@@ -200,6 +203,8 @@ func run() error {
 		"run the sandbox browser headless")
 	flag.StringVar(&opt.browserProxy, "browser-proxy", envOr("PIFORGE_BROWSER_PROXY", ""),
 		"proxy the sandbox browser should use (host:port)")
+	flag.DurationVar(&opt.browserIdleTimeout, "browser-idle-timeout", envDuration("PIFORGE_BROWSER_IDLE_TIMEOUT", browser.DefaultIdleTimeout),
+		"stop a sandbox browser after this long with no viewer attached (0: 60s default, negative disables)")
 	flag.StringVar(&opt.isolation, "isolation", envOr("PIFORGE_ISOLATION", "none"),
 		"process jail for agent processes: none|bubblewrap|firejail")
 	flag.StringVar(&opt.isolationBinary, "isolation-binary", envOr("PIFORGE_ISOLATION_BINARY", ""),
@@ -576,6 +581,11 @@ func run() error {
 		Headless: opt.headlessBrowser,
 		Proxy:    opt.browserProxy,
 		Launcher: launcher,
+		// The panel is lazy-mounted, so the only thing that can keep a sandbox
+		// Chrome alive after a session page closes is this policy. It is
+		// configurable because a test harness wants seconds, not a minute.
+		IdleTimeout: opt.browserIdleTimeout,
+		Logger:      logger,
 	}
 	// One resolver for every sandbox API call this process makes: the file panel,
 	// the terminal, the browser and the worktree request all present the same key
@@ -624,7 +634,13 @@ func run() error {
 		}
 	}
 	browsers := browser.NewManager(browserCfg)
+	browsers.StartIdleReaper()
 	defer browsers.CloseAll()
+	if browsers.IdleTimeout() > 0 {
+		logger.Info("sandbox browsers are stopped when idle",
+			"idle_timeout", browsers.IdleTimeout().String(),
+			"detail", "a browser starts only when someone selects the panel; with no viewer attached it is stopped after this window")
+	}
 
 	// With a docker sandbox that runs an AIO image, the terminal lives in that
 	// container too: the shell sees the same filesystem the agent edits. Like the

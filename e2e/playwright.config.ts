@@ -110,6 +110,10 @@ export default defineConfig({
         // opens more than that, and the 65th terminal spec then failed with
         // "term: too many sessions" depending only on test order.
         PIFORGE_TERM_MAX_SESSIONS: "256",
+        // The browser idle policy is seconds, not the shipped minute: 67 has to
+        // observe a stopped sandbox browser inside one test. Without a viewer
+        // attached, the manager stops it after this window.
+        PIFORGE_BROWSER_IDLE_TIMEOUT: "3s",
       },
     },
     {

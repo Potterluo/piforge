@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Boxes, Cpu, GitBranch, MessagesSquare, Server, Users } from "lucide-react";
+import { Activity, Boxes, Cpu, GitBranch, Globe, MessagesSquare, Server, Users } from "lucide-react";
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Item, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "@/components/ui/item";
@@ -102,6 +102,23 @@ export default function AdminStatusPage() {
                   </ItemTitle>
                   <ItemDescription>
                     并行分支上限（1–{data.parallel_limit_max}，来自 -parallel-limit）
+                  </ItemDescription>
+                </ItemContent>
+              </Item>
+              <Item variant="outline" data-testid="stat-browsers">
+                <ItemMedia variant="icon">
+                  <Globe />
+                </ItemMedia>
+                <ItemContent>
+                  <ItemTitle data-testid="browsers-running-value">{data.browsers_running}</ItemTitle>
+                  <ItemDescription>
+                    沙箱浏览器
+                    {data.browser_sandboxes.length > 0
+                      ? ` · ${data.browser_sandboxes.length} 个沙箱`
+                      : ""}
+                    {data.browser_idle_after
+                      ? `（无查看者 ${data.browser_idle_after} 后停止）`
+                      : ""}
                   </ItemDescription>
                 </ItemContent>
               </Item>

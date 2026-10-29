@@ -95,7 +95,7 @@ func (s *server) handleSessionBrowser(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	session, err := s.deps.Browser.Ensure(ctx, sandboxID, profileRoot)
+	session, release, err := s.deps.Browser.Acquire(ctx, sandboxID, profileRoot)
 	if err != nil {
 		if errors.Is(err, browser.ErrNotConfigured) {
 			_ = conn.Write(ctx, websocket.MessageText, mustJSON(map[string]string{
@@ -110,6 +110,10 @@ func (s *server) handleSessionBrowser(w http.ResponseWriter, r *http.Request) {
 		}))
 		return
 	}
+	// The viewer counts as attached only while this socket lives. Releasing here,
+	// rather than relying on a process exit, is what lets the idle policy stop a
+	// browser the moment the last panel closes.
+	defer release()
 
 	// The viewer names the page it wants (PRD FR-11.7). An empty `tab` means the one
 	// the browser opened with, which is what a single-tab viewer wants.

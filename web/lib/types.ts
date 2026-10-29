@@ -447,6 +447,12 @@ export interface DeploymentStatus {
   parallel_limit: number;
   /** The largest value the cap may be configured to. */
   parallel_limit_max: number;
+  /** Sandbox browsers alive right now; zero unless a panel is open or idle. */
+  browsers_running: number;
+  /** The sandboxes those browsers belong to. */
+  browser_sandboxes: string[];
+  /** The effective idle policy, e.g. "1m0s". */
+  browser_idle_after: string;
 }
 /**
  * One recorded admin read of a session (PRD FR-16.8). The owner sees these; they
