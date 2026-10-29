@@ -381,8 +381,22 @@ func (s *Session) screencastOn(ctx context.Context, client *cdp, onFrame func(jp
 		"maxHeight":     800,
 		"everyNthFrame": 1,
 	}
+	// Take the screencast over rather than refusing to start.
+	//
+	// A viewer that goes away without its stop reaching Chrome — a page reload closes
+	// the WebSocket, a proxy drops it, the tab is closed mid-frame — leaves Chrome
+	// streaming to nobody, and every later attempt failed with "Screencast is already
+	// active". Stopping first is harmless when nothing is running and is the only way
+	// back when something is.
+	_ = client.call(ctx, "Page.stopScreencast", nil, nil)
 	if err := client.call(ctx, "Page.startScreencast", params, nil); err != nil {
-		return err
+		// Chrome can still be tearing the previous cast down; one short retry covers the
+		// window without pretending the failure did not happen.
+		time.Sleep(150 * time.Millisecond)
+		_ = client.call(ctx, "Page.stopScreencast", nil, nil)
+		if retry := client.call(ctx, "Page.startScreencast", params, nil); retry != nil {
+			return fmt.Errorf("browser: start screencast: %w (after retry: %v)", err, retry)
+		}
 	}
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

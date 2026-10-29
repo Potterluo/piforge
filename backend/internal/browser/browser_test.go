@@ -16,8 +16,11 @@ import (
 
 // fakeCDP is a stand-in for Chrome's devtools endpoint.
 type fakeCDP struct {
-	server *httptest.Server
-	wsURL  string
+	// allowTakeover makes the fake accept a second StartScreencast, which is what
+	// Chrome does once the previous cast has been stopped.
+	allowTakeover bool
+	server        *httptest.Server
+	wsURL         string
 
 	mu       sync.Mutex
 	received []string
@@ -90,6 +93,17 @@ func (f *fakeCDP) serve(t *testing.T, conn *websocket.Conn) {
 			"Input.insertText", "Page.navigate":
 			reply(map[string]any{})
 		case "Page.startScreencast":
+			// Real Chrome refuses a second cast with "Screencast is already active".
+			// Modelling that is the whole point: a fake that always says yes cannot
+			// tell the difference between taking over and failing to.
+			if screencasting && !f.allowTakeover {
+				payload, _ := json.Marshal(map[string]any{
+					"id":    msg.ID,
+					"error": map[string]any{"code": -32000, "message": "Screencast is already active"},
+				})
+				_ = conn.Write(ctx, websocket.MessageText, payload)
+				continue
+			}
 			screencasting = true
 			reply(map[string]any{})
 			if !silent {
@@ -324,4 +338,80 @@ func TestManagerLifecycle(t *testing.T) {
 	if _, err := m.Ensure(context.Background(), "sb_1", t.TempDir()); err == nil {
 		t.Fatal("Ensure succeeded after CloseAll")
 	}
+}
+
+// A viewer that disappears without stopping its cast used to lock the panel forever:
+// every later StartScreencast answered "Screencast is already active". Taking the cast
+// over is what keeps a reload from bricking the panel.
+func TestScreencastTakesOverFromADeadViewer(t *testing.T) {
+	fake := newFakeCDP(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	client, err := dialCDP(ctx, fake.wsURL)
+	if err != nil {
+		t.Fatalf("dialCDP: %v", err)
+	}
+	defer client.close()
+
+	// The fake refuses a second cast unless the first was stopped, exactly like Chrome.
+	fake.mu.Lock()
+	fake.allowTakeover = false
+	fake.mu.Unlock()
+
+	session := &Session{client: client}
+	// First cast: starts, then its context dies without a clean stop (the viewer's
+	// socket closed).
+	firstCtx, firstCancel := context.WithCancel(ctx)
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		_ = session.screencastOn(firstCtx, client, func([]byte, Meta) {})
+	}()
+	waitForMethod(t, fake, "Page.startScreencast")
+	firstCancel()
+	<-firstDone
+
+	// Second cast on the same connection. Before the fix this returned
+	// "Screencast is already active" because Chrome still had the old cast open.
+	secondCtx, secondCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer secondCancel()
+	gotFrame := make(chan struct{}, 1)
+	go func() {
+		_ = session.screencastOn(secondCtx, client, func([]byte, Meta) {
+			select {
+			case gotFrame <- struct{}{}:
+			default:
+			}
+		})
+	}()
+
+	select {
+	case <-gotFrame:
+		// Streaming again: the takeover worked.
+	case <-time.After(3 * time.Second):
+		t.Fatal("the second screencast never produced a frame")
+	}
+}
+
+// waitForMethod blocks until the fake has seen a CDP method.
+func waitForMethod(t *testing.T, fake *fakeCDP, method string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		fake.mu.Lock()
+		seen := false
+		for _, got := range fake.received {
+			if got == method {
+				seen = true
+				break
+			}
+		}
+		fake.mu.Unlock()
+		if seen {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("the fake never saw %s", method)
 }
