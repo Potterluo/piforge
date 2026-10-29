@@ -231,6 +231,71 @@ func (s *Store) UpdateSandboxState(ctx context.Context, userID, sandboxID string
 	return requireOneRow(res, "store: update sandbox "+sandboxID)
 }
 
+// UpdateSandboxStateIdle records a transition made by the idle reaper.
+//
+// It differs from UpdateSandboxState in exactly one way: it does not refresh
+// last_active_at. The reaper's write is not user activity, and moving the clock
+// there would restart the idle countdown every time the reaper looked at a row —
+// a PAUSED sandbox would then never reach the reclaim threshold.
+func (s *Store) UpdateSandboxStateIdle(ctx context.Context, userID, sandboxID string, state contracts.SandboxState, message string) error {
+	if state == "" {
+		return fmt.Errorf("store: update sandbox %q: empty state: %w", sandboxID, ErrInvalid)
+	}
+	res, err := s.w.ExecContext(ctx,
+		`UPDATE sandboxes SET state = ?, message = ?
+		  WHERE id = ? AND user_id = ?`,
+		string(state), message, sandboxID, userID)
+	if err != nil {
+		return fmt.Errorf("store: update sandbox %q: %w", sandboxID, err)
+	}
+	return requireOneRow(res, "store: update sandbox "+sandboxID)
+}
+
+// TouchSandbox records real activity on a sandbox. Only user-driven paths call
+// it; the reaper's own state writes deliberately do not.
+func (s *Store) TouchSandbox(ctx context.Context, userID, sandboxID string) error {
+	res, err := s.w.ExecContext(ctx,
+		`UPDATE sandboxes SET last_active_at = ? WHERE id = ? AND user_id = ?`,
+		formatTime(s.now()), sandboxID, userID)
+	if err != nil {
+		return fmt.Errorf("store: touch sandbox %q: %w", sandboxID, err)
+	}
+	return requireOneRow(res, "store: touch sandbox "+sandboxID)
+}
+
+// ReapableSandboxes lists the caller-less sandboxes in one state whose
+// last_active_at is older than idleBefore, oldest first.
+//
+// It is intentionally user-unscoped: the reaper works for the whole deployment,
+// and its safety comes from the state machine (only READY may be paused, only
+// PAUSED may be reclaimed) rather than from a user predicate.
+func (s *Store) ReapableSandboxes(ctx context.Context, state contracts.SandboxState, idleBefore time.Time) ([]*contracts.Sandbox, error) {
+	if state == "" {
+		return nil, fmt.Errorf("store: reapable sandboxes: empty state: %w", ErrInvalid)
+	}
+	rows, err := s.r.QueryContext(ctx,
+		`SELECT `+sandboxCols+` FROM sandboxes
+		  WHERE state = ? AND last_active_at < ?
+		  ORDER BY last_active_at ASC`, string(state), formatTime(idleBefore))
+	if err != nil {
+		return nil, fmt.Errorf("store: reapable sandboxes: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]*contracts.Sandbox, 0, 8)
+	for rows.Next() {
+		sb, serr := scanSandbox(rows)
+		if serr != nil {
+			return nil, fmt.Errorf("store: reapable sandboxes: %w", serr)
+		}
+		out = append(out, sb)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: reapable sandboxes: %w", err)
+	}
+	return out, nil
+}
+
 func scanSandbox(sc interface{ Scan(dest ...any) error }) (*contracts.Sandbox, error) {
 	var (
 		sb      contracts.Sandbox

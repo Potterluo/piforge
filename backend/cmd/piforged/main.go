@@ -43,7 +43,9 @@ import (
 	"github.com/piforge/piforge/backend/internal/pi"
 	"github.com/piforge/piforge/backend/internal/pimodel"
 	"github.com/piforge/piforge/backend/internal/provision"
+	"github.com/piforge/piforge/backend/internal/reaper"
 	"github.com/piforge/piforge/backend/internal/sandbox"
+	"github.com/piforge/piforge/backend/internal/snapshot"
 	"github.com/piforge/piforge/backend/internal/store"
 	"github.com/piforge/piforge/backend/internal/term"
 	"github.com/piforge/piforge/backend/internal/workspaceremote"
@@ -83,6 +85,12 @@ type options struct {
 	browserProxy string
 	// agentIdleTTL is how long an agent process may sit unused before it is stopped.
 	agentIdleTTL time.Duration
+	// sandboxIdlePause / sandboxReclaimAfter are the two FR-5.3 thresholds.
+	// Zero disables each stage.
+	sandboxIdlePause    time.Duration
+	sandboxReclaimAfter time.Duration
+	// sandboxReapInterval is how often the sandbox reaper looks for candidates.
+	sandboxReapInterval time.Duration
 	// sandboxBrowser is "auto" (the flag's default), "host" or "remote". It holds
 	// the resolved placement by the time anything reads it: auto follows the
 	// provider, which is remote under docker and host under local.
@@ -125,6 +133,12 @@ func run() error {
 		"provider used when a session has no model_ref")
 	flag.DurationVar(&opt.agentIdleTTL, "agent-idle-ttl", envDuration("PIFORGE_AGENT_IDLE_TTL", 30*time.Minute),
 		"stop an agent process after it has been idle this long")
+	flag.DurationVar(&opt.sandboxIdlePause, "sandbox-idle-pause", envDuration("PIFORGE_SANDBOX_IDLE_PAUSE", 30*time.Minute),
+		"pause a READY sandbox after it has been idle this long (0 disables)")
+	flag.DurationVar(&opt.sandboxReclaimAfter, "sandbox-reclaim-after", envDuration("PIFORGE_SANDBOX_RECLAIM_AFTER", 336*time.Hour),
+		"reclaim a PAUSED sandbox after it has been idle this long, snapshotting first (0 disables)")
+	flag.DurationVar(&opt.sandboxReapInterval, "sandbox-reap-interval", envDuration("PIFORGE_SANDBOX_REAP_INTERVAL", time.Minute),
+		"how often the sandbox idle reaper checks for candidates")
 	flag.StringVar(&opt.sandboxKind, "sandbox", envOr("PIFORGE_SANDBOX", "local"),
 		"sandbox provider: local (directories) or docker (one container per project)")
 	flag.StringVar(&opt.sandboxBrowser, "sandbox-browser", envOr("PIFORGE_SANDBOX_BROWSER", "auto"),
@@ -595,6 +609,44 @@ func run() error {
 	// eighty sessions does not leave eighty children behind.
 	go rt.StartIdleReaper(ctx, opt.agentIdleTTL, time.Minute)
 
+	// Sandboxes idle-pause and are reclaimed on their own (FR-5.3). The two
+	// thresholds are independent so an operator can pause without ever deleting,
+	// or leave a long PAUSED window. Reclaim always writes the manifest first;
+	// the reaper refuses to destroy if that step fails.
+	if opt.sandboxIdlePause > 0 || opt.sandboxReclaimAfter > 0 {
+		snapshots, serr := snapshot.New(snapshot.Config{
+			Root:  filepath.Join(opt.dataDir, "snapshots"),
+			Store: st,
+		})
+		if serr != nil {
+			return fmt.Errorf("init sandbox snapshot writer: %w", serr)
+		}
+		rp := reaper.New(reaper.Config{
+			Store:        st,
+			Sandbox:      sb,
+			Snapshots:    snapshots,
+			Logger:       logger,
+			Now:          time.Now,
+			PauseAfter:   opt.sandboxIdlePause,
+			ReclaimAfter: opt.sandboxReclaimAfter,
+			Interval:     opt.sandboxReapInterval,
+			// Pausing is not just a label. The manual pause handler already
+			// stops the agents on a sandbox; the background pause must do the
+			// same or a "PAUSED" sandbox keeps executing work.
+			OnPaused: func(pctx context.Context, s *contracts.Sandbox) {
+				stopAgentsOnSandbox(pctx, logger, st, rt, s)
+			},
+		})
+		logger.Info("sandbox idle policy enabled",
+			"pause_after", opt.sandboxIdlePause.String(),
+			"reclaim_after", opt.sandboxReclaimAfter.String(),
+			"interval", opt.sandboxReapInterval.String(),
+			"snapshots", abs(filepath.Join(opt.dataDir, "snapshots")))
+		go rp.Start(ctx)
+	} else {
+		logger.Info("sandbox idle policy disabled (both thresholds are 0)")
+	}
+
 	// Scratch sessions (PRD FR-1.10) expire on their own: a quick question should
 	// not need a cleanup step from the user.
 	go func() {
@@ -665,6 +717,32 @@ func (a termAdapter) Resize(tabID string, cols, rows int) error {
 func (a termAdapter) Close(tabID string) error { return a.m.Close(tabID) }
 func (a termAdapter) Read(tabID string, from int64) ([]byte, int64, bool) {
 	return a.m.Read(tabID, from)
+}
+
+// stopAgentsOnSandbox stops every agent process whose worktree belongs to one
+// sandbox. It mirrors the manual pause handler: "paused" should describe the
+// machine, not only the row. Errors are logged and do not fail the transition;
+// a process that will not die is the agent reaper's problem next.
+func stopAgentsOnSandbox(ctx context.Context, logger *slog.Logger, st *store.Store, rt *pi.Runtime, sb *contracts.Sandbox) {
+	sessions, err := st.ListSessions(ctx, sb.UserID, store.SessionFilter{Limit: 500})
+	if err != nil {
+		logger.Warn("sandbox idle: cannot list sessions to stop agents",
+			"sandbox", sb.ID, "error", err.Error())
+		return
+	}
+	for _, sess := range sessions {
+		if sess.WorktreeID == "" {
+			continue
+		}
+		wt, werr := st.WorktreeByID(ctx, sess.WorktreeID)
+		if werr != nil || wt.SandboxID != sb.ID {
+			continue
+		}
+		if serr := rt.Stop(ctx, sess.ID); serr != nil {
+			logger.Warn("sandbox idle: could not stop an agent on the paused sandbox",
+				"sandbox", sb.ID, "session", sess.ID, "error", serr.Error())
+		}
+	}
 }
 
 // newRuntime builds the agent runtime. With -fake-pi it drives the fake peer

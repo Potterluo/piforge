@@ -706,6 +706,58 @@ func TestSandboxAndWorktree(t *testing.T) {
 	}
 }
 
+func TestSandboxIdleQueriesSeparateActivityFromReaperWrites(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	u := mkUser(t, s, "idle@example.com", contracts.RoleUser)
+	p := mkProject(t, s, u.ID, "idle")
+	sb, err := s.CreateSandbox(ctx, u.ID, NewSandbox{ProjectID: p.ID, State: contracts.SandboxReady})
+	if err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	created := sb.LastActiveAt
+
+	// A message (real activity) moves the clock forward.
+	time.Sleep(5 * time.Millisecond)
+	if err := s.TouchSandbox(ctx, u.ID, sb.ID); err != nil {
+		t.Fatalf("TouchSandbox: %v", err)
+	}
+	touched, err := s.Sandbox(ctx, u.ID, sb.ID)
+	if err != nil {
+		t.Fatalf("Sandbox: %v", err)
+	}
+	if !touched.LastActiveAt.After(created) {
+		t.Fatalf("last_active_at = %v, want after %v", touched.LastActiveAt, created)
+	}
+
+	// ReapableSandboxes is state-scoped and strict about the cutoff.
+	if got, err := s.ReapableSandboxes(ctx, contracts.SandboxReady, time.Now().Add(time.Hour)); err != nil || len(got) != 1 {
+		t.Fatalf("reapable far future = %d, %v", len(got), err)
+	}
+	if got, err := s.ReapableSandboxes(ctx, contracts.SandboxReady, time.Now().Add(-time.Hour)); err != nil || len(got) != 0 {
+		t.Fatalf("reapable far past = %d, %v", len(got), err)
+	}
+	if got, err := s.ReapableSandboxes(ctx, contracts.SandboxPaused, time.Now().Add(time.Hour)); err != nil || len(got) != 0 {
+		t.Fatalf("reapable wrong state = %d, %v", len(got), err)
+	}
+
+	// The reaper's transition must not refresh last_active_at, or the reclaim
+	// countdown would restart on every pass.
+	if err := s.UpdateSandboxStateIdle(ctx, u.ID, sb.ID, contracts.SandboxPaused, "idle pause"); err != nil {
+		t.Fatalf("UpdateSandboxStateIdle: %v", err)
+	}
+	paused, err := s.Sandbox(ctx, u.ID, sb.ID)
+	if err != nil {
+		t.Fatalf("Sandbox after pause: %v", err)
+	}
+	if paused.State != contracts.SandboxPaused {
+		t.Errorf("state = %q, want PAUSED", paused.State)
+	}
+	if !paused.LastActiveAt.Equal(touched.LastActiveAt) {
+		t.Errorf("reaper write moved last_active_at: %v vs %v", paused.LastActiveAt, touched.LastActiveAt)
+	}
+}
+
 func TestAuthSessions(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

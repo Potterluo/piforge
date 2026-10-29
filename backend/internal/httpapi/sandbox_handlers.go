@@ -104,6 +104,28 @@ func (s *server) handleSandboxResume(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"state": live.State})
 }
 
+// handleSandboxSnapshots lists the snapshots recorded for a session's sandbox,
+// newest first.
+//
+// Snapshots are written by the idle reaper before it reclaims a sandbox and by
+// nothing else yet, so this endpoint is read-only by design: there is no
+// restore-from-snapshot route, and inventing one before the snapshot is a real
+// filesystem image would be a promise the backend cannot keep. blob_key is
+// relative to the deployment's <dataDir>/snapshots directory.
+func (s *server) handleSandboxSnapshots(w http.ResponseWriter, r *http.Request) {
+	sb, ok := s.sandboxFor(w, r)
+	if !ok {
+		return
+	}
+	user := auth.MustUser(r.Context())
+	rows, err := s.deps.Store.ListSnapshots(r.Context(), user.ID, sb.ID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"snapshots": rows})
+}
+
 // sessionsOnSandbox lists the sessions whose worktree belongs to one sandbox.
 func (s *server) sessionsOnSandbox(r *http.Request, userID, sandboxID string) []string {
 	sessions, err := s.deps.Store.ListSessions(r.Context(), userID, store.SessionFilter{Limit: 200})

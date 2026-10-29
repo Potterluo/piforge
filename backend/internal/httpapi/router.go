@@ -228,6 +228,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /v1/sessions/{id}/git/branch", s.mutatingBearer(s.handleGitBranch))
 	mux.Handle("POST /v1/sessions/{id}/git/checkout", s.mutatingBearer(s.handleGitCheckout))
 	mux.Handle("GET /v1/sessions/{id}/sandbox", s.authed(s.handleSandboxState))
+	mux.Handle("GET /v1/sessions/{id}/sandbox/snapshots", s.authed(s.handleSandboxSnapshots))
 	mux.Handle("POST /v1/sessions/{id}/sandbox/pause", s.mutatingBearer(s.handleSandboxPause))
 	mux.Handle("POST /v1/sessions/{id}/sandbox/resume", s.mutatingBearer(s.handleSandboxResume))
 	mux.Handle("POST /v1/sessions/{id}/git/hunk", s.mutatingBearer(s.handleGitHunk))

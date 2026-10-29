@@ -370,12 +370,25 @@ func (s *server) wakeSandbox(r *http.Request, userID string, sess *contracts.Ses
 		return
 	}
 	sb, err := s.deps.Store.Sandbox(r.Context(), userID, wt.SandboxID)
-	if err != nil || sb.State != contracts.SandboxPaused {
+	if err != nil {
 		return
 	}
-	live, rerr := s.deps.Sandbox.Resume(r.Context(), sandbox.ID(sb.UserID, sb.ProjectID))
-	if rerr != nil {
+	if sb.State == contracts.SandboxPaused {
+		live, rerr := s.deps.Sandbox.Resume(r.Context(), sandbox.ID(sb.UserID, sb.ProjectID))
+		if rerr != nil {
+			return
+		}
+		_ = s.deps.Store.UpdateSandboxState(r.Context(), userID, sb.ID, live.State, "")
 		return
 	}
-	_ = s.deps.Store.UpdateSandboxState(r.Context(), userID, sb.ID, live.State, "")
+	// A message is the clearest real activity a sandbox has. Without this touch,
+	// last_active_at would remain the creation time and the idle reaper (FR-5.3)
+	// would pause a sandbox somebody is actively using.
+	switch sb.State {
+	case contracts.SandboxReady, contracts.SandboxBusy, contracts.SandboxIdle:
+		if terr := s.deps.Store.TouchSandbox(r.Context(), userID, sb.ID); terr != nil {
+			s.log.WarnContext(r.Context(), "could not record sandbox activity",
+				"sandbox", sb.ID, "error", terr.Error())
+		}
+	}
 }

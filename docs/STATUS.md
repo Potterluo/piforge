@@ -9,7 +9,7 @@
 保留它的原因：我此前两次在汇报里把“做完”说早了。第一次是“P2 全落地”（真），第二次暗示 PRD 全落地（假）。
 一张带证据的表比一段自我评价可靠。
 
-基线：HEAD 2e5f206。共 126 条 FR：DONE 35 / PARTIAL 51 / MISSING 40。
+基线：HEAD 2e5f206；此后补齐 FR-5.3。共 126 条 FR：DONE 36 / PARTIAL 51 / MISSING 39。
 
 ---
 # PiForge 对照 PRD 的实现审计
@@ -18,7 +18,7 @@
 - 审计方法：逐条打开 `backend/internal/httpapi/router.go` 的路由表、各 handler、`web/components/**` 与 `e2e/tests/*.spec.ts`，以「路由 + handler/组件 + 测试名」为准，不采信命名与注释。
 - 状态口径：**DONE** = 有实现且至少一条单测/e2e 覆盖；**PARTIAL** = 有实现但无测试，或只做了 API / 只做了界面 / 只做了 PRD 描述的一部分；**MISSING** = 无实现。
 - 审计过程中仓库被并发修改过：审计开始时 `POST /v1/sessions/{id}/clone`（FR-2.7）尚是未提交的未跟踪文件，约 03:50 被提交进 `2e5f206`。下表按该提交为准。
-- 计数：**126 条 FR，DONE 35 / PARTIAL 51 / MISSING 40**。
+- 计数：**126 条 FR，DONE 36 / PARTIAL 51 / MISSING 39**（审计后补上 FR-5.3）。
 
 > 说明：PRD 中没有「部署」类 FR（§12 是里程碑，`deploy/` 是 Dockerfile.app / Dockerfile.offline / k8s.yaml / entrypoint.sh，属交付物而非需求行），因此下面没有部署行。
 
@@ -56,7 +56,7 @@
 | FR-4.7 提升为分支（带上上下文） | DONE | `sidecar_promote.go` `handlePromoteSidecar` + `contracts.SessionCloner` `CloneSession` + `copyEvents`；`21-promote.spec.ts` "promoting keeps the conversation and gives it its own worktree"、`sidecar_promote_test.go` |
 | FR-5.1 沙箱状态机 + UI 状态与倒计时 | PARTIAL | `contracts.SandboxState`（9 态）+ `sandbox.go` `setState`/`Ensure`（STARTING→READY）；UI 只在侧栏显示 `sandbox_state`（`app-sidebar.tsx` "沙箱 · READY"），**无倒计时/expires 展示**；`sandbox_test.go` 覆盖状态转换 |
 | FR-5.2 打开会话自动唤醒 | DONE | 发消息时若沙箱是 PAUSED 自动 `Resume`（`message_handlers.go` `wakeSandbox`）；`40-sandbox-lifecycle.spec.ts` |
-| FR-5.3 空闲 15min 暂停 / 14d 回收 / 先快照后销毁 | MISSING | 无 TTL 看门狗；`Local.Pause` 注释明说 "nothing is snapshotted"；`piforged/main.go` 的定时循环只清理 ephemeral 会话 |
+| FR-5.3 空闲 15min 暂停 / 14d 回收 / 先快照后销毁 | DONE（本地 provider 实测；快照是清单索引，不是工作区副本） | `internal/reaper` 两段状态机：READY→`Pause`→PAUSED，PAUSED→snapshot→`Destroy`→MISSING；`piforged/main.go` 的 `-sandbox-idle-pause`（默认 30m，0 关闭）/`-sandbox-reclaim-after`（默认 336h，0 关闭）/`-sandbox-reap-interval`（默认 1m），启动即跑一轮。**顺序固定为快照→销毁**：快照失败只记日志、provider 与 store 行都不动，下一 tick 重试（`TestReaperSnapshotFailureLeavesSandboxUntouched`、`TestReaperDestroyFailureKeepsPausedForRetry`）。`internal/snapshot` 把每个 checkout 的路径/大小/branch/HEAD/未提交清单写进 `<dataDir>/snapshots/<sandbox-id>/<timestamp>/manifest.json`，并在 `snapshots` 表记一行；`GET /v1/sessions/{id}/sandbox/snapshots` 只读列出。测试：`TestReaperPausesOnlyReadyPastThreshold`、`TestReaperReclaimsOnlyPausedPastThreshold`、`TestReaperIsIdempotentWhenRunTwice`、`TestReaperDisabledChangesNothing`、`TestTakeIndexesFilesGitAndUncommittedWork`。**局限**：完整回收只在 `-sandbox local` 上实跑过；docker 的 `Destroy` 会保留宿主数据目录（`docker.go` 注释），但未跑容器回收；没有 restore-from-snapshot；本地 provider 回收会删掉工作区目录，清单只记录「当时有什么」，文件内容不保留 |
 | FR-5.4 多 worktree 创建/列出/清理 | PARTIAL | 创建：`provision.EnsureWorktree`（`provision_test.go`、`routes_test.go` `TestCreateSessionProvisionsWorktree`）；列出/清理：无 HTTP 端点，`gitx.ListWorktrees`/`RemoveWorktree`/`PruneWorktrees` 无调用者 |
 | FR-5.5 依赖缓存共享 | MISSING | `GOMODCACHE`/`_cacache`/`CARGO_HOME` 全仓库零命中 |
 | FR-5.6 快照（fs / fs+mem，仅工具边界） | PARTIAL | 只有数据层：`store/resources.go` `CreateSnapshot`/`ListSnapshots` + `store_test.go`；没有任何生产者、没有工具边界钩子、无 HTTP、`sandbox.Pause` 不快照 |
@@ -159,7 +159,7 @@
 4. **FR-15.2 MCP 凭据被静默丢弃，UI 却宣称已加密**——`POST /v1/mcp/servers` 接受 `secrets` 后直接不落库（代码注释自认；`contracts.MCPServer` 连存密文的字段都没有），而设置页写着「凭据单独加密保存」。用户填的 token 消失且无报错，需要 header/env 的 MCP 服务器永远连不上——这是「文案撒谎」而不只是「功能缺失」。
 5. **FR-7.1 / FR-7.10 不能编辑文件**——PRD 的 P0 要求 CodeMirror 6 只读/编辑切换；现在 `web/package.json` 连 `@codemirror/*` 都没有，`api.files.write` 无任何调用者，`PUT …/files` 是死路由。用户想手改一行只能去终端。
 6. **FR-8.8 完全没有任何远端操作**——fetch/pull/push/开 PR 全无（"pull" 全仓库零命中）。写完代码只能留在本地分支。
-7. **FR-5.2 / 5.3 沙箱唤醒与回收策略**——`sandbox.Resume` 无调用者，没有 15min/14d 的 TTL，也没有快照。PRD 的 JS-6「昨天那事继续」和「PAUSED 打开即唤醒 ≤3s」都不存在，状态条也没有倒计时。
+7. **FR-5.3 快照之后没有恢复面**——看门狗与「先快照后销毁」已经落地（本地 provider 实测），但快照只是清单索引，没有 restore-from-snapshot；本地 provider 回收会删掉工作区目录，docker 的宿主目录保留却未实跑。状态条也仍没有倒计时（FR-5.1）。
 8. **FR-9.2 / 9.4 跟随终端没接上**——`FollowTerminal` 组件写好了（含只读 xterm 与工具栏）但**没有任何地方渲染**；命令重放也没有。PRD 把「跟随」列为新增重点，现在 agent 跑 bash 只能在 Trace 里看折叠文本。
 9. **FR-11.2 / 11.4 浏览器没有观察/接管模式**——输入永远直通（click/key/wheel 全发），没有「谁在控制」、没有二次确认、也没有接管时拦 agent 的浏览器工具。人和 agent 会互相抢鼠标，正是 PRD §7.6.2 说要避免的灾难。
 10. **FR-1.5 会话列表不能搜索**——`GET /v1/sessions?q=` 后端有了，侧栏没有输入框。会话一多就翻不动，这是每天都会撞上的小缺口。

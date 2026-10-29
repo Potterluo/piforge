@@ -62,6 +62,7 @@ func TestEveryRouteIsRegistered(t *testing.T) {
 		{http.MethodDelete, "/v1/sessions/{id}/files"},
 		{http.MethodGet, "/v1/sessions/{id}/search"},
 		{http.MethodGet, "/v1/sessions/{id}/git/status"},
+		{http.MethodGet, "/v1/sessions/{id}/sandbox/snapshots"},
 		{http.MethodGet, "/v1/sessions/{id}/git/diff"},
 		{http.MethodGet, "/v1/sessions/{id}/git/log"},
 		{http.MethodPost, "/v1/sessions/{id}/git/stage"},
