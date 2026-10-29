@@ -21,10 +21,12 @@ test.describe("conversation", () => {
     });
     await expect(page.getByTestId("turn-user").first()).toContainText("cache eviction");
 
-    // The scripted peer always emits one bash tool call with streamed output.
-    await expect(page.getByTestId("tool-trace").first()).toBeVisible({ timeout: 30_000 });
-    await page.getByTestId("tool-trace").first().click();
-    await expect(page.getByTestId("tool-output").first()).toBeVisible();
+    // The scripted peer always emits one bash tool call. It is folded into the run's
+    // single tool row rather than occupying a row of its own; opening that row is covered
+    // by 45-tool-group.spec.ts.
+    await expect(page.getByTestId("tool-group").first()).toContainText("个工具调用", {
+      timeout: 30_000,
+    });
 
     await expect(page.getByTestId("run-state")).toHaveAttribute("data-state", "settled", {
       timeout: 60_000,
