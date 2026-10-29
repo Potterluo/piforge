@@ -43,6 +43,7 @@ import type { StreamStatus } from "@/lib/session/use-session-events";
 import type { ForkPoint } from "@/lib/types";
 
 import { BranchTree } from "./branch-tree";
+import { CompactContextButton } from "./compact-context";
 import { Composer, type ModelOption } from "./composer";
 import { ContextMeter } from "./context-marker";
 import { ForkDialog } from "./fork-dialog";
@@ -185,6 +186,9 @@ function WorkbenchBody({
     if (settled === 0) return;
     void queryClient.invalidateQueries({ queryKey: qk.session(sessionId) });
     void queryClient.invalidateQueries({ queryKey: qk.sessions(projectId) });
+    // A settled run is also when the agent process becomes visible as alive
+    // (FR-1.9's compact action needs one), so re-read the status then.
+    void queryClient.invalidateQueries({ queryKey: ["session-status", sessionId] });
   }, [settled, queryClient, sessionId, projectId]);
   const project = useProject(projectId);
   const providers = useProviders();
@@ -196,6 +200,10 @@ function WorkbenchBody({
     queryKey: ["session-status", sessionId],
     queryFn: () => api.sessions.status(sessionId),
     staleTime: 10_000,
+    // The status carries process_id, which is the only honest "is there an agent
+    // to compact" signal; a freshly started process must become visible without
+    // a reload (FR-1.9).
+    refetchInterval: 15_000,
   });
   const forkPoints = useQuery({
     queryKey: ["session-fork-points", sessionId],
@@ -258,6 +266,10 @@ function WorkbenchBody({
   // lists every enabled provider, including inherited ones with no key, so the
   // header cannot infer readiness from `models.length`.
   const hasModel = providers.data ? hasUsableModel(providers.data.providers) : undefined;
+  // "Agent alive" is not "a run is in flight": Pi keeps the process warm between
+  // turns, and compaction is possible exactly then. process_id is present only
+  // while a process exists, so a fresh session honestly shows the action disabled.
+  const agentAlive = Boolean(runtime.data?.process_id);
   const timeline = useMemo(() => selectTimeline(state), [state]);
   // The agent's own bash output, which the follow view mirrors (FR-9.2). Capped
   // to the newest lines so a long-running command cannot grow the page without
@@ -313,6 +325,7 @@ function WorkbenchBody({
           ) : null}
           <ConnectionBadge status={status} />
           <ContextMeter sessionId={sessionId} running={state.running} usage={state.usage} />
+          <CompactContextButton sessionId={sessionId} agentAlive={agentAlive} />
           <Button
             size="sm"
             variant="ghost"
