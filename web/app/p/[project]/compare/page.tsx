@@ -1,36 +1,17 @@
 import { Suspense } from "react";
 
-import { ComparePage } from "@/components/session/compare-page";
+import { CompareRoute } from "@/components/session/compare-route";
 
 /**
- * FR-2.5 lives on its own route so a comparison can be linked and reloaded: the
- * selection is in the query string (`?ids=a,b`), not in component state.
+ * The comparison's selection lives in `?ids=`, and this deployment runs Next with
+ * Cache Components: awaiting `searchParams` in the page turned a prerendered shell into
+ * a dynamic one at runtime and every comparison answered 500. Reading the query on the
+ * client keeps the shell static and works for a page whose only input is the URL.
  */
-export default function Page({
-  params,
-  searchParams,
-}: {
-  params: Promise<{ project: string }>;
-  searchParams: Promise<{ ids?: string }>;
-}) {
+export default function Page() {
   return (
     <Suspense fallback={null}>
-      <Route params={params} searchParams={searchParams} />
+      <CompareRoute />
     </Suspense>
   );
-}
-
-async function Route({
-  params,
-  searchParams,
-}: {
-  params: Promise<{ project: string }>;
-  searchParams: Promise<{ ids?: string }>;
-}) {
-  const [{ project }, query] = await Promise.all([params, searchParams]);
-  const ids = (query.ids ?? "")
-    .split(",")
-    .map((id) => id.trim())
-    .filter(Boolean);
-  return <ComparePage projectId={project} ids={ids} />;
 }

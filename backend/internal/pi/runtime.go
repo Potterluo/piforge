@@ -336,9 +336,18 @@ func (r *Runtime) Close() error {
 // re-runs Start, which respawns it from the session file (PRD §7.4.5 — a crash
 // is reported, never replayed automatically).
 func (r *Runtime) Prompt(ctx context.Context, req contracts.PromptRequest) (contracts.PromptResult, error) {
-	// A prompt is the strongest signal that this session is in use (FR-5.x reaping).
+	// A prompt is the strongest signal that this session is in use (FR-5.x reaping),
+	// and it is also where a dead process is noticed: an agent killed by the kernel or
+	// the OOM reaper leaves no trace until the next call, which used to fail with
+	// "bridge closed" and no way back from the UI.
 	if s, err := r.get(req.SessionID); err == nil {
-		s.touch()
+		if !s.bridge.Alive() {
+			if _, rerr := r.ensure(ctx, s.spec); rerr != nil {
+				return contracts.PromptResult{}, fmt.Errorf("pi: respawn after a dead agent: %w", rerr)
+			}
+		} else {
+			s.touch()
+		}
 	}
 	s, err := r.get(req.SessionID)
 	if err != nil {
@@ -871,4 +880,19 @@ func ArgsForKind(base []string, kind contracts.SessionKind) []string {
 		out = append(out, WriteToolArgs()...)
 	}
 	return out
+}
+
+// Alive reports whether a session has a working agent process.
+//
+// It is the question the hub has to ask before trusting a cached subscription: a
+// process killed from outside leaves the subscription behind, and answering from it
+// turned every later prompt into "bridge closed". Status is not a substitute — it
+// reports the *normalizer's* view, which a fake peer (and a just-spawned process)
+// legitimately fills with zeros.
+func (r *Runtime) Alive(sessionID string) bool {
+	s, err := r.get(sessionID)
+	if err != nil {
+		return false
+	}
+	return s.bridge.Alive()
 }

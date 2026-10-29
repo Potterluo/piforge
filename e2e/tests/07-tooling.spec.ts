@@ -34,6 +34,9 @@ test.describe("tooling", () => {
 
     expect(body.mounted_at).not.toBe("");
     expect(body.mounted.mcp_servers).toContain(name);
+    // `mcp_written` now means "the agent has a config", and that file lives in the
+    // session's agent directory where Pi reads it — not in the checkout, where the
+    // old `.mcp.json` was written and ignored.
     expect(body.mounted.mcp_written).toBe(true);
   });
 

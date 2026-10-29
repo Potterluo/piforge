@@ -54,13 +54,21 @@ func (h *hub) ensure(ctx context.Context, userID string, spec contracts.SessionS
 
 	h.mu.Lock()
 	if sub, ok := h.subs[spec.SessionID]; ok {
-		h.mu.Unlock()
-		select {
-		case <-sub.ready:
-			return sub.err
-		case <-ctx.Done():
-			return ctx.Err()
+		// A cached subscription says a pump exists, not that the process does. An
+		// agent killed by the kernel, the OOM reaper or a crash leaves the subscription
+		// behind, and returning it meant every later prompt failed with "bridge closed"
+		// until the daemon restarted — a session that could not be recovered from the
+		// UI at all.
+		if h.live(ctx, spec.SessionID) {
+			h.mu.Unlock()
+			select {
+			case <-sub.ready:
+				return sub.err
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
+		delete(h.subs, spec.SessionID)
 	}
 	sub := &subscription{ready: make(chan struct{})}
 	h.subs[spec.SessionID] = sub
@@ -241,4 +249,19 @@ func (h *hub) liveCount() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.subs)
+}
+
+// live reports whether the runtime still has a working process for a session.
+//
+// Status answers from the normalizer, so a dead process reads as ProcessID 0. That is
+// the cheapest honest test, and it is what makes a crashed session self-healing instead
+// of a page that looks fine and fails every action.
+func (h *hub) live(_ context.Context, sessionID string) bool {
+	type aliver interface{ Alive(string) bool }
+	if a, ok := h.rt.(aliver); ok {
+		return a.Alive(sessionID)
+	}
+	// A runtime that cannot answer keeps the old behaviour, which is what it had
+	// before: trust the subscription.
+	return true
 }

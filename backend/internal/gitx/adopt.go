@@ -47,7 +47,11 @@ func (r *Runner) Adopt(ctx context.Context, sourceDir, targetDir, message string
 	if message == "" {
 		message = "adopt: changes from a branch"
 	}
-	if _, err := r.Run(ctx, sourceDir, "commit", "-m", message, "--no-verify"); err != nil {
+	// The commit uses the same identity fallback as `Commit`: without it, a fresh
+	// container has no `user.email` and every adopt failed with "Author identity
+	// unknown" — a 500 the user cannot act on.
+	commitArgs := append(r.identityArgs(ctx, sourceDir), "commit", "-m", message, "--no-verify")
+	if _, err := r.Run(ctx, sourceDir, commitArgs...); err != nil {
 		// A commit that produced nothing means the tree matched HEAD after staging;
 		// that is still "nothing to adopt", not a failure.
 		if strings.Contains(StderrOf(err), "nothing to commit") {

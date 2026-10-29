@@ -183,7 +183,6 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 	// It is deliberately not duplicated here. Two files would mean two sources of
 	// truth, and the project-local one wins in Pi — silently dropping the credentials
 	// the agent directory carries.
-	servers2 := map[string]any{}
 	for _, server := range servers {
 		if server == nil || !server.Enabled {
 			continue
@@ -207,7 +206,10 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 		return Result{}, err
 	}
 
-	next := Manifest{Skills: result.Skills, MCPServers: result.MCPServers, MCPWritten: len(servers2) > 0}
+	// `MCPServers` non-empty means the agent will get a config: `pimodel.WriteMCP` writes
+	// it at spawn. The field kept its name for the wire format, not for the file it used
+	// to describe.
+	next := Manifest{Skills: result.Skills, MCPServers: result.MCPServers, MCPWritten: len(result.MCPServers) > 0}
 	if err := writeManifest(root, next); err != nil {
 		return Result{}, err
 	}

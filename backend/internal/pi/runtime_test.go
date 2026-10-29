@@ -525,3 +525,33 @@ func TestReapIdleStopsUnusedAgentsOnly(t *testing.T) {
 		t.Fatalf("Tree after restart: %v", err)
 	}
 }
+
+// A crashed agent used to brick its session: the process was gone, the runtime still
+// held the entry, and every prompt answered "bridge closed" until the daemon restarted.
+// The next prompt is where the crash is noticed, so that is where it has to heal.
+func TestPromptRespawnsAfterTheAgentDied(t *testing.T) {
+	rt := newFakeRuntime(t, pitest.ScriptOK, 0)
+	ctx, cancel := ctxFor(t)
+	defer cancel()
+
+	if _, err := rt.Start(ctx, sessionSpec(t, "ses_crash", contracts.KindMain)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Simulate the kernel taking the process away.
+	s, err := rt.get("ses_crash")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	_ = s.bridge.Close()
+
+	if _, err := rt.Prompt(ctx, contracts.PromptRequest{SessionID: "ses_crash", Text: "after the crash"}); err != nil {
+		t.Fatalf("prompt after a dead agent: %v", err)
+	}
+	again, err := rt.get("ses_crash")
+	if err != nil {
+		t.Fatalf("get after respawn: %v", err)
+	}
+	if !again.bridge.Alive() {
+		t.Fatal("the agent was not respawned")
+	}
+}

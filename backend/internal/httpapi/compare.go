@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -87,23 +88,16 @@ func (s *server) handleCompareSessions(w http.ResponseWriter, r *http.Request) {
 			row.CostUSD = st.CostUSD
 		}
 
-		// The change size is the one number a person actually compares on. It needs a
-		// checkout; without one, say so instead of reporting a confident zero.
+		// The change size is the one number a person actually compares on, and it has
+		// to cover everything the branch did: staged work and new files are the common
+		// case, and counting only unstaged tracked diffs reported 0/+0/-0 for a branch
+		// full of work.
 		if sess.WorktreeID != "" && s.deps.Workspace != nil {
 			wt, werr := s.deps.Store.Worktree(r.Context(), user.ID, sess.WorktreeID)
 			if werr == nil {
 				ctx, cancel := detach(r.Context(), 20*time.Second)
-				diffs, derr := s.deps.Workspace.Diff(ctx, wt.Path, contracts.DiffRequest{Scope: contracts.ScopeUnstaged})
+				row.FilesChanged, row.Additions, row.Deletions, row.DiffError = s.changeSize(ctx, wt.Path)
 				cancel()
-				if derr != nil {
-					row.DiffError = "读取改动失败"
-				} else {
-					row.FilesChanged = len(diffs)
-					for _, diff := range diffs {
-						row.Additions += diff.Additions
-						row.Deletions += diff.Deletions
-					}
-				}
 			} else {
 				row.DiffError = "没有 checkout"
 			}
@@ -114,4 +108,30 @@ func (s *server) handleCompareSessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"rows": rows})
+}
+
+// changeSize counts everything uncommitted in a checkout: staged, unstaged and new
+// files. A branch's work is usually untracked or staged, so a diff scope of "unstaged"
+// alone reported an empty change for a branch that had done a lot.
+func (s *server) changeSize(ctx context.Context, root string) (files, additions, deletions int, diffErr string) {
+	status, err := s.deps.Workspace.Status(ctx, root)
+	if err != nil {
+		return 0, 0, 0, "读取改动失败"
+	}
+	paths := map[string]bool{}
+	for _, change := range status.Changes {
+		paths[change.Path] = true
+	}
+	for _, scope := range []contracts.DiffScope{contracts.ScopeStaged, contracts.ScopeUnstaged} {
+		diffs, derr := s.deps.Workspace.Diff(ctx, root, contracts.DiffRequest{Scope: scope})
+		if derr != nil {
+			return 0, 0, 0, "读取改动失败"
+		}
+		for _, diff := range diffs {
+			paths[diff.Path] = true
+			additions += diff.Additions
+			deletions += diff.Deletions
+		}
+	}
+	return len(paths), additions, deletions, ""
 }

@@ -79,8 +79,8 @@ func initRepoWithTwoWorktrees(t *testing.T, r *Runner, ctx context.Context) (roo
 		}
 	}
 	must(root, "init", "-b", "main")
-	must(root, "config", "user.email", "test@piforge.local")
-	must(root, "config", "user.name", "Test")
+	// No user.email/user.name on purpose: a fresh container has none, and the adopt
+	// must supply its own fallback rather than fail with "Author identity unknown".
 	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("base\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

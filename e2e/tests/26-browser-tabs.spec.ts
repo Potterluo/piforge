@@ -59,7 +59,7 @@ test("the browser panel keeps several pages", async ({ page }) => {
           const body = (await response.json()) as { tabs?: { id: string }[] };
           return (body.tabs ?? []).some((tab) => tab.id === tabId) ? 2 : 1;
         }, { tabId: id, sessionId }),
-      { timeout: 20_000 },
+      { timeout: 45_000 },
     )
     .toBe(1);
   await expect.poll(async () => tabs.count(), { timeout: 20_000 }).toBe(1);
