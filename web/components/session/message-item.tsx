@@ -13,6 +13,7 @@ import {
   MessageHeader,
 } from "@/components/ui/message";
 import { formatClock } from "@/lib/session/format";
+import { modelErrorAdvice, modelErrorTitle } from "@/lib/session/model-error";
 import { Markdown } from "@/lib/session/markdown-view";
 import type { Turn } from "@/lib/session/reduce";
 import { cn } from "@/lib/utils";
@@ -169,7 +170,7 @@ export function MessageItem({
               className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
             >
               <p className="font-medium">
-                模型调用失败
+                {modelErrorTitle(turn.error)}
                 {turn.retries ? (
                   <span className="ml-2 font-normal text-muted-foreground">
                     已自动重试 {turn.retries} 次
@@ -177,9 +178,7 @@ export function MessageItem({
                 ) : null}
               </p>
               <p className="mt-1 whitespace-pre-wrap break-words opacity-90">{turn.error}</p>
-              <p className="mt-1 text-muted-foreground">
-                检查「设置 → 模型」里这个 provider 的地址与密钥，然后重新发送。
-              </p>
+              <p className="mt-1 text-muted-foreground">{modelErrorAdvice(turn.error)}</p>
             </div>
           ) : null}
 

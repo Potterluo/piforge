@@ -210,9 +210,47 @@ type Normalizer struct {
 	runOut    int64
 	runCacheR int64
 	runCacheW int64
+	// interrupted is set when the user stops a run (Runtime.Interrupt) and
+	// cleared when the next run starts. Pi reports the abort as a normal provider
+	// failure on the assistant message ("This operation was aborted", stopReason
+	// "error"), and only agent_settled.aborted says it was a stop; without this
+	// flag the transcript kept a 模型调用失败 box for pressing Stop.
+	interrupted bool
 }
 
 var runCounter atomic.Uint64
+
+// NoteInterrupt records that the user asked to stop the current run.
+//
+// The abort reaches Pi as a normal RPC call, so the only evidence in the event
+// stream is the provider failure Pi fabricates while unwinding. Marking the run
+// here is what lets the transcript distinguish "the user stopped this" from "the
+// model call failed" — the two are identical in the wire records.
+func (n *Normalizer) NoteInterrupt() {
+	n.mu.Lock()
+	n.interrupted = true
+	n.mu.Unlock()
+}
+
+// errorForMessage reports the provider failure a message carries, or "" when
+// there is none.
+//
+// Two shapes mean "the user stopped this", not "the call failed":
+//   - a message with stopReason "aborted";
+//   - an error reported after Interrupt was called. Real Pi surfaces the stop as
+//     stopReason "error" with "This operation was aborted", which used to render
+//     as 模型调用失败 with advice to check the provider's key (QA-14, MAJOR).
+//
+// `run.aborted` is the signal for a stop; the transcript stays clean.
+func (n *Normalizer) errorForMessage(msg messageWire) string {
+	if msg.StopReason == "aborted" {
+		return ""
+	}
+	if n.interrupted {
+		return ""
+	}
+	return msg.ErrorMessage
+}
 
 // NewNormalizer returns a normalizer for one session.
 func NewNormalizer(sessionID string, kind contracts.SessionKind) *Normalizer {
@@ -301,8 +339,11 @@ func (n *Normalizer) Translate(raw []byte) ([]contracts.Event, error) {
 		n.state.Streaming = true
 		n.state.Turn = 0
 		// A new run starts with a clean accumulator: the settle payload reports
-		// what this run cost, not what the session has cost so far.
+		// what this run cost, not what the session has cost so far. The pending
+		// stop is cleared too: it only explains the failures of the run it
+		// interrupted.
 		n.runIn, n.runOut, n.runCacheR, n.runCacheW = 0, 0, 0, 0
+		n.interrupted = false
 		n.asm.Reset()
 		return n.emit(contracts.EvRunStarted, RunStartedPayload{}), nil
 
@@ -361,7 +402,7 @@ func (n *Normalizer) Translate(raw []byte) ([]contracts.Event, error) {
 			Provider:    w.Message.Provider,
 			Model:       w.Message.Model,
 			Truncated:   n.asm.HasTruncatedToolCall(),
-			Error:       w.Message.ErrorMessage,
+			Error:       n.errorForMessage(w.Message),
 		}
 		usage := w.Message.Usage
 		if usage == nil {

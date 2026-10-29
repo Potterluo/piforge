@@ -614,6 +614,203 @@ describe("model attribution", () => {
     expect(state.turns[0].model).toBe("p/m");
   });
 });
+describe("an interrupted run", () => {
+  // QA-14: stopping a run painted 模型调用失败 / "This operation was aborted" /
+  // credential advice, plus a red "1 个失败" tool group. A stop is a normal
+  // outcome, so the reducer must not record a failure for it.
+  const abortedRun = () =>
+    reduceAll([
+      event(EV.runStarted, {}, { seq: 1 }),
+      event(EV.msgStarted, { message_id: "a1", role: "assistant" }, { seq: 2 }),
+      event(
+        EV.msgFinal,
+        { message_id: "a1", role: "assistant", blocks: [{ kind: "text", text: "I'll run it" }] },
+        { seq: 3 },
+      ),
+      event(
+        EV.toolStarted,
+        { tool_call_id: "t1", name: "bash", args: { command: "sleep 30" } },
+        { seq: 4 },
+      ),
+      event(
+        EV.toolEnded,
+        { tool_call_id: "t1", name: "bash", is_error: true, text: "Command aborted" },
+        { seq: 5 },
+      ),
+      event(EV.msgFinal, { message_id: "a2", role: "assistant", blocks: [] }, { seq: 6 }),
+      event(EV.runAborted, { reason: "aborted" }, { seq: 7 }),
+      event(EV.runSettled, { aborted: true }, { seq: 8 }),
+    ]);
+
+  it("marks the run as stopped instead of failing it", () => {
+    const state = abortedRun();
+    expect(state.aborted).toBe(true);
+    expect(state.error).toBeNull();
+    // No turn carries an error: the backend drops the abort message's error text
+    // and nothing else may invent one.
+    expect(state.turns.filter((turn) => turn.error)).toHaveLength(0);
+  });
+
+  it("does not report the aborted tool call as a failure", () => {
+    const state = abortedRun();
+    const tool = state.turns.flatMap((turn) => turn.blocks).find((block) => block.kind === "tool");
+    expect(tool).toMatchObject({ id: "t1", done: true, aborted: true });
+  });
+
+  it("gives a tool the abort cut short a terminal, non-failing state", () => {
+    // The peer may never report the tool's end when the stop lands: without this
+    // the row stays "运行中" forever, which is worse than the red group it replaced.
+    const state = reduceAll([
+      event(EV.runStarted, {}, { seq: 1 }),
+      event(EV.msgStarted, { message_id: "a1", role: "assistant" }, { seq: 2 }),
+      event(EV.toolStarted, { tool_call_id: "t1", name: "bash", args: {} }, { seq: 3 }),
+      event(EV.runAborted, {}, { seq: 4 }),
+      event(EV.runSettled, { aborted: true }, { seq: 5 }),
+    ]);
+
+    const tool = state.turns.flatMap((turn) => turn.blocks).find((block) => block.kind === "tool");
+    expect(tool).toMatchObject({ done: true, aborted: true });
+    expect(tool?.kind === "tool" && tool.isError).toBeFalsy();
+    expect(runningToolCount(state)).toBe(0);
+  });
+
+  it("drops the abort echo Pi reports as a provider error", () => {
+    // Real Pi: stopReason "error" + "This operation was aborted". The control
+    // plane strips it now, but a run that was stopped must never paint a failure
+    // even if an error text arrives first.
+    const state = reduceAll([
+      event(EV.runStarted, {}, { seq: 1 }),
+      event(EV.msgStarted, { message_id: "a1", role: "assistant" }, { seq: 2 }),
+      event(
+        EV.msgFinal,
+        {
+          message_id: "a1",
+          role: "assistant",
+          blocks: [],
+          stop_reason: "error",
+          error: "This operation was aborted",
+        },
+        { seq: 3 },
+      ),
+      event(EV.runAborted, { reason: "aborted" }, { seq: 4 }),
+      event(EV.runSettled, { aborted: true }, { seq: 5 }),
+    ]);
+
+    expect(state.aborted).toBe(true);
+    expect(state.turns.filter((turn) => turn.error)).toHaveLength(0);
+  });
+
+  it("keeps a real failure from earlier in the same run", () => {
+    const state = reduceAll([
+      event(EV.runStarted, {}, { seq: 1 }),
+      event(EV.msgStarted, { message_id: "a0", role: "assistant" }, { seq: 2 }),
+      event(
+        EV.msgFinal,
+        { message_id: "a0", role: "assistant", blocks: [], stop_reason: "error", error: "502: upstream down" },
+        { seq: 3 },
+      ),
+      event(EV.msgStarted, { message_id: "a1", role: "assistant" }, { seq: 4 }),
+      event(EV.runAborted, {}, { seq: 5 }),
+      event(EV.runSettled, { aborted: true }, { seq: 6 }),
+    ]);
+
+    expect(state.turns.filter((turn) => turn.error)).toHaveLength(1);
+    expect(state.turns.find((turn) => turn.error)?.error).toContain("502");
+  });
+
+  it("folds a tool result into the trace instead of the transcript", () => {
+    // "Command aborted" used to render under the PiForge label as if the model
+    // had said it: a tool result is not an assistant message.
+    const state = reduceAll([
+      event(EV.runStarted, {}, { seq: 1 }),
+      event(EV.msgStarted, { message_id: "t1", role: "toolResult" }, { seq: 2 }),
+      event(
+        EV.msgFinal,
+        { message_id: "t1", role: "toolResult", text: "Command aborted", blocks: [{ kind: "text", text: "Command aborted" }] },
+        { seq: 3 },
+      ),
+      event(EV.runSettled, { aborted: false }, { seq: 4 }),
+    ]);
+
+    expect(state.turns).toHaveLength(0);
+    expect(selectTimeline(state)).toHaveLength(0);
+  });
+
+  it("clears the stopped marker when the next run starts", () => {
+    const next = reduceAll([
+      event(EV.runAborted, {}, { seq: 1 }),
+      event(EV.runSettled, { aborted: true }, { seq: 2 }),
+      event(EV.runStarted, {}, { seq: 3 }),
+    ]);
+    expect(next.aborted).toBe(false);
+  });
+});
+
+describe("a retried provider failure", () => {
+  // QA-14 (minor): a transient gateway 502 that the turn recovered from stayed in
+  // the transcript as a terminal 模型调用失败.
+  it("drops the failed attempt once the same run answers", () => {
+    const state = reduceAll([
+      event(EV.runStarted, {}, { seq: 1 }),
+      event(EV.msgFinal, { message_id: "m1", role: "assistant", blocks: [], error: "502: upstream_error" }, { seq: 2 }),
+      event(
+        EV.msgFinal,
+        { message_id: "m2", role: "assistant", blocks: [{ kind: "text", text: "可以" }] },
+        { seq: 3 },
+      ),
+      event(EV.runSettled, { aborted: false }, { seq: 4 }),
+    ]);
+
+    expect(state.turns.filter((turn) => turn.error)).toHaveLength(0);
+    expect(selectTimeline(state)).toHaveLength(1);
+  });
+
+  it("keeps a failure that never recovered", () => {
+    const state = reduceAll([
+      event(EV.runStarted, {}, { seq: 1 }),
+      event(EV.msgFinal, { message_id: "m1", role: "assistant", blocks: [], error: "502: upstream_error" }, { seq: 2 }),
+      event(EV.runSettled, { aborted: false }, { seq: 3 }),
+    ]);
+
+    expect(state.turns).toHaveLength(1);
+    expect(state.turns[0].error).toContain("502");
+  });
+
+  it("drops it when the retry landed after a new agent run started", () => {
+    // Real Pi shape (QA-14 evidence): the failure settles, then run.retry starts
+    // a *new* agent run whose answer is a second assistant turn. The failed turn
+    // is therefore before the answer, not trailing.
+    const state = reduceAll([
+      event(EV.runStarted, {}, { seq: 1 }),
+      event(EV.msgStarted, { message_id: "u1", role: "user" }, { seq: 2 }),
+      event(EV.msgFinal, { message_id: "u1", role: "user", text: "hi", blocks: [{ kind: "text", text: "hi" }] }, { seq: 3 }),
+      event(EV.msgStarted, { message_id: "a1", role: "assistant" }, { seq: 4 }),
+      event(
+        EV.msgFinal,
+        { message_id: "a1", role: "assistant", blocks: [], error: '502: {"code":"upstream_error"}' },
+        { seq: 5 },
+      ),
+      event(EV.turnEnded, {}, { seq: 6 }),
+      event(EV.runRetry, { phase: "start", attempt: 1 }, { seq: 7 }),
+      event(EV.runStarted, {}, { seq: 8 }),
+      event(EV.msgStarted, { message_id: "a2", role: "assistant" }, { seq: 9 }),
+      event(
+        EV.msgFinal,
+        { message_id: "a2", role: "assistant", blocks: [{ kind: "text", text: "可以" }] },
+        { seq: 10 },
+      ),
+      event(EV.runSettled, { aborted: false }, { seq: 11 }),
+    ]);
+
+    expect(state.turns.filter((turn) => turn.error)).toHaveLength(0);
+    const timeline = selectTimeline(state);
+    expect(timeline.map((item) => (item.kind === "turn" ? item.turn.role : item.kind))).toEqual([
+      "user",
+      "assistant",
+    ]);
+  });
+});
+
 // A push is a fact about the session that happened outside the conversation. Recording
 // it as an event and never rendering it is a claim nobody can check.
 it("turns git events into timeline notes", () => {

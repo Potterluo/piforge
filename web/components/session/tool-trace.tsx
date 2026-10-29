@@ -101,8 +101,12 @@ export function ToolTrace({ block }: { block: ToolBlock }) {
   const meta = toolMeta(block.name);
   const summary = summarizeToolArgs(block.args);
   const Icon = meta.icon;
-  const status = block.done ? (block.isError ? "error" : undefined) : "running";
-  const statusLabel = block.done ? (block.isError ? "失败" : "完成") : "运行中";
+  // A call cut short by a stop is not a failed call. Pi reports the aborted shell
+  // as an error, which used to paint the interrupt red and then blame the
+  // provider's key (QA-14).
+  const aborted = block.aborted === true;
+  const status = block.done ? (aborted ? undefined : block.isError ? "error" : undefined) : "running";
+  const statusLabel = block.done ? (aborted ? "已中断" : block.isError ? "失败" : "完成") : "运行中";
   const argsText = (() => {
     if (!block.args || typeof block.args !== "object") return "";
     const keys = Object.keys(block.args as Record<string, unknown>);
@@ -134,7 +138,7 @@ export function ToolTrace({ block }: { block: ToolBlock }) {
             <span
               className={cn(
                 "shrink-0 text-[11px]",
-                block.isError ? "text-destructive" : "text-muted-foreground/70",
+                block.isError && !aborted ? "text-destructive" : "text-muted-foreground/70",
               )}
             >
               {statusLabel}
@@ -145,7 +149,7 @@ export function ToolTrace({ block }: { block: ToolBlock }) {
           <div className="flex flex-col gap-2">
             <CodeBlock
               size="sm"
-              variant={block.isError ? "destructive" : "default"}
+              variant={block.isError && !aborted ? "destructive" : "default"}
               data-testid="tool-output"
             >
               <CodeBlockHeader>
@@ -189,7 +193,8 @@ export function ToolGroup({ blocks }: { blocks: ToolBlock[] }) {
   const [open, setOpen] = useState(false);
   if (blocks.length === 0) return null;
 
-  const failed = blocks.filter((block) => block.isError).length;
+  const failed = blocks.filter((block) => block.isError && !block.aborted).length;
+  const aborted = blocks.filter((block) => block.aborted).length;
   const running = blocks.filter((block) => !block.done).length;
   const totalMs = blocks.reduce((sum, block) => sum + (block.durationMs ?? 0), 0);
   const names = Array.from(new Set(blocks.map((block) => toolMeta(block.name).label)));
@@ -207,6 +212,9 @@ export function ToolGroup({ blocks }: { blocks: ToolBlock[] }) {
             <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">{label}</span>
             {failed > 0 ? (
               <span className="shrink-0 text-[11px] text-destructive">{failed} 个失败</span>
+            ) : null}
+            {aborted > 0 ? (
+              <span className="shrink-0 text-[11px] text-muted-foreground">{aborted} 个已中断</span>
             ) : null}
             {running > 0 ? (
               <span className="shrink-0 text-[11px] text-muted-foreground">{running} 个运行中</span>

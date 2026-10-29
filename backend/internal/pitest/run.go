@@ -10,6 +10,20 @@ import (
 // Prompt handling and the scripted run
 // ---------------------------------------------------------------------------
 
+// HoldMarker in a prompt asks the peer to pace that one run at
+// HoldChunkDelay instead of its configured delay.
+//
+// Interrupting a run is a product behaviour that can only be tested against a run
+// that is still in flight, and the default pacing finishes a scripted run in
+// about a second — faster than a browser can find the stop button. The marker is
+// how the end-to-end suite asks for a run it can stop, without making every other
+// test slow.
+const HoldMarker = "[[hold-run]]"
+
+// HoldChunkDelay is the per-chunk pacing a held run uses: slow enough to click
+// through, fast enough that a run that is never stopped still settles.
+const HoldChunkDelay = 250 * time.Millisecond
+
 func (s *server) handlePrompt(c command) {
 	s.mu.Lock()
 	if s.running {
@@ -38,6 +52,10 @@ func (s *server) handlePrompt(c command) {
 	cancel := make(chan struct{})
 	s.runCancel = cancel
 	text := c.Message
+	delay := s.delay
+	if strings.Contains(text, HoldMarker) {
+		delay = HoldChunkDelay
+	}
 	s.mu.Unlock()
 
 	s.ok(c, map[string]any{"disposition": "started"})
@@ -45,7 +63,7 @@ func (s *server) handlePrompt(c command) {
 	s.runs.Add(1)
 	go func() {
 		defer s.runs.Done()
-		s.run(text, cancel)
+		s.run(text, delay, cancel)
 	}()
 }
 
@@ -80,7 +98,7 @@ func (s *server) sleep(d time.Duration, cancel chan struct{}) bool {
 // with thinking, text and one tool call, the tool execution, and a closing
 // assistant turn. It ends with agent_end and agent_settled; only the latter is
 // a completion signal, exactly as documented for Pi.
-func (s *server) run(text string, cancel chan struct{}) {
+func (s *server) run(text string, delay time.Duration, cancel chan struct{}) {
 	defer func() {
 		s.mu.Lock()
 		s.streaming = false
@@ -124,7 +142,7 @@ func (s *server) run(text string, cancel chan struct{}) {
 		s.emit(map[string]any{"type": "message_update", "usage": usage{},
 			"assistantMessageEvent": map[string]any{
 				"type": "thinking_delta", "contentIndex": 0, "delta": chunk}})
-		if !s.sleep(s.delay, cancel) {
+		if !s.sleep(delay, cancel) {
 			s.finishAborted()
 			return
 		}
@@ -146,7 +164,7 @@ func (s *server) run(text string, cancel chan struct{}) {
 			"usage": usage{Input: 120, Output: int64(len(body))},
 			"assistantMessageEvent": map[string]any{
 				"type": "text_delta", "contentIndex": 1, "delta": chunk}})
-		if !s.sleep(s.delay, cancel) {
+		if !s.sleep(delay, cancel) {
 			s.finishAborted()
 			return
 		}
@@ -218,7 +236,7 @@ func (s *server) run(text string, cancel chan struct{}) {
 			"partialResult": map[string]any{
 				"content": []any{map[string]any{"type": "text", "text": partial.String()}},
 				"details": map[string]any{}}})
-		if !s.sleep(s.delay, cancel) {
+		if !s.sleep(delay, cancel) {
 			s.finishAborted()
 			return
 		}
@@ -263,7 +281,7 @@ func (s *server) run(text string, cancel chan struct{}) {
 			"usage": usage{Input: 240, Output: 24},
 			"assistantMessageEvent": map[string]any{
 				"type": "text_delta", "contentIndex": 0, "delta": chunk}})
-		if !s.sleep(s.delay, cancel) {
+		if !s.sleep(delay, cancel) {
 			s.finishAborted()
 			return
 		}
@@ -309,7 +327,7 @@ func (s *server) run(text string, cancel chan struct{}) {
 				"type": "queue_update", "steering": steeringLeft, "followUp": followUpLeft,
 			})
 		}
-		s.run(next, cancel)
+		s.run(next, delay, cancel)
 		return
 	}
 	s.emit(map[string]any{"type": "agent_settled", "aborted": false})

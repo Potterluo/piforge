@@ -21,6 +21,12 @@ export type Block =
       chunk: string;
       done: boolean;
       isError?: boolean;
+      /**
+       * The run was stopped while this call was in flight. Pi reports the aborted
+       * shell as an error ("Command aborted"), which painted a red "1 个失败"
+       * group after every interrupt — a normal outcome shown as a failure.
+       */
+      aborted?: boolean;
       durationMs?: number;
       index?: number;
     };
@@ -52,6 +58,12 @@ export interface Turn {
    * actually answered.
    */
   model?: string;
+  /**
+   * Pi's stop reason for the message ("stop", "toolUse", "error", "aborted").
+   * A user stop arrives as "error" with the abort text, so the reason is the only
+   * structural hint that the failure was a stop.
+   */
+  stopReason?: string;
 }
 
 export interface ContextMarker {
@@ -89,6 +101,11 @@ export interface SessionState {
   usage?: LiveUsage;
   /** True between run.started and run.settled. */
   running: boolean;
+  /**
+   * The last run ended because the user stopped it. It is not an error: the
+   * transcript says 已中断 and nothing else, and a later run clears it.
+   */
+  aborted: boolean;
   /** True until run.settled. Also drives the streaming cursor. */
   streaming: boolean;
   /**
@@ -125,6 +142,7 @@ export const initialSessionState: SessionState = {
   queue: [],
   running: false,
   streaming: false,
+  aborted: false,
   settled: 0,
   lastSeq: 0,
   needsResync: false,
@@ -272,6 +290,31 @@ function mergeToolState(existing: Block[], incoming: Block[]): Block[] {
   });
 }
 
+/**
+ * Drops the empty error turns left behind by a provider failure that Pi then
+ * retried successfully.
+ *
+ * Unless a run has a new attempt behind it, a failed attempt is the outcome and
+ * must stay visible. Once a later assistant message carries content, the failure
+ * is history: leaving it in the transcript keeps reporting an outage that healed
+ * on its own (QA-14 minor: a transient gateway 502).
+ *
+ * `answeredAt` is the index of the turn that answered. The attempts it retried
+ * sit immediately before it — Pi starts a fresh agent run for the retry, so the
+ * failed turns are neither trailing nor after the answer.
+ */
+function dropRecoveredFailures(turns: Turn[], answeredAt: number): Turn[] {
+  const start = Math.min(answeredAt, turns.length);
+  let from = start;
+  while (from > 0) {
+    const turn = turns[from - 1];
+    if (turn.role !== "assistant" || !turn.error || turn.blocks.length > 0) break;
+    from -= 1;
+  }
+  if (from >= start) return turns;
+  return [...turns.slice(0, from), ...turns.slice(start)];
+}
+
 /** Reads the authoritative block list out of a message.final payload. */
 function finalBlocks(payload: Payload): Block[] {
   const out: Block[] = [];
@@ -313,12 +356,61 @@ function finalBlocks(payload: Payload): Block[] {
 // Event application
 // ---------------------------------------------------------------------------
 
+/**
+ * True for a message Pi emitted on behalf of a tool rather than the model.
+ *
+ * A tool result is a `message` entry with role "toolResult". Rendering it as an
+ * assistant turn printed every command's output a second time as prose — and after
+ * a stop it printed "Command aborted" under the PiForge label, which is what made
+ * an interrupt look like the model said it (QA-14). The tool trace already owns
+ * that text.
+ */
+function isToolResult(role: string): boolean {
+  return role === "toolResult" || role === "tool_result";
+}
+
+/**
+ * True when a failure is the echo of a user stop.
+ *
+ * Real Pi reports a stop as stopReason "error" with "This operation was aborted",
+ * so the wording is the only evidence left on the message once the control plane
+ * has not stripped it. Kept narrow on purpose: "502: upstream error" must survive.
+ */
+function isAbortEcho(error?: string, stopReason?: string): boolean {
+  if (stopReason === "aborted") return true;
+  return Boolean(error) && /abort/i.test(error as string);
+}
+
 function applyEvent(state: SessionState, event: PfEvent): SessionState {
   const payload = asRecord(event.payload);
 
   switch (event.type) {
     case EV.runStarted: {
-      return { ...state, running: true, streaming: true, error: null };
+      return { ...state, running: true, streaming: true, error: null, aborted: false };
+    }
+
+    case EV.runAborted: {
+      // A user stop: nothing failed, and the calls that were in flight were cut
+      // short rather than reported. Marking them here is what keeps the tool
+      // group neutral instead of a red "1 个失败" — and it is the only place a
+      // tool left running by the abort gets a terminal state at all.
+      return {
+        ...state,
+        aborted: true,
+        turns: state.turns.map((turn) => {
+          if (!turn.streaming) return turn;
+          const blocks = turn.blocks.map((block) => {
+            if (block.kind !== "tool") return block;
+            if (block.isError) return { ...block, aborted: true };
+            if (block.done) return block;
+            return { ...block, done: true, aborted: true };
+          });
+          // The stop's own echo is not a failure. A genuine error from earlier in
+          // the same run is kept: the user stopping does not un-fail it.
+          const error = isAbortEcho(turn.error, turn.stopReason) ? undefined : turn.error;
+          return { ...turn, blocks, error };
+        }),
+      };
     }
 
     case EV.runSettled: {
@@ -326,13 +418,19 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
       // both arrive before the agent has actually finished thinking about the
       // next turn, so treating them as completion makes the UI flicker idle.
       const settled = asRecord(event.payload);
+      const stopped = settled.aborted === true;
       return {
         ...state,
         running: false,
         streaming: false,
+        aborted: stopped ? true : state.aborted,
         settled: state.settled + 1,
-        turns: state.turns.map((turn) => (turn.streaming ? { ...turn, streaming: false } : turn)),
-        error: settled.aborted === true ? null : state.error,
+        turns: state.turns.map((turn) => {
+          if (!turn.streaming) return turn;
+          const error = stopped && isAbortEcho(turn.error, turn.stopReason) ? undefined : turn.error;
+          return { ...turn, streaming: false, error };
+        }),
+        error: stopped ? null : state.error,
       };
     }
 
@@ -347,6 +445,9 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
       return state;
 
     case EV.msgStarted: {
+      // A tool result proves nothing about what the model said: it is folded into
+      // the tool trace instead of becoming a turn (see isToolResult).
+      if (isToolResult(str(payload.role) ?? "")) return state;
       const id = messageIdOf(event, payload, state, false);
       const role: Turn["role"] = str(payload.role) === "user" ? "user" : "assistant";
       const existing = findTurn(state.turns, id);
@@ -400,6 +501,10 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
     }
 
     case EV.msgFinal: {
+      // Tool output belongs to the tool trace, not to the conversation: rendering
+      // it as an assistant message printed "Command aborted" under the PiForge
+      // label after every stop (QA-14).
+      if (isToolResult(str(payload.role) ?? "")) return state;
       const id = messageIdOf(event, payload, state, true);
       const role: Turn["role"] = str(payload.role) === "user" ? "user" : "assistant";
       const incoming = finalBlocks(payload);
@@ -408,33 +513,42 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
       // empty assistant bubble.
       const errorText = str(payload.error) || undefined;
       const modelRef = modelLabel(payload);
+      // Pi retries a failed call by itself, and a retry that succeeds leaves the
+      // earlier attempts behind as empty error turns. The recovery is the
+      // outcome: keeping the 502 would report an outage that already healed.
+      const recovered = role === "assistant" && !errorText;
       const index = findTurn(state.turns, id);
       if (index < 0) {
+        const turns = recovered ? dropRecoveredFailures(state.turns, state.turns.length) : state.turns;
         return {
           ...state,
           activeMessageId: undefined,
           turns: [
-            ...state.turns,
+            ...turns,
             {
               ...newTurn(id, role, event.ts, false),
               entryId: event.entry_id,
               blocks: incoming,
               error: errorText,
               model: modelRef,
+              stopReason: str(payload.stop_reason),
             },
           ],
         };
       }
+      const next = replaceTurn(state, index, (turn) => ({
+        ...turn,
+        role,
+        entryId: event.entry_id ?? turn.entryId,
+        // Replacement, never append: the final content is authoritative.
+        blocks: mergeToolState(turn.blocks, incoming),
+        error: errorText,
+        model: modelLabel(payload) ?? turn.model,
+        stopReason: str(payload.stop_reason) ?? turn.stopReason,
+      }));
       return {
-        ...replaceTurn(state, index, (turn) => ({
-          ...turn,
-          role,
-          entryId: event.entry_id ?? turn.entryId,
-          // Replacement, never append: the final content is authoritative.
-          blocks: mergeToolState(turn.blocks, incoming),
-          error: errorText,
-          model: modelLabel(payload) ?? turn.model,
-        })),
+        ...next,
+        turns: recovered ? dropRecoveredFailures(next.turns, index) : next.turns,
         activeMessageId: undefined,
       };
     }

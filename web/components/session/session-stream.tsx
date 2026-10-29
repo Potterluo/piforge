@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
-import { AlertCircle, LoaderCircle, MessagesSquare } from "lucide-react";
+import { AlertCircle, LoaderCircle, MessagesSquare, Square } from "lucide-react";
 
 import {
   Empty,
@@ -113,31 +113,46 @@ export function SessionStream({
                 </Marker>
               </MessageScrollerItem>
             ) : (
-              timeline.map((item) =>
-                item.kind === "turn" ? (
-                  <MessageScrollerItem
-                    key={item.key}
-                    messageId={item.turn.id}
-                    scrollAnchor={item.turn.role === "user"}
-                  >
-                    <MessageItem
-                      turn={item.turn}
-                      forkEntryId={resolveForkEntry?.(item.turn)}
-                      onFork={onFork}
-                    />
-                  </MessageScrollerItem>
-                ) : item.kind === "note" ? (
-                  <MessageScrollerItem key={item.key}>
-                    <Marker data-testid="session-note">
-                      <MarkerContent>{item.text}</MarkerContent>
+              <>
+                {timeline.map((item) =>
+                  item.kind === "turn" ? (
+                    <MessageScrollerItem
+                      key={item.key}
+                      messageId={item.turn.id}
+                      scrollAnchor={item.turn.role === "user"}
+                    >
+                      <MessageItem
+                        turn={item.turn}
+                        forkEntryId={resolveForkEntry?.(item.turn)}
+                        onFork={onFork}
+                      />
+                    </MessageScrollerItem>
+                  ) : item.kind === "note" ? (
+                    <MessageScrollerItem key={item.key}>
+                      <Marker data-testid="session-note">
+                        <MarkerContent>{item.text}</MarkerContent>
+                      </Marker>
+                    </MessageScrollerItem>
+                  ) : (
+                    <MessageScrollerItem key={item.key}>
+                      <CompactionMarker marker={item.marker} />
+                    </MessageScrollerItem>
+                  ),
+                )}
+                {state.aborted ? (
+                  // A stop is a normal outcome, so it reads as a neutral marker
+                  // where the run stopped — not as 模型调用失败 with advice about
+                  // the provider's key (QA-14).
+                  <MessageScrollerItem>
+                    <Marker data-testid="run-interrupted">
+                      <MarkerIcon>
+                        <Square />
+                      </MarkerIcon>
+                      <MarkerContent>已中断</MarkerContent>
                     </Marker>
                   </MessageScrollerItem>
-                ) : (
-                  <MessageScrollerItem key={item.key}>
-                    <CompactionMarker marker={item.marker} />
-                  </MessageScrollerItem>
-                ),
-              )
+                ) : null}
+              </>
             )}
           </MessageScrollerContent>
         </MessageScrollerViewport>

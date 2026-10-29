@@ -435,3 +435,81 @@ func TestMessageEndCarriesTheProviderError(t *testing.T) {
 		t.Fatalf("error = %q", payload.Error)
 	}
 }
+// TestInterruptedRunReportsNoFailure pins the shape real Pi produced when a user
+// stopped a run: the assistant message is a *provider error* ("This operation was
+// aborted", stopReason "error"), and only agent_settled.aborted says it was a
+// stop. Forwarding the error made every Stop render as 模型调用失败 with advice to
+// check the provider's key (QA-14, MAJOR).
+func TestInterruptedRunReportsNoFailure(t *testing.T) {
+	n := NewNormalizer("ses_stop", contracts.KindMain)
+	if _, err := n.Translate([]byte(`{"type":"agent_start"}`)); err != nil {
+		t.Fatalf("agent_start: %v", err)
+	}
+	// The user presses Stop while a tool runs.
+	n.NoteInterrupt()
+
+	events, err := n.Translate([]byte(`{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"This operation was aborted","provider":"piforge","model":"m"}}`))
+	if err != nil {
+		t.Fatalf("message_end: %v", err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Type != contracts.EvMsgFinal {
+			continue
+		}
+		var payload MessageFinalPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		found = true
+		if payload.Error != "" {
+			t.Fatalf("a stopped run carried a failure: %q", payload.Error)
+		}
+	}
+	if !found {
+		t.Fatal("no message.final")
+	}
+
+	// The next run is a fresh one: a genuine failure in it is still reported.
+	if _, err := n.Translate([]byte(`{"type":"agent_settled","aborted":true}`)); err != nil {
+		t.Fatalf("agent_settled: %v", err)
+	}
+	if _, err := n.Translate([]byte(`{"type":"agent_start"}`)); err != nil {
+		t.Fatalf("agent_start 2: %v", err)
+	}
+	events, err = n.Translate([]byte(`{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"401: invalid api key"}}`))
+	if err != nil {
+		t.Fatalf("message_end 2: %v", err)
+	}
+	for _, event := range events {
+		if event.Type != contracts.EvMsgFinal {
+			continue
+		}
+		var payload MessageFinalPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		if !strings.Contains(payload.Error, "invalid api key") {
+			t.Fatalf("a real credential failure was swallowed: %+v", payload)
+		}
+	}
+
+	// And a message that says stopReason "aborted" is not a failure either.
+	n2 := NewNormalizer("ses_stop2", contracts.KindMain)
+	events, err = n2.Translate([]byte(`{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"aborted","errorMessage":"aborted"}}`))
+	if err != nil {
+		t.Fatalf("aborted message_end: %v", err)
+	}
+	for _, event := range events {
+		if event.Type != contracts.EvMsgFinal {
+			continue
+		}
+		var payload MessageFinalPayload
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		if payload.Error != "" {
+			t.Fatalf("stopReason aborted carried a failure: %q", payload.Error)
+		}
+	}
+}
