@@ -410,6 +410,46 @@ WS   /v1/sessions/<id>/pty               "echo e2e-docker-ok\r\n" + "e2e-docker-
    先看日志里的 `falling back to a host PTY`；
 4. 关闭终端不会删除容器里的 shell 会话，容器停掉/删除时才一起消失。
 
+## 一条命令验证 docker 沙箱
+
+`scripts/verify-docker-sandbox.ps1` 把上面这些手工验证步骤固定成一条命令。它不是单元测试：
+它构建 `piforged` 和 `fakepi`，在空闲端口上以 `-sandbox docker` 启动，用 cookie 登录 +
+`X-PF-CSRF` 走纯 HTTP 驱动产品，再用 `docker exec` 检查容器。每一步打印一行 PASS/FAIL，
+全部通过才退出 0。
+
+它证明的事情（其中几条是**否定断言**，也是过去十个提交里真正回归过的缺陷）：
+
+| 检查 | 断言 |
+|---|---|
+| 放置 | 日志里 `sandbox=docker browser=remote terminal=remote files=remote`，且没有 mixed WARN |
+| 容器 | 存在 `piforge-*` 容器并发布了 8080 |
+| 隔离（否定） | 项目 A 写入并提交 `a.txt` 后，项目 B 的容器里 `test -e a.txt` 退出 1；两个项目的 `/workspace` 挂载源不同 |
+| 文件 | 面板 `PUT /files` 写入的字节与容器内 `od` 读到的字节完全一致 |
+| git | status/stage/commit 都是 200，且 `docker exec -u gem ... git log -1 --format=%ae` 是 `sandbox@piforge.local` |
+| 分支会话（否定旧 bug） | 分支会话写入/暂存/提交都是 200，`.git/worktrees/<slug>` 的 owner 是 `gem`，不是宿主用户 |
+| 终端 | 连 `/pty` 发 `hostname`，输出等于 `docker exec <c> hostname` |
+| 浏览器（否定旧 bug） | 截图是 PNG，容器内与宿主绑定目录里的字节相同（不需要本机 Chrome） |
+| 反向对照（否定） | `docker stop` 容器后，面板读同一个文件返回 4xx/5xx；如果它还在读宿主，会继续成功 |
+
+运行（PowerShell 7，Windows）：
+
+```powershell
+pwsh scripts/verify-docker-sandbox.ps1
+pwsh scripts/verify-docker-sandbox.ps1 -Image <all-in-one-sandbox:tag>
+$env:PIFORGE_SANDBOX_IMAGE = "<image>"; pwsh scripts/verify-docker-sandbox.ps1
+```
+
+需要：Docker daemon、**本地已有**沙箱镜像（默认
+`enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0`；脚本不会
+自动 pull，缺失时直接报错）、Go 和 PowerShell 7。冷启动（构建二进制、起两个容器、容器内
+Chromium 冷启动）大约 5–8 分钟；Go 构建缓存和镜像层都热时通常不到一分钟。
+
+脚本把二进制、data 目录和日志放在自己的临时目录里，`finally` 中停止进程、`docker rm -f`
+它创建的每个容器（按会话取到的容器名，以及带本项目 label 的容器），再删除临时目录。它只
+按自己创建的项目 id 和记录下来的容器名删除，**不会碰 `pf-local` 或 `piforge`**，重复运行
+不会留下状态。截图检查直接比较容器内文件和绑定挂载的宿主文件，不走
+`GET /files?download=1`：remote 文件 API 的预览读取按 UTF-8 解码，二进制 PNG 在那里会失败。
+
 ## 为什么不是一个共享容器
 
 沙箱粒度是 `(project, user)`，容器边界必须和它一致。一个共享容器等于把多租户隔离交给
