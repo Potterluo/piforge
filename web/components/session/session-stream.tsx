@@ -21,10 +21,12 @@ import {
 import { Marker, MarkerContent, MarkerIcon } from "@/components/ui/marker";
 import { Skeleton } from "@/components/ui/skeleton";
 import { selectTimeline, type Turn } from "@/lib/session/reduce";
+import { groupTranscript } from "@/lib/session/transcript-runs";
 import { cn } from "@/lib/utils";
 
 import { CompactionMarker } from "./context-marker";
 import { MessageItem } from "./message-item";
+import { AssistantRun } from "./run-item";
 import { useSessionEventState } from "./session-events-provider";
 
 /**
@@ -36,15 +38,21 @@ import { useSessionEventState } from "./session-events-provider";
  */
 export function SessionStream({
   className,
+  sessionModel,
   onFork,
   resolveForkEntry,
 }: {
   className?: string;
+  /** The model the session is pinned to; inherited sessions have none. */
+  sessionModel?: string;
   onFork?: (entryId: string) => void;
   resolveForkEntry?: (turn: Turn) => string | undefined;
 }) {
   const { state, status } = useSessionEventState();
   const timeline = useMemo(() => selectTimeline(state), [state]);
+  // One reply is several Pi messages. Grouping them here (and not in the
+  // reducer) keeps turn ids, per-turn tests and fork entry ids untouched.
+  const transcript = useMemo(() => groupTranscript(timeline), [timeline]);
 
   const loading = timeline.length === 0 && (status === "connecting" || status === "reconnecting");
 
@@ -114,8 +122,16 @@ export function SessionStream({
               </MessageScrollerItem>
             ) : (
               <>
-                {timeline.map((item) =>
-                  item.kind === "turn" ? (
+                {transcript.map((item) =>
+                  item.kind === "run" ? (
+                    <MessageScrollerItem
+                      key={item.key}
+                      messageId={item.turns[0]?.id}
+                      scrollAnchor={false}
+                    >
+                      <AssistantRun turns={item.turns} sessionModel={sessionModel} />
+                    </MessageScrollerItem>
+                  ) : item.kind === "turn" ? (
                     <MessageScrollerItem
                       key={item.key}
                       messageId={item.turn.id}

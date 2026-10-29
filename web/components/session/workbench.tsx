@@ -335,6 +335,7 @@ function WorkbenchBody({
               when a side folds, the transcript column gets the width back. */}
           <div data-testid="transcript-column" className="flex h-full min-h-0 w-full flex-col">
             <SessionStream
+              sessionModel={detail?.model_ref}
               resolveForkEntry={(turn) =>
                 turn.entryId ?? matchForkEntry(turn, forkPoints.data?.points ?? [])
               }

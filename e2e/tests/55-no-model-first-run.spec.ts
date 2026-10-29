@@ -30,6 +30,13 @@ test("a new account sees the missing model before and after sending", async ({ p
 
   const context = await browser.newContext();
   const fresh = await context.newPage();
+  // Shared providers are deployment-wide, so a later spec may inherit one into
+  // every account. This test is about the state where there is nothing to
+  // inherit; pin the provider list to that shape instead of depending on which
+  // specs ran before it.
+  await fresh.route("**/v1/providers", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: '{"providers":[]}' }),
+  );
   try {
     await login(fresh, { email, password });
 
@@ -52,8 +59,21 @@ test("a new account sees the missing model before and after sending", async ({ p
     );
     await expect(fresh.getByTestId("composer-input")).toHaveValue("");
 
-    // A send is refused for the same reason. The bar must name it, and the text
-    // must remain where the user can act on it.
+    // A send is refused for the same reason. The fake peer does not need a
+    // model, so the refusal itself is injected with the exact 400 `no_model`
+    // body the deployed control plane returns (verified against :7722).
+    await fresh.route("**/v1/sessions/**/messages", (route) =>
+      route.fulfill({
+        status: 400,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: {
+            code: "no_model",
+            message: 'the provider "volc" is not configured: add it in Settings → Models',
+          },
+        }),
+      }),
+    );
     const message = "你好，先介绍一下你能做什么";
     await fresh.getByTestId("composer-input").fill(message);
     await fresh.getByTestId("composer-send").click();
