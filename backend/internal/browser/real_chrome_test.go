@@ -223,6 +223,85 @@ func TestRealChromeScreenshotFollowsTheActiveTab(t *testing.T) {
 	}
 }
 
+// TestRealChromeConcurrentEnsureSharesOneBrowser is the launch race against the
+// real binary: the browser panel and a tab ask for the same sandbox's browser
+// at the same moment. Both callers must get a working session — one browser,
+// not one session and one "devtools never became ready".
+//
+// The second half is the part a unit test cannot show: each returned session
+// must drive the page it was handed. A session attached to a Chromium that lost
+// its profile to the other launch exists, answers the cache, and does nothing
+// useful.
+func TestRealChromeConcurrentEnsureSharesOneBrowser(t *testing.T) {
+	binary := findChrome(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<html><body style="margin:0;background:#12c;color:#fff;` +
+			`font:48px sans-serif"><h1>concurrent</h1></body></html>`))
+	}))
+	defer server.Close()
+
+	manager := NewManager(Config{Binary: binary, Headless: true, Width: 640, Height: 480})
+	defer manager.CloseAll()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	profileRoot := t.TempDir()
+	const callers = 2
+	type answer struct {
+		session *Session
+		err     error
+	}
+	answers := make(chan answer, callers)
+	start := make(chan struct{})
+	for i := 0; i < callers; i++ {
+		go func() {
+			<-start
+			session, err := manager.Ensure(ctx, "sb_concurrent", profileRoot)
+			answers <- answer{session: session, err: err}
+		}()
+	}
+	close(start)
+
+	sessions := make([]*Session, 0, callers)
+	for i := 0; i < callers; i++ {
+		select {
+		case got := <-answers:
+			if got.err != nil {
+				t.Fatalf("concurrent Ensure %d: %v", i, got.err)
+			}
+			sessions = append(sessions, got.session)
+		case <-time.After(90 * time.Second):
+			t.Fatal("a concurrent Ensure never returned")
+		}
+	}
+	if sessions[0].PID != sessions[1].PID {
+		t.Fatalf("the two callers got different browsers (%d and %d)", sessions[0].PID, sessions[1].PID)
+	}
+	if manager.Len() != 1 {
+		t.Fatalf("manager holds %d browsers, want 1", manager.Len())
+	}
+
+	for i, session := range sessions {
+		if err := session.Navigate(ctx, server.URL); err != nil {
+			t.Fatalf("caller %d cannot navigate its session: %v", i, err)
+		}
+		if got := captureBackgroundColour(t, ctx, session, ""); got != "blue" {
+			t.Fatalf("caller %d captured %q, want the page it navigated to", i, got)
+		}
+	}
+
+	// Once the race is over the browser stays cached: a later call reuses it.
+	again, err := manager.Ensure(ctx, "sb_concurrent", profileRoot)
+	if err != nil {
+		t.Fatalf("Ensure after the race: %v", err)
+	}
+	if again.PID != sessions[0].PID {
+		t.Fatalf("a later Ensure launched a second browser (%d vs %d)", again.PID, sessions[0].PID)
+	}
+}
+
 // captureBackgroundColour takes a screenshot and names the colour of its
 // top-left pixel. It retries while the page is still painting: a fresh tab is
 // allowed to be blank for a moment, and the point of the test is which page is

@@ -19,7 +19,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -33,6 +32,68 @@ import (
 // unavailable rather than broken. The HTTP layer maps it to a 422 with a reason
 // instead of a 500.
 var ErrNotConfigured = errors.New("browser: no chrome binary is configured")
+
+// ErrClosed means the manager was shut down before the browser could be handed
+// out. It is a sentinel so a caller can tell "we are stopping" from "this
+// sandbox would not start".
+var ErrClosed = errors.New("browser: manager is closed")
+
+// LaunchStage says how far a launch got before it failed. The difference
+// matters to whoever reads the log or the panel: a missing binary is a
+// configuration problem, devtools not answering is a machine problem, and a
+// locked profile is somebody else's browser.
+type LaunchStage string
+
+const (
+	// StageProfile is "the profile directory or its lock".
+	StageProfile LaunchStage = "profile"
+	// StageStart is "the process never started".
+	StageStart LaunchStage = "start"
+	// StageDevTools is "the process started but its devtools endpoint never
+	// answered".
+	StageDevTools LaunchStage = "devtools"
+	// StageAttach is "devtools answered but a page session could not be made".
+	StageAttach LaunchStage = "attach"
+	// StageExited is "the browser quit before the session could be used".
+	StageExited LaunchStage = "exited"
+	// StageLaunch is a failure that did not come from a specific step, such as a
+	// launcher that returned neither a session nor an error.
+	StageLaunch LaunchStage = "launch"
+)
+
+// LaunchError is the failure of one attempt to start a sandbox's browser.
+//
+// It is a type rather than a string because the panel has to be able to say
+// which step failed, and because callers must be able to tell a launch failure
+// (retryable, maybe) from a usage error. Ensure returns it only after the
+// in-flight entry for that sandbox is gone, so the next call starts a fresh
+// attempt instead of replaying this error.
+type LaunchError struct {
+	SandboxID string
+	Stage     LaunchStage
+	Err       error
+}
+
+func (e *LaunchError) Error() string {
+	return fmt.Sprintf("browser: sandbox %s: launch failed at %s: %v", e.SandboxID, e.Stage, e.Err)
+}
+
+func (e *LaunchError) Unwrap() error { return e.Err }
+
+// pendingLaunch is one in-flight launch for one sandbox.
+//
+// It is a rendezvous, not a cache: Ensure publishes it before starting Chrome
+// and deletes it when the attempt is over, whatever the outcome. A second
+// caller waits on done and takes the first caller's session or error, which is
+// what stops two Chromiums from being pointed at one profile.
+type pendingLaunch struct {
+	done    chan struct{}
+	session *Session
+	err     error
+	// cancelled is set when Close/CloseAll arrives while the launch is running;
+	// the browser that comes out of it is stopped instead of recorded.
+	cancelled bool
+}
 
 // Config wires the manager.
 type Config struct {
@@ -112,13 +173,26 @@ type Snapshot struct {
 	URL       string `json:"url"`
 }
 
+// maxLaunchTime bounds one launch when the caller that started it goes away.
+// waitForDevTools has its own 30s budget, so this only has to cover a browser
+// that gets past that and then hangs in the handshake.
+const maxLaunchTime = 60 * time.Second
+
 // Manager owns the browsers of this process, keyed by sandbox.
 type Manager struct {
 	cfg Config
 
 	mu       sync.Mutex
 	sessions map[string]*Session
+	// launches holds the in-flight launch of each sandbox. It is keyed by sandbox
+	// on purpose: two sandboxes must start in parallel, only two launches of the
+	// same sandbox must not.
+	launches map[string]*pendingLaunch
 	closed   bool
+
+	// start launches one browser. It is a field so the launch serialisation can be
+	// tested without a browser; NewManager wires the real launch.
+	start func(ctx context.Context, sandboxID, profileRoot string) (*Session, error)
 }
 
 // NewManager builds a manager. A manager with no binary is still usable: every
@@ -136,7 +210,13 @@ func NewManager(cfg Config) *Manager {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Manager{cfg: cfg, sessions: map[string]*Session{}}
+	m := &Manager{
+		cfg:      cfg,
+		sessions: map[string]*Session{},
+		launches: map[string]*pendingLaunch{},
+	}
+	m.start = m.launch
+	return m
 }
 
 // Configured reports whether a binary is available.
@@ -154,6 +234,14 @@ func (m *Manager) Available() bool { return m.Configured() || m.cfg.Remote != ni
 // profileRoot is the directory the profile lives in — always inside the
 // sandbox, so a paused sandbox takes the browser state with it and a deleted
 // sandbox deletes the cookies.
+//
+// Launches are serialised per sandbox, not globally. Two callers that race for
+// the same sandbox's browser (a panel that reconnects while a tab is opening,
+// two viewers of the same session) used to start two Chromiums on one profile:
+// Chromium's profile singleton lets one win and makes the other's devtools
+// endpoint never appear, which the user saw as "the browser panel is stuck".
+// The second caller now waits for the first attempt and reuses whatever it
+// produced. Different sandboxes still launch in parallel.
 func (m *Manager) Ensure(ctx context.Context, sandboxID, profileRoot string) (*Session, error) {
 	// A remote browser needs no local binary: the "configured" question is whether there
 	// is a browser at all, and a sandbox container answers it by existing.
@@ -164,51 +252,134 @@ func (m *Manager) Ensure(ctx context.Context, sandboxID, profileRoot string) (*S
 		return nil, errors.New("browser: sandbox id is required")
 	}
 
+	var stale *Session
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
-		return nil, errors.New("browser: manager is closed")
+		return nil, ErrClosed
 	}
-	if existing, ok := m.sessions[sandboxID]; ok && !existing.dead() {
+	if existing, ok := m.sessions[sandboxID]; ok {
+		if !existing.dead() {
+			m.mu.Unlock()
+			return existing, nil
+		}
+		// A session that cannot answer is not reused. It is also not simply
+		// forgotten: a Chromium process can outlive its devtools connection and
+		// still hold the profile, so the replacement launch would find a live
+		// singleton lock. It is stopped below, once the in-flight entry makes
+		// every other caller wait.
+		delete(m.sessions, sandboxID)
+		stale = existing
+	}
+	if pending, inFlight := m.launches[sandboxID]; inFlight {
 		m.mu.Unlock()
-		return existing, nil
+		return m.awaitLaunch(ctx, sandboxID, pending)
+	}
+	pending := &pendingLaunch{done: make(chan struct{})}
+	m.launches[sandboxID] = pending
+	m.mu.Unlock()
+
+	if stale != nil {
+		stale.Stop()
+	}
+
+	// The attempt outlives the caller that happened to start it: another panel may
+	// be waiting on it, and tearing a shared browser down because one websocket
+	// closed is how the remaining viewer gets stuck. The bound keeps a hung launch
+	// from pinning the sandbox forever.
+	launchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), maxLaunchTime)
+	session, err := m.start(launchCtx, sandboxID, profileRoot)
+	cancel()
+
+	return m.finishLaunch(sandboxID, pending, session, err)
+}
+
+// awaitLaunch waits for the launch that is already running for this sandbox.
+//
+// A failure is passed on as the launcher produced it: the waiters asked for the
+// same browser, so the honest answer is the same typed error. A caller whose
+// own context ends stops waiting without disturbing the launch — the browser it
+// was waiting for is still recorded, and its next call reuses it.
+func (m *Manager) awaitLaunch(ctx context.Context, sandboxID string, pending *pendingLaunch) (*Session, error) {
+	select {
+	case <-pending.done:
+		if pending.err != nil {
+			return nil, pending.err
+		}
+		if pending.session == nil {
+			return nil, &LaunchError{
+				SandboxID: sandboxID,
+				Stage:     StageLaunch,
+				Err:       errors.New("the launch finished without a session"),
+			}
+		}
+		return pending.session, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// finishLaunch records one attempt's result and wakes its waiters.
+//
+// The in-flight entry is removed whatever the outcome. It is a rendezvous, not
+// a cache: a failed launch costs one error, not a sandbox that can never start
+// again.
+func (m *Manager) finishLaunch(sandboxID string, pending *pendingLaunch, session *Session, err error) (*Session, error) {
+	m.mu.Lock()
+	delete(m.launches, sandboxID)
+	if err == nil && (m.closed || pending.cancelled) {
+		err = ErrClosed
+	}
+	if err == nil && (session == nil || session.dead()) {
+		err = &LaunchError{
+			SandboxID: sandboxID,
+			Stage:     StageExited,
+			Err:       errors.New("the browser exited before it could be used"),
+		}
+	}
+	if err != nil {
+		// Every failure leaving Ensure is typed, so a caller can tell a launch
+		// failure from a bad request. A context that ended is not a launch
+		// failure: pass it through so errors.Is still works.
+		var launchErr *LaunchError
+		if !errors.As(err, &launchErr) && !errors.Is(err, ErrClosed) &&
+			!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			err = &LaunchError{SandboxID: sandboxID, Stage: StageLaunch, Err: err}
+		}
+		pending.err = err
+	} else {
+		m.sessions[sandboxID] = session
+		pending.session = session
 	}
 	m.mu.Unlock()
 
-	session, err := m.launch(ctx, sandboxID, profileRoot)
 	if err != nil {
+		if session != nil {
+			// Never leave a started browser unrecorded: nothing could stop it later.
+			session.Stop()
+		}
+		close(pending.done)
 		return nil, err
 	}
-
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		session.Stop()
-		return nil, errors.New("browser: manager is closed")
-	}
-	// Another request may have won the race; prefer the live one.
-	if existing, ok := m.sessions[sandboxID]; ok && !existing.dead() {
-		m.mu.Unlock()
-		session.Stop()
-		return existing, nil
-	}
-	m.sessions[sandboxID] = session
-	m.mu.Unlock()
+	close(pending.done)
 	return session, nil
 }
 
 // launch starts chrome and connects to its devtools endpoint.
 func (m *Manager) launch(ctx context.Context, sandboxID, profileRoot string) (*Session, error) {
 	profile := filepath.Join(profileRoot, ".piforge-browser")
-	if err := os.MkdirAll(profile, 0o700); err != nil {
-		return nil, fmt.Errorf("browser: create profile dir: %w", err)
+	// A lock left by a browser that is gone is cleared here, inside the serialised
+	// launch, so two attempts can never both decide it is stale.
+	if err := prepareProfile(profile); err != nil {
+		return nil, &LaunchError{SandboxID: sandboxID, Stage: StageProfile, Err: err}
 	}
 
 	// Pick a free port rather than a fixed one, so two sandboxes on one host
 	// cannot fight over 9222.
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return nil, fmt.Errorf("browser: reserve a devtools port: %w", err)
+		return nil, &LaunchError{SandboxID: sandboxID, Stage: StageStart,
+			Err: fmt.Errorf("reserve a devtools port: %w", err)}
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
 	_ = listener.Close()
@@ -245,19 +416,25 @@ func (m *Manager) launch(ctx context.Context, sandboxID, profileRoot string) (*S
 		argv = m.cfg.Launcher.Wrap(argv)
 	}
 	if len(argv) == 0 {
-		return nil, errors.New("browser: empty command")
+		return nil, &LaunchError{SandboxID: sandboxID, Stage: StageStart,
+			Err: errors.New("empty command")}
 	}
 	// A remote browser is attached to, not started: the sandbox owns the process, and
 	// killing it here would kill the user's browser.
 	if m.cfg.Remote != nil {
 		wsURL, debugHTTP, rerr := m.cfg.Remote(ctx, sandboxID)
 		if rerr == nil && wsURL != "" {
-			return m.attachRemote(ctx, sandboxID, profile, wsURL, debugHTTP)
+			session, aerr := m.attachRemote(ctx, sandboxID, profile, wsURL, debugHTTP)
+			if aerr != nil {
+				return nil, &LaunchError{SandboxID: sandboxID, Stage: StageAttach, Err: aerr}
+			}
+			return session, nil
 		}
 		if rerr != nil && !m.Configured() {
 			// There is no local binary to fall back to, and "exec: no command" would
 			// blame this process instead of the sandbox that did not answer.
-			return nil, fmt.Errorf("browser: sandbox %s: %w", sandboxID, rerr)
+			return nil, &LaunchError{SandboxID: sandboxID, Stage: StageAttach,
+				Err: fmt.Errorf("sandbox %s: %w", sandboxID, rerr)}
 		}
 	}
 
@@ -266,7 +443,8 @@ func (m *Manager) launch(ctx context.Context, sandboxID, profileRoot string) (*S
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("browser: start chrome: %w", err)
+		return nil, &LaunchError{SandboxID: sandboxID, Stage: StageStart,
+			Err: fmt.Errorf("start chrome: %w", err)}
 	}
 
 	// 30s, not 15: a loaded machine can take far longer than 15s to bring Chrome's
@@ -274,21 +452,21 @@ func (m *Manager) launch(ctx context.Context, sandboxID, profileRoot string) (*S
 	// 500 — looks like a product bug rather than a slow start.
 	wsURL, err := waitForDevTools(ctx, port, 30*time.Second)
 	if err != nil {
-		_ = cmd.Process.Kill()
-		return nil, err
+		abandon(cmd)
+		return nil, &LaunchError{SandboxID: sandboxID, Stage: StageDevTools, Err: err}
 	}
 
 	client, err := dialCDP(ctx, wsURL, nil)
 	if err != nil {
-		_ = cmd.Process.Kill()
-		return nil, err
+		abandon(cmd)
+		return nil, &LaunchError{SandboxID: sandboxID, Stage: StageDevTools, Err: err}
 	}
 	// A browser-level connection can only talk to Target.*; Page and Input need
 	// a page session.
 	if err := client.attachToPage(ctx); err != nil {
 		client.close()
-		_ = cmd.Process.Kill()
-		return nil, err
+		abandon(cmd)
+		return nil, &LaunchError{SandboxID: sandboxID, Stage: StageAttach, Err: err}
 	}
 
 	session := &Session{
@@ -310,7 +488,36 @@ func (m *Manager) launch(ctx context.Context, sandboxID, profileRoot string) (*S
 		session.Stop()
 	}()
 
+	// Prove the page session still answers before handing the browser out. A
+	// Chromium that lost its profile to another instance can exit right after the
+	// handshake, and a Session attached to it is exactly the "panel is stuck"
+	// state: it exists, it is in the cache, and every action hangs. Asking the
+	// page a question it always answers is cheaper than making the user find out.
+	var history struct {
+		CurrentIndex int `json:"currentIndex"`
+	}
+	if err := client.call(ctx, "Page.getNavigationHistory", nil, &history); err != nil {
+		session.Stop()
+		return nil, &LaunchError{SandboxID: sandboxID, Stage: StageExited,
+			Err: fmt.Errorf("the browser did not survive its own startup: %w", err)}
+	}
+
 	return session, nil
+}
+
+// abandon stops a browser this process started and reaps it, so a failed launch
+// cannot leave a process (or a zombie) for the next attempt to trip over.
+//
+// It uses Process.Wait rather than Cmd.Wait because the success path already
+// installed a goroutine that owns Cmd.Wait: a second Cmd.Wait on the same
+// command would return "Wait was already called" and leave the reaping to the
+// other goroutine.
+func abandon(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	_ = cmd.Process.Kill()
+	_, _ = cmd.Process.Wait()
 }
 
 // waitForDevTools polls Chrome's HTTP endpoint until it reports a websocket URL.
@@ -354,13 +561,20 @@ func waitForDevTools(ctx context.Context, port int, timeout time.Duration) (stri
 	return "", fmt.Errorf("browser: devtools never became ready: %w", lastErr)
 }
 
+// dead reports whether the session can still be used.
+//
+// A browser whose process exited is dead, and so is one whose devtools
+// connection ended: the second case used to be invisible here, so the manager
+// kept handing out a Session that could never answer again (a panel that
+// reconnected saw "browser busy" forever). Treating both as dead is what makes
+// the next Ensure start a fresh browser instead of reusing a broken handle.
 func (s *Session) dead() bool {
 	select {
 	case <-s.stopped:
 		return true
 	default:
-		return false
 	}
+	return s.client != nil && s.client.gone()
 }
 
 // Stop shuts the browser down. It is safe to call more than once and from
@@ -383,15 +597,25 @@ func (s *Session) Stop() {
 				cancel()
 			}
 			// Give it a moment to exit on its own before taking the process down.
+			// The wait after the kill matters as much as the one before: a browser
+			// that is only *dying* still answers on its profile socket, and the
+			// replacement launch runs immediately after Stop. Letting the OS reap
+			// it here keeps that launch from reading the dying process as a live
+			// singleton lock.
 			if s.proc != nil && s.proc.Process != nil {
-				done := make(chan struct{})
+				exited := make(chan struct{})
 				go func() {
 					_, _ = s.proc.Process.Wait()
-					close(done)
+					close(exited)
 				}()
 				select {
-				case <-done:
+				case <-exited:
 				case <-time.After(2 * time.Second):
+					_ = s.proc.Process.Kill()
+					select {
+					case <-exited:
+					case <-time.After(2 * time.Second):
+					}
 				}
 			}
 			s.client.close()
@@ -608,12 +832,21 @@ func (s *Session) dispatchOn(ctx context.Context, client *cdp, in Input) error {
 }
 
 // Close shuts a sandbox's browser down and forgets it.
+//
+// When a launch is still in flight for that sandbox it is marked cancelled: the
+// attempt finishes, the browser it produced is stopped instead of recorded, and
+// its caller learns the sandbox was closed. Otherwise the browser would appear
+// in the manager after the caller had already closed it.
 func (m *Manager) Close(sandboxID string) bool {
 	m.mu.Lock()
 	session, ok := m.sessions[sandboxID]
 	delete(m.sessions, sandboxID)
+	if pending, inFlight := m.launches[sandboxID]; inFlight {
+		pending.cancelled = true
+		ok = true
+	}
 	m.mu.Unlock()
-	if ok {
+	if session != nil {
 		session.Stop()
 	}
 	return ok

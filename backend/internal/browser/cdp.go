@@ -274,3 +274,16 @@ func (c *cdp) attachToPage(ctx context.Context) error {
 func (c *cdp) close() {
 	_ = c.conn.Close(websocket.StatusNormalClosure, "shutdown")
 }
+
+// gone reports whether the connection to Chrome has ended. Chrome can drop its
+// devtools socket while the process keeps running (a crashed tab session, a
+// target the browser detached); every command on that connection fails from
+// then on, which is indistinguishable from a dead browser to the panel.
+func (c *cdp) gone() bool {
+	select {
+	case <-c.closed:
+		return true
+	default:
+		return false
+	}
+}
