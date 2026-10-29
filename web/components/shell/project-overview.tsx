@@ -25,6 +25,7 @@ import {
   sessionStatusLabel,
   sessionStatusTone,
 } from "@/lib/session/format";
+import { humanizeError } from "@/lib/errors";
 import { useProject, useProjectSessions } from "@/lib/session/queries";
 import { cn } from "@/lib/utils";
 import type { SessionStatus } from "@/lib/types";
@@ -69,7 +70,7 @@ export function ProjectOverview({ projectId }: { projectId: string }) {
   if (project.isError) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
-        <p className="text-sm text-muted-foreground">项目加载失败：{project.error.message}</p>
+        <p className="text-sm text-muted-foreground">项目加载失败：{humanizeError(project.error)}</p>
         <Button variant="outline" onClick={() => void project.refetch()}>
           重试
         </Button>
@@ -130,7 +131,7 @@ export function ProjectOverview({ projectId }: { projectId: string }) {
           <Card>
             <CardHeader>
               <CardTitle>会话加载失败</CardTitle>
-              <CardDescription>{sessions.error.message}</CardDescription>
+              <CardDescription>{humanizeError(sessions.error)}</CardDescription>
             </CardHeader>
             <CardContent>
               <Button variant="outline" size="sm" onClick={() => void sessions.refetch()}>

@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Item, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "@/components/ui/item";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 import { ApiError } from "@/lib/types";
 
 /**
@@ -47,7 +48,7 @@ export default function AdminStatusPage() {
               {forbidden
                 ? "这个页面只有管理员能打开。"
                 : status.error instanceof Error
-                  ? status.error.message
+                  ? humanizeError(status.error)
                   : "未知错误"}
             </CardDescription>
           </CardHeader>

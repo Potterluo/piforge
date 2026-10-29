@@ -42,6 +42,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { api, type CreateProviderInput } from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 import type { Provider } from "@/lib/types";
 import { qk, useCurrentUser, useProviders } from "@/lib/session/queries";
 
@@ -99,7 +100,7 @@ export default function ProvidersPage() {
     },
     onError: (error) => {
       toast.error("添加失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       });
     },
   });
@@ -112,7 +113,7 @@ export default function ProvidersPage() {
     },
     onError: (error) => {
       toast.error("删除失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       });
     },
   });
@@ -133,7 +134,7 @@ export default function ProvidersPage() {
     },
     onError: (error) => {
       toast.error("更新失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       });
     },
   });
@@ -146,7 +147,7 @@ export default function ProvidersPage() {
     },
     onError: (error) => {
       toast.error("连通性测试失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       });
     },
   });
@@ -544,7 +545,7 @@ function SharedProviders({ onChanged }: { onChanged: () => void }) {
     },
     onError: (error) =>
       toast.error("共享失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       }),
   });
 
@@ -556,7 +557,7 @@ function SharedProviders({ onChanged }: { onChanged: () => void }) {
     },
     onError: (error) =>
       toast.error("取消失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       }),
   });
 

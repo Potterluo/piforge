@@ -25,6 +25,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 import { qk } from "@/lib/session/queries";
 import { selectTimeline } from "@/lib/session/reduce";
 import { useSessionEvents } from "@/lib/session/use-session-events";
@@ -132,7 +133,7 @@ export function SidecarDock({
     },
     onError: (error) =>
       toast.error("提升失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       }),
   });
 
@@ -172,7 +173,7 @@ export function SidecarDock({
           <div className="flex flex-1 flex-col items-center justify-center gap-2 p-4 text-xs text-muted-foreground">
             <p className="max-w-xs text-center">
               Sidecar 创建失败：
-              {create.error instanceof Error ? create.error.message : "未知错误"}
+              {humanizeError(create.error)}
             </p>
             <Button size="sm" variant="outline" onClick={() => create.mutate()}>
               重试

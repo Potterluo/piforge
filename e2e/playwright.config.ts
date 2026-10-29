@@ -55,7 +55,11 @@ export default defineConfig({
   workers: 1,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : "list",
-  outputDir: "./.artifacts",
+  // Keep test output in its own directory: Playwright removes `outputDir` at the
+  // start of a run, and a top-level `./.artifacts` would delete the QA evidence
+  // kept in sibling folders. The harness owns `.artifacts/test-results`; probes
+  // and screenshots stay under `.artifacts/qa13*` and `.artifacts/fix-qa13b`.
+  outputDir: "./.artifacts/test-results",
   use: {
     baseURL: "http://127.0.0.1:3100",
     trace: "retain-on-failure",

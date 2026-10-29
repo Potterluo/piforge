@@ -11,6 +11,7 @@ import {
   Moon,
   Plus,
   Shield,
+  SlidersHorizontal,
   Sparkles,
   Sun,
 } from "lucide-react";
@@ -123,6 +124,10 @@ export function CommandPalette({
           <CommandItem onSelect={() => run(() => router.push("/settings/mcp"))}>
             <Boxes />
             MCP 中心
+          </CommandItem>
+          <CommandItem onSelect={() => run(() => router.push("/settings/general"))}>
+            <SlidersHorizontal />
+            通用设置
           </CommandItem>
           {me.data?.user.role === "admin" ? (
             <CommandItem onSelect={() => run(() => router.push("/admin/users"))}>

@@ -13,10 +13,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import { humanizeError, repoUrlError } from "@/lib/errors";
 import { useCreateProject } from "@/lib/session/queries";
+import { ApiError } from "@/lib/types";
 
 /**
  * Creates a project and jumps straight into it: a project with no session has
@@ -34,12 +36,21 @@ export function NewProjectDialog({
   const [name, setName] = useState("");
   const [repoUrl, setRepoUrl] = useState("");
   const [branch, setBranch] = useState("main");
+  const [repoError, setRepoError] = useState<string | null>(null);
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const trimmed = name.trim();
     if (!trimmed) {
       toast.error("请填写项目名称");
+      return;
+    }
+    // Reject locally first: a bad address must not create a project whose every
+    // session then has no worktree. The API applies the same rule for callers
+    // that do not use this form.
+    const repoMessage = repoUrlError(repoUrl);
+    if (repoMessage) {
+      setRepoError(repoMessage);
       return;
     }
     try {
@@ -52,11 +63,16 @@ export function NewProjectDialog({
       setName("");
       setRepoUrl("");
       setBranch("main");
+      setRepoError(null);
       onOpenChange(false);
       router.push(`/p/${result.project.id}`);
     } catch (error) {
+      if (error instanceof ApiError && error.code === "invalid_argument" && /^repo_url/.test(error.message)) {
+        setRepoError(humanizeError(error, repoUrlError(repoUrl) ?? "仓库地址格式不支持"));
+        return;
+      }
       toast.error("创建项目失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       });
     }
   };
@@ -85,16 +101,21 @@ export function NewProjectDialog({
                 required
               />
             </Field>
-            <Field>
+            <Field data-invalid={repoError ? true : undefined}>
               <FieldLabel htmlFor="project-repo">仓库地址</FieldLabel>
               <Input
                 id="project-repo"
                 data-testid="project-repo"
                 value={repoUrl}
-                onChange={(event) => setRepoUrl(event.target.value)}
+                aria-invalid={repoError ? true : undefined}
+                onChange={(event) => {
+                  setRepoUrl(event.target.value);
+                  setRepoError(null);
+                }}
                 placeholder="https://github.com/acme/cache-service.git"
               />
-              <FieldDescription>留空则创建一个空白工作区。</FieldDescription>
+              <FieldDescription>留空则创建一个空白工作区。支持 https 链接或 git@主机:路径。</FieldDescription>
+              <FieldError data-testid="project-repo-error">{repoError}</FieldError>
             </Field>
             <Field>
               <FieldLabel htmlFor="project-branch">基准分支</FieldLabel>

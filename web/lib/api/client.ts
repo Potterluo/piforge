@@ -131,11 +131,20 @@ export interface CreateProjectInput {
   default_branch?: string;
 }
 
+export interface UpdateProjectInput {
+  name?: string;
+  repo_url?: string;
+  default_branch?: string;
+}
+
 export const projects = {
   list: () => request<{ projects: Project[] }>("/v1/projects"),
   get: (id: string) => request<{ project: Project }>(`/v1/projects/${id}`),
   create: (input: CreateProjectInput) =>
     request<{ project: Project }>("/v1/projects", { method: "POST", body: input }),
+  update: (id: string, input: UpdateProjectInput) =>
+    request<{ project: Project }>(`/v1/projects/${id}`, { method: "PATCH", body: input }),
+  remove: (id: string) => request<{ ok: boolean }>(`/v1/projects/${id}`, { method: "DELETE" }),
 };
 
 // ---------------------------------------------------------------------------

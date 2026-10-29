@@ -11,6 +11,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 import { toast } from "sonner";
 import { useFeature } from "@/lib/session/queries";
 
@@ -90,7 +91,7 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
         if (next === "takeover") toast.success("你正在控制浏览器", { description: "agent 的浏览器操作已暂停。" });
         else toast.info("已切回观察模式", { description: "点击与键盘不再发送到页面。" });
       } catch (error) {
-        toast.error("切换失败", { description: error instanceof Error ? error.message : undefined });
+        toast.error("切换失败", { description: humanizeError(error) });
       }
     },
     [sessionId],
@@ -157,7 +158,7 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
             // than the bitmap decode path below.
             setPainted(true);
           } else if (message.type === "error") {
-            setError(message.message ?? "浏览器不可用");
+            setError(humanizeError(message.message, "浏览器不可用"));
             setStatus("error");
           }
         } catch {
@@ -296,7 +297,7 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
       onCaptured?.(result.path);
     } catch (error) {
       toast.error("截图失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       });
     } finally {
       setCapturing(false);
@@ -312,7 +313,7 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
     },
     onError: (error) =>
       toast.error("打开标签页失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       }),
   });
   const closeTab = async (id: string) => {
@@ -322,7 +323,7 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
       await queryClient.invalidateQueries({ queryKey: ["browser-tabs", sessionId] });
     } catch (error) {
       toast.error("关闭标签页失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       });
     }
   };

@@ -49,6 +49,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { api } from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 import { shortModel, truncate } from "@/lib/session/format";
 import type { QueuedPrompt } from "@/lib/session/reduce";
 import { ApiError } from "@/lib/types";
@@ -175,7 +176,7 @@ export function Composer({
       }
     } catch (error) {
       toast.error("发送失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       });
     } finally {
       setSending(false);
@@ -197,7 +198,7 @@ export function Composer({
       textareaRef.current?.focus();
     } catch (error) {
       toast.error("中断失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       });
     } finally {
       setInterrupting(false);
@@ -249,7 +250,7 @@ export function Composer({
       setImages((current) => [...current, ...drafts].slice(0, 4));
     } catch (error) {
       toast.error("添加图片失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       });
     }
   };
@@ -262,7 +263,7 @@ export function Composer({
       await api.sessions.update(sessionId, body);
     } catch (error) {
       toast.error("更新会话设置失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       });
     }
   };

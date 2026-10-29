@@ -7,9 +7,10 @@ import { GitCompare } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 import { formatRelative } from "@/lib/session/format";
 import type { CompareRow } from "@/lib/types";
 
@@ -22,25 +23,46 @@ import type { CompareRow } from "@/lib/types";
  * read "—" would be decoration pretending to be evidence.
  */
 export function ComparePage({ projectId, ids }: { projectId: string; ids: string[] }) {
+  const unique = new Set(ids);
+  const duplicate = unique.size !== ids.length;
+  const invalid = ids.length < 2 || duplicate || ids.length > 3;
+
   const compare = useQuery({
     queryKey: ["compare", projectId, ids.join(",")],
     queryFn: () => api.sessions.compare(ids),
-    enabled: ids.length >= 2,
+    enabled: !invalid,
   });
 
-  if (ids.length < 2) {
+  if (invalid) {
+    // A hand-edited URL (or the old single-session action) can ask for the same
+    // session twice. Fetching it would render two identical columns and call it
+    // "对比 2 个尝试", which is not a comparison — so it is rejected before the
+    // request, with the reason and a way back.
+    const title = duplicate
+      ? "不能拿同一个会话和自己对比"
+      : ids.length < 2
+        ? "选两个会话再对比"
+        : "一次最多对比三个会话";
+    const description = duplicate
+      ? "对比需要两个不同的会话。回到会话菜单，选择另一个会话作为对比对象。"
+      : ids.length < 2
+        ? "在会话的 ⋯ 菜单里选「对比」，然后选择同项目里的另一个会话。"
+        : "请从会话菜单重新选择，最多选三个不同的会话。";
     return (
       <div className="p-6" data-testid="compare-page">
-        <Empty>
+        <Empty data-testid="compare-invalid">
           <EmptyHeader>
             <EmptyMedia variant="icon">
               <GitCompare />
             </EmptyMedia>
-            <EmptyTitle>选两个会话再对比</EmptyTitle>
-            <EmptyDescription>
-              在会话的 ⋯ 菜单里选「对比」，或者从项目页勾选两个到三个分支。
-            </EmptyDescription>
+            <EmptyTitle>{title}</EmptyTitle>
+            <EmptyDescription>{description}</EmptyDescription>
           </EmptyHeader>
+          <EmptyContent>
+            <Button size="sm" variant="outline" render={<Link href={`/p/${projectId}`} />}>
+              返回项目
+            </Button>
+          </EmptyContent>
         </Empty>
       </div>
     );
@@ -62,7 +84,7 @@ export function ComparePage({ projectId, ids }: { projectId: string; ids: string
         <Skeleton className="h-40 w-full" />
       ) : compare.isError ? (
         <p className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-          读取失败：{compare.error instanceof Error ? compare.error.message : "未知错误"}
+          读取失败：{humanizeError(compare.error)}
         </p>
       ) : (
         <div className="grid gap-3 md:grid-cols-3" data-testid="compare-grid">

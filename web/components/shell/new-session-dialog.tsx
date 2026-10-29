@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Spinner } from "@/components/ui/spinner";
+import { humanizeError } from "@/lib/errors";
 import { useCreateSession, useProviders } from "@/lib/session/queries";
 
 const THINKING_LEVELS = [
@@ -96,7 +97,7 @@ export function NewSessionDialog({
       router.push(`/p/${projectId}/s/${result.session.id}`);
     } catch (error) {
       toast.error("创建会话失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       });
     }
   };

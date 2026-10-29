@@ -43,6 +43,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import api from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 import { baseName, gitLetterMap } from "@/lib/fs/file-kind";
 import type { FileNode } from "@/lib/types";
 import { useDebouncedCallback } from "@/hooks/use-debounced-callback";
@@ -216,7 +217,7 @@ export function FileTree({ sessionId, revision = 0, activePath, onOpenFile, onRe
         const response = await api.files.tree(sessionId, path, 1, showIgnored);
         setExtraDirs((previous) => ({ ...previous, [path]: response.nodes }));
       } catch (error) {
-        setActionError(error instanceof Error ? error.message : "目录加载失败");
+        setActionError(humanizeError(error, "目录加载失败"));
       } finally {
         setLoadingDirs((previous) => previous.filter((entry) => entry !== path));
       }
@@ -262,7 +263,7 @@ export function FileTree({ sessionId, revision = 0, activePath, onOpenFile, onRe
       setExtraDirs({});
       tree.reload();
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : "删除失败");
+      setActionError(humanizeError(error, "删除失败"));
     }
   }, [pending, sessionId, tree]);
 
@@ -291,7 +292,7 @@ export function FileTree({ sessionId, revision = 0, activePath, onOpenFile, onRe
       tree.reload();
       onOpenFile(path);
     } catch (error) {
-      setCreateError(error instanceof Error ? error.message : "创建失败");
+      setCreateError(humanizeError(error, "创建失败"));
     } finally {
       setCreating(false);
     }

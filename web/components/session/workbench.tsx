@@ -43,6 +43,7 @@ import { BranchTree } from "./branch-tree";
 import { Composer, type ModelOption } from "./composer";
 import { ContextMeter } from "./context-marker";
 import { ForkDialog } from "./fork-dialog";
+import { NoWorktreeState } from "./no-worktree-state";
 import { SessionEventsProvider, useSessionEventState } from "./session-events-provider";
 import { SessionStream } from "./session-stream";
 import { SessionLogsSheet } from "./session-logs-sheet";
@@ -302,11 +303,19 @@ function WorkbenchBody({
         <ResizableHandle withHandle />
 
         <ResizablePanel defaultSize="56" minSize="30" className="min-h-0">
-          <WorkspacePanels
-          sessionId={sessionId}
-          projectId={projectId}
-          followChunks={bashChunks}
-        />
+          {detail && !detail.worktree_id ? (
+            <NoWorktreeState
+              projectId={projectId}
+              projectName={project.data?.project.name}
+              repoUrl={project.data?.project.repo_url}
+            />
+          ) : (
+            <WorkspacePanels
+              sessionId={sessionId}
+              projectId={projectId}
+              followChunks={bashChunks}
+            />
+          )}
         </ResizablePanel>
       </ResizablePanelGroup>
 

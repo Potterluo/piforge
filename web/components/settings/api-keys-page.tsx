@@ -19,6 +19,7 @@ import {
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 import { formatRelative } from "@/lib/session/format";
 
 /**
@@ -44,7 +45,7 @@ export function ApiKeysPage() {
     },
     onError: (error) =>
       toast.error("创建失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       }),
   });
 
@@ -56,7 +57,7 @@ export function ApiKeysPage() {
     },
     onError: (error) =>
       toast.error("吊销失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       }),
   });
 
@@ -70,7 +71,10 @@ export function ApiKeysPage() {
   };
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-6" data-testid="api-keys-page">
+    <div
+      className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col gap-4 overflow-y-auto p-6"
+      data-testid="api-keys-page"
+    >
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="flex items-center gap-2 text-lg font-medium">

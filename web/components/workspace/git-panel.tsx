@@ -22,6 +22,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import api from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 import { toast } from "sonner";
 import type { DiffScope } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -145,7 +146,7 @@ export function GitChangesPanel() {
         await operation();
         git.refresh();
       } catch (error) {
-        setActionError(error instanceof Error ? error.message : "git 操作失败");
+        setActionError(humanizeError(error, "git 操作失败"));
       } finally {
         setBusy(false);
       }
@@ -359,7 +360,7 @@ function RemoteActions() {
       git.refresh();
       remote.reload();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "远端操作失败");
+      setError(humanizeError(cause, "远端操作失败"));
     } finally {
       setBusy(null);
     }

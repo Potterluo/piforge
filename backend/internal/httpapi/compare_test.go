@@ -51,10 +51,13 @@ func TestComparePutsBranchesSideBySide(t *testing.T) {
 		t.Fatalf("a session without a checkout reported a change size: %+v", body.Rows[1])
 	}
 
-	// Boundaries: one id is not a comparison, four is too many, and a session that is
-	// not yours must not appear.
+	// Boundaries: one id is not a comparison, four is too many, the same id twice
+	// is not a comparison either, and a session that is not yours must not appear.
 	if rec := env.doAuthed(http.MethodGet, "/v1/sessions/compare?ids="+main.ID, nil, c); rec.Code != http.StatusBadRequest {
 		t.Fatalf("single id = %d", rec.Code)
+	}
+	if rec := env.doAuthed(http.MethodGet, "/v1/sessions/compare?ids="+main.ID+","+main.ID, nil, c); rec.Code != http.StatusBadRequest {
+		t.Fatalf("duplicate id = %d %s", rec.Code, rec.Body.String())
 	}
 	env.mkUser("other@piforge.local", "pw2", contracts.RoleUser)
 	stranger := env.login("other@piforge.local", "pw2")

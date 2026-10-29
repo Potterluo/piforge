@@ -18,6 +18,7 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 
 const SEEDED_ACCOUNTS = [
   { email: "admin@piforge.local", role: "管理员" },
@@ -51,7 +52,7 @@ export default function LoginPage() {
       await queryClient.invalidateQueries({ queryKey: ["me"] });
       router.push("/");
     } catch (err) {
-      const message = err instanceof Error ? err.message : "未知错误";
+      const message = humanizeError(err);
       setError(message);
       toast.error("登录失败", { description: message });
     } finally {

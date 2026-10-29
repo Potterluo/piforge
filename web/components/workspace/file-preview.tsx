@@ -15,6 +15,7 @@ import {
 import {
   Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import api from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 import {
   type FileKind,
   baseName,
@@ -108,7 +109,7 @@ export function FilePreview({ sessionId, path, onSaved, onClose }: FilePreviewPr
       file.reload();
       onSaved?.();
     } catch (error) {
-      setSaveError(error instanceof Error ? error.message : "保存失败");
+      setSaveError(humanizeError(error, "保存失败"));
     } finally {
       setSaving(false);
     }

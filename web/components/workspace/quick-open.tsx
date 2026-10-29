@@ -19,6 +19,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { api } from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 import type { SearchResult } from "@/lib/types";
 
 /**
@@ -75,7 +76,7 @@ export function QuickOpen({
         })
         .catch((cause: unknown) => {
           if (cancelled) return;
-          setError(cause instanceof Error ? cause.message : "搜索失败");
+          setError(humanizeError(cause, "搜索失败"));
         })
         .finally(() => {
           if (!cancelled) setSearching(false);

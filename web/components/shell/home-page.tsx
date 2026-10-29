@@ -17,6 +17,7 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
+import { humanizeError } from "@/lib/errors";
 import { formatRelative, sandboxLabel } from "@/lib/session/format";
 import { useProjects } from "@/lib/session/queries";
 
@@ -55,7 +56,7 @@ export function HomePage() {
           </div>
         ) : projects.isError ? (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            项目列表加载失败：{projects.error.message}
+            项目列表加载失败：{humanizeError(projects.error)}
             <Button size="sm" variant="outline" onClick={() => void projects.refetch()}>
               重试
             </Button>

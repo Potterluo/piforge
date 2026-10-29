@@ -179,6 +179,8 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /v1/projects", s.authed(s.handleListProjects))
 	mux.Handle("POST /v1/projects", s.mutatingBearer(s.handleCreateProject))
 	mux.Handle("GET /v1/projects/{id}", s.authed(s.handleGetProject))
+	mux.Handle("PATCH /v1/projects/{id}", s.mutatingBearer(s.handlePatchProject))
+	mux.Handle("DELETE /v1/projects/{id}", s.mutatingBearer(s.handleDeleteProject))
 	mux.Handle("POST /v1/projects/{id}/sessions", s.mutatingBearer(s.handleCreateSession))
 
 	// Sessions.

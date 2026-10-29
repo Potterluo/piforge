@@ -112,6 +112,80 @@ func (s *Store) Project(ctx context.Context, userID, projectID string) (*contrac
 	return p, nil
 }
 
+// ProjectPatch is the input for UpdateProject. Nil fields are left alone; an
+// explicit empty repo URL is a valid edit (it turns the project into a blank
+// workspace), which is why this is pointers rather than zero-value checks.
+type ProjectPatch struct {
+	Name          *string
+	RepoURL       *string
+	DefaultBranch *string
+}
+
+// UpdateProject edits one project owned by userID.
+//
+// It exists for the recovery path: a session whose provisioning failed has no
+// worktree, and the only useful action there is "the repository address was
+// wrong, let me fix it". Ownership is proved first so a stranger gets the same
+// not_found as a missing id.
+func (s *Store) UpdateProject(ctx context.Context, userID, projectID string, patch ProjectPatch) (*contracts.Project, error) {
+	if _, err := s.Project(ctx, userID, projectID); err != nil {
+		return nil, err
+	}
+
+	sets := make([]string, 0, 3)
+	args := make([]any, 0, 4)
+	if patch.Name != nil {
+		name := strings.TrimSpace(*patch.Name)
+		if name == "" {
+			return nil, fmt.Errorf("store: update project %q: name is required: %w", projectID, ErrInvalid)
+		}
+		sets = append(sets, "name = ?")
+		args = append(args, name)
+	}
+	if patch.RepoURL != nil {
+		sets = append(sets, "repo_url = ?")
+		args = append(args, strings.TrimSpace(*patch.RepoURL))
+	}
+	if patch.DefaultBranch != nil {
+		branch := strings.TrimSpace(*patch.DefaultBranch)
+		if branch == "" {
+			branch = "main"
+		}
+		sets = append(sets, "default_branch = ?")
+		args = append(args, branch)
+	}
+	if len(sets) == 0 {
+		return s.Project(ctx, userID, projectID)
+	}
+
+	args = append(args, projectID, userID)
+	if _, err := s.w.ExecContext(ctx,
+		`UPDATE projects SET `+strings.Join(sets, ", ")+` WHERE id = ? AND user_id = ?`, args...); err != nil {
+		if isUniqueViolation(err) {
+			return nil, fmt.Errorf("store: update project %q: %w", projectID, ErrConflict)
+		}
+		return nil, fmt.Errorf("store: update project %q: %w", projectID, err)
+	}
+	return s.Project(ctx, userID, projectID)
+}
+
+// DeleteProject removes one project owned by userID.
+//
+// Foreign keys cascade to sandboxes, worktrees, sessions, runs and events, so a
+// deleted project cannot leave rows pointing at a repository that no longer
+// exists. The container behind a sandbox is not a row: the caller destroys it
+// first (best effort) and this method only removes the record.
+func (s *Store) DeleteProject(ctx context.Context, userID, projectID string) error {
+	if _, err := s.Project(ctx, userID, projectID); err != nil {
+		return err
+	}
+	res, err := s.w.ExecContext(ctx, `DELETE FROM projects WHERE id = ? AND user_id = ?`, projectID, userID)
+	if err != nil {
+		return fmt.Errorf("store: delete project %q: %w", projectID, err)
+	}
+	return requireOneRow(res, "store: delete project "+projectID)
+}
+
 func scanProject(sc interface{ Scan(dest ...any) error }) (*contracts.Project, error) {
 	var (
 		p          contracts.Project

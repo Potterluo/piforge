@@ -19,6 +19,7 @@ import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 import { qk } from "@/lib/session/queries";
 import { truncate } from "@/lib/session/format";
 
@@ -58,7 +59,7 @@ function ForkForm({
     },
     onError: (error) => {
       toast.error("分叉失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       });
     },
   });

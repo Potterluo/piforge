@@ -12,6 +12,7 @@ import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 import type { SupportNotice } from "@/lib/types";
 
 /**
@@ -37,7 +38,7 @@ export default function SupportPage() {
     },
     onError: (error) =>
       toast.error("无法查看", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       }),
   });
 

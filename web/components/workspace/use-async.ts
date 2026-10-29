@@ -2,6 +2,8 @@
 
 import * as React from "react";
 
+import { humanizeError } from "@/lib/errors";
+
 /**
  * The smallest async-data hook the workspace panels need.
  *
@@ -23,8 +25,8 @@ export interface AsyncResult<T> {
 
 /** Human message for anything thrown by the API client. */
 export function errorMessage(error: unknown): string {
-  if (error instanceof Error && error.message) return error.message;
-  if (typeof error === "string" && error) return error;
+  if (error instanceof Error && error.message) return humanizeError(error, "请求失败，请重试");
+  if (typeof error === "string" && error) return humanizeError(error, "请求失败，请重试");
   return "请求失败，请重试";
 }
 

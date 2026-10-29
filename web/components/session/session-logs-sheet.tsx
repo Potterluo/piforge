@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 
 /**
  * The agent's stderr tail (PRD FR-5.10).
@@ -46,7 +47,7 @@ export function SessionLogsSheet({
       setReason(result.reason ?? null);
       setError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "读取失败");
+      setError(humanizeError(cause, "读取失败"));
     } finally {
       setLoading(false);
     }

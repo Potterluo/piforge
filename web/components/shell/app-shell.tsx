@@ -2,6 +2,7 @@
 
 import { usePathname, useRouter } from "next/navigation";
 import { Suspense, useEffect, useState, type ReactNode } from "react";
+import { Search } from "lucide-react";
 
 import { AppSidebar } from "@/components/shell/app-sidebar";
 import { CommandPalette } from "@/components/shell/command-palette";
@@ -9,6 +10,7 @@ import { NewProjectDialog } from "@/components/shell/new-project-dialog";
 import { NewSessionDialog } from "@/components/shell/new-session-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { humanizeError } from "@/lib/errors";
 import { cn } from "@/lib/utils";
 import { SidebarInset, SidebarProvider, SidebarTrigger, useSidebar } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -86,7 +88,7 @@ function AppShellFrame({ children }: { children: ReactNode }) {
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
-            <p className="text-xs text-muted-foreground">{me.error.message}</p>
+            <p className="text-xs text-muted-foreground">{humanizeError(me.error, "无法连接后端")}</p>
             <Button variant="outline" onClick={() => void me.refetch()}>
               重试
             </Button>
@@ -104,9 +106,10 @@ function AppShellFrame({ children }: { children: ReactNode }) {
       <AppSidebar
         onNewProject={() => setNewProjectOpen(true)}
         onNewSession={() => setNewSessionOpen(true)}
+        onOpenPalette={() => setPaletteOpen(true)}
       />
       <SidebarInset className="flex h-svh min-h-0 flex-1 flex-col overflow-hidden">
-        <ShellTopBar />
+        <ShellTopBar onOpenPalette={() => setPaletteOpen(true)} />
         {children}
       </SidebarInset>
 
@@ -153,7 +156,7 @@ export function AppShell({ children }: { children: ReactNode }) {
  * On a wide screen the bar appears exactly when the sidebar is collapsed, and on
  * a narrow one it is always there (the sidebar is an overlay).
  */
-function ShellTopBar() {
+function ShellTopBar({ onOpenPalette }: { onOpenPalette: () => void }) {
   const { state } = useSidebar();
   return (
     <div
@@ -164,6 +167,17 @@ function ShellTopBar() {
     >
       <SidebarTrigger data-testid="sidebar-trigger" />
       <span className="text-sm font-medium">PiForge</span>
+      <Button
+        variant="ghost"
+        size="xs"
+        className="ml-auto"
+        aria-label="打开命令面板"
+        data-testid="command-palette-trigger-topbar"
+        onClick={onOpenPalette}
+      >
+        <Search />
+        搜索命令
+      </Button>
     </div>
   );
 }

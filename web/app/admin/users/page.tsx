@@ -54,6 +54,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { api } from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 import type { User } from "@/lib/types";
 import { formatRelative } from "@/lib/session/format";
 import { qk, useAdminUsers, useCurrentUser } from "@/lib/session/queries";
@@ -97,7 +98,7 @@ export default function AdminUsersPage() {
       setRole("user");
       refresh();
     },
-    onError: (error: Error) => toast.error(error.message),
+    onError: (error: Error) => toast.error(humanizeError(error)),
   });
 
   const updateUser = useMutation({
@@ -121,7 +122,7 @@ export default function AdminUsersPage() {
       toast.success(who ? `${who} · ${what}` : what);
       refresh();
     },
-    onError: (error: Error) => toast.error(error.message),
+    onError: (error: Error) => toast.error(humanizeError(error)),
   });
 
   if (me.isPending) {
@@ -474,7 +475,7 @@ function FeatureDialog({ user, onClose }: { user: User | null; onClose: () => vo
     },
     onError: (error) =>
       toast.error("保存失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       }),
   });
 

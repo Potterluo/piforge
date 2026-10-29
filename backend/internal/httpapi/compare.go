@@ -56,6 +56,14 @@ func (s *server) handleCompareSessions(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "一次最多对比三个会话"))
 		return
 	}
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if _, duplicate := seen[id]; duplicate {
+			s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "不能重复对比同一个会话"))
+			return
+		}
+		seen[id] = struct{}{}
+	}
 
 	rows := make([]compareRow, 0, len(ids))
 	projectID := ""

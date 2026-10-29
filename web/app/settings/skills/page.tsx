@@ -30,6 +30,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { api, type SkillFile } from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 import { formatRelative } from "@/lib/session/format";
 import { qk, useCurrentUser } from "@/lib/session/queries";
 
@@ -56,7 +57,7 @@ export default function SkillsPage() {
         void queryClient.invalidateQueries({ queryKey: ["skills"] });
       }
     },
-    onError: (error: Error) => toast.error("导入失败", { description: error.message }),
+    onError: (error: Error) => toast.error("导入失败", { description: humanizeError(error) }),
   });
   const [importUrl, setImportUrl] = useState("");
   const [importRef, setImportRef] = useState("");
@@ -99,7 +100,7 @@ export default function SkillsPage() {
     },
     onError: (error) => {
       toast.error("创建 Skill 失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       });
     },
   });
@@ -112,7 +113,7 @@ export default function SkillsPage() {
     },
     onError: (error) => {
       toast.error("删除失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       });
     },
   });

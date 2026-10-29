@@ -48,6 +48,7 @@ beforeEach(() => {
       id: "s1",
       user_id: "u1",
       project_id: "p1",
+      worktree_id: "wt1",
       kind: "main",
       title: "修缓存竞态",
       status: "idle",
@@ -106,5 +107,28 @@ describe("Workbench", () => {
   it("renders the session title once the session query resolves", async () => {
     renderWorkbench();
     await waitFor(() => expect(screen.getByText("修缓存竞态")).toBeInTheDocument());
+  });
+
+  it("replaces the workspace panels with recovery actions when there is no worktree", async () => {
+    vi.mocked(api.sessions.get).mockResolvedValue({
+      session: {
+        id: "s1",
+        user_id: "u1",
+        project_id: "p1",
+        kind: "main",
+        title: "没有工作区",
+        status: "idle",
+        created_at: "2026-01-01T00:00:00.000Z",
+        last_active_at: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    renderWorkbench();
+
+    await waitFor(() => expect(screen.getByTestId("no-worktree-state")).toBeInTheDocument());
+    expect(screen.queryByTestId("workspace-panels")).not.toBeInTheDocument();
+    expect(screen.getByTestId("no-worktree-fix")).toBeInTheDocument();
+    expect(screen.getByTestId("no-worktree-delete")).toBeInTheDocument();
+    // The old state offered a 重试 button whose request could never succeed.
+    expect(screen.queryByText("重试")).not.toBeInTheDocument();
   });
 });

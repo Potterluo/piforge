@@ -9,6 +9,7 @@ import { toast } from "sonner";
 import {
   Activity,
   Archive,
+  Check,
   Copy,
   Eye,
   ChevronRight,
@@ -24,6 +25,7 @@ import {
   MoreHorizontal,
   PenLine,
   Plus,
+  Search,
   Settings,
   Shield,
   Trash2,
@@ -67,7 +69,9 @@ import {
   SidebarSeparator,
 } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Kbd } from "@/components/ui/kbd";
 import { api } from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 import {
   formatRelative,
   sandboxLabel,
@@ -167,9 +171,11 @@ function KindGlyph({ kind }: { kind: Session["kind"] }) {
 export function AppSidebar({
   onNewProject,
   onNewSession,
+  onOpenPalette,
 }: {
   onNewProject: () => void;
   onNewSession: () => void;
+  onOpenPalette: () => void;
 }) {
   const [accountOpen, setAccountOpen] = React.useState(false);
   const pathname = usePathname();
@@ -214,6 +220,23 @@ export function AppSidebar({
         <SidebarMenu>
           <SidebarMenuItem className="flex items-center gap-1">
             <SidebarTrigger data-testid="sidebar-collapse" className="ml-auto" aria-label="收起侧边栏" />
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            {/*
+              A visible door to the palette. Ctrl+K was the only way in, which
+              made every command it contains invisible to anyone who does not
+              know the shortcut.
+            */}
+            <SidebarMenuButton
+              tooltip="命令面板（Ctrl+K）"
+              aria-label="打开命令面板"
+              data-testid="command-palette-trigger"
+              onClick={onOpenPalette}
+            >
+              <Search />
+              <span>搜索命令</span>
+              <Kbd className="ml-auto group-data-[collapsible=icon]:hidden">Ctrl K</Kbd>
+            </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>
             {/*
@@ -525,6 +548,33 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
   const [renaming, setRenaming] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  // The compare chooser: a session can only be compared with *other* sessions in
+  // its project. Picking `session.id` as the fallback (the old behaviour when a
+  // session had no parent) put the same id in the URL twice and the compare page
+  // dutifully rendered the session against itself.
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [compareWith, setCompareWith] = useState<string[]>([]);
+  const projectSessions = useProjectSessions(projectId);
+  const compareCandidates = (projectSessions.data?.sessions ?? []).filter(
+    (candidate) => candidate.id !== session.id,
+  );
+
+  const toggleCompareCandidate = (id: string) => {
+    setCompareWith((current) => {
+      if (current.includes(id)) return current.filter((value) => value !== id);
+      if (current.length >= 2) return current;
+      return [...current, id];
+    });
+  };
+
+  const startCompare = () => {
+    if (compareWith.length === 0) return;
+    const ids = [session.id, ...compareWith];
+    setCompareOpen(false);
+    setCompareWith([]);
+    setMenuOpen(false);
+    router.push(`/p/${projectId}/compare?ids=${ids.join(",")}`);
+  };
 
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: qk.sessions(projectId) });
@@ -541,7 +591,7 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
     },
     onError: (error) =>
       toast.error("重命名失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       }),
   });
 
@@ -556,7 +606,7 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
     },
     onError: (error) =>
       toast.error("操作失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       }),
   });
 
@@ -573,7 +623,7 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
     },
     onError: (error) =>
       toast.error("删除失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       }),
   });
 
@@ -627,12 +677,8 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
             data-testid="session-compare"
             onClick={() => {
               setMenuOpen(false);
-              // Compare against the session this one came from: that is the choice a
-              // person is actually making ("is this attempt better than where I
-              // started?").
-              const other = session.parent_id || session.id;
-              const ids = session.parent_id ? [session.id, other] : [other, other];
-              router.push(`/p/${projectId}/compare?ids=${ids.join(",")}`);
+              setCompareWith([]);
+              setCompareOpen(true);
             }}
           >
             <GitCompare />
@@ -652,7 +698,7 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
                   )
                   .catch((error: unknown) =>
                     toast.error("采纳失败", {
-                      description: error instanceof Error ? error.message : "未知错误",
+                      description: humanizeError(error),
                     }),
                   );
               }}
@@ -670,7 +716,7 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
                 .then((data) => router.push(`/p/${projectId}/s/${data.session.id}`))
                 .catch((error: unknown) =>
                   toast.error("克隆失败", {
-                    description: error instanceof Error ? error.message : "未知错误",
+                    description: humanizeError(error),
                   }),
                 );
             }}
@@ -692,6 +738,77 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+
+      <Dialog
+        open={compareOpen}
+        onOpenChange={(open) => {
+          setCompareOpen(open);
+          if (!open) setCompareWith([]);
+        }}
+      >
+        <DialogContent className="sm:max-w-md" data-testid="compare-chooser">
+          <DialogHeader>
+            <DialogTitle>对比其他会话</DialogTitle>
+            <DialogDescription>
+              选一个或两个「{session.title || "未命名会话"}」之外的会话，并排看每个尝试的改动和开销。
+            </DialogDescription>
+          </DialogHeader>
+
+          {compareCandidates.length === 0 ? (
+            <p
+              className="rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground"
+              data-testid="compare-no-others"
+            >
+              这个项目里还没有其他会话。先克隆当前会话，或者新建一个会话，再回来对比。
+            </p>
+          ) : (
+            <div className="flex max-h-72 flex-col gap-1 overflow-y-auto">
+              {compareCandidates.map((candidate) => {
+                const selected = compareWith.includes(candidate.id);
+                const full = compareWith.length >= 2 && !selected;
+                return (
+                  <button
+                    key={candidate.id}
+                    type="button"
+                    data-testid="compare-candidate"
+                    data-session-id={candidate.id}
+                    aria-pressed={selected}
+                    aria-disabled={full || undefined}
+                    disabled={full}
+                    onClick={() => toggleCompareCandidate(candidate.id)}
+                    className={`flex items-center gap-2 rounded-md border px-2 py-1.5 text-left transition-colors ${
+                      selected ? "border-primary/50 bg-muted" : "border-transparent hover:bg-muted"
+                    } disabled:cursor-not-allowed disabled:opacity-50`}
+                  >
+                    <span className="flex min-w-0 flex-1 flex-col">
+                      <span className="truncate text-sm">{candidate.title || "未命名会话"}</span>
+                      <span className="truncate text-xs text-muted-foreground">
+                        {sessionKindLabel(candidate.kind)} · {sessionStatusLabel(candidate.status)} ·{" "}
+                        {formatRelative(candidate.last_active_at)}
+                      </span>
+                    </span>
+                    {selected ? <Check className="size-4 shrink-0 text-primary" /> : null}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setCompareOpen(false)}>
+              取消
+            </Button>
+            <Button
+              type="button"
+              data-testid="compare-start"
+              disabled={compareWith.length === 0}
+              onClick={startCompare}
+            >
+              对比
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={renaming !== null} onOpenChange={(open) => !open && setRenaming(null)}>
         <DialogContent className="sm:max-w-md">

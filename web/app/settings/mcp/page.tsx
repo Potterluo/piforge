@@ -31,6 +31,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 import { formatRelative } from "@/lib/session/format";
 import { qk } from "@/lib/session/queries";
 
@@ -99,7 +100,7 @@ export default function McpPage() {
     },
     onError: (error) => {
       toast.error("添加失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       });
     },
   });
@@ -112,7 +113,7 @@ export default function McpPage() {
     },
     onError: (error) => {
       toast.error("删除失败", {
-        description: error instanceof Error ? error.message : "未知错误",
+        description: humanizeError(error),
       });
     },
   });
