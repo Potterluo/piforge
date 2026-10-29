@@ -32,6 +32,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { WorkspacePanels } from "@/components/workspace/workspace-panels";
 import { api } from "@/lib/api/client";
+import { humanizeError } from "@/lib/errors";
 import { ApiError } from "@/lib/types";
 import { toast } from "sonner";
 import { sessionKindLabel, shortModel } from "@/lib/session/format";
@@ -44,6 +45,7 @@ import { BranchTree } from "./branch-tree";
 import { Composer, type ModelOption } from "./composer";
 import { ContextMeter } from "./context-marker";
 import { ForkDialog } from "./fork-dialog";
+import { NoModelBar, hasUsableModel } from "./no-model-bar";
 import { NoWorktreeState } from "./no-worktree-state";
 import { SessionEventsProvider, useSessionEventState } from "./session-events-provider";
 import { SessionStream } from "./session-stream";
@@ -153,6 +155,27 @@ function WorkbenchBody({
   session: SessionQuery;
 }) {
   const { state, status } = useSessionEventState();
+  /**
+   * The server's refusal for a send that had no usable model behind it.
+   *
+   * It is kept here, above the composer, instead of in a toast: a toast vanishes
+   * while the message is still in the input, which is exactly the state a new
+   * account needs explained. The API client announces the code; the bar below
+   * carries the server's own sentence.
+   */
+  const [modelRefusal, setModelRefusal] = useState<string | null>(null);
+  useEffect(() => {
+    const onNoModel = (event: Event) => {
+      setModelRefusal(humanizeError((event as CustomEvent).detail));
+    };
+    window.addEventListener("piforge:no-model", onNoModel);
+    return () => window.removeEventListener("piforge:no-model", onNoModel);
+  }, []);
+  // A later send that starts a run means the configuration now works (or the
+  // user picked a working model); the old refusal must not outlive it.
+  useEffect(() => {
+    if (state.running) setModelRefusal(null);
+  }, [state.running]);
   // The first message names an untitled session on the server. Nothing pushes
   // that title, so a settled run is the cue to re-read it.
   const queryClient = useQueryClient();
@@ -226,6 +249,10 @@ function WorkbenchBody({
   // provider name); the session's own field is what the user picked. Guessing from
   // the first provider option produced a header that named a model nobody used.
   const runtimeModel = runtime.data?.model_ref;
+  // A model is only usable when the account can actually send to it. The picker
+  // lists every enabled provider, including inherited ones with no key, so the
+  // header cannot infer readiness from `models.length`.
+  const hasModel = providers.data ? hasUsableModel(providers.data.providers) : undefined;
   const timeline = useMemo(() => selectTimeline(state), [state]);
   // The agent's own bash output, which the follow view mirrors (FR-9.2).
   const bashChunks = useMemo(() => collectBashOutput(timeline), [timeline]);
@@ -234,7 +261,11 @@ function WorkbenchBody({
     ? shortModel(detail.model_ref)
     : runtimeModel && runtimeModel !== "unknown"
       ? `跟随默认（${shortModel(runtimeModel)}）`
-      : "跟随默认";
+      : // "unknown" is an internal state, not a model name. When the account
+        // has nothing to resolve, say so instead of printing it.
+        hasModel === false
+        ? "未配置"
+        : "跟随默认";
   // Branches are titled from their label; repeating it under the title reads as a
   // stutter rather than information.
   const showLabel = Boolean(detail?.label) && detail?.label !== title;
@@ -252,7 +283,7 @@ function WorkbenchBody({
               </Badge>
             ) : null}
           </h1>
-          <p className="truncate text-[11px] text-muted-foreground">
+          <p className="truncate text-[11px] text-muted-foreground" data-testid="session-meta">
             {project.data?.project.name ?? "项目"}
             {" · "}
             {sessionKindLabel(detail?.kind)}
@@ -312,6 +343,11 @@ function WorkbenchBody({
                 setForkTarget({ entryId, preview: point?.preview });
               }}
             />
+            {hasModel === false || modelRefusal ? (
+              <div className="px-3 pt-3" data-testid="no-model-slot">
+                <NoModelBar error={modelRefusal ?? undefined} />
+              </div>
+            ) : null}
             <Composer
               sessionId={sessionId}
               running={state.running}

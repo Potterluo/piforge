@@ -100,7 +100,16 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 
   setCsrfFromResponse(res);
 
-  if (!res.ok) throw await toError(res);
+  if (!res.ok) {
+    const error = await toError(res);
+    // A missing model is a configuration state, not a one-off toast. The
+    // workbench listens for this and keeps the refusal on screen above the
+    // composer, next to the message that did not send.
+    if (typeof window !== "undefined" && error.code === "no_model") {
+      window.dispatchEvent(new CustomEvent("piforge:no-model", { detail: error }));
+    }
+    throw error;
+  }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
