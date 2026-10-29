@@ -362,6 +362,7 @@ go run ./tools/wsprobe -base ws://127.0.0.1:7700 -session <session id> `
 这个工具在这次验证里也修了两处：`-cmd` 之后是等一个 `-grace` 窗口再把输出打出来（原来
 "输出里出现命令的最后一个词就停"，而终端会把命令本身回显一遍，于是永远停在回显上、看不到
 答案）；发给沙箱的行是 `\n` 而不是 `\r`（AIO 的行式会话认 `\n`，`\r` 只会被回显、不执行）。
+
 **Docker Desktop / Windows 的注意事项**（都是这台机器上的实测结论）：
 
 1. **socket 能用，但它是 Desktop 的代理**。compose 里写的是
@@ -399,7 +400,7 @@ go run ./tools/wsprobe -base ws://127.0.0.1:7700 -session <session id> `
 
 - 控制面不再需要 root，runner 是唯一持有 socket 的进程，而它的接口面是**六个动作**，
   不是"整个 Docker API"。审一个几百行的 runner 比审"控制面里每一处 shell 调用"容易；
-- runner 与 daemon 同机，所以 bind mount 的路径语义问题在它内部自洽（它知道宿主路径）；
+- runner 是唯一"靠近 daemon"的一方：单机形态下它和控制面跑在同一台机器上，路径语义直接成立；容器形态下它按卷名挂（§1.4 第 2 条），宿主路径根本不进这条链路。两种形态 provider 是同一份代码；
 - runner 无状态，重启不影响已存在的沙箱；
 - 以后换 K8s，runner 换成一个 K8s 控制器，控制面这一侧的调用形状不变 —— 这正是
   `SandboxProvider` 应该长的样子。
