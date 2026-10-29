@@ -145,6 +145,10 @@ func NewDocker(cfg DockerConfig) (*Docker, error) {
 // Name identifies the provider in the sandbox row.
 func (d *Docker) Name() string { return "docker" }
 
+// A branch session's worktree is created inside the container, as the sandbox
+// user; see AddWorktree.
+var _ contracts.WorktreeSandbox = (*Docker)(nil)
+
 // containerName is derived from (user, project), for the same reason the local provider
 // does it: two sessions in one project must share one sandbox, and the name has to be
 // recoverable after a restart of the control plane.
@@ -289,12 +293,19 @@ func (d *Docker) runContainer(ctx context.Context, name, userID, projectID, work
 	return err
 }
 
-// checkoutStep is one command of the container-side checkout plan.
-type checkoutStep struct {
-	// name is what an error names: init, clone, checkout or commit.
+// sandboxStep is one command of a provisioning plan that runs inside the
+// sandbox: the main checkout (planCheckout) or a branch session's linked
+// worktree (planBranchWorktree).
+type sandboxStep struct {
+	// name is what an error names: init, clone, checkout, commit,
+	// check-ref-format or worktree.
 	name string
-	// argv is the command, "git" first, run with /workspace/repo as its directory.
+	// argv is the command, "git" first.
 	argv []string
+	// dir is the working directory inside the container. Empty means the main
+	// checkout: every step of planCheckout runs there. Worktree steps name the
+	// repository explicitly because `git worktree add` is a repository command.
+	dir string
 	// fallback runs when argv exits non-zero, and replaces it. It exists for one
 	// case: cloning a repository whose requested branch is not a local branch yet.
 	// Git's checkout DWIM usually handles that, but Local's gitx.CreateAndCheckout
@@ -311,7 +322,7 @@ type checkoutStep struct {
 // called repeatedly and moving a HEAD the user is building on would be the worse
 // bug. A .git without a commit is not "ready": the empty commit is what worktrees
 // branch from, so a half-provisioned checkout is resumed instead of trusted.
-func planCheckout(ready bool, repoURL, branch string) []checkoutStep {
+func planCheckout(ready bool, repoURL, branch string) []sandboxStep {
 	if ready {
 		return nil
 	}
@@ -320,7 +331,7 @@ func planCheckout(ready bool, repoURL, branch string) []checkoutStep {
 		branch = DefaultInitialBranch
 	}
 	if url := strings.TrimSpace(repoURL); url != "" {
-		return []checkoutStep{
+		return []sandboxStep{
 			// "." because the checkout directory already exists (and must, so that
 			// the bind mount cannot be replaced by a clone volume silently).
 			{name: "clone", argv: []string{"git", "clone", "--quiet", "--", url, "."}},
@@ -331,7 +342,7 @@ func planCheckout(ready bool, repoURL, branch string) []checkoutStep {
 			},
 		}
 	}
-	return []checkoutStep{
+	return []sandboxStep{
 		{name: "init", argv: []string{"git", "init", "-q", "-b", branch}},
 		// The identity is written into the checkout inside the container instead of
 		// being passed with -c on the commit: every later commit from the panel
@@ -341,6 +352,39 @@ func planCheckout(ready bool, repoURL, branch string) []checkoutStep {
 		{name: "init", argv: []string{"git", "config", "user.email", sandboxGitEmail}},
 		{name: "commit", argv: []string{"git", "commit", "--allow-empty", "--no-gpg-sign", "-q", "-m", initialCommit}},
 	}
+}
+
+// planBranchWorktree is the argv list that makes worktreeDir a linked worktree of
+// repoDir on branch.
+//
+// It is pure for the same reason planCheckout is: the commands, their order and
+// the directory each one runs in are the contract, and a test pins them without a
+// container. ready is the idempotency gate — a retry after `git worktree add`
+// succeeded but its store row did not must not add the worktree twice ("already
+// exists") — and an existing worktree is left exactly as it is.
+//
+// check-ref-format comes first so an invalid branch name fails before git creates
+// anything; `worktree add -b` is then the single command that creates the branch
+// and the checkout, in the repository (a worktree cannot be added from a
+// subdirectory of the repository).
+func planBranchWorktree(ready bool, repoDir, worktreeDir, branch string) ([]sandboxStep, error) {
+	if ready {
+		return nil, nil
+	}
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return nil, fmt.Errorf("a branch name is required to add a worktree")
+	}
+	// git would read a leading dash as an option to `worktree add -b`, and
+	// check-ref-format would not catch it because the argv never reaches the
+	// branch-name parser.
+	if strings.HasPrefix(branch, "-") {
+		return nil, fmt.Errorf("invalid branch name %q: it starts with a dash", branch)
+	}
+	return []sandboxStep{
+		{name: "check-ref-format", dir: repoDir, argv: []string{"git", "check-ref-format", "--branch", branch}},
+		{name: "worktree", dir: repoDir, argv: []string{"git", "worktree", "add", "-b", branch, "--", worktreeDir}},
+	}, nil
 }
 
 // ensureCheckout makes /workspace/repo a git checkout owned by the sandbox user.
@@ -376,12 +420,12 @@ func (d *Docker) ensureCheckout(ctx context.Context, name, repoURL, branch strin
 		return fmt.Errorf("sandbox: docker: prepare %s: %s", containerRepoDir, commandFailure(res))
 	}
 	for _, step := range steps {
-		err := runCheckoutStep(ctx, shell, step.argv)
+		err := runSandboxStep(ctx, shell, step)
 		if err == nil {
 			continue
 		}
 		if step.fallback != nil {
-			ferr := runCheckoutStep(ctx, shell, step.fallback)
+			ferr := runSandboxStep(ctx, shell, sandboxStep{name: step.name, dir: step.dir, argv: step.fallback})
 			if ferr == nil {
 				continue
 			}
@@ -392,18 +436,137 @@ func (d *Docker) ensureCheckout(ctx context.Context, name, repoURL, branch strin
 	return nil
 }
 
+// AddWorktree creates a branch session's linked worktree inside the sandbox, as
+// the sandbox user, through the container's own API (contracts.WorktreeSandbox).
+//
+// The defect this exists for: provisioning used to call `git worktree add` on the
+// host, through the bind mount. The worktree directory and
+// `<main>/.git/worktrees/<slug>` then belonged to the host user while the panel's
+// shell runs as `gem` (uid 1000), so the first `git stage` in a branch session
+// died with
+//
+//	fatal: Unable to create '.../.git/worktrees/<slug>/index.lock': Permission denied
+//
+// (and on a host whose absolute paths do not exist inside the container, git
+// answered "not a git repository" instead, because the worktree's `.git` file
+// recorded a host path). Running the same command inside the container gives the
+// administrative files to `gem` and makes the `.git` file point at
+// `/workspace/repo/.git/worktrees/<slug>`, which is where the container's git
+// looks.
+//
+// planBranchWorktree decides which commands run, in what order; this is only
+// their execution, and it uses exactly the rules ensureCheckout established: the
+// image's shell already runs as the sandbox user, cwd is prefixed as
+// `cd -- <dir> &&` by aio.Client.Exec because the image ignores the field, every
+// git command carries `-c safe.directory=<repo>`, and no command is `exit`.
+func (d *Docker) AddWorktree(ctx context.Context, sandboxID, repoDir, path, branch string) error {
+	name := d.resolve(sandboxID)
+	repo, err := d.ContainerPath(repoDir)
+	if err != nil {
+		return fmt.Errorf("sandbox: docker: add worktree: repository %q: %w", repoDir, err)
+	}
+	worktree, err := d.ContainerPath(path)
+	if err != nil {
+		return fmt.Errorf("sandbox: docker: add worktree: %q: %w", path, err)
+	}
+
+	// The worktree is created through the sandbox API, so the endpoint has to
+	// answer first; an already-running container answers immediately.
+	shell, err := d.waitForSandboxShell(ctx, name, probeSandboxAPI)
+	if err != nil {
+		return fmt.Errorf("sandbox: docker: add worktree %s: %w", worktree, err)
+	}
+	ready, err := probeWorktreeReady(ctx, shell, worktree)
+	if err != nil {
+		return fmt.Errorf("sandbox: docker: add worktree %s: %w", worktree, err)
+	}
+	steps, err := planBranchWorktree(ready, repo, worktree, branch)
+	if err != nil {
+		return fmt.Errorf("sandbox: docker: add worktree %s: %w", worktree, err)
+	}
+	for _, step := range steps {
+		if err := runSandboxStep(ctx, shell, step); err != nil {
+			return fmt.Errorf("sandbox: docker: %s %s: %w", step.name, worktree, err)
+		}
+	}
+	return nil
+}
+
+// probeWorktreeReady reports whether a session worktree already exists as a
+// usable linked worktree. It is the idempotency gate of planBranchWorktree: a
+// retry sees "ready" and leaves the checkout alone, while a path that is missing
+// or not a repository is (re)created.
+func probeWorktreeReady(ctx context.Context, shell checkoutShell, worktreeDir string) (bool, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, checkoutProbeTimeout)
+	defer cancel()
+	quoted := aio.Quote(worktreeDir)
+	script := `if [ -e ` + quoted + `/.git ] && git -c ` + aio.Quote("safe.directory="+worktreeDir) +
+		` -C ` + quoted + ` rev-parse --verify --quiet HEAD >/dev/null 2>&1; then echo ready; else echo absent; fi`
+	res, err := shell.Exec(probeCtx, script, containerWorkspace)
+	if err != nil {
+		return false, err
+	}
+	if res.ExitCode != 0 {
+		return false, fmt.Errorf("exit %d: %s", res.ExitCode, strings.TrimSpace(res.Output))
+	}
+	return strings.TrimSpace(res.Output) == "ready", nil
+}
+
+// probeSandboxAPI is the liveness probe for a container whose API is needed but
+// whose checkout already exists: it proves a command actually ran, which is what
+// "the image's services are listening" means here.
+func probeSandboxAPI(ctx context.Context, shell checkoutShell) error {
+	probeCtx, cancel := context.WithTimeout(ctx, checkoutProbeTimeout)
+	defer cancel()
+	const marker = "piforge-api-ready"
+	res, err := shell.Exec(probeCtx, "echo "+marker, containerWorkspace)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("exit %d: %s", res.ExitCode, strings.TrimSpace(res.Output))
+	}
+	if !strings.Contains(res.Output, marker) {
+		return fmt.Errorf("the sandbox API answered without running the probe: %s", strings.TrimSpace(res.Output))
+	}
+	return nil
+}
+
 // waitForCheckoutShell waits until the container's HTTP API answers, then
 // reports whether the checkout is already usable.
 //
-// `docker run -d` returns before the image's services are listening, so the
-// first calls can fail with connection refused. Only that startup window is
-// retried, and it is bounded: a container that never serves the API is an error
-// naming the checkout, not an invitation to shell out to Docker. The readiness
-// answer comes from the same probe used by every earlier build, just executed by
-// the sandbox's own shell this time.
+// The readiness answer comes from the same probe used by every earlier build,
+// just executed by the sandbox's own shell this time. The retry window itself is
+// waitForSandboxShell's: `docker run -d` returns before the image's services are
+// listening.
 func (d *Docker) waitForCheckoutShell(ctx context.Context, name string) (checkoutShell, bool, error) {
+	var ready bool
+	shell, err := d.waitForSandboxShell(ctx, name, func(probeCtx context.Context, shell checkoutShell) error {
+		isReady, probeErr := probeCheckoutReady(probeCtx, shell)
+		if probeErr != nil {
+			return probeErr
+		}
+		ready = isReady
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return shell, ready, nil
+}
+
+// waitForSandboxShell waits until the container's HTTP API answers and returns a
+// shell that runs commands inside it, as the sandbox user. probe is the liveness
+// test: an error means "the API is not serving yet, try again"; any answer means
+// it is up.
+//
+// `docker run -d` returns before the image's services are listening, so the first
+// calls can fail with connection refused. Only that startup window is retried,
+// and it is bounded: a container that never serves the API is an error naming the
+// step, not an invitation to shell out to Docker.
+func (d *Docker) waitForSandboxShell(ctx context.Context, name string, probe func(context.Context, checkoutShell) error) (checkoutShell, error) {
 	if d.cfg.APIPort <= 0 && d.openCheckout == nil {
-		return nil, false, fmt.Errorf("the checkout runs through the sandbox API, but this provider publishes no api port (DockerConfig.APIPort); " +
+		return nil, fmt.Errorf("the checkout runs through the sandbox API, but this provider publishes no api port (DockerConfig.APIPort); " +
 			"the docker CLI is not a fallback")
 	}
 	deadline := time.Now().Add(checkoutAPIWait)
@@ -423,20 +586,20 @@ func (d *Docker) waitForCheckoutShell(ctx context.Context, name string) (checkou
 			}
 		}
 		if shell != nil {
-			ready, probeErr := probeCheckoutReady(ctx, shell)
-			if probeErr == nil {
-				return shell, ready, nil
+			if probeErr := probe(ctx, shell); probeErr == nil {
+				return shell, nil
+			} else {
+				lastErr = probeErr
 			}
-			lastErr = probeErr
 		}
 		if time.Now().After(deadline) {
-			return nil, false, fmt.Errorf("the sandbox API did not answer within %s: %w", checkoutAPIWait, lastErr)
+			return nil, fmt.Errorf("the sandbox API did not answer within %s: %w", checkoutAPIWait, lastErr)
 		}
 		timer := time.NewTimer(checkoutAPIPoll)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, false, ctx.Err()
+			return nil, ctx.Err()
 		case <-timer.C:
 		}
 	}
@@ -463,16 +626,21 @@ func probeCheckoutReady(ctx context.Context, shell checkoutShell) (bool, error) 
 	return strings.TrimSpace(res.Output) == "ready", nil
 }
 
-// runCheckoutStep runs one planned argv in the checkout directory.
-func runCheckoutStep(ctx context.Context, shell checkoutShell, argv []string) error {
-	command, err := checkoutCommand(argv)
+// runSandboxStep runs one planned argv in the step's directory (the main
+// checkout when the step names none).
+func runSandboxStep(ctx context.Context, shell checkoutShell, step sandboxStep) error {
+	dir := step.dir
+	if strings.TrimSpace(dir) == "" {
+		dir = containerRepoDir
+	}
+	command, err := checkoutCommand(step.argv, dir)
 	if err != nil {
 		return err
 	}
 	// The image accepts cwd but ignores it, so aio.Client.Exec prefixes the
 	// command with `cd -- <dir> &&`; the directory is in the command line that
 	// actually crosses the API, not only in JSON the image may drop.
-	res, err := shell.Exec(ctx, command, containerRepoDir)
+	res, err := shell.Exec(ctx, command, dir)
 	if err != nil {
 		return err
 	}
@@ -485,18 +653,18 @@ func runCheckoutStep(ctx context.Context, shell checkoutShell, argv []string) er
 // checkoutCommand turns one planned argv into the shell string the sandbox API
 // runs, as the sandbox user.
 //
-// git gets `-c safe.directory=<containerRepoDir>`. A checkout arrived through a
-// bind mount, and on a Docker Desktop/drvfs host the mount can show it as owned
-// by somebody other than the shell account; git 2.34 then refuses the repository
-// with "detected dubious ownership", which turned every panel git view into a
-// 500. The path is exactly the workspace this sandbox owns, so trusting it is
-// narrower than `safe.directory=*`.
-func checkoutCommand(argv []string) (string, error) {
+// git gets `-c safe.directory=<dir>`. A checkout arrived through a bind mount,
+// and on a Docker Desktop/drvfs host the mount can show it as owned by somebody
+// other than the shell account; git 2.34 then refuses the repository with
+// "detected dubious ownership", which turned every panel git view into a 500. The
+// path is exactly the directory this command was told to run in — a workspace the
+// sandbox owns — so trusting it is narrower than `safe.directory=*`.
+func checkoutCommand(argv []string, dir string) (string, error) {
 	if len(argv) == 0 {
 		return "", fmt.Errorf("sandbox: docker: checkout step has no command")
 	}
 	quoted := make([]string, 0, len(argv)+3)
-	quoted = append(quoted, aio.Quote(argv[0]), aio.Quote("-c"), aio.Quote("safe.directory="+containerRepoDir))
+	quoted = append(quoted, aio.Quote(argv[0]), aio.Quote("-c"), aio.Quote("safe.directory="+dir))
 	for _, arg := range argv[1:] {
 		quoted = append(quoted, aio.Quote(arg))
 	}

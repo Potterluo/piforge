@@ -197,7 +197,7 @@ func (s *Service) EnsureWorktree(
 		return existing, nil
 	}
 
-	if err := s.cfg.Git.AddWorktree(ctx, RepoDir(sb), path, branch, true); err != nil {
+	if err := s.addWorktree(ctx, sb, RepoDir(sb), path, branch); err != nil {
 		return nil, fmt.Errorf("provision: add worktree %s: %w", branch, err)
 	}
 
@@ -219,6 +219,32 @@ func (s *Service) EnsureWorktree(
 		return nil, err
 	}
 	return wt, nil
+}
+
+// addWorktree creates a branch session's linked worktree, inside the sandbox
+// when the provider can run commands there and on the control plane's own
+// filesystem otherwise.
+//
+// The choice follows the provider, not a flag: a linked worktree's
+// administrative files (`<main>/.git/worktrees/<slug>` and the `.git` file in the
+// worktree) belong to whoever ran `git worktree add`. With -sandbox docker the
+// panel's shell and git run inside the container as `gem`, so a worktree created
+// by the host leaves those files owned by another account and points the `.git`
+// file at a host path the container cannot resolve: the first `git stage` in a
+// branch session fails with
+//
+//	fatal: Unable to create '.../.git/worktrees/<slug>/index.lock': Permission denied
+//
+// A provider that cannot enter its sandbox has no such second account — the local
+// provider's directories are the same filesystem the control plane's git runs on
+// — and keeps using gitx (which also validates the branch and path on the host).
+// Existing worktrees are never rewritten: the reuse checks above return the
+// recorded row before this is reached.
+func (s *Service) addWorktree(ctx context.Context, sb *contracts.Sandbox, repoDir, path, branch string) error {
+	if inside, ok := s.cfg.Sandbox.(contracts.WorktreeSandbox); ok {
+		return inside.AddWorktree(ctx, sb.ID, repoDir, path, branch)
+	}
+	return s.cfg.Git.AddWorktree(ctx, repoDir, path, branch, true)
 }
 
 // mountTooling projects the user's skills and MCP servers into a checkout.

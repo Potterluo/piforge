@@ -545,6 +545,26 @@ type SandboxProvider interface {
 	Exec(ctx context.Context, sandboxID string, argv []string, dir string) (string, error)
 }
 
+// WorktreeSandbox is the optional half of SandboxProvider that creates a
+// session's linked worktree inside the sandbox instead of on the control plane's
+// own filesystem.
+//
+// It exists because a linked worktree's administrative files belong to whoever
+// ran `git worktree add`: `<main>/.git/worktrees/<name>` and the `.git` file in
+// the worktree itself. With a container provider the shell — and the panel's git
+// — runs as the sandbox user, so a worktree created by the host is owned by
+// another account (stage then dies on `<wt>/index.lock`), and its `.git` file
+// records a host path the container cannot resolve. A provider that can run
+// commands inside its sandbox implements this; providers without that capability
+// keep using the control plane's git (provision.Config.Git) and the host layout,
+// which is what -sandbox local needs.
+type WorktreeSandbox interface {
+	// AddWorktree creates a linked worktree of repoDir at path on branch,
+	// creating branch from the repository's HEAD. All three paths are host-side
+	// paths in the sandbox's workspace; translating them is the provider's job.
+	AddWorktree(ctx context.Context, sandboxID, repoDir, path, branch string) error
+}
+
 // ---------------------------------------------------------------------------
 // Providers (BYOK, PRD §5.7)
 // ---------------------------------------------------------------------------

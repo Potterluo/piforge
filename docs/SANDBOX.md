@@ -65,6 +65,7 @@ level=WARN msg="sandbox placement is mixed: these features still run on the host
   `<data>/sandboxes/<user>/<project>`，不存在就 `docker run -d`，存在就复用；**只把这个项目的
   目录**挂到 `/workspace`，暂停/重启不丢工作区；
 - `Ensure` 还在容器起来之后、返回 READY 之前把 `/workspace/repo` 变成 checkout，见下一节；
+- 分支会话的 linked worktree 也在容器里创建（as `gem`），见"分支会话"一节；
 - `RootDir`：**宿主侧**那个 per-project 绑定目录，不是容器里的 `/workspace`。控制面自己的
   git/文件读写跑在宿主上，写的位置必须正好是容器看到的位置；`ContainerPath` 负责把
   `<data>/sandboxes/<user>/<project>/...` 翻译成 `/workspace/...`；
@@ -158,6 +159,81 @@ checkout 改走 `/v1/shell/exec` 之后再跑同一条链路（容器 `piforge-c
 
 `internal/sandbox/docker_test.go` 会真的起一个容器跑完整生命周期；没有 docker 或
 daemon 不可达时**跳过并说明原因**，不会假装通过。
+
+## 分支会话：worktree 由容器创建，否则 stage 会死在 index.lock
+
+`Ensure` 把主 checkout 建在容器里之后，分支会话仍然是坏的：provisioning 用**宿主**的
+`git worktree add` 通过绑定挂载建 linked worktree，于是 `<pair>/repo/.git/worktrees/<slug>/`
+和 worktree 目录都归宿主（在容器里看是 root），而面板的 shell 与 git 以 `gem`（uid 1000）
+运行。表现就是第一次 `git stage` 500：
+
+```
+fatal: Unable to create '.../.git/worktrees/<slug>/index.lock': Permission denied
+```
+
+同一个原因还有第二种表现：worktree 的 `.git` 文件里写的是宿主绝对路径，容器里根本解析不到。
+在 Windows/Docker Desktop 上实测到的就是这一种（见下），根因是同一个决定——谁运行
+`git worktree add`。
+
+规则：**谁运行 `git worktree add`，`.git/worktrees/<slug>` 和 worktree 里的 `.git` 就归谁**。
+容器 provider 因此自己建（`contracts.WorktreeSandbox`、`Docker.AddWorktree`），走的是和
+checkout 一样的路：容器自己的 HTTP API（`POST /v1/shell/exec`），命令由镜像的 shell 以 `gem`
+执行，`cwd` 由 `aio.Client.Exec` 拼成 `cd -- <dir> &&`，每条 git 带
+`-c safe.directory=<repo>`，不发 `exit`。`provision` 用类型断言选路：provider 实现了
+`WorktreeSandbox` 就在沙箱里建，否则（`-sandbox local`）仍用控制面自己的 git——不是散落的
+flag 判断。
+
+| 情况 | 执行 |
+|---|---|
+| 该路径已是可用 worktree（`.git` 存在且 `HEAD` 可解析） | 什么都不做：重试不会 "already exists"，也不会改写已有 checkout |
+| 否则 | `git check-ref-format --branch <branch>`，再 `git -c safe.directory=<repo> worktree add -b <branch> -- /workspace/worktrees/<slug>`（cwd 是 `/workspace/repo`，worktree 命令必须跑在仓库里） |
+
+不变量：
+
+- 仍是主 checkout 的**真 linked worktree**：`git worktree list --porcelain` 里有它，分支上的
+  提交进同一个对象库，diff/合并照旧；
+- `ContainerPath` 映射没变：`<pair>/worktrees/<slug>` ↔ `/workspace/worktrees/<slug>`；
+- 已有会话不被静默改写：`EnsureWorktree` 先按 session 的 `WorktreeID`、再按路径查已有记录并
+  直接复用，只有缺失时才创建；
+- `-sandbox local` 走宿主 git 的路径完全没变（没有容器可进）；
+- 注意 `-sandbox docker -sandbox-files host` 这种混合放置：worktree 的 `.git` 现在指向容器路径
+  `/workspace/repo/.git/worktrees/<slug>`，宿主的 git 解析不到它。docker 下默认 `files=remote`
+  （面板 git 本来就在容器里跑），混合放置启动时已经会 warn。
+
+2026-10-29 实测（`piforged -sandbox docker` + AIO 1.11.0，容器 `piforge-1edced17e1c125fa`）。
+
+复现（修复前）：分支会话建出来后 `GET /git/status`、`POST /git/stage`、`POST /git/commit`
+全 500，服务端日志：
+
+```
+level=ERROR msg="request failed" method=GET path=/v1/sessions/ses_.../git/status status=500
+error="... status --porcelain ... exit 128: fatal: not a git repository:
+/workspace/worktrees/branch-repro/C:/Users/.../repo/.git/worktrees/branch-repro"
+```
+
+（Linux 宿主上同一处会是 `Unable to create '.../index.lock': Permission denied`：宿主创建、
+容器写入。两种都是宿主 git 建 worktree 的结果。）
+
+修复后：
+
+| 步骤 | 证据 |
+|---|---|
+| `POST /v1/projects/<id>/sessions {"kind":"branch","label":"branch-fix"}` | `201`，`worktree_id=wt_01M636N6D8T1BHVKZF99SHK42H` |
+| `PUT /v1/sessions/<branch>/files?path=branch.txt` | `200 {"ok":true}` |
+| `GET /v1/sessions/<branch>/git/status` | `200 {"branch":"piforge/branch-fix","clean":false,"changes":[{"path":"branch.txt","index":"?","worktree":"?"}]}` |
+| `POST /v1/sessions/<branch>/git/stage` | `200 {"ok":true}` |
+| `POST /v1/sessions/<branch>/git/commit` | `200 {"commit":"dacee75c69e327bd9b4873043957b240e16d77bb"}` |
+| `docker exec -u gem <c> git -C /workspace/worktrees/branch-fix log --oneline -3` | `dacee75 feat: branch session commit` / `aa3cc8e feat: main session commit` / `a72a1fa piforge: initial commit` |
+| `docker exec -u gem <c> sh -c 'cd /workspace/repo && stat -c %U .git/worktrees/branch-fix'` | `gem` |
+| `docker exec -u gem <c> stat -c %U /workspace/worktrees/branch-fix` | `gem` |
+| `docker exec -u gem <c> git -C /workspace/repo worktree list` | `/workspace/repo aa3cc8e [main]` / `/workspace/worktrees/branch-fix dacee75 [piforge/branch-fix]` |
+
+测试：`TestPlanBranchWorktree`（纯函数：命令、顺序、cwd）、
+`TestDockerProviderBranchWorktreeUsesTheSandboxAPI`（只有 API 的假 shell，钉住每条命令、
+safe.directory 和不出现 docker/exit）、`TestBranchWorktreeUsesTheProvider`（provider 能力优先，
+宿主 git 指向不存在的二进制）、`TestBranchWorktreeInDockerStagesAndCommitsAsGem`（真镜像：
+建分支会话 → 以 gem stage+commit → `stat %U` 是 gem；没有 `PIFORGE_TEST_SANDBOX_IMAGE` 时
+**跳过并说明原因**）。
 
 ## 浏览器：已能连上容器里的 Chromium
 

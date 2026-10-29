@@ -542,19 +542,34 @@ type recordedShellCall struct {
 	cwd     string
 }
 
-// fakeCheckoutShell records commands and answers the readiness probe. It has no
+// fakeCheckoutShell records commands and answers the readiness probes. It has no
 // Docker connection at all, which is how the test below proves the checkout path
 // needs neither the CLI nor a local daemon.
 type fakeCheckoutShell struct {
 	mu    sync.Mutex
 	calls []recordedShellCall
 	ready bool
+	// worktreeReady answers probeWorktreeReady. It is separate from ready because
+	// the checkout and a branch worktree are two different paths, and a test must
+	// be able to say "the checkout is ready but the worktree is not" — the shape a
+	// fresh branch session has.
+	worktreeReady bool
 }
 
 func (f *fakeCheckoutShell) Exec(ctx context.Context, command, cwd string) (aio.ShellResult, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, recordedShellCall{command: command, cwd: cwd})
 	f.mu.Unlock()
+	if strings.Contains(command, "piforge-api-ready") {
+		return aio.ShellResult{Output: "piforge-api-ready"}, nil
+	}
+	// The worktree probe also ends in `echo ready`, so it is matched first.
+	if strings.Contains(command, "/worktrees/") && strings.Contains(command, "echo ready") {
+		if f.worktreeReady {
+			return aio.ShellResult{Output: "ready"}, nil
+		}
+		return aio.ShellResult{Output: "absent"}, nil
+	}
 	if strings.Contains(command, "echo ready") {
 		if f.ready {
 			return aio.ShellResult{Output: "ready"}, nil
@@ -988,5 +1003,202 @@ func TestDockerProviderCheckoutFailureNamesTheStep(t *testing.T) {
 	// be left behind for the next Ensure to re-adopt as if it were healthy.
 	if _, ierr := provider.inspect(ctx, provider.containerName(userID, projectID)); ierr == nil {
 		t.Fatal("a container whose checkout failed was left behind")
+	}
+}
+
+// A branch session's worktree plan is the contract: check the branch name, then
+// add the worktree from the repository, with the exact argv and directory each
+// step runs with. It is pure, so this test needs no Docker.
+func TestPlanBranchWorktree(t *testing.T) {
+	const (
+		repoDir     = containerRepoDir
+		worktreeDir = "/workspace/worktrees/fix-cache"
+	)
+	tests := []struct {
+		name        string
+		ready       bool
+		worktreeDir string
+		branch      string
+		want        [][]string
+		wantName    []string
+		wantErr     string
+	}{
+		{
+			name:        "fresh branch: validate the name, then add the worktree",
+			worktreeDir: worktreeDir,
+			branch:      "piforge/fix-cache",
+			want: [][]string{
+				{"git", "check-ref-format", "--branch", "piforge/fix-cache"},
+				{"git", "worktree", "add", "-b", "piforge/fix-cache", "--", worktreeDir},
+			},
+			wantName: []string{"check-ref-format", "worktree"},
+		},
+		{
+			name:        "the branch name is trimmed before it reaches git",
+			worktreeDir: worktreeDir,
+			branch:      "  piforge/fix-cache  ",
+			want: [][]string{
+				{"git", "check-ref-format", "--branch", "piforge/fix-cache"},
+				{"git", "worktree", "add", "-b", "piforge/fix-cache", "--", worktreeDir},
+			},
+			wantName: []string{"check-ref-format", "worktree"},
+		},
+		{
+			name:        "an existing worktree is left exactly as it is",
+			ready:       true,
+			worktreeDir: worktreeDir,
+			branch:      "piforge/fix-cache",
+		},
+		{
+			name:        "an empty branch is refused before git runs",
+			worktreeDir: worktreeDir,
+			branch:      "   ",
+			wantErr:     "branch name is required",
+		},
+		{
+			name:        "a branch that looks like an option is refused",
+			worktreeDir: worktreeDir,
+			branch:      "-b",
+			wantErr:     "starts with a dash",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			steps, err := planBranchWorktree(tt.ready, repoDir, tt.worktreeDir, tt.branch)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("planBranchWorktree error = %v, want %q", err, tt.wantErr)
+				}
+				if len(steps) != 0 {
+					t.Fatalf("a refused plan returned steps: %+v", steps)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("planBranchWorktree: %v", err)
+			}
+			var argv [][]string
+			var names []string
+			for _, step := range steps {
+				argv = append(argv, step.argv)
+				names = append(names, step.name)
+				if step.dir != repoDir {
+					t.Fatalf("step %q runs in %q, want the repository %q", step.name, step.dir, repoDir)
+				}
+			}
+			if !reflect.DeepEqual(argv, tt.want) {
+				t.Fatalf("argv = %q\nwant    %q", argv, tt.want)
+			}
+			if !reflect.DeepEqual(names, tt.wantName) {
+				t.Fatalf("step names = %q, want %q", names, tt.wantName)
+			}
+		})
+	}
+}
+
+// The branch worktree has to be created by the sandbox itself, as the sandbox
+// user, over /v1/shell/exec — the defect was a `git worktree add` on the host
+// through the bind mount, which left .git/worktrees/<slug> owned by somebody the
+// container's git could not write as. This test has no container: the only thing
+// the provider can reach is the injected shell, so any host-side git (or a
+// `docker exec`) on the path would fail here.
+func TestDockerProviderBranchWorktreeUsesTheSandboxAPI(t *testing.T) {
+	const name = "piforge-apishell"
+	dataRoot := t.TempDir()
+	repoHost := filepath.Join(dataRoot, "usr_api", "prj_api", "repo")
+	worktreeHost := filepath.Join(dataRoot, "usr_api", "prj_api", "worktrees", "fix-cache")
+
+	newProvider := func(t *testing.T, shell *fakeCheckoutShell) *Docker {
+		t.Helper()
+		provider := &Docker{cfg: DockerConfig{DataRoot: dataRoot}}
+		provider.openCheckout = func(ctx context.Context, sandboxID string) (checkoutShell, error) {
+			if sandboxID != name {
+				t.Fatalf("worktree asked for sandbox %q, want %q", sandboxID, name)
+			}
+			return shell, nil
+		}
+		return provider
+	}
+
+	t.Run("a new worktree crosses the API as the sandbox user", func(t *testing.T) {
+		shell := &fakeCheckoutShell{}
+		provider := newProvider(t, shell)
+		if err := provider.AddWorktree(context.Background(), name, repoHost, worktreeHost, "piforge/fix-cache"); err != nil {
+			t.Fatalf("AddWorktree: %v", err)
+		}
+		calls := shell.calls
+		if len(calls) != 4 {
+			t.Fatalf("ran %d commands, want the liveness probe, the worktree probe and two worktree steps: %+v", len(calls), calls)
+		}
+		if calls[0].command != "echo piforge-api-ready" || calls[0].cwd != containerWorkspace {
+			t.Fatalf("first command = %+v, want the API liveness probe", calls[0])
+		}
+		if !strings.Contains(calls[1].command, "rev-parse --verify --quiet HEAD") ||
+			!strings.Contains(calls[1].command, "safe.directory=/workspace/worktrees/fix-cache") ||
+			calls[1].cwd != containerWorkspace {
+			t.Fatalf("second command = %+v, want the worktree readiness probe", calls[1])
+		}
+		want := []recordedShellCall{
+			{
+				command: `'git' '-c' 'safe.directory=/workspace/repo' 'check-ref-format' '--branch' 'piforge/fix-cache'`,
+				cwd:     containerRepoDir,
+			},
+			{
+				command: `'git' '-c' 'safe.directory=/workspace/repo' 'worktree' 'add' '-b' 'piforge/fix-cache' '--' '/workspace/worktrees/fix-cache'`,
+				cwd:     containerRepoDir,
+			},
+		}
+		for i, want := range want {
+			got := calls[i+2]
+			if got.command != want.command {
+				t.Fatalf("command %d = %q\nwant %q", i+2, got.command, want.command)
+			}
+			// The image ignores cwd, so the repository has to be explicit on every
+			// command that touches it.
+			if got.cwd != want.cwd {
+				t.Fatalf("command %d runs in %q, want %q", i+2, got.cwd, want.cwd)
+			}
+		}
+		for _, call := range calls {
+			lower := strings.ToLower(call.command)
+			if strings.Contains(lower, "exit") {
+				t.Fatalf("worktree provisioning sent an explicit exit, which wedges the image's shell: %q", call.command)
+			}
+			if strings.Contains(lower, "docker") {
+				t.Fatalf("worktree command mentions docker: %q", call.command)
+			}
+		}
+	})
+
+	t.Run("an existing worktree is not added twice", func(t *testing.T) {
+		shell := &fakeCheckoutShell{worktreeReady: true}
+		provider := newProvider(t, shell)
+		if err := provider.AddWorktree(context.Background(), name, repoHost, worktreeHost, "piforge/fix-cache"); err != nil {
+			t.Fatalf("AddWorktree: %v", err)
+		}
+		if len(shell.calls) != 2 {
+			t.Fatalf("a ready worktree ran %+v, want only the two probes", shell.calls)
+		}
+		for _, call := range shell.calls[1:] {
+			if strings.Contains(call.command, "worktree add") {
+				t.Fatalf("an existing worktree was added again: %q", call.command)
+			}
+		}
+	})
+
+	t.Run("no published API port fails instead of shelling out", func(t *testing.T) {
+		provider := &Docker{cfg: DockerConfig{DataRoot: dataRoot}}
+		err := provider.AddWorktree(context.Background(), name, repoHost, worktreeHost, "piforge/fix-cache")
+		if err == nil || !strings.Contains(err.Error(), "no api port") {
+			t.Fatalf("AddWorktree = %v, want the missing API port named", err)
+		}
+	})
+
+	// The container path the terminal and the file API use must keep matching the
+	// host worktree, or a branch session would show one directory and commit in
+	// another.
+	if got, err := (&Docker{cfg: DockerConfig{DataRoot: dataRoot}}).ContainerPath(worktreeHost); err != nil || got != "/workspace/worktrees/fix-cache" {
+		t.Fatalf("ContainerPath(%q) = %q, %v; want /workspace/worktrees/fix-cache", worktreeHost, got, err)
 	}
 }

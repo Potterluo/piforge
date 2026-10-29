@@ -307,3 +307,297 @@ func TestEnsureWorktreeMountsSkillsAndMCPServers(t *testing.T) {
 		t.Fatalf("manifest mcp servers = %v", manifest.MCPServers)
 	}
 }
+
+// fakeWorktreeSandbox is a SandboxProvider that can also run its own worktree
+// creation — the shape -sandbox docker has (contracts.WorktreeSandbox).
+type fakeWorktreeSandbox struct {
+	root  string
+	calls []worktreeCall
+}
+
+type worktreeCall struct {
+	sandboxID string
+	repoDir   string
+	path      string
+	branch    string
+}
+
+var _ contracts.SandboxProvider = (*fakeWorktreeSandbox)(nil)
+var _ contracts.WorktreeSandbox = (*fakeWorktreeSandbox)(nil)
+
+func (f *fakeWorktreeSandbox) Ensure(ctx context.Context, userID, projectID, repoURL, branch string) (*contracts.Sandbox, error) {
+	return &contracts.Sandbox{
+		ID:        "sbx_fake",
+		UserID:    userID,
+		ProjectID: projectID,
+		State:     contracts.SandboxReady,
+		Provider:  "fake",
+		RootDir:   f.root,
+	}, nil
+}
+
+func (f *fakeWorktreeSandbox) Get(ctx context.Context, sandboxID string) (*contracts.Sandbox, error) {
+	return f.Ensure(ctx, "", "", "", "")
+}
+
+func (f *fakeWorktreeSandbox) Pause(ctx context.Context, sandboxID string) error { return nil }
+
+func (f *fakeWorktreeSandbox) Resume(ctx context.Context, sandboxID string) (*contracts.Sandbox, error) {
+	return f.Get(ctx, sandboxID)
+}
+
+func (f *fakeWorktreeSandbox) Destroy(ctx context.Context, sandboxID string) error { return nil }
+
+func (f *fakeWorktreeSandbox) Exec(ctx context.Context, sandboxID string, argv []string, dir string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeWorktreeSandbox) AddWorktree(ctx context.Context, sandboxID, repoDir, path, branch string) error {
+	f.calls = append(f.calls, worktreeCall{sandboxID: sandboxID, repoDir: repoDir, path: path, branch: branch})
+	return nil
+}
+
+// The choice between the provider's own worktree creation and the control
+// plane's git follows the provider, not a flag: a provider that implements
+// contracts.WorktreeSandbox creates the worktree itself. The host runner here
+// points at a git binary that does not exist, so taking the host path would fail
+// loudly instead of silently producing the root-owned worktree that made stage
+// die under -sandbox docker.
+func TestBranchWorktreeUsesTheProvider(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "piforge.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	user, err := st.CreateUser(ctx, store.NewUser{Email: "provider-choice@example.test"})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	project, err := st.CreateProject(ctx, user.ID, store.NewProject{Name: "demo", DefaultBranch: "main"})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	branch, err := st.CreateSession(ctx, user.ID, store.NewSession{
+		ProjectID: project.ID, Kind: contracts.KindBranch, Label: "fix-cache", Title: "fix cache",
+	})
+	if err != nil {
+		t.Fatalf("create branch session: %v", err)
+	}
+
+	root := t.TempDir()
+	fake := &fakeWorktreeSandbox{root: root}
+	svc := New(Config{
+		Store:   st,
+		Sandbox: fake,
+		Git:     gitx.New(gitx.Config{GitBinary: "piforge-test-git-that-does-not-exist"}),
+	})
+
+	wt, err := svc.EnsureWorktree(ctx, user.ID, project, branch)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if len(fake.calls) != 1 {
+		t.Fatalf("the provider was asked %d times, want exactly one worktree: %+v", len(fake.calls), fake.calls)
+	}
+	call := fake.calls[0]
+	if call.sandboxID != "sbx_fake" {
+		t.Fatalf("sandbox id = %q", call.sandboxID)
+	}
+	if filepath.Clean(call.repoDir) != filepath.Join(root, "repo") {
+		t.Fatalf("repo dir = %q, want the main checkout inside the sandbox", call.repoDir)
+	}
+	wantPath := filepath.Join(root, "worktrees", "fix-cache")
+	if filepath.Clean(call.path) != wantPath {
+		t.Fatalf("worktree path = %q, want %q", call.path, wantPath)
+	}
+	if call.branch != "piforge/fix-cache" {
+		t.Fatalf("branch = %q, want the namespaced branch", call.branch)
+	}
+	if filepath.Clean(wt.Path) != wantPath || wt.Branch != "piforge/fix-cache" {
+		t.Fatalf("recorded worktree = %+v, want path %q on piforge/fix-cache", wt, wantPath)
+	}
+	// The host git never touched the workspace: no host-side checkout appeared.
+	if _, err := os.Stat(wt.Path); !os.IsNotExist(err) {
+		t.Fatalf("the host path was created outside the provider: %v", err)
+	}
+}
+
+// The product defect, end to end: under -sandbox docker a branch session's
+// worktree used to be created by the host's git through the bind mount, so
+// `<main>/.git/worktrees/<slug>` belonged to the host user while the container's
+// git runs as `gem`, and `git stage` died with
+//
+//	fatal: Unable to create '.../.git/worktrees/<slug>/index.lock': Permission denied
+//
+// This test provisions a real branch session through the provisioner, then does
+// exactly what the panel's stage and commit endpoints do — as `gem`, inside the
+// container — and checks the ownership that made it possible.
+func TestBranchWorktreeInDockerStagesAndCommitsAsGem(t *testing.T) {
+	image := strings.TrimSpace(os.Getenv("PIFORGE_TEST_SANDBOX_IMAGE"))
+	if image == "" {
+		t.Skip("PIFORGE_TEST_SANDBOX_IMAGE is not set: this test needs a sandbox image with git and the gem user (all-in-one-sandbox 1.11.0)")
+	}
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker is not installed")
+	}
+	if err := exec.Command("docker", "info").Run(); err != nil {
+		t.Skipf("the docker daemon is not reachable: %v", err)
+	}
+
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "piforge.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	user, err := st.CreateUser(ctx, store.NewUser{Email: "docker-branch@example.test"})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	project, err := st.CreateProject(ctx, user.ID, store.NewProject{Name: "docker-branch", DefaultBranch: "main"})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	main, err := st.CreateSession(ctx, user.ID, store.NewSession{
+		ProjectID: project.ID, Kind: contracts.KindMain, Title: "main",
+	})
+	if err != nil {
+		t.Fatalf("create main session: %v", err)
+	}
+	branch, err := st.CreateSession(ctx, user.ID, store.NewSession{
+		ProjectID: project.ID, Kind: contracts.KindBranch, Label: "docker-branch", Title: "docker branch",
+	})
+	if err != nil {
+		t.Fatalf("create branch session: %v", err)
+	}
+
+	provider, err := sandbox.NewDocker(sandbox.DockerConfig{
+		Image:    image,
+		DataRoot: filepath.Join(t.TempDir(), "sandboxes"),
+		CPUs:     "1",
+		Memory:   "1g",
+		APIPort:  8080,
+	})
+	if err != nil {
+		t.Fatalf("NewDocker: %v", err)
+	}
+	svc := New(Config{
+		Store:     st,
+		Sandbox:   provider,
+		Git:       gitx.New(gitx.Config{}),
+		SkillsDir: filepath.Join(t.TempDir(), "skills"),
+	})
+
+	mainWT, err := svc.EnsureWorktree(ctx, user.ID, project, main)
+	if err != nil {
+		t.Fatalf("main worktree: %v", err)
+	}
+	t.Cleanup(func() { _ = provider.Destroy(context.Background(), mainWT.SandboxID) })
+
+	brWT, err := svc.EnsureWorktree(ctx, user.ID, project, branch)
+	if err != nil {
+		t.Fatalf("branch worktree: %v", err)
+	}
+
+	const (
+		containerRepo = "/workspace/repo"
+		containerWT   = "/workspace/worktrees/docker-branch"
+	)
+	wantPath := filepath.Join(filepath.Dir(mainWT.Path), "worktrees", "docker-branch")
+	if filepath.Clean(brWT.Path) != filepath.Clean(wantPath) {
+		t.Fatalf("branch worktree path = %q, want %q", brWT.Path, wantPath)
+	}
+	if brWT.Branch != "piforge/docker-branch" {
+		t.Fatalf("branch = %q, want piforge/docker-branch", brWT.Branch)
+	}
+	if brWT.SandboxID != mainWT.SandboxID {
+		t.Fatalf("branch used sandbox %q, want the project's %q", brWT.SandboxID, mainWT.SandboxID)
+	}
+	if got, err := provider.ContainerPath(brWT.Path); err != nil || got != containerWT {
+		t.Fatalf("ContainerPath(%q) = %q, %v; want %q", brWT.Path, got, err, containerWT)
+	}
+
+	// A real linked worktree of the main checkout, not a copy: git's own
+	// bookkeeping lists it, and the .git file points at the container's path (the
+	// host path the old implementation wrote is what the container could not
+	// resolve).
+	list, err := dockerAsGem(t, brWT.SandboxID, "git", "-C", containerRepo, "worktree", "list", "--porcelain")
+	if err != nil {
+		t.Fatalf("git worktree list as gem: %v: %s", err, list)
+	}
+	if !strings.Contains(list, "worktree "+containerWT) {
+		t.Fatalf("the branch checkout is not a worktree of the main checkout:\n%s", list)
+	}
+	gitFile, err := os.ReadFile(filepath.Join(brWT.Path, ".git"))
+	if err != nil {
+		t.Fatalf("read the worktree's .git file: %v", err)
+	}
+	if !strings.Contains(string(gitFile), containerRepo+"/.git/worktrees/docker-branch") {
+		t.Fatalf(".git = %q, want the container's gitdir", strings.TrimSpace(string(gitFile)))
+	}
+
+	// Ownership is the defect: these two directories are written by the panel's
+	// git, which runs as gem.
+	for _, dir := range []string{containerRepo + "/.git/worktrees/docker-branch", containerWT} {
+		owner, err := dockerAsGem(t, brWT.SandboxID, "stat", "-c", "%U", dir)
+		if err != nil {
+			t.Fatalf("stat %s: %v: %s", dir, err, owner)
+		}
+		if owner != "gem" {
+			t.Fatalf("%s is owned by %q, want gem: stage would fail on index.lock", dir, owner)
+		}
+	}
+
+	// What GET /git/status, POST /git/stage and POST /git/commit do, as the same
+	// account: this is the failure that was reported.
+	status, err := dockerAsGem(t, brWT.SandboxID, "git", "-C", containerWT, "status", "--porcelain")
+	if err != nil {
+		t.Fatalf("git status as gem: %v: %s", err, status)
+	}
+	out, err := dockerAsGem(t, brWT.SandboxID, "sh", "-c",
+		"cd "+containerWT+" && printf 'branch work from the panel\\n' > branch.txt && "+
+			"git add -A && git commit -q -m 'feat: branch commit as gem' && git log --oneline -1")
+	if err != nil {
+		t.Fatalf("stage and commit as gem: %v: %s", err, out)
+	}
+	if !strings.Contains(out, "feat: branch commit as gem") {
+		t.Fatalf("log after commit = %q", out)
+	}
+	if status, err := dockerAsGem(t, brWT.SandboxID, "git", "-C", containerWT, "status", "--porcelain"); err != nil || status != "" {
+		t.Fatalf("status after commit = %q, %v; want a clean worktree", status, err)
+	}
+	if name, err := dockerAsGem(t, brWT.SandboxID, "git", "-C", containerWT, "rev-parse", "--abbrev-ref", "HEAD"); err != nil || name != "piforge/docker-branch" {
+		t.Fatalf("HEAD branch = %q, %v; want piforge/docker-branch", name, err)
+	}
+
+	// Existing sessions are not silently rewritten: asking again returns the same
+	// row, and the worktree keeps its commit.
+	reloaded, err := st.Session(ctx, user.ID, branch.ID)
+	if err != nil {
+		t.Fatalf("reload branch session: %v", err)
+	}
+	again, err := svc.EnsureWorktree(ctx, user.ID, project, reloaded)
+	if err != nil {
+		t.Fatalf("second EnsureWorktree: %v", err)
+	}
+	if again.ID != brWT.ID || filepath.Clean(again.Path) != filepath.Clean(brWT.Path) {
+		t.Fatalf("second EnsureWorktree changed the worktree: %+v vs %+v", again, brWT)
+	}
+	head, err := dockerAsGem(t, brWT.SandboxID, "git", "-C", containerWT, "log", "--oneline", "-1")
+	if err != nil || !strings.Contains(head, "feat: branch commit as gem") {
+		t.Fatalf("worktree HEAD after a repeated provision = %q, %v", head, err)
+	}
+}
+
+// dockerAsGem runs argv in the container as the sandbox user. Docker is only an
+// inspection tool in these tests; provisioning itself goes through the sandbox
+// API.
+func dockerAsGem(t *testing.T, sandboxID string, argv ...string) (string, error) {
+	t.Helper()
+	args := append([]string{"exec", "-u", "gem", sandboxID}, argv...)
+	out, err := exec.Command("docker", args...).CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
