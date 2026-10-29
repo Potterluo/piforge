@@ -112,11 +112,14 @@ func (c *Client) request(ctx context.Context, method, path string, body any, out
 }
 
 // Info reports what the sandbox can do, including the CDP URL of its browser.
+//
+// Field names taken from the running image (1.11.0), not from the docs: the answer is
+// wrapped in `data`, and the workspace is not reported at all.
 type Info struct {
 	CDPURL    string `json:"cdp_url"`
 	VNCURL    string `json:"vnc_url"`
-	WorkSpace string `json:"workspace"`
-	Version   string `json:"version"`
+	CDPUIRL   string `json:"cdp_ui_url"`
+	UserAgent string `json:"user_agent"`
 }
 
 // BrowserInfo asks for the browser endpoint.
@@ -125,9 +128,17 @@ type Info struct {
 // turns "the panel's browser lives on the host" into "the panel's browser lives with the
 // files".
 func (c *Client) BrowserInfo(ctx context.Context) (Info, error) {
-	var out Info
-	err := c.request(ctx, http.MethodGet, "/v1/browser/info", nil, &out)
-	return out, err
+	var envelope struct {
+		Data Info `json:"data"`
+		Info
+	}
+	if err := c.request(ctx, http.MethodGet, "/v1/browser/info", nil, &envelope); err != nil {
+		return Info{}, err
+	}
+	if envelope.Data.CDPURL == "" && envelope.CDPURL != "" {
+		return envelope.Info, nil
+	}
+	return envelope.Data, nil
 }
 
 // ShellResult is what a command produced.
@@ -220,27 +231,52 @@ func (c *Client) Navigate(ctx context.Context, target string) error {
 		map[string]any{"url": target}, nil)
 }
 
-// Screenshot returns a PNG/JPEG of the sandbox's browser.
+// Screenshot returns a PNG of the sandbox's browser.
 //
-// The API answers with base64 in a JSON envelope, which is why this is not a byte stream.
+// GET, not POST — the running image answers 405 to a POST, and the openapi agrees. The
+// body is base64 inside a JSON envelope, which is why this is not a byte stream.
 func (c *Client) Screenshot(ctx context.Context) ([]byte, error) {
-	var out struct {
-		Data struct {
-			Image string `json:"image"`
-		} `json:"data"`
-		Image string `json:"image"`
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.base+"/v1/browser/page/screenshot?format=png", nil)
+	if err != nil {
+		return nil, fmt.Errorf("aio: screenshot: %w", err)
 	}
-	if err := c.request(ctx, http.MethodPost, "/v1/browser/page/screenshot", map[string]any{}, &out); err != nil {
-		return nil, err
+	if c.key != "" {
+		req.Header.Set("X-AIO-API-Key", c.key)
 	}
-	encoded := out.Data.Image
-	if encoded == "" {
-		encoded = out.Image
+	res, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("aio: screenshot: %w", err)
 	}
-	if encoded == "" {
+	defer res.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(res.Body, 16<<20))
+	if err != nil {
+		return nil, fmt.Errorf("aio: screenshot: %w", err)
+	}
+	if res.StatusCode >= 400 {
+		return nil, fmt.Errorf("aio: screenshot: %d: %s", res.StatusCode, truncate(string(body), 200))
+	}
+	// The endpoint answers raw image bytes when the browser is up, and a JSON error
+	// envelope when it is not — so a JSON-looking body is decoded for its message rather
+	// than handed back as a corrupt PNG.
+	if len(body) > 0 && body[0] == '{' {
+		var envelope struct {
+			Message string `json:"message"`
+			Data    struct {
+				Image string `json:"image"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(body, &envelope) == nil {
+			if envelope.Data.Image != "" {
+				return decodeBase64Image(envelope.Data.Image)
+			}
+			return nil, fmt.Errorf("aio: screenshot: %s", truncate(envelope.Message, 200))
+		}
+	}
+	if len(body) == 0 {
 		return nil, fmt.Errorf("aio: screenshot returned nothing")
 	}
-	return decodeBase64Image(encoded)
+	return body, nil
 }
 
 func truncate(s string, n int) string {
