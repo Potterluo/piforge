@@ -64,6 +64,9 @@ vi.mock("@/lib/api/client", () => ({
       stage: vi.fn(async () => ({ ok: true })),
       unstage: vi.fn(async () => ({ ok: true })),
       commit: vi.fn(async () => ({ commit: "ccccccc" })),
+      remote: vi.fn(async () => ({ remote: false, ahead: 0, behind: 0 })),
+      push: vi.fn(async () => ({ branch: "main", commit: "ccccccc" })),
+      pull: vi.fn(async () => ({ branch: "main", commit: "ccccccc", changed: false })),
     },
   },
 }));

@@ -217,6 +217,7 @@ export function GitChangesPanel() {
           <Button size="xs" onClick={() => textareaRef.current?.focus()} disabled={busy}>
             提交
           </Button>
+          <RemoteActions />
           <Tooltip>
             <TooltipTrigger
               render={<span className="inline-flex" />}
@@ -312,6 +313,83 @@ export function GitChangesPanel() {
           </div>
         </ResizablePanel>
       </ResizablePanelGroup>
+    </div>
+  );
+}
+/**
+ * Push and pull (FR-8.7).
+ *
+ * The count comes from the remote-tracking ref, so the buttons say what they would do:
+ * 推送 3 means three commits would leave this machine. A checkout with no remote gets
+ * no buttons at all rather than two that always fail.
+ */
+function RemoteActions() {
+  const git = useGitData();
+  const remote = useAsync(`remote:${git.sessionId}`, () => api.git.remote(git.sessionId));
+  const [busy, setBusy] = React.useState<"push" | "pull" | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+
+  if (!remote.data?.remote) return null;
+
+  const act = async (which: "push" | "pull") => {
+    setBusy(which);
+    setError(null);
+    try {
+      if (which === "push") await api.git.push(git.sessionId);
+      else await api.git.pull(git.sessionId);
+      git.refresh();
+      remote.reload();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "远端操作失败");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const ahead = remote.data?.ahead ?? 0;
+  const behind = remote.data?.behind ?? 0;
+
+  return (
+    <div className="flex items-center gap-1">
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              size="xs"
+              variant="ghost"
+              data-testid="git-pull"
+              disabled={busy !== null}
+              onClick={() => void act("pull")}
+            >
+              <ArrowDownIcon />
+              {behind > 0 ? behind : null}
+            </Button>
+          }
+        />
+        <TooltipContent>从远端拉取（仅快进）</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              size="xs"
+              variant={ahead > 0 ? "default" : "ghost"}
+              data-testid="git-push"
+              disabled={busy !== null || ahead === 0}
+              onClick={() => void act("push")}
+            >
+              <ArrowUpIcon />
+              {ahead > 0 ? ahead : null}
+            </Button>
+          }
+        />
+        <TooltipContent>{ahead > 0 ? `推送 ${ahead} 个提交` : "没有待推送的提交"}</TooltipContent>
+      </Tooltip>
+      {error ? (
+        <span data-testid="git-remote-error" className="truncate text-[10px] text-destructive">
+          {error}
+        </span>
+      ) : null}
     </div>
   );
 }

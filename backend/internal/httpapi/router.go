@@ -225,6 +225,9 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /v1/sessions/{id}/git/commit", s.mutatingBearer(s.handleGitCommit))
 	mux.Handle("POST /v1/sessions/{id}/git/branch", s.mutatingBearer(s.handleGitBranch))
 	mux.Handle("POST /v1/sessions/{id}/git/checkout", s.mutatingBearer(s.handleGitCheckout))
+	mux.Handle("GET /v1/sessions/{id}/git/remote", s.authed(s.handleGitRemote))
+	mux.Handle("POST /v1/sessions/{id}/git/push", s.mutatingBearer(s.handleGitPush))
+	mux.Handle("POST /v1/sessions/{id}/git/pull", s.mutatingBearer(s.handleGitPull))
 
 	// Providers.
 	mux.Handle("GET /v1/api-keys", s.authed(s.handleListAPIKeys))

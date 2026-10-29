@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"errors"
 	"fmt"
+	"github.com/piforge/piforge/backend/internal/gitx"
 	"io"
 	"net/http"
 	"os"
@@ -327,6 +329,12 @@ func (s *server) handleGitCommit(w http.ResponseWriter, r *http.Request) {
 		Message: in.Message, Paths: in.Paths, Amend: in.Amend,
 	})
 	if err != nil {
+		// "Nothing to commit" is a state the user can fix by staging something, not a
+		// server fault, and git's own sentence does not belong in a 500.
+		if errors.Is(err, gitx.ErrNothingToCommit) {
+			s.fail(w, r, apiErr(contracts.ErrConflict, "没有可提交的改动：先暂存一些文件，或修改后再试"))
+			return
+		}
 		s.fail(w, r, err)
 		return
 	}

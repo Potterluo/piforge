@@ -74,6 +74,10 @@ type GitOps interface {
 	CreateBranch(ctx context.Context, root, name string) error
 	Checkout(ctx context.Context, root, name string) error
 	Adopt(ctx context.Context, sourceRoot, targetRoot, message string) (contracts.AdoptResult, error)
+	Push(ctx context.Context, root string) (contracts.RemoteResult, error)
+	Pull(ctx context.Context, root string) (contracts.RemoteResult, error)
+	Fetch(ctx context.Context, root string) error
+	AheadBehind(ctx context.Context, root string) (ahead, behind int, err error)
 }
 
 // Config configures a Service. The zero value is usable: defaults apply and
@@ -718,4 +722,35 @@ func (s *Service) TreeWithOptions(ctx context.Context, root, relPath string, dep
 		return nil, err
 	}
 	return page.Nodes, nil
+}
+
+// Push, Pull, Fetch and AheadBehind are the remote half of the workspace (FR-8.7).
+// They live here so the HTTP layer talks to one interface instead of reaching for git.
+
+func (s *Service) Push(ctx context.Context, root string) (contracts.RemoteResult, error) {
+	if s.cfg.Git == nil {
+		return contracts.RemoteResult{}, ErrNoGitBackend
+	}
+	return s.cfg.Git.Push(ctx, root)
+}
+
+func (s *Service) Pull(ctx context.Context, root string) (contracts.RemoteResult, error) {
+	if s.cfg.Git == nil {
+		return contracts.RemoteResult{}, ErrNoGitBackend
+	}
+	return s.cfg.Git.Pull(ctx, root)
+}
+
+func (s *Service) Fetch(ctx context.Context, root string) error {
+	if s.cfg.Git == nil {
+		return ErrNoGitBackend
+	}
+	return s.cfg.Git.Fetch(ctx, root)
+}
+
+func (s *Service) AheadBehind(ctx context.Context, root string) (int, int, error) {
+	if s.cfg.Git == nil {
+		return 0, 0, ErrNoGitBackend
+	}
+	return s.cfg.Git.AheadBehind(ctx, root)
 }

@@ -2,6 +2,7 @@ package gitx
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -92,6 +93,9 @@ func (r *Runner) Commit(ctx context.Context, root string, req contracts.CommitRe
 		args = append(args, "--amend")
 	}
 	if _, err := r.Run(ctx, dir, args...); err != nil {
+		if classified := classifyCommit(err); errors.Is(classified, ErrNothingToCommit) {
+			return "", classified
+		}
 		return "", fmt.Errorf("gitx: commit %s: %w", dir, err)
 	}
 	head, err := r.Head(ctx, dir)
@@ -303,4 +307,16 @@ func cleanRels(paths []string) ([]string, error) {
 		rels = append(rels, rel)
 	}
 	return rels, nil
+}
+
+// ErrNothingToCommit is returned when git has nothing staged, so the HTTP layer can
+// answer "nothing to commit" instead of a 500 with git's own wording inside it.
+var ErrNothingToCommit = errors.New("gitx: nothing to commit")
+
+// classifyCommit turns git's "nothing to commit" into a sentinel.
+func classifyCommit(err error) error {
+	if strings.Contains(StderrOf(err)+err.Error(), "nothing to commit") {
+		return ErrNothingToCommit
+	}
+	return err
 }

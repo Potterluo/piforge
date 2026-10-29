@@ -479,6 +479,21 @@ type Workspace interface {
 	Checkout(ctx context.Context, root, name string) error
 	// Adopt carries one checkout's work into another (PRD FR-2.6).
 	Adopt(ctx context.Context, sourceRoot, targetRoot, message string) (AdoptResult, error)
+
+	// The remote workflow (PRD FR-8.7). Fast-forward only: a pull that needs a merge
+	// is refused with ErrDiverged rather than half-done.
+	Push(ctx context.Context, root string) (RemoteResult, error)
+	Pull(ctx context.Context, root string) (RemoteResult, error)
+	Fetch(ctx context.Context, root string) error
+	AheadBehind(ctx context.Context, root string) (ahead, behind int, err error)
+}
+
+// RemoteResult is what a push or a pull reports.
+type RemoteResult struct {
+	Branch string `json:"branch"`
+	Commit string `json:"commit"`
+	// Changed is false when a pull found nothing to bring down.
+	Changed bool `json:"changed"`
 }
 
 // AdoptResult says what a branch hand-off carried.

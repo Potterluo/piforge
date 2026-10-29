@@ -305,6 +305,19 @@ export const git = {
   },
   log: (sessionId: string, limit = 200) =>
     request<GitGraph>(`/v1/sessions/${sessionId}/git/log?limit=${limit}`),
+  remote: (sessionId: string) =>
+    request<{ remote: boolean; ahead: number; behind: number }>(
+      `/v1/sessions/${sessionId}/git/remote`,
+    ),
+  push: (sessionId: string) =>
+    request<{ branch: string; commit: string }>(`/v1/sessions/${sessionId}/git/push`, {
+      method: "POST",
+    }),
+  pull: (sessionId: string) =>
+    request<{ branch: string; commit: string; changed: boolean }>(
+      `/v1/sessions/${sessionId}/git/pull`,
+      { method: "POST" },
+    ),
   stage: (sessionId: string, paths: string[]) =>
     request<{ ok: boolean }>(`/v1/sessions/${sessionId}/git/stage`, {
       method: "POST",

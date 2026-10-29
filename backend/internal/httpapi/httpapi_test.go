@@ -458,12 +458,17 @@ type fakeWorkspace struct {
 	// includeIgnored records the last tree request's switch state.
 	includeIgnored bool
 	adopted        []string
-	content        *contracts.FileContent
-	status         *contracts.GitStatus
-	diffs          []contracts.FileDiff
-	graph          *contracts.GitGraph
-	results        []contracts.SearchResult
-	err            error
+	// remote is what Push/Pull report and AheadBehind splits.
+	remote    contracts.RemoteResult
+	ahead     int
+	behind    int
+	remoteErr error
+	content   *contracts.FileContent
+	status    *contracts.GitStatus
+	diffs     []contracts.FileDiff
+	graph     *contracts.GitGraph
+	results   []contracts.SearchResult
+	err       error
 
 	written   map[string][]byte
 	deleted   []string
@@ -685,4 +690,23 @@ func (w *fakeWorkspace) Adopt(_ context.Context, sourceRoot, targetRoot, message
 	}
 	w.adopted = append(w.adopted, sourceRoot+"->"+targetRoot+"#"+message)
 	return contracts.AdoptResult{Commit: "abc1234", Files: []string{"feature.txt"}}, nil
+}
+func (f *fakeWorkspace) Push(_ context.Context, root string) (contracts.RemoteResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.roots = append(f.roots, "push:"+root)
+	return f.remote, f.remoteErr
+}
+
+func (f *fakeWorkspace) Pull(_ context.Context, root string) (contracts.RemoteResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.roots = append(f.roots, "pull:"+root)
+	return f.remote, f.remoteErr
+}
+
+func (f *fakeWorkspace) Fetch(context.Context, string) error { return f.remoteErr }
+
+func (f *fakeWorkspace) AheadBehind(context.Context, string) (int, int, error) {
+	return f.ahead, f.behind, f.remoteErr
 }
