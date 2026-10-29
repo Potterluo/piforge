@@ -188,9 +188,13 @@ export const browser = {
 };
 
 export const sessions = {
-  list: (params: { project?: string } = {}) => {
-    const q = params.project ? `?project=${encodeURIComponent(params.project)}` : "";
-    return request<{ sessions: Session[] }>(`/v1/sessions${q}`);
+  list: (params: { project?: string; q?: string; limit?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.project) query.set("project", params.project);
+    if (params.q) query.set("q", params.q);
+    if (params.limit) query.set("limit", String(params.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    return request<{ sessions: Session[] }>(`/v1/sessions${suffix}`);
   },
   get: (id: string) =>
     request<{ session: Session; status?: RuntimeStatus; project?: Project }>(`/v1/sessions/${id}`),

@@ -57,7 +57,7 @@ test("settings exposes a visible navigation on every page and a palette trigger"
   await expect(trigger).toHaveCount(1);
   await expect(trigger).toHaveAttribute("aria-label", "打开命令面板");
   await trigger.click();
-  const search = page.locator('input[placeholder="搜索命令、项目…"]:visible');
+  const search = page.locator('input[placeholder="搜索命令、项目、会话…"]:visible');
   await expect(search).toBeVisible({ timeout: 10_000 });
   // The palette still offers the settings destinations it always did.
   await expect(page.locator('[role="dialog"]').filter({ hasText: "模型与凭据" })).toBeVisible();

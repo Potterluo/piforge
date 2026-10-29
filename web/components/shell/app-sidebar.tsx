@@ -44,6 +44,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -60,14 +61,12 @@ import {
   SidebarHeader,
   SidebarMenu,
   SidebarMenuAction,
-  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarMenuSub,
   SidebarMenuSubButton,
   SidebarMenuSubItem,
   SidebarRail,
-  SidebarSeparator,
   useSidebar,
 } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -81,7 +80,7 @@ import {
   sessionStatusLabel,
   sessionStatusTone,
 } from "@/lib/session/format";
-import { qk, useCurrentUser, useFeature, useProjectSessions, useProjects } from "@/lib/session/queries";
+import { qk, useCurrentUser, useFeature, useProjectSessions, useProjects, useSessionSearch } from "@/lib/session/queries";
 import { SupportNotices } from "@/components/shell/support-notices";import { cn } from "@/lib/utils";
 import type { Session, SessionStatus } from "@/lib/types";
 
@@ -208,22 +207,40 @@ export function AppSidebar({
   }, [sessions.data, showArchived]);
 
   /**
-   * Forty projects is a normal account, and a flat list of forty rows pushes the
-   * session list — the thing the sidebar is actually for — below the fold. The
-   * default view is therefore "最近": the few projects a person works in, newest
-   * first, plus the one on screen so the list never hides where you are. Typing
-   * in the filter searches *all* of them; "查看全部" shows the whole list. No
-   * project is ever removed, only folded away.
+   * Search is the sidebar's way across projects.
+   *
+   * The visible list stays the current project's sessions (that is the history
+   * the page you are on belongs to); typing switches the same area to a global
+   * `GET /v1/sessions?q=` result list, so a session can be found without
+   * remembering which project it lives in.
    */
-  const [projectQuery, setProjectQuery] = useState("");
-  const [showAllProjects, setShowAllProjects] = useState(false);
-  const normalizedQuery = projectQuery.trim().toLowerCase();
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchActiveIndex, setSearchActiveIndex] = useState(0);
+  const searchNeedle = searchQuery.trim();
+  const searchEnabled = searchNeedle.length > 0;
+  const search = useSessionSearch(searchQuery, { enabled: searchEnabled, limit: 50 });
+  const searchResults = search.data?.sessions ?? [];
+  const projectNames = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const item of projects.data?.projects ?? []) names.set(item.id, item.name);
+    return names;
+  }, [projects.data]);
+
+  const openFoundSession = (session: Session) => {
+    setSearchQuery("");
+    router.push(`/p/${session.project_id}/s/${session.id}`);
+  };
+
+  /**
+   * The switcher offers the few projects a person actually works in, newest
+   * first, plus the one on screen. "所有项目" is the home page, which is now the
+   * full list.
+   */
   const projectList = useMemo(() => {
-    const byRecency = [...(projects.data?.projects ?? [])].sort(
+    return [...(projects.data?.projects ?? [])].sort(
       (a, b) =>
         (Date.parse(b.last_active_at ?? "") || 0) - (Date.parse(a.last_active_at ?? "") || 0),
     );
-    return byRecency;
   }, [projects.data]);
   const recentProjects = useMemo(() => {
     const recent = projectList.slice(0, 6);
@@ -233,15 +250,6 @@ export function AppSidebar({
     }
     return recent;
   }, [projectList, projectId]);
-  const matchingProjects = useMemo(() => {
-    if (!normalizedQuery) return [];
-    return projectList.filter((item) => item.name.toLowerCase().includes(normalizedQuery));
-  }, [projectList, normalizedQuery]);
-  const visibleProjects = normalizedQuery
-    ? matchingProjects
-    : showAllProjects
-      ? projectList
-      : recentProjects;
 
   const user = me.data?.user;
   const isAdmin = user?.role === "admin";
@@ -301,153 +309,121 @@ export function AppSidebar({
           </SidebarMenuItem>
           <SidebarMenuItem>
             {/*
-              The header used to be a dropdown that opened nothing and swallowed the click.
-              A list of projects inside a menu with one item per project is also a second
-              copy of the list right below it, so this is a plain link to the project list:
-              one target, always the same behaviour.
+              The sidebar used to answer "which project am I in?" with a link to
+              the project list and then answer "which sessions?" with forty
+              project rows. This is the one project control: the current project,
+              opening a menu of the recent ones. The full list is the home page.
             */}
-            <SidebarMenuButton
-              size="lg"
-              tooltip="所有项目"
-              data-testid="project-switcher"
-              render={<Link href="/" />}
-            >
-              <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-                <FolderGit2 className="size-4" />
-              </div>
-              <div className="grid min-w-0 flex-1 text-left leading-tight">
-                <span className="truncate text-sm font-medium">{project?.name ?? "PiForge"}</span>
-                <span className="truncate text-xs text-muted-foreground">
-                  {project ? `沙箱 · ${sandboxLabel(project.sandbox_state)}` : "所有项目"}
-                </span>
-              </div>
-              <ChevronsUpDown className="ml-auto size-4" />
-            </SidebarMenuButton>
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <SidebarMenuButton
+                    size="lg"
+                    aria-label="切换项目"
+                    title={project ? `切换项目（当前：${project.name}）` : "切换项目"}
+                    data-testid="project-switcher"
+                  />
+                }
+              >
+                <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
+                  <FolderGit2 className="size-4" />
+                </div>
+                <div className="grid min-w-0 flex-1 text-left leading-tight">
+                  <span
+                    data-testid="current-project-name"
+                    className="truncate text-sm font-medium"
+                  >
+                    {project?.name ?? "所有项目"}
+                  </span>
+                  <span className="truncate text-xs text-muted-foreground">
+                    {project ? `沙箱 · ${sandboxLabel(project.sandbox_state)}` : "选择一个项目"}
+                  </span>
+                </div>
+                <ChevronsUpDown className="ml-auto size-4" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-64" style={{ width: "16rem" }}>
+                {/* GroupLabel is a Group part in Base UI: outside <DropdownMenuGroup>
+                    it throws at click time (the menu appearing to do nothing). */}
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel>切换项目</DropdownMenuLabel>
+                  {recentProjects.map((item) => (
+                    <DropdownMenuItem
+                      key={item.id}
+                      data-testid="project-switcher-item"
+                      data-active={item.id === projectId}
+                      onClick={() => router.push(`/p/${item.id}`)}
+                    >
+                      <FolderGit2 />
+                      <span className="truncate">{item.name}</span>
+                      {item.session_count > 0 ? (
+                        <span className="ml-auto text-[10px] text-muted-foreground">
+                          {item.session_count} 个会话
+                        </span>
+                      ) : null}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  data-testid="project-switcher-all"
+                  onClick={() => router.push("/")}
+                >
+                  <FolderGit2 />
+                  所有项目
+                </DropdownMenuItem>
+                <DropdownMenuItem data-testid="project-switcher-new" onClick={onNewProject}>
+                  <Plus />
+                  新建项目
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>
 
       <SidebarContent data-testid={collapsed ? "sidebar-rail" : undefined}>
-        <SidebarGroup>
-          <SidebarGroupLabel>项目</SidebarGroupLabel>
-          <SidebarGroupAction onClick={onNewProject} title="新建项目">
-            <Plus />
-            <span className="sr-only">新建项目</span>
-          </SidebarGroupAction>
-          <SidebarGroupContent>
-            {projects.isPending ? (
-              <SidebarMenu>
-                {[0, 1, 2].map((index) => (
-                  <SidebarMenuItem key={index}>
-                    <Skeleton className="h-8 w-full" />
-                  </SidebarMenuItem>
-                ))}
-              </SidebarMenu>
-            ) : projects.isError ? (
-              <div className="flex flex-col items-start gap-2 px-2 py-1 text-xs text-muted-foreground">
-                <span>项目加载失败</span>
-                <Button size="xs" variant="outline" onClick={() => void projects.refetch()}>
-                  重试
-                </Button>
-              </div>
-            ) : (
-              <>
-                {/* The rail cannot type, so the filter and the scope switcher only
-                    exist in the expanded sidebar; the icon list falls back to 最近. */}
-                {projectList.length > 6 ? (
-                  <div className="px-2 pb-2 group-data-[collapsible=icon]:hidden">
-                    <Input
-                      data-testid="project-filter"
-                      aria-label="筛选项目"
-                      placeholder="筛选项目…"
-                      value={projectQuery}
-                      onChange={(event) => setProjectQuery(event.target.value)}
-                      className="h-7 text-xs"
-                    />
-                  </div>
-                ) : null}
-
-                <div
-                  data-testid="project-list-scope"
-                  className="flex items-center justify-between gap-2 px-2 pb-1 text-[10px] text-muted-foreground group-data-[collapsible=icon]:hidden"
-                >
-                  <span>
-                    {normalizedQuery
-                      ? `匹配 ${matchingProjects.length} 个`
-                      : showAllProjects
-                        ? `全部 ${projectList.length} 个`
-                        : "最近"}
-                  </span>
-                  {projects.data ? <span>{`共 ${projectList.length} 个`}</span> : null}
-                </div>
-
-                <SidebarMenu>
-                  {/* Icon mode keeps the two "new" doors: a 48px rail with no way to
-                      start a session would be a dead end. */}
-                  <SidebarMenuItem className="hidden group-data-[collapsible=icon]:block">
-                    <SidebarMenuButton
-                      tooltip="新建项目"
-                      aria-label="新建项目"
-                      onClick={onNewProject}
-                    >
-                      <Plus />
-                      <span>新建项目</span>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                  {visibleProjects.map((item) => (
-                    <SidebarMenuItem key={item.id} data-testid="project-row">
-                      <SidebarMenuButton
-                        isActive={item.id === projectId}
-                        tooltip={item.name}
-                        render={<Link href={`/p/${item.id}`} />}
-                      >
-                        <FolderGit2 />
-                        <span className="truncate">{item.name}</span>
-                        {item.session_count > 0 ? (
-                          <SidebarMenuBadge>{item.session_count}</SidebarMenuBadge>
-                        ) : null}
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  ))}
-                </SidebarMenu>
-
-                {normalizedQuery ? (
-                  matchingProjects.length === 0 ? (
-                    <p
-                      data-testid="project-empty"
-                      className="px-2 py-1 text-xs text-muted-foreground"
-                    >
-                      没有匹配的项目
-                    </p>
-                  ) : (
-                    <button
-                      type="button"
-                      data-testid="project-clear-filter"
-                      className="mt-1 w-full rounded-md px-2 py-1 text-left text-xs text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground group-data-[collapsible=icon]:hidden"
-                      onClick={() => setProjectQuery("")}
-                    >
-                      清除筛选
-                    </button>
-                  )
-                ) : projectList.length > recentProjects.length ? (
-                  <button
-                    type="button"
-                    data-testid="project-show-all"
-                    aria-expanded={showAllProjects}
-                    className="mt-1 w-full rounded-md px-2 py-1 text-left text-xs text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground group-data-[collapsible=icon]:hidden"
-                    onClick={() => setShowAllProjects((value) => !value)}
-                  >
-                    {showAllProjects
-                      ? "只看最近"
-                      : `查看全部 ${projectList.length} 个项目`}
-                  </button>
-                ) : null}
-              </>
-            )}
-          </SidebarGroupContent>
-        </SidebarGroup>
-
-        <SidebarSeparator />
+        {/*
+          The project list used to start here. With forty projects it pushed the
+          session list — the reason to open the sidebar at all — thousands of
+          pixels down, so it is gone: the header's switcher covers "which
+          project", this search covers "which session, in any project", and the
+          home page is the full list.
+        */}
+        <div className="px-2 pt-1 pb-2 group-data-[collapsible=icon]:hidden">
+          <div className="relative">
+            <Search className="pointer-events-none absolute top-1/2 left-2 size-3 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              data-testid="session-search-input"
+              aria-label="搜索会话"
+              placeholder="搜索会话…"
+              value={searchQuery}
+              onChange={(event) => {
+                setSearchQuery(event.target.value);
+                setSearchActiveIndex(0);
+              }}
+              onKeyDown={(event) => {
+                if (!searchEnabled) return;
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setSearchActiveIndex((index) =>
+                    Math.min(index + 1, Math.max(searchResults.length - 1, 0)),
+                  );
+                } else if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setSearchActiveIndex((index) => Math.max(index - 1, 0));
+                } else if (event.key === "Enter") {
+                  event.preventDefault();
+                  const target = searchResults[searchActiveIndex] ?? searchResults[0];
+                  if (target) openFoundSession(target);
+                } else if (event.key === "Escape") {
+                  setSearchQuery("");
+                  setSearchActiveIndex(0);
+                }
+              }}
+              className="h-7 pl-7 text-xs"
+            />
+          </div>
+        </div>
 
         <SidebarGroup>
           <SidebarGroupLabel className="gap-2">
@@ -478,9 +454,81 @@ export function AppSidebar({
                 </SidebarMenuButton>
               </SidebarMenuItem>
             </SidebarMenu>
-            {!projectId ? (
+            {searchEnabled ? (
+              search.isPending ? (
+                <SidebarMenu>
+                  {[0, 1, 2, 3].map((index) => (
+                    <SidebarMenuItem key={index}>
+                      <Skeleton className="h-9 w-full" />
+                    </SidebarMenuItem>
+                  ))}
+                </SidebarMenu>
+              ) : search.isError ? (
+                <div className="flex flex-col items-start gap-2 px-2 py-1 text-xs text-muted-foreground">
+                  <span>搜索失败</span>
+                  <Button size="xs" variant="outline" onClick={() => void search.refetch()}>
+                    重试
+                  </Button>
+                </div>
+              ) : searchResults.length === 0 ? (
+                <p
+                  data-testid="session-search-empty"
+                  className="px-2 py-1 text-xs text-muted-foreground"
+                >
+                  没有匹配的会话
+                </p>
+              ) : (
+                <>
+                  <p
+                    data-testid="session-search-summary"
+                    className="px-2 pb-1 text-[10px] text-muted-foreground"
+                  >
+                    匹配 {searchResults.length} 个会话 · 跨项目
+                  </p>
+                  <SidebarMenu data-testid="session-search-results">
+                    {searchResults.map((session, index) => (
+                      <SidebarMenuItem key={session.id}>
+                        <SidebarMenuButton
+                          isActive={index === searchActiveIndex}
+                          data-testid="session-search-result"
+                          data-session-id={session.id}
+                          data-project-id={session.project_id}
+                          aria-current={index === searchActiveIndex ? "true" : undefined}
+                          onMouseEnter={() => setSearchActiveIndex(index)}
+                          onClick={() => openFoundSession(session)}
+                        >
+                          <MessagesSquare />
+                          <span className="flex min-w-0 flex-1 flex-col">
+                            <span className="truncate text-sm">{session.title || "新会话"}</span>
+                            <span
+                              data-testid="session-search-project"
+                              className="truncate text-[10px] text-muted-foreground"
+                            >
+                              {projectNames.get(session.project_id) ?? "项目"}
+                            </span>
+                          </span>
+                          <span
+                            data-testid="session-search-status"
+                            className={cn(
+                              "ml-auto shrink-0 text-[10px]",
+                              session.status === "running" && "text-primary",
+                              session.status === "failed" && "text-destructive",
+                              session.status !== "running" &&
+                                session.status !== "failed" &&
+                                "text-muted-foreground",
+                            )}
+                          >
+                            {sessionStatusLabel(session.status)}
+                          </span>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    ))}
+                  </SidebarMenu>
+                </>
+              )
+            ) : !projectId ? (
               <p className="px-2 py-1 text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">
-                先选择一个项目
+                选择一个项目查看它的会话，或直接搜索所有会话。
               </p>
             ) : sessions.isPending ? (
               <SidebarMenu>
@@ -512,7 +560,7 @@ export function AppSidebar({
                     <SidebarMenuItem>
                       <SidebarMenuButton
                         isActive={group.root.id === sessionId}
-                        tooltip={group.root.title || "未命名会话"}
+                        tooltip={group.root.title || "新会话"}
                         data-testid="session-link"
                         render={<Link href={`/p/${projectId}/s/${group.root.id}`} />}
                       >
@@ -527,7 +575,7 @@ export function AppSidebar({
                             group.root.status === "archived" && "text-muted-foreground",
                           )}
                         >
-                          {group.root.title || "未命名会话"}
+                          {group.root.title || "新会话"}
                         </span>
                         {group.root.status === "archived" ? (
                           <Badge variant="outline" className="text-[9px] leading-none">

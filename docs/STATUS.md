@@ -26,11 +26,11 @@
 
 | FR | 状态 | 证据 |
 |---|---|---|
-| FR-1.1 新建会话（仓库/基准分支/模型/推理强度） | PARTIAL | 会话只选标题/模型/推理/临时：`web/components/shell/new-session-dialog.tsx`（`FieldLabel` 标题、`session-model`、`session-thinking`）；仓库与基准分支只在建项目时选（`new-project-dialog.tsx` 的 `repo_url`/`default_branch`，`handleCreateProject`）。测试：`e2e/tests/00-shell.spec.ts` "creates a project and a session through the dialogs"（未覆盖分支选择） |
+| FR-1.1 新建会话（仓库/基准分支/模型/推理强度） | PARTIAL | 会话只选模型/推理/临时（标题框已删，首条消息自动命名）：`web/components/shell/new-session-dialog.tsx`（`session-model`、`session-thinking`）；仓库与基准分支只在建项目时选（`new-project-dialog.tsx` 的 `repo_url`/`default_branch`，`handleCreateProject`）。测试：`e2e/tests/00-shell.spec.ts` "creates a project and a session through the dialogs"（未覆盖分支选择）、`59-auto-naming.spec.ts` |
 | FR-1.2 会话流就地折叠 | DONE | `web/components/session/message-item.tsx` + `thinking-trace.tsx` + `tool-trace.tsx`（Trace/Collapsible，无弹窗）；`e2e/tests/02-conversation.spec.ts` "a full run streams a reply, a tool call and settles"（点 `tool-trace` 展开 `tool-output`） |
 | FR-1.3 双队列输入（follow-up / steer） | DONE | `composer.tsx` `onKeyDown` → `submit("follow_up")` 或 `submit("steer")`；后端 `handlePostMessage` 的 `streaming_behavior` 校验；`composer.test.tsx` 三个用例 + `02-conversation.spec.ts` "Enter queues a follow-up while running, Ctrl+Enter steers" |
 | FR-1.4 Esc 清队列 + abort + 回填 | DONE | `composer.tsx` `interrupt()` 把 `cleared_steering`/`cleared_follow_up` 合并回输入框；后端 `handleInterrupt` → `rt.Interrupt`（`clear_queue`）；`composer.test.tsx` "interrupts on Esc and restores the cleared queue text" |
-| FR-1.5 会话列表：搜索/排序/状态徽章 | PARTIAL | `app-sidebar.tsx` `groupSessions` + `StatusDot` + 归档切换 + 按 `last_active_at` 排序；**没有搜索框**（`GET /v1/sessions?q=` 有后端支持，客户端 `sessions.list` 只传 `project`）；无对应测试 |
+| FR-1.5 会话列表：搜索/排序/状态徽章 | DONE | `app-sidebar.tsx` `groupSessions` + `StatusDot` + 归档切换 + 按 `last_active_at` 排序，顶部 `session-search-input` 跨项目搜索（`GET /v1/sessions?q=`，客户端 `sessions.list` 透传 `q`/`limit`）+ 键盘上下/Enter；命令面板的「最近会话/会话」组同样接 `?q=`；`e2e/tests/60-session-search.spec.ts` 2 例 |
 | FR-1.6 断线续传（SSE Last-Event-ID + entries） | DONE | `sse.go` `handleEvents`（读 `Last-Event-ID`/`after_seq`，窗口超限回 409 `need_full_resync`）+ `handleEntries`；`sse_test.go` 5 个用例，含 `TestSSEReplayFromLastEventID`、`TestSSEGapReturnsNeedFullResync` |
 | FR-1.7 重命名/归档/删除/导出（MD / HTML） | PARTIAL | 重命名/归档/删除：`handlePatchSession`/`handleDeleteSession` + `app-sidebar.tsx` `SessionActions`，`14-session-actions.spec.ts`；导出：`session_export.go` 同时有 `renderMarkdown` 与 `renderHTML`，但 UI 只有 `api.sessions.exportUrl(id,"md")`，HTML 无入口 |
 | FR-1.8 上下文用量（按轮 in/out/cache + 窗口占用） | PARTIAL | `handleSessionStats` + `Store.SessionStats`/`LastContextUsage`；`context-marker.tsx` `ContextMeter`（tokens/percent/cost）。无单测或 e2e 断言用量数值 |
@@ -164,18 +164,17 @@
 7. **FR-5.3 快照之后没有恢复面**——看门狗与「先快照后销毁」已经落地（本地 provider 实测），但快照只是清单索引，没有 restore-from-snapshot；本地 provider 回收会删掉工作区目录，docker 的宿主目录保留却未实跑。状态条也仍没有倒计时（FR-5.1）。
 8. **FR-9.2 / 9.4 跟随终端没接上**——`FollowTerminal` 组件写好了（含只读 xterm 与工具栏）但**没有任何地方渲染**；命令重放也没有。PRD 把「跟随」列为新增重点，现在 agent 跑 bash 只能在 Trace 里看折叠文本。
 9. **FR-11.2 / 11.4 浏览器没有观察/接管模式**——输入永远直通（click/key/wheel 全发），没有「谁在控制」、没有二次确认、也没有接管时拦 agent 的浏览器工具。人和 agent 会互相抢鼠标，正是 PRD §7.6.2 说要避免的灾难。
-10. **FR-1.5 会话列表不能搜索**——`GET /v1/sessions?q=` 后端有了，侧栏没有输入框。会话一多就翻不动，这是每天都会撞上的小缺口。
-11. **FR-10.2 终端只有一个 tab**——后端支持 `?tab=`，前端没有 tab 条、不能重命名/关闭；PRD 要求 ≥5 个独立 PTY。
-12. **FR-12.5 / 12.6 测试结果面板与一键开 PR**——两者都没有；`FR-12.1` 的「某次提交/本轮」作用域也缺（前端 `SCOPES` 只有 3 项）。
-13. **FR-2.3 / FR-8.5 / FR-8.6 分支与 commit 的可视化只到一半**——分支树画的是 Pi entry 树而非分支图（无创建时间/diff 规模）；点 commit 只有元数据 sheet，`git-commit-sheet.tsx` 自己写明「取不到该 commit 的 diff」。
-14. **FR-14.6 / 14.7 skill 无法被显式调用**——没有 `/skill:name`、没有 `/` 命令面板、没有内置 skill，skill 只能靠模型自己判断去读。
-15. **FR-5.7 / 5.8 / 16.4 / 16.6 运维面整体缺失**——端口发现、资源护栏、镜像管理、护栏配置都没有端点；`admin/status` 只有计数，没有水位与镜像告警。
-16. **FR-4.3 / 4.4 sidecar 引用与独立模型**——引用卡（`@main:msg_xxx`）不存在；独立模型 API 支持但 UI 不提供。
+10. **FR-10.2 终端只有一个 tab**——后端支持 `?tab=`，前端没有 tab 条、不能重命名/关闭；PRD 要求 ≥5 个独立 PTY。
+11. **FR-12.5 / 12.6 测试结果面板与一键开 PR**——两者都没有；`FR-12.1` 的「某次提交/本轮」作用域也缺（前端 `SCOPES` 只有 3 项）。
+12. **FR-2.3 / FR-8.5 / FR-8.6 分支与 commit 的可视化只到一半**——分支树画的是 Pi entry 树而非分支图（无创建时间/diff 规模）；点 commit 只有元数据 sheet，`git-commit-sheet.tsx` 自己写明「取不到该 commit 的 diff」。
+13. **FR-14.6 / 14.7 skill 无法被显式调用**——没有 `/skill:name`、没有 `/` 命令面板、没有内置 skill，skill 只能靠模型自己判断去读。
+14. **FR-5.7 / 5.8 / 16.4 / 16.6 运维面整体缺失**——端口发现、资源护栏、镜像管理、护栏配置都没有端点；`admin/status` 只有计数，没有水位与镜像告警。
+15. **FR-4.3 / 4.4 sidecar 引用与独立模型**——引用卡（`@main:msg_xxx`）不存在；独立模型 API 支持但 UI 不提供。
 
 ## 与 `docs/STATUS.md` 的差异（自查表本身的问题）
 
 - `FR-3.4 多窗格` 记为「完成」——实际是多面板检查器（`PANELS = changes/git/browser/terminal`），不是 2–4 个分支的实时流，`25-split.spec.ts` 也只验证两个检查器面板并排。
 - `FR-4.6 多个 sidecar` 记为「完成」——后端有 3 个上限与单测，但 UI 只有一个 dock，没有 tab 切换。
-- `FR-1.5` 记为「完成」——缺搜索；`FR-2.4` 记为「完成」——删除分支不清理 worktree（`RemoveWorktree` 无调用者），也从未写 Pi 的 `label` entry。
+- `FR-2.4` 记为「完成」——删除分支不清理 worktree（`RemoveWorktree` 无调用者），也从未写 Pi 的 `label` entry。
 - `FR-2.7 clone`（2e5f206）与 `FR-2.6 采纳`（85ceaba）已在审计之后落地，两行都已更新。
 - STATUS.md 完全没有覆盖 FR-5.x、FR-9.x、FR-10.x、FR-12.x、FR-14.x、FR-15.x 的大部分行，这些正是 MISSING 最集中的区域。

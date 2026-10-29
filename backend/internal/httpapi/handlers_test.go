@@ -274,9 +274,19 @@ func TestProjectEnvelopes(t *testing.T) {
 		t.Fatalf("project id = %q", got.Project.ID)
 	}
 
-	// Validation.
+	// Validation: an empty name is derived, not refused. With no repository the
+	// name is the dated blank workspace, so the project is still addressable.
 	rec = env.doAuthed(http.MethodPost, "/v1/projects", map[string]string{"name": "  "}, c)
-	env.mustErr(rec, http.StatusBadRequest, contracts.ErrInvalidArgument)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("blank name = %d body %s", rec.Code, rec.Body.String())
+	}
+	var blank struct {
+		Project *contracts.Project `json:"project"`
+	}
+	env.mustJSON(rec, &blank)
+	if blank.Project == nil || !strings.HasPrefix(blank.Project.Name, "空白工作区 · ") {
+		t.Fatalf("blank project = %s", rec.Body.String())
+	}
 
 	// Duplicate name is a conflict.
 	rec = env.doAuthed(http.MethodPost, "/v1/projects", map[string]string{"name": "repo"}, c)

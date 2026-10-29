@@ -2,7 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { api, type CreateProjectInput, type CreateSessionInput, type SendMessageInput } from "@/lib/api/client";
+import { api, type CreateProjectInput, type CreateSessionInput, type SendMessageInput, type UpdateProjectInput } from "@/lib/api/client";
 import { ApiError, type Session } from "@/lib/types";
 
 /** Query keys live in one place so invalidation cannot drift from fetching. */
@@ -11,6 +11,8 @@ export const qk = {
   projects: ["projects"] as const,
   project: (id: string) => ["project", id] as const,
   sessions: (projectId: string) => ["sessions", projectId] as const,
+  /** Cross-project search, kept apart from the project list's cache entry. */
+  sessionSearch: (query: string, limit: number) => ["sessions", "search", query, limit] as const,
   session: (id: string) => ["session", id] as const,
   stats: (id: string) => ["stats", id] as const,
   sandbox: (id: string) => ["sandbox", id] as const,
@@ -60,6 +62,29 @@ export function useProjectSessions(projectId: string | undefined) {
   });
 }
 
+/**
+ * Sessions matching a query across every project.
+ *
+ * The server already filters on title and label (`GET /v1/sessions?q=`), so this
+ * is the same endpoint the project sidebar uses, without `project`. An empty
+ * query is allowed for callers that want "recent sessions" (the palette).
+ */
+export function useSessionSearch(
+  query: string,
+  options: { enabled?: boolean; limit?: number } = {},
+) {
+  const needle = query.trim();
+  const limit = options.limit ?? 20;
+  return useQuery({
+    queryKey: qk.sessionSearch(needle, limit),
+    queryFn: () => api.sessions.list({ q: needle || undefined, limit }),
+    enabled: options.enabled ?? true,
+    // A search is cheap and the result list is small; a short stale window keeps
+    // a keystroke from refetching what is already on screen.
+    staleTime: 5_000,
+  });
+}
+
 export function useSession(sessionId: string) {
   return useQuery({
     queryKey: qk.session(sessionId),
@@ -84,6 +109,22 @@ export function useCreateProject() {
   return useMutation({
     mutationFn: (input: CreateProjectInput) => api.projects.create(input),
     onSuccess: () => {
+      void client.invalidateQueries({ queryKey: qk.projects });
+    },
+  });
+}
+
+/**
+ * Renames (or re-points) a project. Both the project list and the project detail
+ * are updated, because the sidebar, the header and the home page each read one
+ * of them — a rename that only changes the page you are on is not a rename.
+ */
+export function useUpdateProject(projectId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: UpdateProjectInput) => api.projects.update(projectId, input),
+    onSuccess: (data) => {
+      client.setQueryData(qk.project(projectId), data);
       void client.invalidateQueries({ queryKey: qk.projects });
     },
   });

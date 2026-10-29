@@ -36,7 +36,9 @@ test.describe("shell navigation", () => {
     // The project page offers the session dialog.
     await clickWhenSettled(page.getByTestId("new-session-button").first());
     await expect(page.getByTestId("session-submit")).toBeVisible({ timeout: 20_000 });
-    await page.getByTestId("session-title").fill("from the ui");
+    // Naming is the server's job now: the dialog has no title field, and the
+    // sidebar shows 新会话 until the first message names it (59-auto-naming).
+    await expect(page.getByTestId("session-title")).toHaveCount(0);
     await page.getByTestId("session-submit").click();
 
     // Landing on the workbench is what "it worked" means.

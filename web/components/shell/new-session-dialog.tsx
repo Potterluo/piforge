@@ -14,7 +14,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Field, FieldContent, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -38,6 +37,10 @@ const THINKING_LEVELS = [
 /**
  * Starts a session inside a project (PRD FR-1.1).
  *
+ * There is no title field: the server names an untitled session after the first
+ * message (`autoTitle`), so asking for a name here only postponed "start" for a
+ * decision the user cannot make yet. The sidebar shows 新会话 until then.
+ *
  * A session picks its model up front but can switch later from the composer,
  * so nothing here is a commitment: it is just the starting point.
  */
@@ -52,7 +55,6 @@ export function NewSessionDialog({
 }) {
   const router = useRouter();
   const providers = useProviders();
-  const [title, setTitle] = useState("");
   const [model, setModel] = useState("auto");
   const [thinking, setThinking] = useState("default");
   // Scratch space (PRD FR-1.10): kept out of the sidebar and swept after a few
@@ -83,13 +85,11 @@ export function NewSessionDialog({
     }
     try {
       const result = await create.mutateAsync({
-        title: title.trim() || undefined,
         model_ref: model === "auto" ? undefined : model,
         thinking_level: thinking === "default" ? undefined : thinking,
         ephemeral,
       });
       toast.success(ephemeral ? "临时会话已创建（数小时后自动清理）" : "会话已创建");
-      setTitle("");
       setModel("auto");
       setThinking("default");
       setEphemeral(false);
@@ -109,23 +109,11 @@ export function NewSessionDialog({
           <DialogHeader>
             <DialogTitle>新会话</DialogTitle>
             <DialogDescription>
-              会话会在项目沙箱里创建一个独立 worktree，可以随时分叉出并行分支。
+              会话会在项目沙箱里创建一个独立 worktree，可以随时分叉出并行分支。发送第一条消息后，会话会用它自动命名。
             </DialogDescription>
           </DialogHeader>
 
           <FieldGroup>
-            <Field>
-              <FieldLabel htmlFor="session-title">标题</FieldLabel>
-              <Input
-                id="session-title"
-                data-testid="session-title"
-                value={title}
-                onChange={(event) => setTitle(event.target.value)}
-                placeholder="例如：修缓存淘汰竞态"
-                autoFocus
-              />
-              <FieldDescription>留空则用第一条消息自动命名。</FieldDescription>
-            </Field>
             <Field orientation="horizontal">
               <Switch
                 id="session-ephemeral"

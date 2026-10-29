@@ -119,11 +119,18 @@ for (const viewport of SIDES) {
     expect(controlBox.x).toBeGreaterThanOrEqual(0);
     expect(controlBox.x + controlBox.width).toBeLessThanOrEqual(viewport.width);
 
-    // Every affordance the expanded sidebar has, the rail keeps as an icon.
+    // Every affordance the expanded sidebar has, the rail keeps as an icon. The
+    // project list is no longer here at all: the rail keeps the switcher, whose
+    // menu is the compact form of that list.
     await expect(page.getByTestId("project-switcher")).toBeVisible();
     await expect(page.getByTestId("account-menu")).toBeVisible();
     await expect(page.locator('[data-sidebar="menu-button"][aria-label="新会话"]')).toBeVisible();
-    await expect(page.getByTestId("project-row").first()).toBeVisible();
+    await expect(page.getByTestId("project-row")).toHaveCount(0);
+    await page.getByTestId("project-switcher").click();
+    await expect(page.getByTestId("project-switcher-item").first()).toBeVisible({
+      timeout: 15_000,
+    });
+    await page.keyboard.press("Escape");
 
     await noHorizontalScroll(page);
     await page.screenshot({ path: path.join(ARTIFACTS, `sidebar-collapsed-${viewport.width}.png`) });
@@ -288,13 +295,16 @@ for (const viewport of SIDES) {
   });
 }
 
-test("the project list filters as you type and can show all 40+ projects", async ({ page }) => {
+test("the home page is the full project list, and 42 projects no longer bury sessions", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await login(page, USER);
 
-  // Forty is what a real account accumulates; the sidebar has to stay usable.
+  // Forty is what a real account accumulates; the home page has to stay usable.
   const stamp = Date.now();
   const prefix = `qa53-${stamp}`;
+  const projectIds: string[] = [];
   for (let index = 1; index <= 42; index += 1) {
     const created = await apiWrite(page, "POST", "/v1/projects", {
       name: `${prefix}-${String(index).padStart(2, "0")}`,
@@ -302,50 +312,60 @@ test("the project list filters as you type and can show all 40+ projects", async
       default_branch: "main",
     });
     expect(created.status).toBeLessThan(300);
+    projectIds.push((created.body as { project: { id: string } }).project.id);
   }
 
-  // A reload picks up the new projects; the sidebar is client-rendered after auth.
+  // A reload picks up the new projects; the page is client-rendered after auth.
   await page.goto("/");
   const filter = page.getByTestId("project-filter");
   await expect(filter).toBeVisible({ timeout: 20_000 });
-  const rows = page.getByTestId("project-row");
+  const cards = page.getByTestId("project-card");
+  const scope = page.getByTestId("project-list-scope");
 
-  // The default view is "最近", not a wall of forty rows.
-  await expect(page.getByTestId("project-list-scope")).toContainText("最近");
-  const recent = await rows.count();
-  expect(recent).toBeLessThanOrEqual(7);
-
-  const total = Number(
-    (await page.getByTestId("project-list-scope").innerText()).match(/共 (\d+) 个/)?.[1] ?? 0,
-  );
+  const total = Number((await scope.innerText()).match(/共 (\d+) 个/)?.[1] ?? 0);
   expect(total).toBeGreaterThanOrEqual(42);
 
-  // Typing filters every project, not just the recent slice.
+  // Typing filters every project, and the empty state names the query.
   await filter.fill(prefix);
-  await expect(rows).toHaveCount(42, { timeout: 15_000 });
-  await expect(page.getByTestId("project-list-scope")).toContainText("匹配 42 个");
-  expect(await rows.first().innerText()).toContain(prefix);
-  await page.screenshot({ path: path.join(ARTIFACTS, "sidebar-filter-qa53.png") });
+  await expect(cards).toHaveCount(42, { timeout: 15_000 });
+  await expect(scope).toContainText("匹配 42 个");
+  expect(await cards.first().innerText()).toContain(prefix);
+  await page.screenshot({ path: path.join(ARTIFACTS, "home-filter-qa53.png") });
 
   // A few more characters narrow it further.
   await filter.fill(`${prefix}-01`);
-  await expect(rows).toHaveCount(1, { timeout: 15_000 });
-  await expect(rows.first()).toContainText(`${prefix}-01`);
-  await page.screenshot({ path: path.join(ARTIFACTS, "sidebar-filter-narrow.png") });
+  await expect(cards).toHaveCount(1, { timeout: 15_000 });
+  await expect(cards.first()).toContainText(`${prefix}-01`);
 
   // A query with no hits says so instead of showing nothing.
   await filter.fill(`${prefix}-does-not-exist`);
   await expect(page.getByTestId("project-empty")).toBeVisible();
 
-  // Clearing the filter restores the recent slice, and "查看全部" still lists all.
+  // Clearing restores the whole list; nothing was deleted.
   await filter.fill("");
-  await expect(rows).toHaveCount(recent);
-  await page.getByTestId("project-show-all").click();
-  await expect(rows).toHaveCount(total, { timeout: 15_000 });
-  await page.screenshot({ path: path.join(ARTIFACTS, "sidebar-all-projects.png") });
+  await expect(cards).toHaveCount(total, { timeout: 15_000 });
 
-  // Nothing was deleted: the rows are the user's projects, all of them.
-  expect(total).toBeGreaterThanOrEqual(42);
+  // The measurement the audit asked for: with 42 projects, the session list is
+  // still on the first screen instead of at y=1301.
+  const created = await apiWrite(page, "POST", `/v1/projects/${projectIds[0]}/sessions`, {
+    title: `qa53-fold-${stamp}`,
+  });
+  expect(created.status).toBeLessThan(300);
+  const sessionId = (created.body as { session: { id: string } }).session.id;
+  await page.goto(`/p/${projectIds[0]}/s/${sessionId}`);
+  await expect(page.getByTestId("workspace-panels")).toBeVisible({ timeout: 40_000 });
+
+  const searchBox = await box(page, "session-search-input");
+  expect(searchBox.y, "the search box stays at the top of the sidebar").toBeLessThan(300);
+  const firstSession = await box(page, "session-link");
+  expect(firstSession.y, "the sessions list must be above the fold").toBeLessThan(600);
+  console.log(
+    `[ux-fix2] 1440x900 with 42 projects: search box y=${searchBox.y.toFixed(0)}, ` +
+      `first session y=${firstSession.y.toFixed(0)} (audit baseline: sessions group at y=1301)`,
+  );
+  await page.screenshot({
+    path: path.join(ARTIFACTS, "sidebar-sessions-above-fold-42-projects.png"),
+  });
 });
 
 

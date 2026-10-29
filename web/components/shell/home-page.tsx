@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { FolderGit2, Plus } from "lucide-react";
 
 import { NewProjectDialog } from "@/components/shell/new-project-dialog";
@@ -16,6 +16,7 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { humanizeError } from "@/lib/errors";
 import { formatRelative, sandboxLabel } from "@/lib/session/format";
@@ -25,12 +26,24 @@ import { useProjects } from "@/lib/session/queries";
  * Project grid — the home page of the product (PRD §10.2).
  *
  * Landing on a project automatically would hide the fact that there is more
- * than one, so this page stays a chooser instead of a redirect.
+ * than one, so this page stays a chooser instead of a redirect. It is also the
+ * full project list now that the sidebar only shows the current project: a
+ * filter is the cost of moving forty rows here.
  */
 export function HomePage() {
   const projects = useProjects();
   const [dialogOpen, setDialogOpen] = useState(false);
-  const list = projects.data?.projects ?? [];
+  const [query, setQuery] = useState("");
+  const all = useMemo(() => projects.data?.projects ?? [], [projects.data]);
+  const list = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return all;
+    return all.filter(
+      (project) =>
+        project.name.toLowerCase().includes(needle) ||
+        (project.repo_url ?? "").toLowerCase().includes(needle),
+    );
+  }, [all, query]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
@@ -45,6 +58,21 @@ export function HomePage() {
           <Plus />
           新建项目
         </Button>
+        {all.length > 0 ? (
+          <div className="flex w-full flex-wrap items-center gap-2">
+            <Input
+              data-testid="project-filter"
+              aria-label="筛选项目"
+              placeholder="筛选项目…"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              className="h-8 w-full sm:w-64"
+            />
+            <span data-testid="project-list-scope" className="text-xs text-muted-foreground">
+              {query.trim() ? `匹配 ${list.length} 个` : `共 ${all.length} 个`}
+            </span>
+          </div>
+        ) : null}
       </header>
 
       <div className="p-4">
@@ -115,6 +143,11 @@ export function HomePage() {
             ))}
           </div>
         )}
+        {list.length === 0 && all.length > 0 ? (
+          <p data-testid="project-empty" className="py-8 text-sm text-muted-foreground">
+            没有匹配的项目
+          </p>
+        ) : null}
       </div>
 
       <NewProjectDialog open={dialogOpen} onOpenChange={setDialogOpen} />

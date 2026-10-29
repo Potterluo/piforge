@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -17,6 +17,7 @@ import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/c
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { humanizeError, repoUrlError } from "@/lib/errors";
+import { deriveProjectName, PROJECT_NAME_PLACEHOLDER, repoBasename } from "@/lib/projects/name";
 import { useCreateProject } from "@/lib/session/queries";
 import { ApiError } from "@/lib/types";
 
@@ -38,13 +39,12 @@ export function NewProjectDialog({
   const [branch, setBranch] = useState("main");
   const [repoError, setRepoError] = useState<string | null>(null);
 
+  // The name is optional: show what an empty field will produce while the user
+  // types the address, so "leave it blank" is a visible outcome, not a guess.
+  const derivedName = useMemo(() => deriveProjectName(repoUrl), [repoUrl]);
+
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const trimmed = name.trim();
-    if (!trimmed) {
-      toast.error("请填写项目名称");
-      return;
-    }
     // Reject locally first: a bad address must not create a project whose every
     // session then has no worktree. The API applies the same rule for callers
     // that do not use this form.
@@ -55,7 +55,8 @@ export function NewProjectDialog({
     }
     try {
       const result = await create.mutateAsync({
-        name: trimmed,
+        // An empty name is derived, not refused: the repository already names it.
+        name: name.trim() || derivedName,
         repo_url: repoUrl.trim() || undefined,
         default_branch: branch.trim() || undefined,
       });
@@ -90,18 +91,6 @@ export function NewProjectDialog({
 
           <FieldGroup>
             <Field>
-              <FieldLabel htmlFor="project-name">名称</FieldLabel>
-              <Input
-                id="project-name"
-                data-testid="project-name"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                placeholder="例如：cache-service"
-                autoFocus
-                required
-              />
-            </Field>
-            <Field data-invalid={repoError ? true : undefined}>
               <FieldLabel htmlFor="project-repo">仓库地址</FieldLabel>
               <Input
                 id="project-repo"
@@ -113,9 +102,27 @@ export function NewProjectDialog({
                   setRepoError(null);
                 }}
                 placeholder="https://github.com/acme/cache-service.git"
+                autoFocus
               />
               <FieldDescription>留空则创建一个空白工作区。支持 https 链接或 git@主机:路径。</FieldDescription>
               <FieldError data-testid="project-repo-error">{repoError}</FieldError>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="project-name">名称</FieldLabel>
+              <Input
+                id="project-name"
+                data-testid="project-name"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder={PROJECT_NAME_PLACEHOLDER}
+              />
+              <FieldDescription data-testid="project-name-derived">
+                {name.trim()
+                  ? "用你填的名字。"
+                  : repoBasename(repoUrl)
+                    ? `留空则用「${derivedName}」——仓库地址的最后一段，去掉 .git。`
+                    : `留空则用「${derivedName}」——没有仓库地址时按日期命名。`}
+              </FieldDescription>
             </Field>
             <Field>
               <FieldLabel htmlFor="project-branch">基准分支</FieldLabel>

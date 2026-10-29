@@ -2,12 +2,27 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { ArrowUpRight, Clock, FolderGit2, Plus } from "lucide-react";
+import { ArrowUpRight, Clock, FolderGit2, MoreHorizontal, PenLine, Plus } from "lucide-react";
+import { toast } from "sonner";
 
 import { NewSessionDialog } from "@/components/shell/new-session-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Empty,
   EmptyContent,
@@ -16,6 +31,8 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
+import { Field, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "@/components/ui/item";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -26,7 +43,7 @@ import {
   sessionStatusTone,
 } from "@/lib/session/format";
 import { humanizeError } from "@/lib/errors";
-import { useProject, useProjectSessions } from "@/lib/session/queries";
+import { useProject, useProjectSessions, useUpdateProject } from "@/lib/session/queries";
 import { cn } from "@/lib/utils";
 import type { SessionStatus } from "@/lib/types";
 
@@ -64,8 +81,35 @@ export function ProjectOverview({ projectId }: { projectId: string }) {
   const project = useProject(projectId);
   const sessions = useProjectSessions(projectId);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameName, setRenameName] = useState("");
+  const rename = useUpdateProject(projectId);
 
   const data = project.data?.project;
+
+  const startRename = () => {
+    setRenameName(data?.name ?? "");
+    setRenameOpen(true);
+  };
+
+  const submitRename = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const name = renameName.trim();
+    if (!name) return;
+    rename.mutate(
+      { name },
+      {
+        onSuccess: () => {
+          toast.success("项目已重命名", { description: name });
+          setRenameOpen(false);
+        },
+        onError: (error) =>
+          toast.error("重命名失败", {
+            description: humanizeError(error),
+          }),
+      },
+    );
+  };
 
   if (project.isError) {
     return (
@@ -85,7 +129,7 @@ export function ProjectOverview({ projectId }: { projectId: string }) {
           <div className="flex min-w-0 flex-col gap-1">
             <div className="flex items-center gap-2">
               <FolderGit2 className="size-4 shrink-0 text-muted-foreground" />
-              <h1 className="truncate text-base font-medium">
+              <h1 data-testid="project-title" className="truncate text-base font-medium">
                 {data?.name ?? <Skeleton className="h-5 w-40" />}
               </h1>
             </div>
@@ -106,6 +150,28 @@ export function ProjectOverview({ projectId }: { projectId: string }) {
               <Plus />
               新会话
             </Button>
+            {/* Rename lives next to the name it changes, not only in the palette:
+                a project created with a derived name had no way to correct it. */}
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <Button
+                    variant="outline"
+                    size="icon-sm"
+                    aria-label="项目操作"
+                    data-testid="project-actions"
+                  />
+                }
+              >
+                <MoreHorizontal />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-40">
+                <DropdownMenuItem data-testid="project-rename" onClick={startRename}>
+                  <PenLine />
+                  重命名
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
       </header>
@@ -195,6 +261,39 @@ export function ProjectOverview({ projectId }: { projectId: string }) {
         onOpenChange={setDialogOpen}
         projectId={projectId}
       />
+
+      <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
+        <DialogContent className="sm:max-w-md">
+          <form className="flex flex-col gap-4" onSubmit={submitRename}>
+            <DialogHeader>
+              <DialogTitle>重命名项目</DialogTitle>
+              <DialogDescription>只改变名字，不影响仓库、沙箱和会话。</DialogDescription>
+            </DialogHeader>
+            <Field>
+              <FieldLabel htmlFor="project-rename-input">名称</FieldLabel>
+              <Input
+                id="project-rename-input"
+                data-testid="project-rename-input"
+                value={renameName}
+                onChange={(event) => setRenameName(event.target.value)}
+                autoFocus
+              />
+            </Field>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setRenameOpen(false)}>
+                取消
+              </Button>
+              <Button
+                type="submit"
+                data-testid="project-rename-submit"
+                disabled={rename.isPending || renameName.trim().length === 0}
+              >
+                保存
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -77,6 +77,38 @@ func (s *server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, projectsResponse{Projects: projects})
 }
 
+// repoBasename is the repository's own name: the last segment of an https URL,
+// a git@host:path address or a local path, without a trailing `.git`.
+func repoBasename(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	if cut := strings.IndexAny(value, "?#"); cut >= 0 {
+		value = value[:cut]
+	}
+	value = strings.TrimRight(value, "/")
+	if len(value) >= 4 && strings.EqualFold(value[len(value)-4:], ".git") {
+		value = value[:len(value)-4]
+	}
+	index := strings.LastIndexAny(value, `/\:`)
+	name := strings.TrimSpace(value[index+1:])
+	if name == "" || name == "." || name == ".." {
+		return ""
+	}
+	return name
+}
+
+// deriveProjectName fills the name the user did not have to invent. A repository
+// address already carries one; a blank workspace falls back to its date so two
+// empty projects are still distinguishable in a list.
+func deriveProjectName(repoURL string, now time.Time) string {
+	if name := repoBasename(repoURL); name != "" {
+		return name
+	}
+	return "空白工作区 · " + now.Format("01-02")
+}
+
 // handleCreateProject creates one project owned by the caller.
 func (s *server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	user := auth.MustUser(r.Context())
@@ -89,16 +121,18 @@ func (s *server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	if strings.TrimSpace(in.Name) == "" {
-		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "name is required"))
-		return
-	}
 	if err := validateRepoURL(in.RepoURL); err != nil {
 		s.fail(w, r, err)
 		return
 	}
+	// The name is optional on purpose: a repository URL is already a name, and
+	// making the field required is how a project ends up called "test2".
+	name := strings.TrimSpace(in.Name)
+	if name == "" {
+		name = deriveProjectName(in.RepoURL, time.Now())
+	}
 	project, err := s.deps.Store.CreateProject(r.Context(), user.ID, store.NewProject{
-		Name:          in.Name,
+		Name:          name,
 		RepoURL:       strings.TrimSpace(in.RepoURL),
 		DefaultBranch: in.DefaultBranch,
 	})
