@@ -20,6 +20,7 @@ import {
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { useDebouncedCallback } from "@/hooks/use-debounced-callback";
 import { GitProvider } from "@/components/workspace/git-data";
@@ -53,11 +54,21 @@ export function WorkspacePanels({
   sessionId,
   projectId,
   followChunks,
+  collapsed: collapsedProp,
+  onCollapsedChange,
 }: {
   sessionId: string;
   projectId: string;
   /** The agent's own bash output, mirrored by the 跟随 panel (FR-9.2). */
   followChunks?: string[];
+  /**
+   * Whether the panel is folded to its rail. The workbench owns this because the
+   * rail only helps if the *panel* shrinks to it: a rail rendered inside a panel
+   * that kept its 56% width left a dead column of background beside the icons,
+   * which is the "collapsed panel did not give its width back" bug.
+   */
+  collapsed?: boolean;
+  onCollapsedChange?: (collapsed: boolean) => void;
 }): React.JSX.Element {
   const [tab, setTab] = React.useState("files");
   // A second pane (PRD FR-3.4): watching the diff while the terminal runs is the
@@ -69,8 +80,17 @@ export function WorkspacePanels({
   const [openPath, setOpenPath] = React.useState<string | null>(null);
   // A full-width toggle: the panel strip can be folded away entirely, leaving a rail of
   // icons. Closing one tab at a time was the only option before, which is not the same
-  // thing as getting the panel out of the way.
-  const [collapsed, setCollapsed] = React.useState(false);
+  // thing as getting the panel out of the way. Controlled by the workbench when it can
+  // shrink the resizable panel; standalone (tests, embeds) it keeps its own state.
+  const [innerCollapsed, setInnerCollapsed] = React.useState(false);
+  const collapsed = collapsedProp ?? innerCollapsed;
+  const setCollapsed = React.useCallback(
+    (next: boolean) => {
+      setInnerCollapsed(next);
+      onCollapsedChange?.(next);
+    },
+    [onCollapsedChange],
+  );
   const [revealTarget, setRevealTarget] = React.useState<string | null>(null);
 
   const handleOpenFile = React.useCallback((path: string) => {
@@ -127,33 +147,51 @@ export function WorkspacePanels({
     return (
       <div
         data-testid="workspace-rail"
-        className="flex h-full w-11 min-h-0 shrink-0 flex-col items-center gap-1 border-s bg-background py-1"
+        role="toolbar"
+        aria-label="工作区面板"
+        aria-orientation="vertical"
+        // No fixed w-11 here: the rail fills whatever the collapsed panel is, so the
+        // two widths cannot drift apart. The surface and the leading border make it
+        // read as a rail rather than as a column of orphaned icons.
+        className="flex h-full w-full min-h-0 shrink-0 flex-col items-center gap-0.5 border-s bg-sidebar py-1"
       >
-        <Button
-          size="icon-xs"
-          variant="ghost"
-          aria-label="展开面板"
-          data-testid="panel-expand"
-          onClick={() => setCollapsed(false)}
-        >
-          <PanelRightOpenIcon />
-        </Button>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                aria-label="展开面板"
+                data-testid="panel-expand"
+                onClick={() => setCollapsed(false)}
+              />
+            }
+          >
+            <PanelRightOpenIcon />
+          </TooltipTrigger>
+          <TooltipContent side="left">展开面板</TooltipContent>
+        </Tooltip>
         <div className="my-1 h-px w-6 bg-border" />
         {PANELS.map((panel) => (
-          <Button
-            key={panel.id}
-            size="icon-xs"
-            variant="ghost"
-            aria-label={panel.label}
-            title={panel.label}
-            data-testid={`rail-${panel.id}`}
-            onClick={() => {
-              setTab(panel.id);
-              setCollapsed(false);
-            }}
-          >
-            {panel.icon}
-          </Button>
+          <Tooltip key={panel.id}>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="icon-xs"
+                  variant={panel.id === tab ? "secondary" : "ghost"}
+                  aria-label={`${panel.label}面板`}
+                  data-testid={`rail-${panel.id}`}
+                  onClick={() => {
+                    setTab(panel.id);
+                    setCollapsed(false);
+                  }}
+                />
+              }
+            >
+              {panel.icon}
+            </TooltipTrigger>
+            <TooltipContent side="left">打开{panel.label}面板</TooltipContent>
+          </Tooltip>
         ))}
       </div>
     );

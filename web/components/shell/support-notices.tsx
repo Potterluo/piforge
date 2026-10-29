@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { SidebarMenuButton } from "@/components/ui/sidebar";
 import {
   Dialog,
   DialogContent,
@@ -53,11 +53,13 @@ export function SupportNotices() {
 
   return (
     <>
-      <Button
-        size="sm"
-        variant="ghost"
+      {/* A sidebar row, not a bare Button: in the icon rail a plain button keeps its
+          label and spills "通知" out of the 48px column. This one folds to the bell
+          and explains itself on hover like every other rail affordance. */}
+      <SidebarMenuButton
+        tooltip={unseen > 0 ? `通知（${unseen} 条未读）` : "通知"}
+        aria-label={unseen > 0 ? `通知，${unseen} 条未读` : "通知"}
         data-testid="support-notices"
-        className="justify-start gap-2"
         onClick={() => {
           setOpen(true);
           if (unseen > 0) markAll();
@@ -66,11 +68,14 @@ export function SupportNotices() {
         <Bell />
         <span>通知</span>
         {unseen > 0 ? (
-          <Badge variant="destructive" className="ml-auto text-[10px] leading-none">
+          <Badge
+            variant="destructive"
+            className="ml-auto text-[10px] leading-none group-data-[collapsible=icon]:hidden"
+          >
             {unseen}
           </Badge>
         ) : null}
-      </Button>
+      </SidebarMenuButton>
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="sm:max-w-lg">

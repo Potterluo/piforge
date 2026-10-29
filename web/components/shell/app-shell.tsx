@@ -11,8 +11,8 @@ import { NewSessionDialog } from "@/components/shell/new-session-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { humanizeError } from "@/lib/errors";
-import { cn } from "@/lib/utils";
-import { SidebarInset, SidebarProvider, SidebarTrigger, useSidebar } from "@/components/ui/sidebar";
+import { readSidebarOpen, writeSidebarOpen } from "@/lib/shell/sidebar-preference";
+import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useCurrentUser } from "@/lib/session/queries";
 import { ApiError } from "@/lib/types";
@@ -46,6 +46,21 @@ function AppShellFrame({ children }: { children: ReactNode }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
+  // The provider's initial state has to be the remembered one, or the sidebar
+  // paints expanded and then snaps to the rail on a reload — the flash the user
+  // asked us to remove. This is safe to read on the first render because the
+  // authenticated frame only mounts after `/auth/me` resolves, i.e. after the
+  // shell has already left the server-rendered skeleton behind.
+  //
+  // The state is *controlled* here on purpose: shadcn's provider treats an
+  // `onOpenChange` without an `open` prop as "someone else owns this", so passing
+  // the writer alone produced a toggle that persisted the choice but never moved
+  // the sidebar. Open + writer together are the working pair.
+  const [sidebarOpen, setSidebarOpen] = useState(() => readSidebarOpen());
+  const handleSidebarOpenChange = (open: boolean) => {
+    setSidebarOpen(open);
+    writeSidebarOpen(open);
+  };
 
   const projectId = projectIdFromPath(pathname);
 
@@ -102,7 +117,11 @@ function AppShellFrame({ children }: { children: ReactNode }) {
     // h-svh and overflow-hidden are load-bearing: with `min-h-svh` the provider grew with
     // the page, which pushed the sidebar footer — the account menu — below the fold and
     // out of reach.
-    <SidebarProvider className="h-svh overflow-hidden">
+    <SidebarProvider
+      open={sidebarOpen}
+      onOpenChange={handleSidebarOpenChange}
+      className="h-svh overflow-hidden"
+    >
       <AppSidebar
         onNewProject={() => setNewProjectOpen(true)}
         onNewSession={() => setNewSessionOpen(true)}
@@ -149,22 +168,17 @@ export function AppShell({ children }: { children: ReactNode }) {
   );
 }
 /**
- * The bar that carries the sidebar trigger.
+ * The bar that carries the sidebar trigger on small screens.
  *
- * With `collapsible="offcanvas"` the sidebar can be fully hidden, which is what
- * the collapse button promises; that only works if something brings it back.
- * On a wide screen the bar appears exactly when the sidebar is collapsed, and on
- * a narrow one it is always there (the sidebar is an overlay).
+ * The desktop sidebar no longer disappears into a 0px offcanvas state — it
+ * collapses to an icon rail that keeps its own toggle — so a bar that appeared
+ * only while collapsed would do nothing but shove the whole main column down by
+ * 40px (and back up) on every toggle. Below `md` the sidebar is an overlay sheet,
+ * where the bar is the only way in, so it stays.
  */
 function ShellTopBar({ onOpenPalette }: { onOpenPalette: () => void }) {
-  const { state } = useSidebar();
   return (
-    <div
-      className={cn(
-        "flex h-10 shrink-0 items-center gap-2 border-b px-2",
-        state === "collapsed" ? "flex" : "md:hidden",
-      )}
-    >
+    <div className="flex h-10 shrink-0 items-center gap-2 border-b px-2 md:hidden">
       <SidebarTrigger data-testid="sidebar-trigger" />
       <span className="text-sm font-medium">PiForge</span>
       <Button

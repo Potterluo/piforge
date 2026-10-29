@@ -80,7 +80,7 @@ test("the panel resizes the sandbox browser when the layout changes", async ({ p
   // the assertion that fails when the resize command stops working.
   expect(Math.abs(before.css - before.surface)).toBeLessThanOrEqual(2);
 
-  await page.getByTestId("sidebar-collapse").click();
+  await page.getByTestId("sidebar-collapse-toggle").click();
   // After collapsing, the surface is wider and the frame has to follow it.
   await expect
     .poll(async () => {

@@ -23,6 +23,8 @@ import {
   MessageSquareDashed,
   MessagesSquare,
   MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
   PenLine,
   Plus,
   Search,
@@ -57,7 +59,6 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
-  SidebarTrigger,
   SidebarMenuAction,
   SidebarMenuBadge,
   SidebarMenuButton,
@@ -67,6 +68,7 @@ import {
   SidebarMenuSubItem,
   SidebarRail,
   SidebarSeparator,
+  useSidebar,
 } from "@/components/ui/sidebar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Kbd } from "@/components/ui/kbd";
@@ -183,6 +185,10 @@ export function AppSidebar({
   const queryClient = useQueryClient();
   const me = useCurrentUser();
   const projects = useProjects();
+  // "collapsed" here means the icon rail: the same sidebar, 48px wide, with the
+  // project/session/settings/account affordances still reachable as icons.
+  const { state: sidebarState, toggleSidebar } = useSidebar();
+  const collapsed = sidebarState === "collapsed";
 
   const { projectId, sessionId } = useMemo(() => activeIds(pathname), [pathname]);
   const sessions = useProjectSessions(projectId ?? undefined);
@@ -201,6 +207,42 @@ export function AppSidebar({
     return groupSessions(visible);
   }, [sessions.data, showArchived]);
 
+  /**
+   * Forty projects is a normal account, and a flat list of forty rows pushes the
+   * session list — the thing the sidebar is actually for — below the fold. The
+   * default view is therefore "最近": the few projects a person works in, newest
+   * first, plus the one on screen so the list never hides where you are. Typing
+   * in the filter searches *all* of them; "查看全部" shows the whole list. No
+   * project is ever removed, only folded away.
+   */
+  const [projectQuery, setProjectQuery] = useState("");
+  const [showAllProjects, setShowAllProjects] = useState(false);
+  const normalizedQuery = projectQuery.trim().toLowerCase();
+  const projectList = useMemo(() => {
+    const byRecency = [...(projects.data?.projects ?? [])].sort(
+      (a, b) =>
+        (Date.parse(b.last_active_at ?? "") || 0) - (Date.parse(a.last_active_at ?? "") || 0),
+    );
+    return byRecency;
+  }, [projects.data]);
+  const recentProjects = useMemo(() => {
+    const recent = projectList.slice(0, 6);
+    if (projectId && !recent.some((item) => item.id === projectId)) {
+      const current = projectList.find((item) => item.id === projectId);
+      if (current) recent.unshift(current);
+    }
+    return recent;
+  }, [projectList, projectId]);
+  const matchingProjects = useMemo(() => {
+    if (!normalizedQuery) return [];
+    return projectList.filter((item) => item.name.toLowerCase().includes(normalizedQuery));
+  }, [projectList, normalizedQuery]);
+  const visibleProjects = normalizedQuery
+    ? matchingProjects
+    : showAllProjects
+      ? projectList
+      : recentProjects;
+
   const user = me.data?.user;
   const isAdmin = user?.role === "admin";
 
@@ -215,11 +257,30 @@ export function AppSidebar({
   };
 
   return (
-    <Sidebar collapsible="offcanvas" data-testid="app-sidebar">
+    <Sidebar id="app-sidebar" collapsible="icon" data-testid="app-sidebar">
       <SidebarHeader>
         <SidebarMenu>
-          <SidebarMenuItem className="flex items-center gap-1">
-            <SidebarTrigger data-testid="sidebar-collapse" className="ml-auto" aria-label="收起侧边栏" />
+          <SidebarMenuItem>
+            {/*
+              The only affordance before this was a 28px ghost icon in the corner,
+              which read as decoration: the user's complaint was "what sidebar
+              collapse?". The control is now a labelled row with the shortcut
+              spelled out, and in the icon rail it keeps the same icon plus a
+              tooltip, so there is always a visible way back.
+            */}
+            <SidebarMenuButton
+              variant="outline"
+              tooltip={collapsed ? "展开侧边栏（Ctrl+B）" : "收起侧边栏（Ctrl+B）"}
+              aria-label={collapsed ? "展开侧边栏（Ctrl+B）" : "收起侧边栏（Ctrl+B）"}
+              aria-expanded={!collapsed}
+              aria-controls="app-sidebar"
+              data-testid="sidebar-collapse-toggle"
+              onClick={() => toggleSidebar()}
+            >
+              {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
+              <span>收起侧边栏</span>
+              <Kbd className="ml-auto group-data-[collapsible=icon]:hidden">Ctrl B</Kbd>
+            </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>
             {/*
@@ -266,7 +327,7 @@ export function AppSidebar({
         </SidebarMenu>
       </SidebarHeader>
 
-      <SidebarContent>
+      <SidebarContent data-testid={collapsed ? "sidebar-rail" : undefined}>
         <SidebarGroup>
           <SidebarGroupLabel>项目</SidebarGroupLabel>
           <SidebarGroupAction onClick={onNewProject} title="新建项目">
@@ -290,23 +351,98 @@ export function AppSidebar({
                 </Button>
               </div>
             ) : (
-              <SidebarMenu>
-                {(projects.data?.projects ?? []).map((item) => (
-                  <SidebarMenuItem key={item.id}>
+              <>
+                {/* The rail cannot type, so the filter and the scope switcher only
+                    exist in the expanded sidebar; the icon list falls back to 最近. */}
+                {projectList.length > 6 ? (
+                  <div className="px-2 pb-2 group-data-[collapsible=icon]:hidden">
+                    <Input
+                      data-testid="project-filter"
+                      aria-label="筛选项目"
+                      placeholder="筛选项目…"
+                      value={projectQuery}
+                      onChange={(event) => setProjectQuery(event.target.value)}
+                      className="h-7 text-xs"
+                    />
+                  </div>
+                ) : null}
+
+                <div
+                  data-testid="project-list-scope"
+                  className="flex items-center justify-between gap-2 px-2 pb-1 text-[10px] text-muted-foreground group-data-[collapsible=icon]:hidden"
+                >
+                  <span>
+                    {normalizedQuery
+                      ? `匹配 ${matchingProjects.length} 个`
+                      : showAllProjects
+                        ? `全部 ${projectList.length} 个`
+                        : "最近"}
+                  </span>
+                  {projects.data ? <span>{`共 ${projectList.length} 个`}</span> : null}
+                </div>
+
+                <SidebarMenu>
+                  {/* Icon mode keeps the two "new" doors: a 48px rail with no way to
+                      start a session would be a dead end. */}
+                  <SidebarMenuItem className="hidden group-data-[collapsible=icon]:block">
                     <SidebarMenuButton
-                      isActive={item.id === projectId}
-                      tooltip={item.name}
-                      render={<Link href={`/p/${item.id}`} />}
+                      tooltip="新建项目"
+                      aria-label="新建项目"
+                      onClick={onNewProject}
                     >
-                      <FolderGit2 />
-                      <span>{item.name}</span>
-                      {item.session_count > 0 ? (
-                        <SidebarMenuBadge>{item.session_count}</SidebarMenuBadge>
-                      ) : null}
+                      <Plus />
+                      <span>新建项目</span>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
-                ))}
-              </SidebarMenu>
+                  {visibleProjects.map((item) => (
+                    <SidebarMenuItem key={item.id} data-testid="project-row">
+                      <SidebarMenuButton
+                        isActive={item.id === projectId}
+                        tooltip={item.name}
+                        render={<Link href={`/p/${item.id}`} />}
+                      >
+                        <FolderGit2 />
+                        <span className="truncate">{item.name}</span>
+                        {item.session_count > 0 ? (
+                          <SidebarMenuBadge>{item.session_count}</SidebarMenuBadge>
+                        ) : null}
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  ))}
+                </SidebarMenu>
+
+                {normalizedQuery ? (
+                  matchingProjects.length === 0 ? (
+                    <p
+                      data-testid="project-empty"
+                      className="px-2 py-1 text-xs text-muted-foreground"
+                    >
+                      没有匹配的项目
+                    </p>
+                  ) : (
+                    <button
+                      type="button"
+                      data-testid="project-clear-filter"
+                      className="mt-1 w-full rounded-md px-2 py-1 text-left text-xs text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground group-data-[collapsible=icon]:hidden"
+                      onClick={() => setProjectQuery("")}
+                    >
+                      清除筛选
+                    </button>
+                  )
+                ) : projectList.length > recentProjects.length ? (
+                  <button
+                    type="button"
+                    data-testid="project-show-all"
+                    aria-expanded={showAllProjects}
+                    className="mt-1 w-full rounded-md px-2 py-1 text-left text-xs text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground group-data-[collapsible=icon]:hidden"
+                    onClick={() => setShowAllProjects((value) => !value)}
+                  >
+                    {showAllProjects
+                      ? "只看最近"
+                      : `查看全部 ${projectList.length} 个项目`}
+                  </button>
+                ) : null}
+              </>
             )}
           </SidebarGroupContent>
         </SidebarGroup>
@@ -334,8 +470,18 @@ export function AppSidebar({
             <span className="sr-only">新会话</span>
           </SidebarGroupAction>
           <SidebarGroupContent>
+            <SidebarMenu>
+              <SidebarMenuItem className="hidden group-data-[collapsible=icon]:block">
+                <SidebarMenuButton tooltip="新会话" aria-label="新会话" onClick={onNewSession}>
+                  <Plus />
+                  <span>新会话</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
             {!projectId ? (
-              <p className="px-2 py-1 text-xs text-muted-foreground">先选择一个项目</p>
+              <p className="px-2 py-1 text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">
+                先选择一个项目
+              </p>
             ) : sessions.isPending ? (
               <SidebarMenu>
                 {[0, 1, 2, 3].map((index) => (
@@ -345,14 +491,14 @@ export function AppSidebar({
                 ))}
               </SidebarMenu>
             ) : sessions.isError ? (
-              <div className="flex flex-col items-start gap-2 px-2 py-1 text-xs text-muted-foreground">
+              <div className="flex flex-col items-start gap-2 px-2 py-1 text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">
                 <span>会话加载失败</span>
                 <Button size="xs" variant="outline" onClick={() => void sessions.refetch()}>
                   重试
                 </Button>
               </div>
             ) : groups.length === 0 ? (
-              <div className="flex flex-col items-start gap-2 px-2 py-1 text-xs text-muted-foreground">
+              <div className="flex flex-col items-start gap-2 px-2 py-1 text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">
                 <span>{archivedCount > 0 && !showArchived ? "没有进行中的会话" : "还没有会话"}</span>
                 <Button size="xs" variant="outline" onClick={onNewSession}>
                   <Plus />
@@ -373,6 +519,11 @@ export function AppSidebar({
                         <MessagesSquare />
                         <span
                           className={cn(
+                            // `truncate` belongs on the label itself: the menu
+                            // button's `[&>span:last-child]` rule hits the status
+                            // dot, not the title, so long titles wrapped to two
+                            // lines and turned the list into a wall of text.
+                            "truncate",
                             group.root.status === "archived" && "text-muted-foreground",
                           )}
                         >
@@ -416,7 +567,7 @@ export function AppSidebar({
                               render={<Link href={`/p/${projectId}/s/${child.id}`} />}
                             >
                               <KindGlyph kind={child.kind} />
-                              <span>{child.label || child.title || "未命名"}</span>
+                              <span className="truncate">{child.label || child.title || "未命名"}</span>
                               <StatusDot status={child.status} />
                             </SidebarMenuSubButton>
                             {/* A branch is a session: it can be renamed, archived,
@@ -475,6 +626,7 @@ export function AppSidebar({
             */}
             <SidebarMenuButton
               size="lg"
+              tooltip={user?.display_name || user?.email || "账户"}
               aria-expanded={accountOpen}
               data-testid="account-menu"
               onClick={() => setAccountOpen((open) => !open)}

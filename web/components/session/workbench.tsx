@@ -1,10 +1,11 @@
 "use client";
 
 import * as React from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangleIcon, GitBranch, LoaderCircle, PanelRight, ScrollText } from "lucide-react";
+import type { PanelImperativeHandle } from "react-resizable-panels";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -183,6 +184,24 @@ function WorkbenchBody({
   const [sidecarOpen, setSidecarOpen] = useState(false);
   const [forkTarget, setForkTarget] = useState<{ entryId: string; preview?: string } | null>(null);
 
+  /**
+   * The right panel's folded state, owned here rather than inside the panels:
+   * collapsing has to shrink the *resizable panel* to the rail's width, or the
+   * column keeps its 56% and the icons sit at the start of a dead band of
+   * background (the bug behind "it collapsed but the chat column did not widen").
+   */
+  const [panelsCollapsed, setPanelsCollapsed] = useState(false);
+  const panelRef = useRef<PanelImperativeHandle | null>(null);
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) return;
+    if (panelsCollapsed) {
+      if (!panel.isCollapsed()) panel.collapse();
+    } else if (panel.isCollapsed()) {
+      panel.expand();
+    }
+  }, [panelsCollapsed]);
+
   const models = useMemo<ModelOption[]>(() => {
     const options: ModelOption[] = [{ value: "inherit", label: "跟随默认" }];
     for (const provider of providers.data?.providers ?? []) {
@@ -281,28 +300,46 @@ function WorkbenchBody({
 
       <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
         <ResizablePanel defaultSize="44" minSize="26" className="flex min-h-0 flex-col">
-          <SessionStream
-            resolveForkEntry={(turn) =>
-              turn.entryId ?? matchForkEntry(turn, forkPoints.data?.points ?? [])
-            }
-            onFork={(entryId) => {
-              const point = forkPoints.data?.points.find((item) => item.entry_id === entryId);
-              setForkTarget({ entryId, preview: point?.preview });
-            }}
-          />
-          <Composer
-            sessionId={sessionId}
-            running={state.running}
-            queue={state.queue}
-            modelRef={detail?.model_ref}
-            thinkingLevel={detail?.thinking_level}
-            models={models}
-          />
+          {/* Named so a test can assert the thing the user actually cares about:
+              when a side folds, the transcript column gets the width back. */}
+          <div data-testid="transcript-column" className="flex h-full min-h-0 w-full flex-col">
+            <SessionStream
+              resolveForkEntry={(turn) =>
+                turn.entryId ?? matchForkEntry(turn, forkPoints.data?.points ?? [])
+              }
+              onFork={(entryId) => {
+                const point = forkPoints.data?.points.find((item) => item.entry_id === entryId);
+                setForkTarget({ entryId, preview: point?.preview });
+              }}
+            />
+            <Composer
+              sessionId={sessionId}
+              running={state.running}
+              queue={state.queue}
+              modelRef={detail?.model_ref}
+              thinkingLevel={detail?.thinking_level}
+              models={models}
+            />
+          </div>
         </ResizablePanel>
 
         <ResizableHandle withHandle />
 
-        <ResizablePanel defaultSize="56" minSize="30" className="min-h-0">
+        <ResizablePanel
+          defaultSize="56"
+          minSize="30"
+          // Folded, the panel is exactly the rail; that is what gives the width
+          // back to the transcript. Dragging the handle below the minimum folds it
+          // too, and the state follows so the rail is what you see.
+          collapsible
+          collapsedSize="44px"
+          panelRef={panelRef}
+          onResize={() => {
+            const isCollapsed = panelRef.current?.isCollapsed() ?? false;
+            setPanelsCollapsed((current) => (current === isCollapsed ? current : isCollapsed));
+          }}
+          className="min-h-0"
+        >
           {detail && !detail.worktree_id ? (
             <NoWorktreeState
               projectId={projectId}
@@ -314,6 +351,8 @@ function WorkbenchBody({
               sessionId={sessionId}
               projectId={projectId}
               followChunks={bashChunks}
+              collapsed={panelsCollapsed}
+              onCollapsedChange={setPanelsCollapsed}
             />
           )}
         </ResizablePanel>
