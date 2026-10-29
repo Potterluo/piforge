@@ -450,13 +450,12 @@ func TestAttachToARemoteBrowser(t *testing.T) {
 	if err := session.Navigate(ctx, "https://example.com"); err != nil {
 		t.Fatalf("Navigate: %v", err)
 	}
-	// Attaching and navigating work. Screenshotting over the sandbox's CDP proxy does not
-	// yet: the page session it hands back is not "active" for Page.captureScreenshot.
-	// Recorded as a skip so the suite never pretends this is done — the sandbox's own
-	// /v1/browser/page/screenshot is the working path today (see internal/aio).
+	// The page domain has to be enabled on the attached session before it can capture;
+	// without that Chrome answers "Not attached to an active page", which sounds like an
+	// attach problem and is not.
 	frame, err := session.Screenshot(ctx)
 	if err != nil {
-		t.Skipf("attach + navigate work; screenshot over this proxy does not yet: %v", err)
+		t.Fatalf("Screenshot over the sandbox CDP proxy: %v", err)
 	}
 	if len(frame) == 0 {
 		t.Fatal("the remote browser returned an empty screenshot")

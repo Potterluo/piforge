@@ -36,9 +36,18 @@ daemon 不可达时**跳过并说明原因**，不会假装通过。
 
 - 握手带 `X-AIO-API-Key`（它的 `/cdp/*` 反代和 HTTP API 共用一个 key，不带就是 401）；
 - **attach + navigate 已经通了**；
-- **截图还没通**：它给的 page session 在 `Page.captureScreenshot` 时不是 active。
-  目前可行路径是沙箱自己的 `/v1/browser/page/screenshot`（`internal/aio` 已封装并实测出图）。
-  `TestAttachToARemoteBrowser` 把这一段显式 skip 掉，不伪装成通过。
+- **截图也通了**：`Page.captureScreenshot` 需要先在该 session 上 `Page.enable`，
+  否则 Chrome 回的是 "Not attached to an active page"——听起来像 attach 失败，其实不是。
+  实测 28498 字节 PNG。
+
+启用方式：
+
+```bash
+piforged -sandbox docker \
+         -sandbox-image <all-in-one-sandbox:1.11.0> \
+         -sandbox-api-key <key> \
+         -sandbox-browser remote
+```
 
 ## 还没做的（这一节是重点）
 

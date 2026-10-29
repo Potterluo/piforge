@@ -653,6 +653,10 @@ func (s *Session) Screenshot(ctx context.Context) ([]byte, error) {
 
 // captureOn takes a screenshot over a given connection (one tab).
 func captureOn(ctx context.Context, client *cdp) ([]byte, error) {
+	// Page must be enabled on this session before it can capture: a fresh attach has the
+	// domain off, and Chrome answers "Not attached to an active page" rather than saying so.
+	_ = client.call(ctx, "Page.enable", nil, nil)
+
 	var out struct {
 		Data string `json:"data"`
 	}

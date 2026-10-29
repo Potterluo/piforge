@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/piforge/piforge/backend/internal/aio"
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/browser"
 	"github.com/piforge/piforge/backend/internal/contracts"
@@ -81,6 +82,10 @@ type options struct {
 	browserProxy string
 	// agentIdleTTL is how long an agent process may sit unused before it is stopped.
 	agentIdleTTL time.Duration
+	// sandboxBrowser is "host" (default) or "remote": remote uses the browser inside a
+	// docker sandbox instead of a local Chrome.
+	sandboxBrowser string
+	sandboxAPIKey  string
 	// sandboxKind picks the sandbox provider: "local" (directories) or "docker".
 	sandboxKind    string
 	sandboxImage   string
@@ -114,6 +119,10 @@ func run() error {
 		"stop an agent process after it has been idle this long")
 	flag.StringVar(&opt.sandboxKind, "sandbox", envOr("PIFORGE_SANDBOX", "local"),
 		"sandbox provider: local (directories) or docker (one container per project)")
+	flag.StringVar(&opt.sandboxBrowser, "sandbox-browser", envOr("PIFORGE_SANDBOX_BROWSER", "host"),
+		"browser placement: host, or remote (inside the docker sandbox)")
+	flag.StringVar(&opt.sandboxAPIKey, "sandbox-api-key", envOr("PIFORGE_SANDBOX_API_KEY", ""),
+		"API key the sandbox container was started with")
 	flag.StringVar(&opt.sandboxImage, "sandbox-image", envOr("PIFORGE_SANDBOX_IMAGE", ""),
 		"image for the docker sandbox provider")
 	flag.StringVar(&opt.sandboxNetwork, "sandbox-network", envOr("PIFORGE_SANDBOX_NETWORK", ""),
@@ -187,6 +196,7 @@ func run() error {
 	// 3. Sandboxes. The local provider runs on the host; swapping in the
 	// Firecracker provider is a one-line change here and nowhere else.
 	var sb contracts.SandboxProvider
+	var dockerSB *sandbox.Docker
 	if opt.sandboxKind == "docker" {
 		// One container per (user, project): the isolation boundary matches the tenancy
 		// boundary the rest of the product already uses. Lifecycle only for now — the
@@ -202,6 +212,7 @@ func run() error {
 			return fmt.Errorf("init docker sandbox provider: %w", derr)
 		}
 		sb = dockerProvider
+		dockerSB = dockerProvider
 	} else {
 		local, lerr := sandbox.NewLocal(sandbox.LocalConfig{
 			Root:          filepath.Join(opt.dataDir, "sandboxes"),
@@ -359,12 +370,37 @@ func run() error {
 
 	// 5. Terminals. The manager owns the PTY processes; the HTTP layer only
 	// relays bytes (PRD §7.6.1).
-	browsers := browser.NewManager(browser.Config{
+	browserCfg := browser.Config{
 		Binary:   opt.chrome,
 		Headless: opt.headlessBrowser,
 		Proxy:    opt.browserProxy,
 		Launcher: launcher,
-	})
+	}
+	// With a docker sandbox that runs an AIO image, the browser lives in that container:
+	// the panel then shows the same machine the agent edits, which is the whole point of
+	// moving the sandbox into a container.
+	if opt.sandboxKind == "docker" && opt.sandboxBrowser == "remote" {
+		browserCfg.RemoteAPIKey = opt.sandboxAPIKey
+		browserCfg.Remote = func(ctx context.Context, sandboxID string) (string, string, error) {
+			if dockerSB == nil {
+				return "", "", fmt.Errorf("remote browser needs the docker sandbox provider")
+			}
+			endpoint, err := dockerSB.Endpoint(ctx, sandboxID)
+			if err != nil {
+				return "", "", err
+			}
+			client, cerr := aio.New(aio.Config{BaseURL: endpoint, APIKey: opt.sandboxAPIKey})
+			if cerr != nil {
+				return "", "", cerr
+			}
+			info, ierr := client.BrowserInfo(ctx)
+			if ierr != nil {
+				return "", "", ierr
+			}
+			return info.CDPURL, endpoint, nil
+		}
+	}
+	browsers := browser.NewManager(browserCfg)
 	defer browsers.CloseAll()
 
 	terminals := term.New(term.Config{
