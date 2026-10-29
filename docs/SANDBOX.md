@@ -1,41 +1,50 @@
-# 沙箱：本地目录 与 Docker 容器
+# 沙箱：本地目录、Docker 容器，以及把容器交给 runner
 
 控制面**从不执行不可信代码**：它只决定"这个 (project, user) 的沙箱在哪里"，然后把
 agent、浏览器、终端指过去。这条不变量在任何 provider 上都成立。
 
-## 两个 provider
+## 三个 provider
 
-| | `local`（默认） | `docker` |
-|---|---|---|
-| 隔离边界 | 一个目录 | 一个容器 |
-| 浏览器 | 宿主 Chrome，按沙箱复用 profile | 容器内 Chromium（默认 `remote`） |
-| 终端 | 宿主进程 + PTY | 容器内 shell 会话（默认 `remote`） |
-| 面板文件读写 | 宿主目录（`fsx`，仅 `-sandbox-files host` 显式指定） | 容器文件 API（默认 `remote`） |
-| 适合 | 单机自托管、开发 | 多租户、需要真实边界 |
-| 启用 | 默认 | `-sandbox docker -sandbox-image <image>` |
+| | `local`（默认） | `docker` | `runner` |
+|---|---|---|---|
+| 隔离边界 | 一个目录 | 一个容器 | 一个容器（Docker CLI 在 runner 进程里） |
+| 浏览器 | 宿主 Chrome，按沙箱复用 profile | 容器内 Chromium（默认 `remote`） | 容器内 Chromium（默认 `remote`） |
+| 终端 | 宿主进程 + PTY | 容器内 shell 会话（默认 `remote`） | 容器内 shell 会话（默认 `remote`） |
+| 面板文件读写 | 宿主目录（`fsx`，仅 `-sandbox-files host` 显式指定） | 容器文件 API（默认 `remote`） | 容器文件 API（默认 `remote`） |
+| 控制面需要 | 无 | docker CLI + daemon | 无（只要 HTTP 能到 runner） |
+| 适合 | 单机自托管、开发 | 单机多租户 | 多服务部署、控制面不持 root |
+| 启用 | 默认 | `-sandbox docker -sandbox-image <image>` | `-sandbox runner -sandbox-runner-url <url> -sandbox-runner-token <token> -sandbox-image <image>` |
 
 `PIFORGE_SANDBOX=docker`、`PIFORGE_SANDBOX_IMAGE`、`PIFORGE_SANDBOX_NETWORK`、
-`PIFORGE_SANDBOX_CPUS`、`PIFORGE_SANDBOX_MEMORY` 是等价的环境变量。
+`PIFORGE_SANDBOX_CPUS`、`PIFORGE_SANDBOX_MEMORY` 是等价的环境变量；
+runner 另有 `PIFORGE_SANDBOX_RUNNER_URL`、`PIFORGE_SANDBOX_RUNNER_TOKEN`。
+`-sandbox local` 与 runner 参数同时出现是启动错误，而不是被忽略。
+runner 的形状与 compose 交付见 `docs/SANDBOX-DEPLOY.md` §1.4。
 
 ## 三个功能开关：默认跟随 provider
 
 浏览器、终端、面板文件读写各自还有一个 `host` / `remote` 开关。它们的默认值是 `auto`，
 意思是"由 provider 决定"，而不是写死 `host`：
 
-| flag | 环境变量 | 取值 | `-sandbox local` | `-sandbox docker` |
+| flag | 环境变量 | 取值 | `-sandbox local` | `-sandbox docker` / `-sandbox runner` |
 |---|---|---|---|---|
-| `-sandbox` | `PIFORGE_SANDBOX` | `local`（默认）/ `docker` | 目录沙箱 | 容器沙箱 |
+| `-sandbox` | `PIFORGE_SANDBOX` | `local`（默认）/ `docker` / `runner` | 目录沙箱 | 容器沙箱 |
 | `-sandbox-browser` | `PIFORGE_SANDBOX_BROWSER` | `auto`（默认）/ `host` / `remote` | `auto` → `host` | `auto` → `remote` |
 | `-sandbox-terminal` | `PIFORGE_SANDBOX_TERMINAL` | `auto`（默认）/ `host` / `remote` | `auto` → `host` | `auto` → `remote` |
 | `-sandbox-files` | `PIFORGE_SANDBOX_FILES` | `auto`（默认）/ `host` / `remote` | `auto` → `host` | `auto` → `remote` |
 
-其余 docker 参数不变：`-sandbox-image`、`-sandbox-network`、`-sandbox-cpus`、
-`-sandbox-memory`、`-sandbox-api-key`。
+`-sandbox` 只接受 `local` / `docker` / `runner`：其他值是启动错误，不再被静默当成
+`local`；`-sandbox runner` 缺 URL/token、或给了 runner 参数却不是 `-sandbox runner`，
+同样启动即失败。
+
+其余容器参数不变：`-sandbox-image`、`-sandbox-network`、`-sandbox-cpus`、
+`-sandbox-memory`、`-sandbox-api-key`。runner 下这些值随每个 create 请求发给 runner，
+由 runner 决定落成 `docker run` 的哪几个参数。
 
 三个开关在启动时一次解析完，日志里直接给出结果，所以看日志就知道这个部署长什么样：
 
 ```
-level=INFO msg="sandbox placement resolved" sandbox=docker browser=remote terminal=remote files=remote
+level=INFO msg="sandbox placement resolved" sandbox=runner browser=remote terminal=remote files=remote
 ```
 
 `-sandbox local` 下写 `remote` 是**启动错误**，不是运行时降级：没有容器可连，"远程"就不是
@@ -45,8 +54,8 @@ level=INFO msg="sandbox placement resolved" sandbox=docker browser=remote termin
 
 三个开关只开一部分，是最难诊断的那种部署：浏览器在容器里、文件面板在宿主机上，面板看到的是
 绑定目录里的另一份视图——同一个工作区、两个读者，谁也不知道对方看见了什么。所以
-`-sandbox docker` 默认把三个都放进容器：agent、浏览器、终端、文件面板是同一台机器、同一个
-`/workspace`。默认值不该产生一个没人会主动挑选的组合。
+`-sandbox docker` / `-sandbox runner` 默认把三个都放进容器：agent、浏览器、终端、文件面板是
+同一台机器、同一个 `/workspace`。默认值不该产生一个没人会主动挑选的组合。
 
 混合部署仍然允许——确实有人想让宿主机的 Chrome 连容器里的工作区来调镜像——但它必须是
 显式写出来的（`-sandbox-files host`），而且启动时会有一条 WARN，把留在宿主机上的功能全部

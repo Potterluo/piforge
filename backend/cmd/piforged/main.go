@@ -102,12 +102,18 @@ type options struct {
 	// workspace through the sandbox's file API instead of the host directory.
 	sandboxFiles  string
 	sandboxAPIKey string
-	// sandboxKind picks the sandbox provider: "local" (directories) or "docker".
+	// sandboxKind picks the sandbox provider: "local" (directories), "docker"
+	// (this process runs the Docker CLI) or "runner" (a sandbox-runner service
+	// runs it; this process speaks HTTP).
 	sandboxKind    string
 	sandboxImage   string
 	sandboxNetwork string
 	sandboxCPUs    string
 	sandboxMemory  string
+	// sandboxRunnerURL and sandboxRunnerToken address the sandbox-runner service
+	// under -sandbox runner; they are rejected under any other provider.
+	sandboxRunnerURL   string
+	sandboxRunnerToken string
 	// webUpstream makes this process serve the UI as well as the API, which is
 	// how a container exposes a single port.
 	webUpstream string
@@ -140,13 +146,13 @@ func run() error {
 	flag.DurationVar(&opt.sandboxReapInterval, "sandbox-reap-interval", envDuration("PIFORGE_SANDBOX_REAP_INTERVAL", time.Minute),
 		"how often the sandbox idle reaper checks for candidates")
 	flag.StringVar(&opt.sandboxKind, "sandbox", envOr("PIFORGE_SANDBOX", "local"),
-		"sandbox provider: local (directories) or docker (one container per project)")
+		"sandbox provider: local (directories), docker (one container per project, CLI here) or runner (a sandbox-runner service runs the CLI)")
 	flag.StringVar(&opt.sandboxBrowser, "sandbox-browser", envOr("PIFORGE_SANDBOX_BROWSER", "auto"),
-		"browser placement: auto (docker: remote, local: host), host, or remote (inside the docker sandbox)")
+		"browser placement: auto (container providers: remote, local: host), host, or remote (inside the sandbox container)")
 	flag.StringVar(&opt.sandboxTerminal, "sandbox-terminal", envOr("PIFORGE_SANDBOX_TERMINAL", "auto"),
-		"terminal placement: auto (docker: remote, local: host), host, or remote (inside the docker sandbox)")
+		"terminal placement: auto (container providers: remote, local: host), host, or remote (inside the sandbox container)")
 	flag.StringVar(&opt.sandboxFiles, "sandbox-files", envOr("PIFORGE_SANDBOX_FILES", "auto"),
-		"workspace files: auto (docker: remote, local: host), host, or remote (read and written through the docker sandbox)")
+		"workspace files: auto (container providers: remote, local: host), host, or remote (read and written through the sandbox)")
 	flag.StringVar(&opt.sandboxAPIKey, "sandbox-api-key", envOr("PIFORGE_SANDBOX_API_KEY", ""),
 		"API key the sandbox container was started with")
 	flag.StringVar(&opt.sandboxImage, "sandbox-image", envOr("PIFORGE_SANDBOX_IMAGE", ""),
@@ -157,6 +163,10 @@ func run() error {
 		"CPU limit per sandbox")
 	flag.StringVar(&opt.sandboxMemory, "sandbox-memory", envOr("PIFORGE_SANDBOX_MEMORY", ""),
 		"memory limit per sandbox, e.g. 2g")
+	flag.StringVar(&opt.sandboxRunnerURL, "sandbox-runner-url", envOr("PIFORGE_SANDBOX_RUNNER_URL", ""),
+		"base URL of the sandbox-runner service, with -sandbox runner (e.g. http://sandbox-runner:7801)")
+	flag.StringVar(&opt.sandboxRunnerToken, "sandbox-runner-token", envOr("PIFORGE_SANDBOX_RUNNER_TOKEN", ""),
+		"shared bearer token of the sandbox-runner service, with -sandbox runner")
 	flag.StringVar(&opt.chrome, "chrome", envOr("PIFORGE_CHROME", ""),
 		"chrome/chromium binary for the browser panel (empty disables it)")
 	flag.BoolVar(&opt.headlessBrowser, "headless-browser", envOr("PIFORGE_HEADLESS_BROWSER", "1") != "0",
@@ -173,6 +183,12 @@ func run() error {
 	// ignores case, and the wiring below does not, so "-sandbox Docker" must mean
 	// the same thing in both places.
 	opt.sandboxKind = normalizedSandboxKind(opt.sandboxKind)
+	// The runner credentials and the provider have to agree before anything is
+	// created: a typo here would otherwise start a process that looks healthy and
+	// fails on the first session.
+	if err := validateSandboxFlags(opt.sandboxKind, opt.sandboxRunnerURL, opt.sandboxRunnerToken); err != nil {
+		return err
+	}
 
 	// Where the browser, the terminal and the file panel look is one decision, not
 	// three. Resolve it before anything is created: a contradictory combination
@@ -252,11 +268,16 @@ func run() error {
 	}
 	gatewayBase := strings.TrimRight(firstNonEmpty(opt.gatewayURL, "http://"+opt.addr), "/")
 
-	// 3. Sandboxes. The local provider runs on the host; swapping in the
-	// Firecracker provider is a one-line change here and nowhere else.
+	// 3. Sandboxes. The local provider runs on the host; the docker provider runs
+	// the Docker CLI here; the runner provider asks a service that owns the CLI.
+	// Swapping between them is a flag and one branch here, nowhere else.
 	var sb contracts.SandboxProvider
-	var dockerSB *sandbox.Docker
-	if opt.sandboxKind == "docker" {
+	// remoteSB is the lifecycle-independent half the panels use (the sandbox's API
+	// endpoint and the host→container path map). It is nil under -sandbox local,
+	// which is how the checks below know there is no container.
+	var remoteSB sandbox.Remote
+	switch opt.sandboxKind {
+	case "docker":
 		// One container per (user, project): the isolation boundary matches the tenancy
 		// boundary the rest of the product already uses. The AIO image publishes one
 		// HTTP port, and the checkout is provisioned through that API (as the sandbox
@@ -276,8 +297,35 @@ func run() error {
 			return fmt.Errorf("init docker sandbox provider: %w", derr)
 		}
 		sb = dockerProvider
-		dockerSB = dockerProvider
-	} else {
+		remoteSB = dockerProvider
+	case "runner":
+		// The same container rules, performed by a process that owns the Docker
+		// socket. This process needs neither the CLI nor a daemon: it has one HTTP
+		// contract, a token, and no way to run anything on the host.
+		//
+		// The DataRoot is this process's view of the shared sandbox directory. The
+		// runner reports the same path in RootDir, which is what makes RootDir,
+		// ContainerPath and provision's host git keep working unchanged.
+		runnerProvider, rerr := sandbox.NewRunner(sandbox.RunnerConfig{
+			BaseURL:  opt.sandboxRunnerURL,
+			Token:    opt.sandboxRunnerToken,
+			DataRoot: filepath.Join(opt.dataDir, "sandboxes"),
+			Image:    opt.sandboxImage,
+			APIKey:   opt.sandboxAPIKey,
+			CPUs:     opt.sandboxCPUs,
+			Memory:   opt.sandboxMemory,
+			Network:  opt.sandboxNetwork,
+			APIPort:  8080,
+		})
+		if rerr != nil {
+			return fmt.Errorf("init runner sandbox provider: %w", rerr)
+		}
+		sb = runnerProvider
+		remoteSB = runnerProvider
+		logger.Info("sandbox lifecycle runs through the runner",
+			"url", opt.sandboxRunnerURL,
+			"detail", "no docker CLI and no daemon are needed in this process")
+	default:
 		local, lerr := sandbox.NewLocal(sandbox.LocalConfig{
 			Root:          filepath.Join(opt.dataDir, "sandboxes"),
 			InitialBranch: "main",
@@ -311,10 +359,10 @@ func run() error {
 	// only thing left to guard is the provider itself.
 	var files contracts.Workspace = fs
 	if opt.sandboxFiles == "remote" {
-		if dockerSB == nil {
-			return fmt.Errorf("remote workspace files need the docker sandbox provider")
+		if remoteSB == nil {
+			return fmt.Errorf("remote workspace files need a container sandbox provider (-sandbox docker or -sandbox runner)")
 		}
-		fileBackend := &sandboxFileBackend{provider: dockerSB, store: st, apiKey: opt.sandboxAPIKey}
+		fileBackend := &sandboxFileBackend{provider: remoteSB, store: st, apiKey: opt.sandboxAPIKey}
 		executor := workspaceremote.ShellExecutor{Backend: fileBackend}
 		remoteFiles, rerr := workspaceremote.New(workspaceremote.Config{
 			Backend: fileBackend,
@@ -478,10 +526,10 @@ func run() error {
 	if opt.sandboxBrowser == "remote" {
 		browserCfg.RemoteAPIKey = opt.sandboxAPIKey
 		browserCfg.Remote = func(ctx context.Context, sandboxID string) (string, string, error) {
-			if dockerSB == nil {
-				return "", "", fmt.Errorf("remote browser needs the docker sandbox provider")
+			if remoteSB == nil {
+				return "", "", fmt.Errorf("remote browser needs a container sandbox provider")
 			}
-			endpoint, err := dockerSB.Endpoint(ctx, sandboxID)
+			endpoint, err := remoteSB.Endpoint(ctx, sandboxID)
 			if err != nil {
 				return "", "", err
 			}
@@ -513,8 +561,8 @@ func run() error {
 	}
 	if opt.sandboxTerminal == "remote" {
 		termCfg.Remote = func(ctx context.Context, worktreeID string) (*aio.Client, string, string, error) {
-			if dockerSB == nil {
-				return nil, "", "", fmt.Errorf("remote terminal needs the docker sandbox provider")
+			if remoteSB == nil {
+				return nil, "", "", fmt.Errorf("remote terminal needs a container sandbox provider")
 			}
 			worktree, werr := st.WorktreeByID(ctx, worktreeID)
 			if werr != nil {
@@ -522,13 +570,13 @@ func run() error {
 					"worktree", worktreeID, "error", werr.Error())
 				return nil, "", "", werr
 			}
-			endpoint, eerr := dockerSB.Endpoint(ctx, worktree.SandboxID)
+			endpoint, eerr := remoteSB.Endpoint(ctx, worktree.SandboxID)
 			if eerr != nil {
 				logger.Warn("cannot reach the sandbox for a remote terminal; falling back to a host PTY",
 					"sandbox", worktree.SandboxID, "error", eerr.Error())
 				return nil, "", "", eerr
 			}
-			cwd, cerr := dockerSB.ContainerPath(worktree.Path)
+			cwd, cerr := remoteSB.ContainerPath(worktree.Path)
 			if cerr != nil {
 				logger.Warn("cannot map the worktree into the sandbox; falling back to a host PTY",
 					"worktree", worktree.Path, "error", cerr.Error())

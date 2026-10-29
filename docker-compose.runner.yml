@@ -1,0 +1,92 @@
+# The two-service shape: piforge has no Docker CLI and no daemon, sandbox-runner
+# owns both.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.runner.yml up -d --build
+#
+# `docker-compose.yml` on its own still describes the single-container deployment
+# (the pod *is* the sandbox), and nothing here changes it until this overlay is
+# named. What the overlay adds:
+#
+#   - sandbox-runner, the only service that mounts /var/run/docker.sock. It runs
+#     the same sandbox provider code the single-host build does, so the container
+#     rules (one workspace per (user, project), mount verification, checkout via
+#     the sandbox's own API, branch worktrees as `gem`) exist once;
+#   - piforged switched to `-sandbox runner`, talking to it over the
+#     sandbox-control network with a shared bearer token.
+#
+# Why the data volume is on both services, at the same path:
+#
+#   a sandbox's workspace is a *bind mount* from the host, and Docker resolves the
+#   source path on the daemon's host. The runner creates the container, so it must
+#   name the path the daemon can see; the control plane runs host git, writes
+#   skills/MCP files and (with -sandbox-files remote) maps those paths into the
+#   container, so it must name the *same* path. Mounting one volume at /data in
+#   both services is what makes `/data/sandboxes/<user>/<project>` mean one
+#   directory. If the two paths differ, nothing errors: Docker quietly creates an
+#   empty directory and both sides write trees the other never reads.
+#
+# Sandbox containers join `piforge-sandboxes` and are addressed by container name
+# (SANDBOX_CONTAINER_ENDPOINT=1), so no sandbox port is published on the host.
+# piforge joins that network to reach them; the runner joins it too because the
+# checkout it performs runs from the runner process, against the container's API.
+
+services:
+  piforge:
+    environment:
+      PIFORGE_SANDBOX: runner
+      PIFORGE_SANDBOX_RUNNER_URL: http://sandbox-runner:7801
+      PIFORGE_SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:?set SANDBOX_RUNNER_TOKEN to a long random string}
+      # The runner starts containers with this image and this key; the control
+      # plane presents the same key to each sandbox's API.
+      PIFORGE_SANDBOX_IMAGE: ${PIFORGE_SANDBOX_IMAGE:?set PIFORGE_SANDBOX_IMAGE to the all-in-one sandbox image}
+      PIFORGE_SANDBOX_API_KEY: ${PIFORGE_SANDBOX_API_KEY:-}
+      PIFORGE_SANDBOX_NETWORK: piforge-sandboxes
+    networks:
+      - default
+      - sandbox-control
+      - piforge-sandboxes
+    depends_on:
+      - sandbox-runner
+
+  sandbox-runner:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.runner
+    image: ${PIFORGE_RUNNER_IMAGE:-piforge/sandbox-runner:dev}
+    container_name: piforge-sandbox-runner
+    # Reap the `docker` processes this service spawns.
+    init: true
+    environment:
+      # The runner refuses to start without a token, and every request must carry
+      # it. There is no TLS between the two services: keep them on an internal
+      # network and do not publish 7801.
+      RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:?set SANDBOX_RUNNER_TOKEN to a long random string}
+      SANDBOX_RUNNER_ADDR: 0.0.0.0:7801
+      SANDBOX_DATA_ROOT: /data/sandboxes
+      SANDBOX_IMAGE: ${PIFORGE_SANDBOX_IMAGE:?set PIFORGE_SANDBOX_IMAGE to the all-in-one sandbox image}
+      SANDBOX_API_KEY: ${PIFORGE_SANDBOX_API_KEY:-}
+      SANDBOX_NETWORK: piforge-sandboxes
+      # Report http://piforge-<hash8>:8080 instead of a published loopback port:
+      # piforged is a container here, so 127.0.0.1:<port> would be its own loopback.
+      SANDBOX_CONTAINER_ENDPOINT: "1"
+    volumes:
+      # The only mount of the daemon socket in this deployment. It is deliberately
+      # not `:ro`: a socket mount's read-only flag does not restrict the API, and
+      # writing it that way would suggest a boundary that is not there.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Same volume, same path, as piforge — see the note above.
+      - piforge-data:/data
+    networks:
+      - sandbox-control
+      - piforge-sandboxes
+    restart: unless-stopped
+
+networks:
+  sandbox-control:
+  # A fixed name: SANDBOX_NETWORK refers to it, and the runner must be able to
+  # resolve sandbox container names on it while it provisions a checkout.
+  piforge-sandboxes:
+    name: piforge-sandboxes
+
+volumes:
+  piforge-data:

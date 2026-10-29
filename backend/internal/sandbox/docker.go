@@ -23,6 +23,11 @@ import (
 // containerWorkspace is where one project's host directory is mounted.
 const containerWorkspace = "/workspace"
 
+// ContainerWorkspace is containerWorkspace for other packages: the sandbox-runner
+// reports it in its records so the control plane can check that both sides agree
+// on the mount root instead of hard-coding the same string twice.
+const ContainerWorkspace = containerWorkspace
+
 // containerRepoDir is the main checkout inside the container. It is the container
 // side of provision.RepoDir(sb): the provider mounts <pair dir> at /workspace and
 // reports <pair dir> as the sandbox's RootDir, so <RootDir>/repo is /workspace/repo.
@@ -119,18 +124,53 @@ type DockerConfig struct {
 	// APIKey is passed to the container as SANDBOX_API_KEY when non-empty, so every
 	// service in it requires the header.
 	APIKey string
+	// ContainerEndpoint reports a sandbox's address as http://<container>:<APIPort>
+	// on Network instead of reading back a host port. It is what a multi-service
+	// deployment needs: when the control plane is in a container of its own,
+	// 127.0.0.1:<published> is its own loopback, not the sandbox. With it set the
+	// container publishes no port at all, and Network must name a network the
+	// control plane (and this process, which reaches the API during checkout) can
+	// resolve container names on.
+	//
+	// False keeps the single-host behaviour byte for byte: publish on a free
+	// loopback port and read it back from `docker port`.
+	ContainerEndpoint bool
 }
 
-// NewDocker builds a container provider.
+// NewDocker builds a container provider. It needs the Docker CLI and an image,
+// because it can create containers.
 func NewDocker(cfg DockerConfig) (*Docker, error) {
 	if strings.TrimSpace(cfg.Image) == "" {
 		return nil, fmt.Errorf("sandbox: docker: image is required")
 	}
-	if strings.TrimSpace(cfg.DataRoot) == "" {
-		return nil, fmt.Errorf("sandbox: docker: data root is required")
+	provider, err := newDocker(cfg)
+	if err != nil {
+		return nil, err
 	}
 	if _, err := exec.LookPath("docker"); err != nil {
 		return nil, fmt.Errorf("sandbox: docker: the docker CLI is not on PATH: %w", err)
+	}
+	return provider, nil
+}
+
+// NewDockerAPI builds a provider that only talks to an existing container's HTTP
+// API: no Docker CLI, no image.
+//
+// It exists for the sandbox-runner's adapter. A request that adds a branch
+// worktree names a container that already exists, and the runner must not demand
+// an image for it (the image arrived with an earlier request, and the runner is
+// stateless by design) or resolve a CLI that the call never uses. The container
+// rules are the same ones NewDocker returns; only those two creation-time
+// preconditions are dropped.
+func NewDockerAPI(cfg DockerConfig) (*Docker, error) { return newDocker(cfg) }
+
+// newDocker validates and normalises what every method needs.
+func newDocker(cfg DockerConfig) (*Docker, error) {
+	if strings.TrimSpace(cfg.DataRoot) == "" {
+		return nil, fmt.Errorf("sandbox: docker: data root is required")
+	}
+	if cfg.ContainerEndpoint && strings.TrimSpace(cfg.Network) == "" {
+		return nil, fmt.Errorf("sandbox: docker: container endpoints need a network to resolve container names on")
 	}
 	// The mount source is compared with what Docker reports back after a restart, so
 	// the configured root has to be the same absolute, cleaned path every time.
@@ -249,6 +289,19 @@ func (d *Docker) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 // runContainer starts the per-(user, project) container, mounting only that pair's
 // host directory at /workspace.
 func (d *Docker) runContainer(ctx context.Context, name, userID, projectID, workspace string) error {
+	_, err := d.docker(ctx, d.containerArgs(name, userID, projectID, workspace)...)
+	return err
+}
+
+// containerArgs is the `docker run` argv for one sandbox.
+//
+// It is a function of the config alone so the two endpoint shapes — a published
+// loopback port, or a name on a shared network — are pinned by a test that needs
+// no daemon. Everything else here is a rule with a bug behind it: the mount is one
+// pair's directory, the labels are how an orphan is found after a crash, and
+// BROWSER_NO_SANDBOX is why the image's Chromium starts under the default seccomp
+// profile.
+func (d *Docker) containerArgs(name, userID, projectID, workspace string) []string {
 	args := []string{
 		"run", "-d",
 		"--name", name,
@@ -267,10 +320,15 @@ func (d *Docker) runContainer(ctx context.Context, name, userID, projectID, work
 	if d.cfg.Memory != "" {
 		args = append(args, "--memory", d.cfg.Memory)
 	}
-	if d.cfg.APIPort > 0 {
+	if d.cfg.APIPort > 0 && !d.cfg.ContainerEndpoint {
 		// Publish on a free host port: two sandboxes on one machine must not fight over
 		// 8080, and the control plane reads the assigned port back from `docker port`.
+		// A deployment whose control plane is a container of its own sets
+		// ContainerEndpoint and gets no published port at all: it reaches the sandbox
+		// by name on the shared network instead (see DockerConfig.ContainerEndpoint).
 		args = append(args, "-p", fmt.Sprintf("127.0.0.1::%d", d.cfg.APIPort))
+	}
+	if d.cfg.APIPort > 0 {
 		// The image starts its Chromium under Docker's default seccomp profile, and the
 		// browser dies before CDP opens: "Failed to move to new namespace ... Operation
 		// not permitted" (zygote_host_impl_linux.cc:207). BROWSER_NO_SANDBOX is the
@@ -288,9 +346,7 @@ func (d *Docker) runContainer(ctx context.Context, name, userID, projectID, work
 	// The image may or may not have an entrypoint that idles; a sandbox has to stay up
 	// between prompts, so keep it alive explicitly.
 	args = append(args, "sleep", "infinity")
-
-	_, err := d.docker(ctx, args...)
-	return err
+	return args
 }
 
 // sandboxStep is one command of a provisioning plan that runs inside the
@@ -940,15 +996,25 @@ func dockerState(status string) contracts.SandboxState {
 	}
 }
 
-// Endpoint reports the host address that serves the sandbox API for one sandbox.
+// Endpoint reports the address that serves the sandbox API for one sandbox.
 //
-// It asks Docker rather than remembering: the port is assigned at creation and survives
-// a control-plane restart, and a number kept in memory would be wrong after either.
+// With ContainerEndpoint it is the container's name on the shared network, and
+// the container is inspected first so a missing sandbox is ErrNotFound rather
+// than a hostname that fails later. Otherwise it is the host port Docker
+// assigned, read back rather than remembered: the port is assigned at creation
+// and survives a control-plane restart, and a number kept in memory would be
+// wrong after either.
 func (d *Docker) Endpoint(ctx context.Context, sandboxID string) (string, error) {
 	if d.cfg.APIPort <= 0 {
 		return "", fmt.Errorf("sandbox: docker: no api port is published for this provider")
 	}
 	name := d.resolve(sandboxID)
+	if d.cfg.ContainerEndpoint {
+		if _, err := d.inspect(ctx, name); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("http://%s:%d", name, d.cfg.APIPort), nil
+	}
 	out, err := d.docker(ctx, "port", name, fmt.Sprintf("%d/tcp", d.cfg.APIPort))
 	if err != nil {
 		return "", err
@@ -973,6 +1039,18 @@ func (d *Docker) Endpoint(ctx context.Context, sandboxID string) (string, error)
 // shared DataRoot and its immediate children are not mounted anywhere any more,
 // and mapping them to /workspace would silently address the wrong tree.
 func (d *Docker) ContainerPath(hostPath string) (string, error) {
+	mapped, err := containerPathFor(d.cfg.DataRoot, hostPath)
+	if err != nil {
+		return "", fmt.Errorf("sandbox: docker: %w", err)
+	}
+	return mapped, nil
+}
+
+// containerPathFor is that mapping, shared with the runner provider so the process
+// that owns the Docker CLI and the process that asks it over HTTP answer
+// identically. It is pure path arithmetic over the configured data root: no
+// daemon, no CLI, and nothing to keep in sync.
+func containerPathFor(dataRoot, hostPath string) (string, error) {
 	// A sandbox record may already carry a container path: provision lays out
 	// repositories from RootDir, which is containerWorkspace.
 	if clean := path.Clean(filepath.ToSlash(strings.TrimSpace(hostPath))); clean == containerWorkspace ||
@@ -980,28 +1058,28 @@ func (d *Docker) ContainerPath(hostPath string) (string, error) {
 		return clean, nil
 	}
 
-	root, err := filepath.Abs(d.cfg.DataRoot)
+	root, err := filepath.Abs(dataRoot)
 	if err != nil {
-		return "", fmt.Errorf("sandbox: docker: data root %q: %w", d.cfg.DataRoot, err)
+		return "", fmt.Errorf("data root %q: %w", dataRoot, err)
 	}
 	abs, err := filepath.Abs(hostPath)
 	if err != nil {
-		return "", fmt.Errorf("sandbox: docker: path %q: %w", hostPath, err)
+		return "", fmt.Errorf("path %q: %w", hostPath, err)
 	}
 	rel, err := filepath.Rel(root, abs)
 	if err != nil {
-		return "", fmt.Errorf("sandbox: docker: %q relative to %q: %w", abs, root, err)
+		return "", fmt.Errorf("%q relative to %q: %w", abs, root, err)
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("sandbox: docker: %q is outside the data root %q", abs, root)
+		return "", fmt.Errorf("%q is outside the data root %q", abs, root)
 	}
 	segments := strings.Split(filepath.ToSlash(rel), "/")
 	if rel == "." || len(segments) < 2 {
-		return "", fmt.Errorf("sandbox: docker: %q is not inside a project workspace under %q", abs, root)
+		return "", fmt.Errorf("%q is not inside a project workspace under %q", abs, root)
 	}
 	for _, segment := range segments[:2] {
 		if err := safeSegment(segment); err != nil {
-			return "", fmt.Errorf("sandbox: docker: %q: %w", abs, err)
+			return "", fmt.Errorf("%q: %w", abs, err)
 		}
 	}
 	if len(segments) == 2 {

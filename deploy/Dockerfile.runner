@@ -1,0 +1,41 @@
+# syntax=docker/dockerfile:1
+
+# sandbox-runner: the only service in a PiForge deployment that holds
+# /var/run/docker.sock.
+#
+# It exists so the control plane does not have to. The socket is host root (a
+# privileged container with `/` mounted is one command away), and the control
+# plane is the process users and models reach; this service narrows that surface
+# to six JSON operations over an internal network. See docs/SANDBOX-DEPLOY.md §1.
+#
+# Build from the repository root:
+#   docker build -f deploy/Dockerfile.runner -t piforge/sandbox-runner:dev .
+#
+# The image carries the Docker CLI because the CLI is how this service creates
+# containers (`docker run/inspect/start/stop/rm/port`) — and nothing else. It does
+# not carry the control plane, the web app, or an agent.
+
+FROM golang:1.25-bookworm AS build
+
+ARG GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=${GOPROXY} GOFLAGS=-mod=mod
+WORKDIR /src/backend
+COPY backend/go.mod backend/go.sum ./
+RUN go mod download
+COPY backend/ ./
+# modernc.org/sqlite is pure Go and the runner imports none of it, but keeping one
+# build recipe means CGO stays off here too.
+ENV CGO_ENABLED=0
+RUN go build -trimpath -ldflags="-s -w" -o /out/sandbox-runner ./cmd/sandbox-runner
+
+# The official CLI image already has the `docker` binary; a static Go build runs
+# on it unchanged. Nothing here talks to a registry directly, so no extra CA
+# bundle is needed for image pulls (the daemon does those).
+FROM docker:29-cli
+
+COPY --from=build /out/sandbox-runner /usr/local/bin/sandbox-runner
+
+# The runner is stateless: containers outlive it, their names come from
+# (user, project), and their workspaces live on the shared volume it mounts, not
+# in this image. Restarting it must not lose a sandbox, and it does not.
+ENTRYPOINT ["/usr/local/bin/sandbox-runner"]

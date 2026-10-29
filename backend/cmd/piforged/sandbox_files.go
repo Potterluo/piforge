@@ -15,11 +15,13 @@ import (
 // sandboxFileBackend maps a host workspace path to the container that owns it.
 //
 // It is the hook that makes -sandbox-files remote work: the store knows which
-// sandbox a worktree path belongs to, the docker provider knows the published
-// endpoint and the inside-the-container path, and this type turns that pair into
-// the one thing workspaceremote needs.
+// sandbox a worktree path belongs to, the provider knows the sandbox's endpoint
+// and the inside-the-container path, and this type turns that pair into the one
+// thing workspaceremote needs. The provider is an interface because a container
+// sandbox may be owned by this process (-sandbox docker) or by a runner service
+// (-sandbox runner); the panel does not care which.
 type sandboxFileBackend struct {
-	provider *sandbox.Docker
+	provider sandbox.Remote
 	store    *store.Store
 	apiKey   string
 
@@ -27,10 +29,11 @@ type sandboxFileBackend struct {
 	cache map[string]cachedSandboxClient
 }
 
-// cachedSandboxClient keeps one client per sandbox. `docker port` is an exec per
-// call, which is not something to do three times for one file preview; the
-// endpoint only changes if the container is recreated, and the TTL bounds how
-// long a stale one can be used after that.
+// cachedSandboxClient keeps one client per sandbox. Resolving the endpoint is a
+// round trip to whatever owns the container (`docker port`, or an HTTP call to
+// the runner), which is not something to do three times for one file preview; the
+// endpoint only changes if the container is recreated, and the TTL bounds how long
+// a stale one can be used after that.
 type cachedSandboxClient struct {
 	client *aio.Client
 	at     time.Time

@@ -11,12 +11,12 @@ daemon 同机、控制面是宿主进程"时才成立的事。先把这六件事
 
 | # | 依赖 | 代码位置 | 换部署会怎样 |
 |---|---|---|---|
-| 1 | 控制面 PATH 上有 `docker` CLI | `sandbox/docker.go:120`（`exec.LookPath("docker")`） | 现在发布的镜像里**没有 docker CLI**（`Dockerfile` runtime 阶段只装 `ca-certificates curl tini` + 可选 chromium），所以 compose 里开 `-sandbox docker` 会启动即失败 |
-| 2 | 工作区是控制面本机的 bind mount 源 `<DataRoot>/<userID>/<projectID>` | `docker.go:152`、`docker.go:242` | daemon 在另一台机器时，源路径在**那台**机器上解析，控制面写自己磁盘，两边从此不是同一棵树 |
-| 3 | `RootDir` 是宿主路径，控制面用它跑宿主 git | `docker.go:519`、`provision.go:200`（`AddWorktree(RepoDir(sb))`）、`provision.go:243`（`materialize.Mount`） | Pod 里没有"宿主路径"这回事，`provision` 立刻失效 |
-| 4 | 端点 = `docker port` 读回的随机端口，拼成 `http://127.0.0.1:<port>` | `docker.go:257`（`-p 127.0.0.1::8080`）、`docker.go:661` | 控制面在容器里时 `127.0.0.1` 是它自己的 loopback；K8s 里没有"发布端口" |
-| 5 | 一个部署级 `-sandbox-api-key`，原样传给**每个**容器 | `main.go:260`、`docker.go:268` | 端点一旦跨租户可达，一个 key 就是所有沙箱的 key |
-| 6 | 生产代码从不调用 `SandboxProvider.Exec`；沙箱内的命令走 AIO 的 `/v1/shell/exec` | `workspaceremote/exec.go:103`、`workspaceremote/files.go:362`；`Exec` 只被测试调用 | K8s 不需要 `pods/exec` 也能跑面板 git —— 这条是好消息，别把它当坏消息一起搬 |
+| 1 | 控制面 PATH 上有 `docker` CLI | `sandbox/docker.go:120`（`exec.LookPath("docker")`） | `-sandbox docker` 仍然如此，而这个镜像里**没有 docker CLI**（`Dockerfile` runtime 阶段只装 `ca-certificates curl tini` + 可选 chromium），所以 compose 里开 `-sandbox docker` 会启动即失败。**已解决**：`-sandbox runner` 把这条依赖移到 runner 容器（§1.4），控制面既不需要 CLI 也不需要 daemon |
+| 2 | 工作区是控制面本机的 bind mount 源 `<DataRoot>/<userID>/<projectID>` | `docker.go:152`、`docker.go:242` | daemon 在另一台机器时，源路径在**那台**机器上解析，控制面写自己磁盘，两边从此不是同一棵树。runner 与 daemon 同机、与控制面共享同一个数据卷、同一个路径（§1.4） |
+| 3 | `RootDir` 是宿主路径，控制面用它跑宿主 git | `docker.go:519`、`provision.go:200`（`AddWorktree(RepoDir(sb))`）、`provision.go:243`（`materialize.Mount`） | Pod 里没有"宿主路径"这回事，`provision` 立刻失效。runner 模式下 `RootDir` 仍是共享卷上的路径，所以 compose 成立；K8s 仍要改 |
+| 4 | 端点 = `docker port` 读回的随机端口，拼成 `http://127.0.0.1:<port>` | `docker.go:257`（`-p 127.0.0.1::8080`）、`docker.go:661` | 控制面在容器里时 `127.0.0.1` 是它自己的 loopback；K8s 里没有"发布端口"。**已解决**：`DockerConfig.ContainerEndpoint`（compose 里 `SANDBOX_CONTAINER_ENDPOINT=1`）改为容器名 `http://piforge-<hash8>:8080`，compose 与 K8s 形状一致 |
+| 5 | 一个部署级 `-sandbox-api-key`，原样传给**每个**容器 | `main.go:260`、`docker.go:268` | 端点一旦跨租户可达，一个 key 就是所有沙箱的 key。runner 没有改变这一点，只是把它收进了内网（§1.4） |
+| 6 | 生产代码从不调用 `SandboxProvider.Exec`；沙箱内的命令走 AIO 的 `/v1/shell/exec` | `workspaceremote/exec.go:103`、`workspaceremote/files.go:362`；`Exec` 只被测试调用 | K8s 不需要 `pods/exec` 也能跑面板 git —— 这条是好消息，别把它当坏消息一起搬。runner 因此**不提供** exec 端点，`sandbox.Runner.Exec` 直接报错而不是假装有 |
 
 还有一条容易被忽略、但决定了整套端点设计：
 
@@ -138,51 +138,108 @@ services:
 
 **适用**：CI、演示、e2e —— 需要"干净、可丢弃"的 docker，而不是"多租户生产"。
 
-### 1.4 方案（iv）：sandbox-runner 兄弟容器（**推荐**）
+### 1.4 方案（iv）：sandbox-runner 兄弟容器（**已交付**）
 
-控制面完全不碰 Docker。加一个只有它挂 socket 的服务，对控制面暴露**五个动作**，别的什么
-都不给：
+控制面完全不碰 Docker。`backend/cmd/sandbox-runner` 是唯一挂 socket 的进程，它对控制面
+暴露**六个动作**，别的什么都不给。交付物：
 
-```yaml
-services:
-  sandbox-runner:
-    image: piforge/sandbox-runner:dev
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - piforge-data:/data            # 与下面同一个卷，路径一致
-    environment:
-      - SANDBOX_RUNNER_TOKEN=${SANDBOX_RUNNER_TOKEN}
-      - SANDBOX_DATA_ROOT=/data/sandboxes
-      - SANDBOX_NETWORK=piforge-sandboxes
-    networks: [sandbox-control]
-
-  piforge:
-    environment:
-      - PIFORGE_SANDBOX=runner
-      - SANDBOX_RUNNER_URL=http://sandbox-runner:7801
-      - SANDBOX_RUNNER_TOKEN=${SANDBOX_RUNNER_TOKEN}
-      - PIFORGE_DATA=/data
-    volumes:
-      - piforge-data:/data
-    networks: [default, sandbox-control]
-```
+- 服务：`backend/cmd/sandbox-runner` + `backend/internal/sandboxrunner`（HTTP 面与
+  `sandbox.Docker` 适配器）；
+- 控制面这一侧：`backend/internal/sandbox/runner.go`（`sandbox.Runner`，实现
+  `contracts.SandboxProvider` 与 `contracts.WorktreeSandbox`）；
+- compose：`docker-compose.runner.yml`（叠加在 `docker-compose.yml` 上），镜像
+  `deploy/Dockerfile.runner`；
+- 验证：`scripts/verify-runner-sandbox.ps1`。
 
 契约（这就是全部）：
 
-| 方法 | 路径 | 语义 | 今天的对应物 |
-|---|---|---|---|
-| POST | `/v1/sandboxes` | `{user_id, project_id, image, cpus, memory}` → `{id, state, endpoint}`；已存在则复用 | `Ensure` |
-| GET | `/v1/sandboxes/{id}` | 状态 | `Get` |
-| POST | `/v1/sandboxes/{id}/pause` \| `/resume` | 停/起 | `Pause` / `Resume` |
-| DELETE | `/v1/sandboxes/{id}` | 删容器，**不删工作区** | `Destroy` |
-| GET | `/v1/sandboxes/{id}/endpoint` | `{base_url}` | `Endpoint` |
+| 方法 | 路径 | 请求体 | 响应 | 对应 `SandboxProvider` |
+|---|---|---|---|---|
+| POST | `/v1/sandboxes` | `{user_id, project_id, image, repo_url, branch, api_port, api_key, cpus, memory, network}` | `200` + record；同名容器已存在则复用 | `Ensure` |
+| GET | `/v1/sandboxes/{id}` | — | `200` + record | `Get` |
+| POST | `/v1/sandboxes/{id}/pause` | — | `204` | `Pause` |
+| POST | `/v1/sandboxes/{id}/resume` | — | `200` + record | `Resume` |
+| DELETE | `/v1/sandboxes/{id}` | — | `204`（删容器，**不删工作区**） | `Destroy` |
+| POST | `/v1/sandboxes/{id}/worktrees` | `{repo_dir, path, branch}`（可选 `api_key`） | `204` | `AddWorktree` |
+
+record 是 `{id, state, root_dir, container_path_root, endpoint}`：`id` 仍然是
+`piforge-<sha256(user/project) 前 8 字节>`，`root_dir` 是共享卷上
+`<SANDBOX_DATA_ROOT>/<user>/<project>`，`container_path_root` 是 `/workspace`（控制面据此
+校验两侧对挂载点的一致理解），`endpoint` 是控制面可达的沙箱 API 地址。
+
+**没有第七个端点**：没有 health、没有 exec、没有文件读写。"在沙箱里跑命令"继续走沙箱
+自己的 `/v1/shell/exec` 与文件 API（§0 第 6 条），runner 不复制它。`POST …/worktrees`
+的可选 `api_key` 是唯一一处扩展字段：创建 worktree 要在容器内以沙箱用户跑 git，而
+runner 无状态，记不住某次 create 传过的 key；控制面把它带上，缺省时用 runner 的
+`SANDBOX_API_KEY`。
+
+**鉴权**：`Authorization: Bearer <RUNNER_TOKEN>`，控制面与 runner 两侧都必需
+（runner 没有 token 直接拒绝启动）。比较在 SHA-256 摘要上做
+`subtle.ConstantTimeCompare`——先摘要再比较，长度不泄漏；缺失、错 scheme、错 token 一律
+`401`，且在解析请求体之前拒掉。状态映射是契约的一部分：`sandbox.ErrNotFound → 404`、
+`ErrInvalidID`/坏 body → `400`、handler 超时 → `504`、其余 → `500`。
+
+**它复用的是同一份实现，不是抄了一份**：`internal/sandboxrunner` 的 `DockerProvider`
+直接调用 `sandbox.Docker`（`NewDocker` 建容器，`NewDockerAPI` 只访问已有容器的 API）。
+每个请求按"请求值 > runner 默认值"合并出一个 `DockerConfig` 再调用，所以 per-pair 目录、
+挂载校验、走沙箱 API 的 checkout、`-u gem`、`safe.directory`、不发 `exit` 这些规则只有
+一份。runner 因此是无状态的：容器名由 (user, project) 派生，重启 runner 不影响已有沙箱。
+
+compose 形状（`docker-compose.runner.yml` 的核心，完整文件带注释）：
+
+```yaml
+services:
+  piforge:
+    environment:
+      PIFORGE_SANDBOX: runner
+      PIFORGE_SANDBOX_RUNNER_URL: http://sandbox-runner:7801
+      PIFORGE_SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:?}
+    volumes: [piforge-data:/data]
+    networks: [default, sandbox-control, piforge-sandboxes]
+
+  sandbox-runner:
+    build: {context: ., dockerfile: deploy/Dockerfile.runner}
+    environment:
+      RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:?}
+      SANDBOX_RUNNER_ADDR: 0.0.0.0:7801
+      SANDBOX_DATA_ROOT: /data/sandboxes
+      SANDBOX_NETWORK: piforge-sandboxes
+      SANDBOX_CONTAINER_ENDPOINT: "1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - piforge-data:/data
+    networks: [sandbox-control, piforge-sandboxes]
+```
+
+四个必须一起成立的细节：
+
+1. **socket 只给 runner，而且不写 `:ro`**。socket 的只读挂载不限制通过它发起的 API
+   调用，写成 `:ro` 只会制造"已经限制住了"的错觉。（早先这一节写的是 `:ro`，那是错的：
+   它既没挡住什么，又让人以为挡住了。）
+2. **数据卷两边同一个路径**。工作区是 bind mount，Docker 在 daemon 主机上解析源路径；
+   两个服务路径不一致时**不会报错**，Docker 会静默建一个空目录，两边各写一棵对方看不见
+   的树。所以两个服务都 `piforge-data:/data`，runner 的 `SANDBOX_DATA_ROOT=/data/sandboxes`，
+   控制面 `-data /data` 推出的 sandbox 根也是 `/data/sandboxes`。控制面启动时会把
+   runner 报回的 `root_dir` 与自己算的路径比一次，不一致就发一条 WARN——这是唯一能在
+   动手写文件之前发现它的地方。
+3. **不发布沙箱端口**。`SANDBOX_CONTAINER_ENDPOINT=1` 让 runner 返回
+   `http://piforge-<hash8>:8080`（容器名 + Docker DNS），控制面加入 `piforge-sandboxes`
+   就能连。runner 也必须在这个网络上：它自己做 checkout 时要访问这个地址。这一条同时
+   去掉了宿主上的 8080 暴露面。
+4. **7801 不发布**，只放在 `sandbox-control` 上。控制面与 runner 之间没有 TLS——token 是
+   唯一的认证，别把这个端口发到宿主或跨主机直连（§7 的"还没做"）。
+
+旧的 `-sandbox docker` 逐字节不变：不设 network 时仍然 `-p 127.0.0.1:<随机端口>` 并从
+`docker port` 读回。`-sandbox runner` 与它共用 `resolveSandboxPlacement`（三个面板默认
+`remote`，显式 `host` 仍然允许并告警），而 `-sandbox runner` 缺 URL/token、或
+`-sandbox local`/`docker` 却给了 runner 参数，都是启动错误。
 
 为什么是它：
 
-- 控制面不再需要 root，runner 是唯一持有 socket 的进程，而它的接口面是**五个动作**，
-  不是"整个 Docker API"。审一个 200 行的 runner 比审"控制面里每一处 shell 调用"容易；
+- 控制面不再需要 root，runner 是唯一持有 socket 的进程，而它的接口面是**六个动作**，
+  不是"整个 Docker API"。审一个几百行的 runner 比审"控制面里每一处 shell 调用"容易；
 - runner 与 daemon 同机，所以 bind mount 的路径语义问题在它内部自洽（它知道宿主路径）；
-- runner 无状态（容器名由 `(user, project)` 派生），重启不影响已存在的沙箱；
+- runner 无状态，重启不影响已存在的沙箱；
 - 以后换 K8s，runner 换成一个 K8s 控制器，控制面这一侧的调用形状不变 —— 这正是
   `SandboxProvider` 应该长的样子。
 
@@ -196,19 +253,21 @@ services:
 
 | 事件 | 会发生什么 | 缓解 |
 |---|---|---|
-| **控制面重启** | 沙箱容器还在（`--restart unless-stopped`）。容器名由 `(user, project)` 派生，`docker inspect` 能找回；端口由 `docker port` 重读，`sandbox_files.go` 的客户端缓存 30s 过期后自愈 | 已经是现状，没问题。但**沙箱里的进程**（Chromium、AIO 的 shell 会话）在 daemon 重启时全丢，终端会断 |
-| **daemon 在远程机器** | `-v` 的源路径在 daemon 主机解析（Docker 文档原话：bind mount "created to the Docker daemon host"，[Bind mounts](https://docs.docker.com/engine/storage/bind-mounts/)）。`-v` 会**静默创建一个空目录**，于是容器看到空 `/workspace`，控制面往自己磁盘写，两边都不报错。`workspaceMount` 比较的是字符串，两台机器上的 `/data/sandboxes/u/p` 完全相同，比较通过 —— 检测不到 | 要么 runner 与 daemon 同机（推荐），要么工作区改用 **named volume**（卷名是跨机器唯一的标识，路径不是），要么 SSH 到 daemon 主机上建目录 —— 最后这条等于把"路径"这个契约偷偷换成"主机可达"，更糟 |
-| **控制面在容器里，沙箱也在容器里** | `127.0.0.1:<published>` 是控制面自己的 loopback，连不上沙箱。现在的 `Endpoint` 把 `0.0.0.0:`/`127.0.0.1:` 前缀剥掉再拼回去，硬编码了"控制面是宿主进程" | 别发布端口：把沙箱放进 `piforge-sandboxes` 网络，端点直接用容器名 `http://piforge-<hash8>:8080`（Docker 内建 DNS）。**这一步同时去掉了宿主上的 8080 暴露面**，比修字符串更值 |
-| **`docker compose down`** | 沙箱容器不是 compose 管的，不会跟着删；`down -v` 也不会删它们（它们挂的是宿主目录，不是 compose 卷） | 明确写出"沙箱要单独清理"，或者让 runner 在启动时按 label 对账 |
-| **网络回连** | 沙箱里的 agent 要访问模型网关（控制面），`127.0.0.1` 在沙箱里不是控制面 | 沙箱加入 `sandbox-control` 网络，网关地址用服务名；`gateway-url` 已经是可配置项 |
-| **镜像里没有 docker CLI** | `NewDocker` 直接返回 `sandbox: docker: the docker CLI is not on PATH` | 要么加 CLI（静态二进制，确切体积未核实），要么走 runner。这条是"今天在 compose 里根本起不来"的直接原因 |
+| **控制面重启** | 沙箱容器还在（`--restart unless-stopped`）。容器名由 `(user, project)` 派生，`docker inspect` 能找回；端口由 `docker port` 重读，`sandbox_files.go` 的客户端缓存 30s 过期后自愈。runner 模式下端点由 runner 的 `GET /v1/sandboxes/{id}` 重问，同样自愈 | 已经是现状，没问题。但**沙箱里的进程**（Chromium、AIO 的 shell 会话）在 daemon 重启时全丢，终端会断 |
+| **daemon 在远程机器** | `-v` 的源路径在 daemon 主机解析（Docker 文档原话：bind mount "created to the Docker daemon host"，[Bind mounts](https://docs.docker.com/engine/storage/bind-mounts/)）。`-v` 会**静默创建一个空目录**，于是容器看到空 `/workspace`，控制面往自己磁盘写，两边都不报错。`workspaceMount` 比较的是字符串，两台机器上的 `/data/sandboxes/u/p` 完全相同，比较通过 —— 检测不到 | runner 与 daemon 同机，且与控制面共享同一个卷、同一个路径（§1.4 第 2 条）。控制面在 `Ensure` 时把 runner 报的 `root_dir` 与自己算的路径比一次，不一致就 WARN；这是唯一能在写文件之前发现它的地方。跨机器仍然只能换 named volume，不要靠 SSH 建目录 |
+| **控制面在容器里，沙箱也在容器里** | `127.0.0.1:<published>` 是控制面自己的 loopback，连不上沙箱。`-sandbox docker` 仍然发布 `127.0.0.1:<port>` 并从 `docker port` 读回 | **已解决**：`SANDBOX_CONTAINER_ENDPOINT=1` 让 runner 不发布端口、返回 `http://piforge-<hash8>:8080`（Docker 内建 DNS），控制面与 runner 都加入 `piforge-sandboxes`。**这一步同时去掉了宿主上的 8080 暴露面** |
+| **`docker compose down`** | 沙箱容器不是 compose 管的，不会跟着删；`down -v` 也不会删它们（它们挂的是宿主目录，不是 compose 卷）。runner 停掉也不删容器（无状态） | 明确写出"沙箱要单独清理"；runner 尚未实现按 label 对账（`POST` 只会建/复用，不会回收孤儿） |
+| **网络回连** | 沙箱里的 agent 要访问模型网关（控制面），`127.0.0.1` 在沙箱里不是控制面 | 沙箱加入 `sandbox-control` 网络，网关地址用服务名；`gateway-url` 已经是可配置项。现在的 compose 把沙箱放在 `piforge-sandboxes`，**还没有**把它接到网关；多服务部署时要把 `-gateway-url` 指到控制面的服务名并把两个网络连通 |
+| **镜像里没有 docker CLI** | `NewDocker` 直接返回 `sandbox: docker: the docker CLI is not on PATH` | 要么加 CLI，要么走 runner。`-sandbox runner` 已经让这条路在 compose 里跑起来：CLI 只在 runner 镜像里（`deploy/Dockerfile.runner`） |
 
 ### 1.6 compose 小结
 
 - 单机、单人：`-sandbox local` 就够，别引入 daemon 权限；
-- 单机、要多租户边界：**runner**；过渡期可以用 proxy，但要写明它仍是宿主 root；
+- 单机、要多租户边界：**runner**（`docker compose -f docker-compose.yml -f docker-compose.runner.yml up`）；
+  过渡期可以用 proxy，但要写明它仍是宿主 root；
 - DinD 留给 CI/e2e；
-- 无论哪种：**不要发布宿主 8080**，用 docker 网络的容器名当端点。
+- 无论哪种：**不要发布宿主 8080**，用 docker 网络的容器名当端点（runner 的
+  `SANDBOX_CONTAINER_ENDPOINT=1` 就是这个形状）。
 
 ---
 
@@ -573,8 +632,8 @@ type SandboxProvider interface {
 | `Pause` | `docker stop` | **删 Pod，保 PVC**（= agent-sandbox 的 `replicas: 0`） | 签名不变，**文档要写明内存态丢失** |
 | `Resume` | `docker start` | 重建 Pod + 等 Ready（~40s 冷启动） | 同上；调用方（`provision.go:265`）必须能等 |
 | `Destroy` | 不变 | 删 Pod + Service，**PVC 保留** | 不变（对齐"不删数据卷"），另加 `Purge` 删 PVC |
-| `Exec` | 保留 | `pods/exec`（client-go remotecommand） | **降级为调试接口**：生产路径不该依赖它，见下 |
-| `Endpoint` | 容器网络名 | Service DNS 或 router | **提进接口**（现在是 `*Docker` 上的具体方法，`main.go`/`sandbox_files.go` 直接依赖具体类型） |
+| `Exec` | **runner 不提供**（`Runner.Exec` 返回错误） | `pods/exec`（client-go remotecommand） | **降级为调试接口**：生产路径不该依赖它，见下 |
+| `Endpoint` | 容器名 `http://piforge-<hash8>:8080` | Service DNS 或 router | **已完成一半**：`sandbox.Remote`（界面见 runner.go）已经被 `main.go`/`sandbox_files.go` 依赖，不再是具体类型 |
 | —（缺） | — | — | `Capabilities()`：能不能 pause、能不能 exec、端点是否需代理 |
 | —（缺） | — | — | `Purge()`：显式删工作区（现在没有任何入口能删数据，这是对的，但需要一个"我确定"的入口） |
 
@@ -639,7 +698,7 @@ Pod 没有"暂停"。三种候选，逐个排除：
 
 | 场景 | 选 | 为什么 | 代价 |
 |---|---|---|---|
-| 单机自托管 / 演示 | compose + **sandbox-runner**（§1.4） | 一个 daemon、一个数据目录，控制面不需要 root | 多一个服务、一份 HTTP 契约 |
+| 单机自托管 / 演示 | compose + **sandbox-runner**（§1.4，已交付） | 一个 daemon、一个数据目录，控制面不需要 root、不需要 docker CLI | 多一个服务、一份 HTTP 契约 |
 | 单机、只有一个人用 | `-sandbox local`（或单容器里全包） | 没有多租户，就不需要边界 | 没有边界 |
 | 单机、已经被 socket 方案绑住 | socket proxy，**明确标注为过渡** | 改动最小 | 仍然是宿主 root，别对外说成隔离 |
 | 多租户生产（预期目标） | **K8s：Pod per (user, project) + PVC + Service + gVisor** | 调度/配额/网络策略是现成的；隔离靠 RuntimeClass | client-go + 端点改造 + 40s 冷启动 |
@@ -691,6 +750,10 @@ Pod 没有"暂停"。三种候选，逐个排除：
 - **用 PVC 快照实现 pause**。用户点"暂停"不该触发一次存储快照+新建 PVC。
 - **把 socket 挂给控制面然后声称"我们有多租户隔离"**。控制面被拿下 = 宿主 root，沙箱
   边界再好也没用。
+- **给 runner 的 7801 发布端口或跨主机直连**。它没有 TLS，token 是唯一的认证，而且它
+  能创建任意容器。只放在内网（`sandbox-control`），要跨机器就先补 mTLS 或前置代理。
+- **给 socket 加 `:ro` 当作安全措施**。它不限制通过 socket 发起的 API 调用，只是让人以为
+  限制住了（§1.4 第 1 条）。
 - **在 PSA `restricted` 下硬跑 AIO 镜像**。`runAsNonRoot` 会让 entrypoint 的 `useradd`
   失败 → `gem` 不存在 → checkout 建不出来。要用 `restricted`，先把 `gem` 烘进镜像。
 - **把 warm pool 当作"配置一下就有"**：`SandboxClaim` 带 `spec.env` 或
@@ -712,7 +775,11 @@ Pod 没有"暂停"。三种候选，逐个排除：
   `docs/research/agent-sandbox-isolation-briefing.md` 的口径一致），不是本轮实测；
 - 具体 CSI 的 detach/attach 与 VolumeSnapshot 耗时；
 - 每节点可挂载 PVC 数的上限（取决于实例类型与 CSI 驱动）；
-- 我们的 sandbox provider 在 K8s 下的真实冷启动时间（没有实测，只有上游的 42–50s）。
+- 我们的 sandbox provider 在 K8s 下的真实冷启动时间（没有实测，只有上游的 42–50s）；
+- `docker-compose.runner.yml` 只做了 `docker compose config` 的合并校验：本轮端到端是在
+  Windows 上用两个本机进程跑的（runner 8111 + piforged 8112，见
+  `scripts/verify-runner-sandbox.ps1`），没有在 Linux 上真的 `compose up` 过；镜像构建
+  （`deploy/Dockerfile.runner`）也没有实际构建过。
 
 ## 9. 来源
 

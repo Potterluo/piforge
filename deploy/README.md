@@ -73,6 +73,28 @@ docker run -d --init -p 7700:7700 \
 `-e HTTPS_PROXY=...` is needed when the container cannot reach the model endpoint
 directly; the model gateway runs inside the container and inherits it.
 
+## Two containers: moving the Docker socket out of the control plane
+
+The image above runs the sandbox as a local directory, so the container *is* the
+boundary. If you want one container per project, the control plane needs a Docker
+daemon — and the socket is host root, so it must not be this container. The
+`sandbox-runner` service owns the socket instead:
+
+```bash
+export SANDBOX_RUNNER_TOKEN="$(openssl rand -hex 32)"
+export PIFORGE_SANDBOX_IMAGE=ghcr.io/agent-infra/sandbox:1.11.0
+docker compose -f docker-compose.yml -f docker-compose.runner.yml up -d --build
+```
+
+Only `sandbox-runner` mounts `/var/run/docker.sock`; `piforge` talks to it over
+`http://sandbox-runner:7801` with that token. Both mount the same data volume at
+`/data`, at the same path, because each sandbox's workspace is a bind mount: the
+runner creates the container with a host path, and the control plane has to name
+the very same directory. `docker-compose.runner.yml` carries the full comment.
+
+The image is `deploy/Dockerfile.runner` (`piforge/sandbox-runner:dev`). It has the
+Docker CLI and the runner binary, nothing else.
+
 ## Publish
 
 ```bash

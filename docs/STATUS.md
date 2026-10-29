@@ -20,7 +20,7 @@
 - 审计过程中仓库被并发修改过：审计开始时 `POST /v1/sessions/{id}/clone`（FR-2.7）尚是未提交的未跟踪文件，约 03:50 被提交进 `2e5f206`。下表按该提交为准。
 - 计数：**126 条 FR，DONE 37 / PARTIAL 50 / MISSING 39**（审计后补上 FR-5.3）。
 
-> 说明：PRD 中没有「部署」类 FR（§12 是里程碑，`deploy/` 是 Dockerfile.app / Dockerfile.offline / k8s.yaml / entrypoint.sh，属交付物而非需求行），因此下面没有部署行。
+> 说明：PRD 中没有「部署」类 FR（§12 是里程碑，`deploy/` 是 Dockerfile.app / Dockerfile.offline / Dockerfile.runner / k8s.yaml / entrypoint.sh，属交付物而非需求行），因此下面没有部署行。`sandbox-runner`（把 Docker CLI 从控制面移出去）同样是交付物而非 FR：它没有改变任何一条 FR 的状态，证据见 `docs/SANDBOX-DEPLOY.md` §1.4 与 `scripts/verify-runner-sandbox.ps1`。
 
 | FR | 状态 | 证据 |
 |---|---|---|

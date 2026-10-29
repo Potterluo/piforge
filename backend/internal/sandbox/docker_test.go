@@ -1202,3 +1202,71 @@ func TestDockerProviderBranchWorktreeUsesTheSandboxAPI(t *testing.T) {
 		t.Fatalf("ContainerPath(%q) = %q, %v; want /workspace/worktrees/fix-cache", worktreeHost, got, err)
 	}
 }
+
+// The `docker run` argv is where the two deployment shapes differ, and it is the
+// one place a test can see it without a daemon: a single-host provider publishes a
+// loopback port and reads it back, a multi-service provider publishes nothing and
+// addresses the container by name on a shared network.
+func TestContainerArgs(t *testing.T) {
+	single := &Docker{cfg: DockerConfig{
+		Image:    "sandbox:1.11.0",
+		DataRoot: "/data/sandboxes",
+		APIPort:  8080,
+		APIKey:   "sandbox-key",
+	}}
+	args := single.containerArgs("piforge-abc", "usr_1", "prj_1", "/data/sandboxes/usr_1/prj_1")
+	assertArgsContain(t, args, "-v", "/data/sandboxes/usr_1/prj_1:/workspace")
+	assertArgsContain(t, args, "-p", "127.0.0.1::8080")
+	assertArgsContain(t, args, "-e", "BROWSER_NO_SANDBOX=--no-sandbox")
+	assertArgsContain(t, args, "-e", "SANDBOX_API_KEY=sandbox-key")
+	assertArgsContain(t, args, "--label", "piforge.user=usr_1")
+	assertArgsContain(t, args, "--label", "piforge.project=prj_1")
+	assertArgsAbsent(t, args, "--network")
+	if got := args[len(args)-1]; got != "infinity" {
+		t.Fatalf("the container does not idle: last arg %q", got)
+	}
+
+	shared := &Docker{cfg: DockerConfig{
+		Image:             "sandbox:1.11.0",
+		DataRoot:          "/data/sandboxes",
+		Network:           "piforge-sandboxes",
+		APIPort:           8080,
+		APIKey:            "sandbox-key",
+		ContainerEndpoint: true,
+	}}
+	args = shared.containerArgs("piforge-abc", "usr_1", "prj_1", "/data/sandboxes/usr_1/prj_1")
+	assertArgsAbsent(t, args, "-p")
+	assertArgsContain(t, args, "--network", "piforge-sandboxes")
+	// The browser switch and the key are about the image, not about how the API is
+	// reached, so they must survive the endpoint change.
+	assertArgsContain(t, args, "-e", "BROWSER_NO_SANDBOX=--no-sandbox")
+	assertArgsContain(t, args, "-e", "SANDBOX_API_KEY=sandbox-key")
+}
+
+// A container endpoint without a network would be a hostname nothing can resolve;
+// refuse it at construction rather than at the first request.
+func TestNewDockerRefusesContainerEndpointWithoutNetwork(t *testing.T) {
+	_, err := NewDockerAPI(DockerConfig{DataRoot: t.TempDir(), APIPort: 8080, ContainerEndpoint: true})
+	if err == nil || !strings.Contains(err.Error(), "network") {
+		t.Fatalf("NewDockerAPI = %v, want an error naming the missing network", err)
+	}
+}
+
+func assertArgsContain(t *testing.T, args []string, flag, value string) {
+	t.Helper()
+	for index := 0; index < len(args)-1; index++ {
+		if args[index] == flag && args[index+1] == value {
+			return
+		}
+	}
+	t.Fatalf("args do not contain %q %q: %v", flag, value, args)
+}
+
+func assertArgsAbsent(t *testing.T, args []string, flag string) {
+	t.Helper()
+	for _, arg := range args {
+		if arg == flag {
+			t.Fatalf("args contain %q, which this shape must not use: %v", flag, args)
+		}
+	}
+}
