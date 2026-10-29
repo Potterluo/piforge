@@ -513,7 +513,7 @@ workspaceremote 的单测覆盖，PNG 和文本都能原样取回。
 | runner（HTTP 六动作） | 容器 | 具备 | bind mount | 已实现 | 生产默认 |
 | k8s 自写 Pod+PVC+Service | 容器 / gVisor | 具备 | PVC | 可自定 | 多租户目标形态 |
 | agent-sandbox | 容器（默认 runc） | 它只建 Pod | PVC | **没有位置** | 只买 warm pool |
-| BoxLite | microVM（真内核） | 只有 PTY，无 CDP，文件仅 tar | 盘快照（无内存） | 单把部署级 key | 只试点隔离层 |
+| BoxLite | microVM（真内核，jailer 默认开） | 服务面只有 PTY + tar 文件；SDK 有 BrowserBox（CDP 被改写回 localhost） | 盘快照（无内存） | 单把部署级 key | 只试点隔离层 |
 | E2B | microVM（他人机房） | 需模板内置 | 无 bind | 部分 | 工作区模型改造后再议 |
 
 三条一句话结论：
