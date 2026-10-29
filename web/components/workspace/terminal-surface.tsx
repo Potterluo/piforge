@@ -26,11 +26,20 @@ export interface TerminalSurfaceHandle {
   focus: () => void;
   search: (term: string, forward?: boolean) => boolean;
   reset: () => void;
+  /** True when the viewport is at the newest output. */
+  isAtBottom: () => boolean;
+  /** Pins the viewport to the newest output. */
+  scrollToBottom: () => void;
 }
 
 export interface TerminalSurfaceProps {
   readOnly?: boolean;
   fontSize?: number;
+  /**
+   * Lines of history the buffer keeps. The follow view passes its own cap so the
+   * bounded source and the rendered scrollback cannot disagree (FR-9.2).
+   */
+  scrollback?: number;
   /** User keystrokes, for the interactive pane once a PTY exists. */
   onData?: (chunk: string) => void;
   onReady?: (handle: TerminalSurfaceHandle) => void;
@@ -51,6 +60,7 @@ function themeFromTokens(): ITheme {
 export function TerminalSurface({
   readOnly = false,
   fontSize = 12,
+  scrollback = 5000,
   onData,
   onReady,
   className,
@@ -77,7 +87,7 @@ export function TerminalSurface({
       cursorBlink: !readOnly,
       fontSize,
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-      scrollback: 5000,
+      scrollback,
       theme: themeFromTokens(),
     });
 
@@ -118,6 +128,8 @@ export function TerminalSurface({
           ? search.findNext(term, { incremental: true })
           : search.findPrevious(term, { incremental: true }),
       reset: () => terminal.reset(),
+      isAtBottom: () => terminal.buffer.active.viewportY >= terminal.buffer.active.baseY,
+      scrollToBottom: () => terminal.scrollToBottom(),
     });
 
     return () => {

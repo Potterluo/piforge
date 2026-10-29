@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { EV, type PfEvent } from "@/lib/types";
 import {
+  collectBashOutput,
   initialSessionState,
   reduceEvent,
   runningToolCount,
@@ -471,6 +472,42 @@ describe("normalizer payload shapes", () => {
       done: true,
       durationMs: 12,
     });
+  });
+
+  it("treats a cumulative tool snapshot as a replacement, not another copy", () => {
+    // Pi's tool_execution_update reports the output so far, so each payload
+    // already contains the previous one. Appending duplicated every line in the
+    // trace and in the follow view.
+    const state = reduceAll([
+      event(EV.toolStarted, { tool_call_id: "t1", name: "bash" }, { seq: 1 }),
+      event(EV.toolProgress, { tool_call_id: "t1", text: "line one\n" }, { seq: 2 }),
+      event(EV.toolProgress, { tool_call_id: "t1", text: "line one\nline two\n" }, { seq: 3 }),
+      event(EV.toolProgress, { tool_call_id: "t1", text: "line one\nline two\nline three\n" }, { seq: 4 }),
+    ]);
+
+    expect(state.turns[0].blocks[0]).toMatchObject({
+      chunk: "line one\nline two\nline three\n",
+    });
+  });
+
+  it("collects the bash output as growing text for the follow view", () => {
+    // The follow pane is fed the whole text and appends only what is new, so the
+    // collector must be a string: a one-element array looks unchanged however
+    // much the element grows, which is how the view froze after one line.
+    const started = reduceAll([
+      event(EV.toolStarted, { tool_call_id: "t1", name: "bash" }, { seq: 1 }),
+      event(EV.toolProgress, { tool_call_id: "t1", text: "tick 1\n" }, { seq: 2 }),
+    ]);
+    expect(collectBashOutput(selectTimeline(started))).toBe("tick 1\n");
+
+    const grown = reduceAll([
+      event(EV.toolStarted, { tool_call_id: "t1", name: "bash" }, { seq: 1 }),
+      event(EV.toolProgress, { tool_call_id: "t1", text: "tick 1\n" }, { seq: 2 }),
+      event(EV.toolProgress, { tool_call_id: "t1", text: "tick 1\ntick 2\ntick 3\n" }, { seq: 3 }),
+      event(EV.toolStarted, { tool_call_id: "t2", name: "read", args: { path: "a" } }, { seq: 4 }),
+      event(EV.toolProgress, { tool_call_id: "t2", text: "not terminal output" }, { seq: 5 }),
+    ]);
+    expect(collectBashOutput(selectTimeline(grown))).toBe("tick 1\ntick 2\ntick 3\n");
   });
 
   it("ignores the start half of a compaction and keeps the end", () => {

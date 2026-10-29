@@ -601,7 +601,7 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
       return updateToolBlock(
         state,
         id,
-        (block) => ({ ...block, chunk: block.chunk + chunk }),
+        (block) => ({ ...block, chunk: mergeToolChunk(block.chunk, chunk) }),
         event.ts,
         payload,
       );
@@ -891,23 +891,42 @@ function modelLabel(payload: Record<string, unknown>): string | undefined {
   return `${provider}/${model}`;
 }
 /**
- * The agent's bash output as plain chunks, for the follow view (FR-9.2).
+ * Folds one tool-output event into the block's accumulated text.
+ *
+ * `tool_execution_update` carries the output *so far* (Pi's `partialResult`), so
+ * a payload that already starts with what we hold is a replacement, not an
+ * increment: appending it duplicated every line the follow view and the trace
+ * had already shown. A peer that sends only the new bytes (and our fake agent's
+ * markers do) must still work, so a non-prefix payload is appended.
+ */
+export function mergeToolChunk(existing: string, incoming: string): string {
+  if (!existing) return incoming;
+  if (incoming === existing) return existing;
+  if (incoming.startsWith(existing)) return incoming;
+  return existing + incoming;
+}
+
+/**
+ * The agent's bash output as plain text, for the follow view (FR-9.2).
  *
  * Only `bash` tool blocks contribute: this is a mirror of the commands the agent
- * actually ran, not a second terminal that would invent a shell of its own. Chunks keep
- * their order across turns, and a reconnecting client re-derives the same list from the
- * timeline it already has.
+ * actually ran, not a second terminal that would invent a shell of its own. Text
+ * keeps its order across turns, and a reconnecting client re-derives the same
+ * text from the timeline it already has.
  */
-export function collectBashOutput(items: TimelineItem[]): string[] {
-  const chunks: string[] = [];
+export function collectBashOutput(items: TimelineItem[]): string {
+  let text = "";
   for (const item of items) {
     if (item.kind !== "turn") continue;
     for (const block of item.turn.blocks) {
       if (block.kind !== "tool") continue;
       if (block.name !== "bash" && block.name !== "Bash") continue;
       if (!block.chunk) continue;
-      chunks.push(block.chunk.endsWith("\n") ? block.chunk : block.chunk + "\n");
+      // Separate two commands that did not end with a newline, so their output
+      // cannot run together into one unreadable line.
+      if (text && !text.endsWith("\n")) text += "\n";
+      text += block.chunk.endsWith("\n") ? block.chunk : block.chunk + "\n";
     }
   }
-  return chunks;
+  return text;
 }

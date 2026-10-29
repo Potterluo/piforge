@@ -28,11 +28,13 @@ const TerminalSurface = dynamic(
 function SurfaceHost({
   readOnly,
   fontSize,
+  scrollback,
   onData,
   onReady,
 }: {
   readOnly?: boolean;
   fontSize: number;
+  scrollback?: number;
   onData?: (chunk: string) => void;
   onReady: (handle: TerminalSurfaceHandle | null) => void;
 }) {
@@ -40,6 +42,7 @@ function SurfaceHost({
     <TerminalSurface
       readOnly={readOnly}
       fontSize={fontSize}
+      scrollback={scrollback}
       onData={onData}
       onReady={onReady}
       className="h-full min-h-0 min-w-0 px-1 py-1"
@@ -260,93 +263,114 @@ export const TerminalPane = React.forwardRef<TerminalPaneHandle, TerminalPanePro
   },
 );
 
-export interface FollowTerminalHandle {
-  /** Appends a chunk; safe to call from an event-stream listener. */
-  append: (chunk: string) => void;
-  reset: () => void;
-}
-
 export interface FollowTerminalProps {
   /**
-   * Optional pre-buffered chunks. Entries are appended exactly once (tracked by
-   * index), so a shell can drive this either with a growing array or with the
-   * imperative handle.
+   * The agent's bash output so far, already bounded (see `capFollowText`).
+   *
+   * This is a growing string rather than a list of chunks because the source is
+   * a cumulative stream: Pi's `partialResult` repeats the output produced so far,
+   * so the newest snapshot *contains* the previous one. Comparing lengths is the
+   * only way to append exactly the bytes that are new.
    */
-  chunks?: string[];
+  text?: string;
   label?: string;
   className?: string;
+  /** Lines of scrollback the pane keeps; matches the source cap. */
+  scrollback?: number;
 }
 
 /**
- * Read-only mirror of the agent's `bash` output.
+ * Read-only, live mirror of the agent's `bash` output.
  *
- * Wiring for `web-shell`: hold a ref, then in the session event stream:
+ * The data source is the session event stream (`tool.progress`), not a byte
+ * stream from a TTY we do not own: the component never invents input. It appends
+ * only the part of `text` it has not written yet, so output shows up while the
+ * command is still running instead of after it settles.
  *
- * ```tsx
- * const followRef = useRef<FollowTerminalHandle>(null);
- * // on pty.stream / tool.progress events:
- * followRef.current?.append(payload.chunk ?? "");
- * // <FollowTerminal ref={followRef} />
- * ```
- *
- * The data source is the event stream (`partialResult` deltas), not a byte
- * stream from a TTY we do not own; the component never invents input.
+ * Two cases used to lose output, and both are handled here:
+ *   - the tab is opened *after* the command started, so `text` is non-empty at
+ *     mount while xterm is still loading (bytes are buffered until it exists);
+ *   - the source shrinks because `capFollowText` dropped the oldest lines (the
+ *     surface is reset and re-rendered from the new tail).
  */
-export const FollowTerminal = React.forwardRef<FollowTerminalHandle, FollowTerminalProps>(
-  function FollowTerminal({ chunks, label = "跟随终端", className }, ref) {
-    const surfaceRef = React.useRef<TerminalSurfaceHandle | null>(null);
-    const consumed = React.useRef(0);
-    const [fontSize, setFontSize] = React.useState(12);
+export function FollowTerminal({
+  text = "",
+  label = "跟随终端",
+  className,
+  scrollback,
+}: FollowTerminalProps) {
+  const surfaceRef = React.useRef<TerminalSurfaceHandle | null>(null);
+  // Characters of `text` already handed to xterm (or buffered for it).
+  const writtenRef = React.useRef(0);
+  // Bytes that arrived before xterm finished mounting. Dropping them would make
+  // a tab opened mid-command start at whatever line came next.
+  const pendingRef = React.useRef("");
+  const [fontSize, setFontSize] = React.useState(12);
 
-    const append = React.useCallback((chunk: string) => {
-      surfaceRef.current?.write(chunk);
-    }, []);
+  const write = React.useCallback((chunk: string) => {
+    if (!chunk) return;
+    const surface = surfaceRef.current;
+    if (!surface) {
+      pendingRef.current += chunk;
+      return;
+    }
+    // Follow only if the user was already at the bottom: scrolling up to read
+    // older output must not be undone by the next line the agent prints.
+    const stick = surface.isAtBottom();
+    surface.write(chunk);
+    if (stick) surface.scrollToBottom();
+  }, []);
 
-    React.useImperativeHandle(
-      ref,
-      () => ({
-        append,
-        reset: () => {
-          surfaceRef.current?.reset();
-          consumed.current = 0;
-        },
-      }),
-      [append],
-    );
+  React.useEffect(() => {
+    // The source shrank, which only happens when the cap dropped old lines (or a
+    // resync replaced the transcript). Appending to the surface would then show
+    // the old and the new tail stitched together, so rebuild it.
+    if (text.length < writtenRef.current) {
+      writtenRef.current = 0;
+      pendingRef.current = "";
+      surfaceRef.current?.reset();
+    }
+    if (text.length === writtenRef.current) return;
+    const delta = text.slice(writtenRef.current);
+    writtenRef.current = text.length;
+    write(delta);
+  }, [text, write]);
 
-    React.useEffect(() => {
-      if (!chunks) return;
-      for (let index = consumed.current; index < chunks.length; index++) {
-        append(chunks[index]);
-      }
-      consumed.current = chunks.length;
-    }, [append, chunks]);
+  const handleReady = React.useCallback((handle: TerminalSurfaceHandle | null) => {
+    surfaceRef.current = handle;
+    if (!handle || !pendingRef.current) return;
+    handle.write(pendingRef.current);
+    pendingRef.current = "";
+    handle.scrollToBottom();
+  }, []);
 
-    return (
-      <div
-        data-testid="follow-terminal"
-        className={cn("flex h-full min-h-0 min-w-0 flex-col", className)}
-      >
-        <Toolbar
-          title={label}
-          follow
+  return (
+    <div
+      data-testid="follow-terminal"
+      className={cn("flex h-full min-h-0 min-w-0 flex-col", className)}
+    >
+      <Toolbar
+        title={label}
+        follow
+        fontSize={fontSize}
+        onFontSize={setFontSize}
+        onSearch={(term) => {
+          if (term) surfaceRef.current?.search(term);
+        }}
+        onClear={() => {
+          surfaceRef.current?.clear();
+          // Clearing is a view action, not a data reset: keep `writtenRef` so the
+          // next chunk appends instead of replaying the whole transcript.
+        }}
+      />
+      <div className="min-h-0 min-w-0 flex-1 bg-background">
+        <SurfaceHost
+          readOnly
+          scrollback={scrollback}
           fontSize={fontSize}
-          onFontSize={setFontSize}
-          onSearch={(term) => {
-            if (term) surfaceRef.current?.search(term);
-          }}
-          onClear={() => surfaceRef.current?.clear()}
+          onReady={handleReady}
         />
-        <div className="min-h-0 min-w-0 flex-1 bg-background">
-          <SurfaceHost
-            readOnly
-            fontSize={fontSize}
-            onReady={(handle) => {
-              surfaceRef.current = handle;
-            }}
-          />
-        </div>
       </div>
-    );
-  },
-);
+    </div>
+  );
+}

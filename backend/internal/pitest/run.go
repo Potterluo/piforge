@@ -2,6 +2,7 @@ package pitest
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -31,6 +32,28 @@ const HoldChunkDelay = 250 * time.Millisecond
 // always produce the same outcome.
 const FailMarker = "[[failing-tests]]"
 
+// SlowLinesMarker in a prompt asks the peer to run a bash call that prints one
+// line every SlowLineDelay for about five seconds.
+//
+// FR-9.2 is about the follow view being *live*: the only honest assertion is one
+// made while the command is still running, so the peer has to produce a command
+// that runs long enough for a browser to look at it mid-flight. Like the other
+// markers this changes only the script, never the wire protocol.
+const SlowLinesMarker = "[[slow-lines]]"
+
+// SlowLineCount and SlowLineDelay pace that run: seven lines 700ms apart is the
+// "prints a line every 700ms for ~5s" the follow-view test needs.
+const (
+	SlowLineCount = 7
+	SlowLineDelay = 700 * time.Millisecond
+)
+
+// BigContextMarker in a prompt asks the peer to report a nearly full context so
+// a compaction has something visible to shrink. Without it the scripted session
+// uses a few hundred tokens, and a compaction's "after" figure would be larger
+// than its "before" — which would make a usage-drop assertion meaningless.
+const BigContextMarker = "[[big-context]]"
+
 func (s *server) handlePrompt(c command) {
 	s.mu.Lock()
 	if s.running {
@@ -56,6 +79,9 @@ func (s *server) handlePrompt(c command) {
 	s.running = true
 	s.streaming = true
 	s.abortSignalled = false
+	if strings.Contains(c.Message, BigContextMarker) {
+		s.bigContext = true
+	}
 	cancel := make(chan struct{})
 	s.runCancel = cancel
 	text := c.Message
@@ -117,6 +143,8 @@ func (s *server) run(text string, delay time.Duration, cancel chan struct{}) {
 	// The fail marker overrides the process-wide script for this one run. It is
 	// a test affordance, like HoldMarker, and never changes the wire protocol.
 	fail := s.script == ScriptError || strings.Contains(text, FailMarker)
+	slow := strings.Contains(text, SlowLinesMarker)
+	bigContext := strings.Contains(text, BigContextMarker)
 
 	ts := time.Now().UnixMilli()
 
@@ -189,6 +217,13 @@ func (s *server) run(text string, delay time.Duration, cancel chan struct{}) {
 	toolCallID := "call_" + s.newID()
 	s.mu.Unlock()
 	toolArgs := map[string]any{"command": "go test ./internal/cache/..."}
+	if slow {
+		// A real shell command, so the timeline and the follow view show the same
+		// thing a user would see: output that takes seconds to finish.
+		toolArgs = map[string]any{
+			"command": "for i in 1 2 3 4 5 6 7; do echo SLOW-LINE-$i; sleep 0.7; done",
+		}
+	}
 	argsJSON, _ := json.Marshal(toolArgs)
 	s.emit(map[string]any{"type": "message_update", "usage": usage{},
 		"assistantMessageEvent": map[string]any{
@@ -236,20 +271,45 @@ func (s *server) run(text string, delay time.Duration, cancel chan struct{}) {
 		output = "=== RUN   TestCacheEvict\n--- FAIL: TestCacheEvict (0.02s)\n\tcache_test.go:42: race detected\nFAIL\nFAIL\tinternal/cache\t0.021s\n"
 	}
 	var partial strings.Builder
-	for _, chunk := range chunks(output, 24) {
-		if cancelled(cancel) {
-			s.finishAborted()
-			return
+	if slow {
+		// One snapshot per line, 700ms apart: cumulative, exactly like Pi's
+		// partialResult, so a consumer that appends snapshots instead of diffing
+		// them duplicates the output and one that only reads the first snapshot
+		// freezes after line one (both were real bugs).
+		var loop strings.Builder
+		for line := 1; line <= SlowLineCount; line++ {
+			if cancelled(cancel) {
+				s.finishAborted()
+				return
+			}
+			fmt.Fprintf(&loop, "SLOW-LINE-%d\n", line)
+			s.emit(map[string]any{"type": "tool_execution_update",
+				"toolCallId": toolCallID, "toolName": "bash", "args": toolArgs,
+				"partialResult": map[string]any{
+					"content": []any{map[string]any{"type": "text", "text": loop.String()}},
+					"details": map[string]any{}}})
+			if !s.sleep(SlowLineDelay, cancel) {
+				s.finishAborted()
+				return
+			}
 		}
-		partial.WriteString(chunk)
-		s.emit(map[string]any{"type": "tool_execution_update",
-			"toolCallId": toolCallID, "toolName": "bash", "args": toolArgs,
-			"partialResult": map[string]any{
-				"content": []any{map[string]any{"type": "text", "text": partial.String()}},
-				"details": map[string]any{}}})
-		if !s.sleep(delay, cancel) {
-			s.finishAborted()
-			return
+		output = loop.String()
+	} else {
+		for _, chunk := range chunks(output, 24) {
+			if cancelled(cancel) {
+				s.finishAborted()
+				return
+			}
+			partial.WriteString(chunk)
+			s.emit(map[string]any{"type": "tool_execution_update",
+				"toolCallId": toolCallID, "toolName": "bash", "args": toolArgs,
+				"partialResult": map[string]any{
+					"content": []any{map[string]any{"type": "text", "text": partial.String()}},
+					"details": map[string]any{}}})
+			if !s.sleep(delay, cancel) {
+				s.finishAborted()
+				return
+			}
 		}
 	}
 	isErr := fail
@@ -272,12 +332,19 @@ func (s *server) run(text string, delay time.Duration, cancel chan struct{}) {
 	if isErr {
 		final = "Tests fail with a data race at `cache_test.go:42`."
 	}
+	// A real session's context grows with every turn; the `[[big-context]]`
+	// marker fakes the "nearly full" reading a compaction is supposed to shrink.
+	finalInput, finalOutput := int64(240), int64(24)
+	if bigContext {
+		finalInput = 150000
+	}
+	finalUsage := map[string]any{"input": finalInput, "output": finalOutput,
+		"cacheRead": 0, "cacheWrite": 0, "totalTokens": finalInput + finalOutput}
 	finalMsg := map[string]any{
 		"role":     "assistant",
 		"content":  []any{map[string]any{"type": "text", "text": final}},
 		"provider": s.provider, "model": s.modelID,
-		"usage": map[string]any{"input": 240, "output": 24,
-			"cacheRead": 128, "cacheWrite": 0, "totalTokens": 264},
+		"usage":      finalUsage,
 		"stopReason": "stop", "timestamp": ts + 4,
 	}
 	s.emit(map[string]any{"type": "message_start", "message": map[string]any{
@@ -354,6 +421,14 @@ func (s *server) finishAborted() {
 
 func (s *server) handleCompact(c command) {
 	s.mu.Lock()
+	// Pi's own rule: a session whose context is still small has nothing worth
+	// compacting, and the command fails with that sentence. Reproducing it here
+	// is what lets the no-op path (200 + reason, not a 500) be tested end to end.
+	if !s.bigContext {
+		s.mu.Unlock()
+		s.fail(c, "Nothing to compact (session too small)")
+		return
+	}
 	s.compacting = true
 	tokensBefore := int64(150000)
 	s.mu.Unlock()
@@ -371,8 +446,11 @@ func (s *server) handleCompact(c command) {
 		"result": map[string]any{
 			"summary": summary, "firstKeptEntryId": id,
 			"tokensBefore": tokensBefore, "estimatedTokensAfter": 32000,
-			"usage": map[string]any{"input": 1000, "output": 200,
-				"cacheRead": 0, "cacheWrite": 0, "totalTokens": 1200},
+			// The usage after a compaction is the size of the summary plus what
+			// was kept: smaller than tokensBefore, which is what makes the
+			// context meter visibly drop in FR-1.9's test.
+			"usage": map[string]any{"input": 32000, "output": 200,
+				"cacheRead": 0, "cacheWrite": 0, "totalTokens": 32200},
 		},
 		"aborted": false, "willRetry": false})
 	s.mu.Lock()

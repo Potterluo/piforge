@@ -330,7 +330,10 @@ type fakeRuntime struct {
 	interrupted []string
 	forked      []contracts.ForkRequest
 	compaction  []string
-	cloned      []string
+	// compactErr is what the runtime answers a compact call with. The no-op path
+	// (contracts.ErrNothingToCompact) is a product behaviour, not a failure.
+	compactErr error
+	cloned     []string
 
 	status contracts.RuntimeStatus
 	tree   []*contracts.TreeEntry
@@ -453,7 +456,7 @@ func (f *fakeRuntime) Compact(_ context.Context, _, instructions string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.compaction = append(f.compaction, instructions)
-	return nil
+	return f.compactErr
 }
 
 func (f *fakeRuntime) promptCount() int {

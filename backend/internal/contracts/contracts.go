@@ -9,6 +9,7 @@ package contracts
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"time"
 )
@@ -759,6 +760,15 @@ const (
 
 // NewError builds a typed API error.
 func NewError(code, msg string) *APIError { return &APIError{Code: code, Message: msg} }
+
+// ErrNothingToCompact reports that the agent had no context worth compacting.
+//
+// It is not a failure. Pi answers the compact command with "Nothing to compact
+// (session too small)" on a fresh session; forwarding that as a 500 told the
+// user the server was broken when the honest answer is "there is nothing to
+// compact yet". Runtimes return this sentinel and the handler turns it into a
+// 200 no-op with a reason (FR-1.9).
+var ErrNothingToCompact = errors.New("nothing to compact")
 
 // SessionLogs is the tail of one session's agent stderr, kept so a crash can be
 // explained without entering the host (PRD FR-5.10).

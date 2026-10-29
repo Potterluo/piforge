@@ -425,7 +425,7 @@ func TestRuntimeCompactAndEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if _, err := rt.Prompt(ctx, contracts.PromptRequest{SessionID: "ses_cmp", Text: "work"}); err != nil {
+	if _, err := rt.Prompt(ctx, contracts.PromptRequest{SessionID: "ses_cmp", Text: "work " + pitest.BigContextMarker}); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
 	collectUntil(t, ch, settledMatcher)
@@ -553,5 +553,24 @@ func TestPromptRespawnsAfterTheAgentDied(t *testing.T) {
 	}
 	if !again.bridge.Alive() {
 		t.Fatal("the agent was not respawned")
+	}
+}
+
+// FR-1.9: "the session is too small" is Pi's answer to compacting a fresh
+// session, not a crash. Recognizing it is what keeps the API from reporting a
+// 500 for a no-op. The match is deliberately loose about wording and case —
+// Pi's message is prose, and a 500 is what a stricter match would regress to.
+func TestNothingToCompactIsRecognized(t *testing.T) {
+	cases := map[string]bool{
+		"Nothing to compact (session too small)": true,
+		"nothing to compact":                     true,
+		"NOTHING TO COMPACT (empty)":             true,
+		"compact failed":                         false,
+		"":                                       false,
+	}
+	for message, want := range cases {
+		if got := isNothingToCompact(message); got != want {
+			t.Errorf("isNothingToCompact(%q) = %v, want %v", message, got, want)
+		}
 	}
 }

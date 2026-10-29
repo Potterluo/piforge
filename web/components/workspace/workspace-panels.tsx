@@ -34,6 +34,7 @@ import { BrowserPanel } from "@/components/workspace/browser-panel";
 import { TestResultsPanel, TestTabBadge, type TestResultsPanelProps } from "@/components/workspace/test-panel";
 import { useTestRuns } from "@/lib/session/use-test-runs";
 import { asPTYInput, buildCdCommand } from "@/lib/terminal/cd";
+import { FOLLOW_MAX_LINES } from "@/lib/session/follow";
 import { FollowTerminal, TerminalPane, type TerminalPaneHandle } from "@/components/workspace/terminal-pane";
 
 /**
@@ -56,14 +57,14 @@ import { FollowTerminal, TerminalPane, type TerminalPaneHandle } from "@/compone
 export function WorkspacePanels({
   sessionId,
   projectId,
-  followChunks,
+  followText,
   collapsed: collapsedProp,
   onCollapsedChange,
 }: {
   sessionId: string;
   projectId: string;
-  /** The agent's own bash output, mirrored by the 跟随 panel (FR-9.2). */
-  followChunks?: string[];
+  /** The agent's own bash output, mirrored live by the 跟随 panel (FR-9.2). */
+  followText?: string;
   /**
    * Whether the panel is folded to its rail. The workbench owns this because the
    * rail only helps if the *panel* shrinks to it: a rail rendered inside a panel
@@ -362,7 +363,11 @@ export function WorkspacePanels({
           </TabsContent>
 
           <TabsContent value="follow" keepMounted className="min-h-0 min-w-0 flex-1">
-            <FollowTerminal chunks={followChunks ?? []} className="min-h-0 flex-1" />
+            <FollowTerminal
+              text={followText ?? ""}
+              scrollback={FOLLOW_MAX_LINES}
+              className="min-h-0 flex-1"
+            />
           </TabsContent>
         </Tabs>
         {/* The second pane belongs to the same row as the tabs. It used to be rendered after the row was closed, which stacked it under the panel at 45% width — the "split below instead of beside" bug. */}

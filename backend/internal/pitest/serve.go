@@ -131,6 +131,11 @@ type server struct {
 	running    bool
 	streaming  bool
 	compacting bool
+	// bigContext records that a run reported a nearly full context, which is
+	// what makes the scripted session worth compacting. Pi refuses to compact a
+	// session that is still small ("Nothing to compact (session too small)"), so
+	// the peer refuses too unless this is set.
+	bigContext bool
 	// runCancel is closed by abort to signal the in-flight run. It is cleared by
 	// the run goroutine when it finishes, never by the abort handler: a cleared
 	// channel would make the run believe it was never cancelled. abortSignalled

@@ -38,6 +38,7 @@ import { toast } from "sonner";
 import { sessionKindLabel, shortModel } from "@/lib/session/format";
 import { qk, useProject, useProviders, useSession, useSessionSkills, useSkills } from "@/lib/session/queries";
 import { collectBashOutput, runningToolCount, selectTimeline, type Turn } from "@/lib/session/reduce";
+import { capFollowText } from "@/lib/session/follow";
 import type { StreamStatus } from "@/lib/session/use-session-events";
 import type { ForkPoint } from "@/lib/types";
 
@@ -258,8 +259,13 @@ function WorkbenchBody({
   // header cannot infer readiness from `models.length`.
   const hasModel = providers.data ? hasUsableModel(providers.data.providers) : undefined;
   const timeline = useMemo(() => selectTimeline(state), [state]);
-  // The agent's own bash output, which the follow view mirrors (FR-9.2).
-  const bashChunks = useMemo(() => collectBashOutput(timeline), [timeline]);
+  // The agent's own bash output, which the follow view mirrors (FR-9.2). Capped
+  // to the newest lines so a long-running command cannot grow the page without
+  // bound; the follow pane renders the tail of this string as it changes.
+  const followText = useMemo(
+    () => capFollowText(collectBashOutput(timeline)),
+    [timeline],
+  );
 
   const effectiveModel = detail?.model_ref
     ? shortModel(detail.model_ref)
@@ -394,7 +400,7 @@ function WorkbenchBody({
             <WorkspacePanels
               sessionId={sessionId}
               projectId={projectId}
-              followChunks={bashChunks}
+              followText={followText}
               collapsed={panelsCollapsed}
               onCollapsedChange={setPanelsCollapsed}
             />

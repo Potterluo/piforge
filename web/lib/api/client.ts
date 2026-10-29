@@ -281,8 +281,14 @@ export const sessions = {
       method: "POST",
       body: { model_ref: modelRef },
     }),
+  /**
+   * Asks the agent to compact its context.
+   *
+   * `compacted:false` is an answer, not a failure: a session with nothing to
+   * compact says so (`reason`) instead of erroring (FR-1.9).
+   */
   compact: (id: string, instructions = "") =>
-    request<{ ok: boolean }>(`/v1/sessions/${id}/compact`, {
+    request<{ compacted: boolean; reason?: string }>(`/v1/sessions/${id}/compact`, {
       method: "POST",
       body: { custom_instructions: instructions },
     }),

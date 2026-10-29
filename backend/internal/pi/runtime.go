@@ -3,6 +3,7 @@ package pi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -668,6 +669,11 @@ func (r *Runtime) ForkPoints(ctx context.Context, sessionID string) ([]contracts
 
 // Compact asks the agent to rewrite its model view (PRD §5.1.1 FR-1.9). The
 // history itself is never modified.
+//
+// Pi refuses to compact a session that has nothing worth compacting yet, and
+// says so with a command failure ("Nothing to compact (session too small)").
+// That is an answer, not a crash: it is reported as contracts.ErrNothingToCompact
+// so the HTTP layer can return a readable no-op instead of a 500.
 func (r *Runtime) Compact(ctx context.Context, sessionID, instructions string) error {
 	s, err := r.get(sessionID)
 	if err != nil {
@@ -678,9 +684,20 @@ func (r *Runtime) Compact(ctx context.Context, sessionID, instructions string) e
 		fields["customInstructions"] = instructions
 	}
 	if _, err := s.bridge.Call(ctx, "compact", fields); err != nil {
+		var cmdErr *CommandError
+		if errors.As(err, &cmdErr) && isNothingToCompact(cmdErr.Message) {
+			return contracts.ErrNothingToCompact
+		}
 		return err
 	}
 	return nil
+}
+
+// isNothingToCompact matches Pi's wording for "the session is too small to be
+// worth compacting". Compared case-insensitively and without the parenthetical
+// so a wording tweak on Pi's side does not turn the no-op back into a 500.
+func isNothingToCompact(message string) bool {
+	return strings.Contains(strings.ToLower(message), "nothing to compact")
 }
 
 // Fork creates a new session file branching at a user message, then starts the

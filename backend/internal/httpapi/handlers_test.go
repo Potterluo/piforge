@@ -660,17 +660,29 @@ func TestRuntimeEnvelopes(t *testing.T) {
 
 	rec = env.doAuthed(http.MethodPost, base+"/compact",
 		map[string]string{"custom_instructions": "keep the diff"}, c)
-	if rec.Code != http.StatusAccepted {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("compact = %d body %s", rec.Code, rec.Body.String())
 	}
-	var okBody map[string]bool
-	env.mustJSON(rec, &okBody)
-	if !okBody["ok"] {
+	var compact compactResponse
+	env.mustJSON(rec, &compact)
+	if !compact.Compacted || compact.Reason != "" {
 		t.Fatalf("compact body = %s", rec.Body.String())
 	}
 	// The key web/lib/api/client.ts sends must reach the runtime.
 	if len(env.runtime.compaction) != 1 || env.runtime.compaction[0] != "keep the diff" {
 		t.Fatalf("compaction = %+v", env.runtime.compaction)
+	}
+
+	// Pi refuses to compact a small session. That answer must be a readable
+	// no-op (200 with compacted:false), never a 500 that reads as a server bug.
+	env.runtime.compactErr = contracts.ErrNothingToCompact
+	rec = env.doAuthed(http.MethodPost, base+"/compact", map[string]any{}, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("compact no-op = %d body %s", rec.Code, rec.Body.String())
+	}
+	env.mustJSON(rec, &compact)
+	if compact.Compacted || compact.Reason != compactNothingToCompact {
+		t.Fatalf("compact no-op body = %s", rec.Body.String())
 	}
 }
 

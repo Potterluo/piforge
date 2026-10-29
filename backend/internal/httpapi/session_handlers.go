@@ -526,6 +526,20 @@ func (s *server) handleSidecar(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, sessionResponse{Session: child})
 }
 
+// compactResponse is what POST /compact answers.
+//
+// `compacted:false` is a real outcome, not an error: a session with too little
+// history has nothing to compact, and Pi says so instead of doing nothing
+// quietly. Answering 200 with a reason keeps that distinguishable from a server
+// fault, which is what a 500 made it look like (FR-1.9).
+type compactResponse struct {
+	Compacted bool   `json:"compacted"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// compactNothingToCompact is the reason the UI shows for the no-op.
+const compactNothingToCompact = "没有可压缩的上下文"
+
 // handleCompact asks the agent to compact its context on demand.
 func (s *server) handleCompact(w http.ResponseWriter, r *http.Request) {
 	user := auth.MustUser(r.Context())
@@ -554,10 +568,15 @@ func (s *server) handleCompact(w http.ResponseWriter, r *http.Request) {
 		instructions = in.Instructions
 	}
 	if err := rt.Compact(r.Context(), sess.ID, instructions); err != nil {
+		if errors.Is(err, contracts.ErrNothingToCompact) {
+			// Not a failure: say what happened and let the client show it.
+			writeJSON(w, http.StatusOK, compactResponse{Compacted: false, Reason: compactNothingToCompact})
+			return
+		}
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, okBody{OK: true})
+	writeJSON(w, http.StatusOK, compactResponse{Compacted: true})
 }
 
 // ---------------------------------------------------------------------------

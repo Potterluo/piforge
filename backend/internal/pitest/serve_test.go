@@ -446,6 +446,12 @@ func TestServeUnknownCommand(t *testing.T) {
 // TestServeCompaction checks the compaction records and the appended entry.
 func TestServeCompaction(t *testing.T) {
 	p := startPeer(t, ScriptOK, 0, "")
+	// Pi refuses to compact a session whose context is still small, so the peer
+	// does too. A run that reports a nearly full context is what makes the
+	// session worth compacting.
+	p.send(t, map[string]any{"id": "0", "type": "prompt", "message": "work " + BigContextMarker})
+	p.until(t, func(m map[string]any) bool { return m["type"] == "agent_settled" })
+
 	p.send(t, map[string]any{"id": "1", "type": "compact", "customInstructions": "keep the tests"})
 	resp := p.response(t, "1")
 	if success, _ := resp["success"].(bool); !success {
@@ -460,6 +466,20 @@ func TestServeCompaction(t *testing.T) {
 	roots := arr(tree["tree"])
 	if len(roots) != 1 {
 		t.Fatalf("compaction entry missing from the tree: %v", tree)
+	}
+}
+
+// TestServeRefusesToCompactASmallSession mirrors Pi's answer on a fresh session,
+// which the control plane has to turn into a readable no-op (FR-1.9).
+func TestServeRefusesToCompactASmallSession(t *testing.T) {
+	p := startPeer(t, ScriptOK, 0, "")
+	p.send(t, map[string]any{"id": "1", "type": "compact"})
+	resp := p.response(t, "1")
+	if success, _ := resp["success"].(bool); success {
+		t.Fatalf("a small session compacted: %v", resp)
+	}
+	if msg, _ := resp["error"].(string); !strings.Contains(msg, "Nothing to compact") {
+		t.Errorf("error = %q, want Pi's 'Nothing to compact'", msg)
 	}
 }
 
