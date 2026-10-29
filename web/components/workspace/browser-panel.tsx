@@ -433,7 +433,19 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
               : "只观察：点击与键盘不会发到页面"
           }
           className="text-[10px]"
-          onClick={() => void setMode(takeover ? "observe" : "takeover")}
+          onClick={() => {
+            if (takeover) {
+              void setMode("observe");
+              return;
+            }
+            // Taking over interrupts the agent mid-run, so it asks first and says what it
+            // will interrupt. A switch that silently stops someone else's work is a
+            // surprise, not a feature.
+            toast.warning("接管浏览器？", {
+              description: "agent 当前的运行会被中断，直到你切回观察模式。",
+              action: { label: "接管", onClick: () => void setMode("takeover") },
+            });
+          }}
         >
           {takeover ? "控制中" : "观察"}
         </Button>

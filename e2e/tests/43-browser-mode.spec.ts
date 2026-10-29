@@ -40,5 +40,8 @@ test("the browser panel starts in observe mode and takeover is explicit", async 
   await page.getByTestId("panel-tab-browser").click();
   await expect(page.getByTestId("browser-mode")).toHaveText("观察", { timeout: 30_000 });
   await page.getByTestId("browser-mode").click();
+  // Taking over interrupts the agent, so it asks first.
+  await expect(page.getByText("接管浏览器？")).toBeVisible({ timeout: 10_000 });
+  await page.getByRole("button", { name: "接管" }).click();
   await expect(page.getByTestId("browser-mode")).toHaveText("控制中", { timeout: 20_000 });
 });
