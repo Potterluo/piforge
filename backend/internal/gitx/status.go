@@ -165,6 +165,14 @@ func (r *Runner) CurrentBranch(ctx context.Context, root string) (string, error)
 	if err != nil {
 		return "", err
 	}
+	// `symbolic-ref` answers on an unborn branch too. `rev-parse --abbrev-ref HEAD` fails
+	// there with "unknown revision", which made an empty repository look like a broken
+	// one — a project created from a remote with no commits is the ordinary new-repo case.
+	if sym, serr := r.Run(ctx, dir, "symbolic-ref", "--short", "-q", "HEAD"); serr == nil {
+		if name := strings.TrimSpace(sym.Stdout); name != "" {
+			return name, nil
+		}
+	}
 	res, err := r.Run(ctx, dir, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return "", fmt.Errorf("gitx: branch %s: %w", dir, err)

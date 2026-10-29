@@ -595,3 +595,28 @@ func TestPathGuards(t *testing.T) {
 		t.Error("SecureAbsPath outside should fail")
 	}
 }
+
+// A project created from an empty remote is the ordinary "new repository" case, and it
+// used to leave the session with no checkout at all: `git branch -- main` needs a commit
+// to point at. Creating the branch with `checkout -b` works on an unborn HEAD.
+func TestCreateAndCheckoutWorksOnAnEmptyRepository(t *testing.T) {
+	dir := t.TempDir()
+	r := NewRunner()
+	ctx := context.Background()
+	if err := r.Init(ctx, dir, "main"); err != nil {
+		t.Skipf("git not usable here: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "rev-list", "--count", "HEAD").CombinedOutput(); err == nil {
+		t.Skipf("this repository already has commits: %s", out)
+	}
+	if err := r.CreateAndCheckout(ctx, dir, "main"); err != nil {
+		t.Fatalf("CreateAndCheckout on an empty repository: %v", err)
+	}
+	branch, err := r.CurrentBranch(ctx, dir)
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	if branch != "main" {
+		t.Fatalf("branch = %q", branch)
+	}
+}

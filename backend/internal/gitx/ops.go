@@ -164,11 +164,23 @@ func (r *Runner) Checkout(ctx context.Context, root, name string) error {
 }
 
 // CreateAndCheckout creates a branch at HEAD and switches to it.
+//
+// `git checkout -b` rather than branch-then-checkout, because a freshly cloned **empty**
+// repository has no commit to branch from: `git branch -- main` fails with "not a valid
+// object name", and that turned every project created from an empty remote into a
+// session with no checkout at all.
 func (r *Runner) CreateAndCheckout(ctx context.Context, root, name string) error {
-	if err := r.CreateBranch(ctx, root, name); err != nil {
+	dir, err := repoPath(root)
+	if err != nil {
 		return err
 	}
-	return r.Checkout(ctx, root, name)
+	if err := r.validateBranchName(ctx, dir, name); err != nil {
+		return err
+	}
+	if _, err := r.Run(ctx, dir, "checkout", "-q", "-b", name); err != nil {
+		return fmt.Errorf("gitx: create branch %q: %w", name, err)
+	}
+	return nil
 }
 
 // RefExists reports whether a revision resolves to a commit.
