@@ -32,19 +32,74 @@ func TestClientSpeaksTheSandboxAPI(t *testing.T) {
 		})
 	})
 	mux.HandleFunc("/v1/file/write", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
-	})
-	mux.HandleFunc("/v1/file/read", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["file"] != "/home/gem/a.txt" || body["content"] != "x" || body["encoding"] != "utf-8" {
+			t.Errorf("write body = %v", body)
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"data": map[string]any{"content": "hello\n", "path": "/home/gem/a.txt"},
+			"success": true, "message": "File written successfully",
+			"data": map[string]any{"file": "/home/gem/a.txt", "bytes_written": 1},
 		})
 	})
+	mux.HandleFunc("/v1/file/read", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["file"] == "/home/gem/missing.txt" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": false,
+				"message": "Failed to read file: no such file",
+				"data": map[string]any{
+					"path": "/home/gem/missing.txt", "operation": "read",
+					"message":    "Failed to read file: no such file",
+					"error_type": "not_found", "errno_name": "ENOENT",
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"data":    map[string]any{"content": "hello\n", "file": "/home/gem/a.txt"},
+		})
+	})
+	// The running image (1.11.0) reports is_directory and unix-seconds
+	// modified_time; the test pins that shape, not the SDK's is_dir.
 	mux.HandleFunc("/v1/file/list", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
 			"data": map[string]any{"files": []map[string]any{
-				{"name": "a.txt", "path": "/home/gem/a.txt", "is_dir": false, "size": 6},
-				{"name": "src", "path": "/home/gem/src", "is_dir": true, "size": 0},
+				{"name": "a.txt", "path": "/home/gem/a.txt", "is_directory": false, "size": 6, "modified_time": "1793250873"},
+				{"name": "src", "path": "/home/gem/src", "is_directory": true, "size": nil, "modified_time": "1793250873"},
 			}},
+		})
+	})
+	mux.HandleFunc("/v1/file/glob", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["path"] != "/home/gem" || body["pattern"] != "*.txt" {
+			t.Errorf("glob body = %v", body)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"data": map[string]any{"files": []map[string]any{
+				{"path": "/home/gem/a.txt", "name": "a.txt", "is_directory": false, "size": 6, "modified_time": "1793250873"},
+			}},
+		})
+	})
+	mux.HandleFunc("/v1/file/grep", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["pattern"] != "hel+o" || body["fixed_strings"] != false {
+			t.Errorf("grep body = %v", body)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"data": map[string]any{
+				"matches": []map[string]any{
+					{"file": "/home/gem/a.txt", "line_number": 1, "line_content": "hello"},
+				},
+				"truncated": false,
+			},
 		})
 	})
 	mux.HandleFunc("/v1/browser/page/screenshot", func(w http.ResponseWriter, r *http.Request) {
@@ -100,6 +155,33 @@ func TestClientSpeaksTheSandboxAPI(t *testing.T) {
 	}
 	if len(nodes) != 2 || !nodes[1].IsDir {
 		t.Fatalf("nodes = %+v", nodes)
+	}
+	if nodes[0].Size != 6 || nodes[0].Modified.IsZero() {
+		t.Fatalf("list metadata = %+v", nodes[0])
+	}
+
+	hits, err := client.Glob(ctx, "/home/gem", "*.txt", GlobOptions{})
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	if len(hits) != 1 || hits[0].Path != "/home/gem/a.txt" {
+		t.Fatalf("glob = %+v", hits)
+	}
+
+	grep, err := client.Grep(ctx, "/home/gem", "hel+o", false, 10)
+	if err != nil {
+		t.Fatalf("Grep: %v", err)
+	}
+	if len(grep.Matches) != 1 || grep.Matches[0].Line != 1 || grep.Matches[0].Text != "hello" {
+		t.Fatalf("grep = %+v", grep)
+	}
+
+	// A file endpoint failure is HTTP 200 with success:false. It has to become
+	// an error, or a missing file reads as an empty one.
+	if _, err := client.ReadFile(ctx, "/home/gem/missing.txt"); err == nil {
+		t.Fatal("a not_found answer returned no error")
+	} else if !IsNotFound(err) {
+		t.Fatalf("IsNotFound(%v) = false", err)
 	}
 
 	shot, err := client.Screenshot(ctx)

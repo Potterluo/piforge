@@ -10,6 +10,7 @@ agent、浏览器、终端指过去。这条不变量在任何 provider 上都�
 | 隔离边界 | 一个目录 | 一个容器 |
 | 浏览器 | 宿主 Chrome，按沙箱复用 profile | 容器内 Chromium（`-sandbox-browser remote`） |
 | 终端 | 宿主进程 + PTY | 容器内 shell 会话（`-sandbox-terminal remote`） |
+| 面板文件读写 | 宿主目录（`fsx`） | 容器文件 API（`-sandbox-files remote`） |
 | 适合 | 单机自托管、开发 | 多租户、需要真实边界 |
 | 启用 | 默认 | `-sandbox docker -sandbox-image <image>` |
 
@@ -153,11 +154,47 @@ WS   /v1/sessions/<id>/pty               "echo e2e-docker-ok\r\n" + "e2e-docker-
 
 这条链路此前有三处断线，都已修：数据库存的沙箱 id 与容器名不一致、`RootDir` 报的是容器内路径（导致往宿主 `C:\workspace` 写）、浏览器门禁看的是"本机有没有 Chrome"。另外容器里的 Chromium 需要镜像自带的 `BROWSER_NO_SANDBOX=--no-sandbox`（比放开容器 seccomp 更窄）。
 
+## 文件：面板的文件树、预览和编辑走容器
+
+`-sandbox-files remote`（等价 `PIFORGE_SANDBOX_FILES=remote`，只在 `-sandbox docker` 下有意义）
+把 `contracts.Workspace` 换成 `internal/workspaceremote`：
+
+- 文件树、预览、编辑、搜索走容器的 `/v1/file/*`（list / read / write / glob / grep）。
+  没有 delete 端点，删除是唯一一条 shell 命令（`rm -rf`，并区分"本来就不存在"）；
+- 大文件按本地同样的阈值分档：≤2 MiB 全文，≤20 MiB 用 `head`/`tail` 取头尾并标记截断，
+  更大的只给元数据；
+- git 不另写一套解析：`internal/gitx` 的 porcelain v2 解析、路径校验、"nothing to commit"
+  分类、hunk 应用全部保留。`workspaceremote.ShellExecutor` 只是把同一份 argv 送进容器执行，
+  stdout 与 stderr 分开取回（私有临时目录 + base64，stdin 写成容器里的临时文件），
+  所以面板对 git 的判断和宿主模式一字不差；
+- 有一处必须特判：bind mount 在 Docker Desktop/drvfs 上把宿主建出来的 checkout 显示成
+  root 所有，而沙箱 shell 是 `gem`，git 2.34 因此拒绝这个仓库
+  （`fatal: detected dubious ownership`）。执行器给每条 git 命令加
+  `-c safe.directory=<容器内根>`：只信任这个工作区，而不是 `safe.directory=*`；
+- 关闭时（默认 `host`）行为与之前逐字节一致；`-sandbox-files remote` 配 `-sandbox local`
+  直接报错，而不是悄悄退回宿主目录。
+
+2026-10-29 实测（piforged 自己起的容器 `piforge-750aee4547df7564`，`127.0.0.1:46635->8080`）：
+
+| 步骤 | 证据 |
+|---|---|
+| `PUT /v1/sessions/<id>/files?path=notes.txt`，body `hello` | `200 {"ok":true}`；`docker exec cat /workspace/repo/notes.txt` → `hello`，`od -An -tx1` → `68 65 6c 6c 6f` |
+| `GET /files/tree` | `notes.txt dir=False size=5` |
+| 容器内写 `agent.txt` | `GET /files?path=agent.txt` → `size=19 body="from the container\n"` |
+| 面板 git | `POST /git/stage` → `notes.txt:A.`；`POST /git/commit` → `c3b0f6fc…`；`GET /git/log` 作者 `Container Git`（该身份只在容器里配置过，证明命令真的在容器里执行） |
+| 搜索 | `/search?q=hello&type=content` → `notes.txt:1 hello`；`type=name` → `notes.txt` |
+| 删除 | `DELETE /files?path=agent.txt` → 200；`docker exec test -e` → `1` |
+| 反向对照 | `docker stop` 容器后同一个 `GET /files` 返回 500：如果面板还在读宿主目录，它会照常成功 |
+
 ## 还没做的（这一节是重点）
 
-浏览器和终端已经能连容器，**但工作区的文件读写与 git 仍然走宿主目录**。单机部署下 bind
-mount 让两边看到同一批文件；控制面部署在别处、只有 Docker daemon 可达时，这条还不成立。
-下一步是把 `Workspace` 的读写切到容器的文件服务。
+浏览器、终端和**文件读写**都已经能连容器。剩下的边界：
+
+- `GET /files?download=1` 仍然用宿主路径流文件（bind mount 下是同一批文件）。当控制面与
+  Docker daemon 不在同一台机器、宿主路径不存在时，它回退到预览 body，大文件下载会被截断；
+- 容器内的文件 API 没有 rename/move 端点，面板也没有这个功能，所以没有补；
+- `-sandbox-files remote` 只影响面板这一侧；provision 仍然用宿主 git 建 checkout（同一份
+  绑定目录），这没有变。
 
 终端本身也还有边界，应该明确：
 

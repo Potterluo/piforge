@@ -81,12 +81,24 @@ type Result struct {
 	ExitCode int
 }
 
+// ExecFunc runs one git invocation somewhere other than this process's own
+// filesystem and reports what it produced.
+//
+// It exists so that git can run *inside* a sandbox without re-implementing the
+// porcelain parsing: the command is identical, only the machine executing it
+// changes. dir is the host-side directory the caller named; translating it and
+// capturing stdout and stderr separately is the executor's job. argv already
+// carries the global `-c` flags. A non-zero exit must come back as
+// *CommandError so ExitCode/StderrOf keep working.
+type ExecFunc func(ctx context.Context, dir string, stdin []byte, argv []string) (Result, error)
+
 // Runner executes git with a configurable binary, timeout and environment.
 // It is safe for concurrent use.
 type Runner struct {
 	bin      string
 	timeout  time.Duration
 	extraEnv []string
+	exec     ExecFunc
 }
 
 // Option configures a Runner.
@@ -110,6 +122,17 @@ func WithTimeout(d time.Duration) Option {
 // WithEnv appends KEY=VALUE pairs to the environment of every invocation.
 func WithEnv(kv ...string) Option {
 	return func(r *Runner) { r.extraEnv = append(r.extraEnv, kv...) }
+}
+
+// WithExecutor runs git through fn instead of this process. It is how the
+// remote workspace keeps the local one's porcelain parsing and gets it against
+// the container's working tree.
+func WithExecutor(fn ExecFunc) Option {
+	return func(r *Runner) {
+		if fn != nil {
+			r.exec = fn
+		}
+	}
 }
 
 // NewRunner builds a Runner.
@@ -210,6 +233,23 @@ func (r *Runner) run(ctx context.Context, dir string, stdin []byte, args []strin
 	argv = append(argv, globalArgs...)
 	argv = append(argv, args...)
 
+	name := strings.Join(args, " ")
+
+	if r.exec != nil {
+		res, err := r.exec(ctx, dir, stdin, argv)
+		if err == nil {
+			return res, nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return res, fmt.Errorf("gitx: git %s: %w", name, ctxErr)
+		}
+		var ce *CommandError
+		if errors.As(err, &ce) {
+			return res, err // already carries the exit code and the two streams
+		}
+		return res, fmt.Errorf("gitx: git %s: %w", name, err)
+	}
+
 	cmd := exec.CommandContext(ctx, r.bin, argv...)
 	cmd.WaitDelay = 2 * time.Second
 	if dir != "" {
@@ -224,7 +264,6 @@ func (r *Runner) run(ctx context.Context, dir string, stdin []byte, args []strin
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
 
-	name := strings.Join(args, " ")
 	err := cmd.Run()
 	res := Result{Stdout: out.String(), Stderr: errb.String()}
 	if err == nil {
@@ -253,12 +292,14 @@ type Config struct {
 	Timeout time.Duration
 	// Env holds extra KEY=VALUE pairs for every invocation.
 	Env []string
+	// Exec runs git through another machine (see WithExecutor). Nil runs it here.
+	Exec ExecFunc
 }
 
 // New builds a Runner from a Config. *Runner implements the git half of
 // contracts.Workspace (see GitWorkspace) and is what fsx.New should receive.
 func New(cfg Config) *Runner {
-	opts := make([]Option, 0, 3)
+	opts := make([]Option, 0, 4)
 	if strings.TrimSpace(cfg.GitBinary) != "" {
 		opts = append(opts, WithBinary(cfg.GitBinary))
 	}
@@ -267,6 +308,9 @@ func New(cfg Config) *Runner {
 	}
 	if len(cfg.Env) > 0 {
 		opts = append(opts, WithEnv(cfg.Env...))
+	}
+	if cfg.Exec != nil {
+		opts = append(opts, WithExecutor(cfg.Exec))
 	}
 	return NewRunner(opts...)
 }

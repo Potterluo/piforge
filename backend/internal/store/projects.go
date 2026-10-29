@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -364,6 +366,62 @@ func (s *Store) ListWorktrees(ctx context.Context, userID, sandboxID string) ([]
 		return nil, fmt.Errorf("store: list worktrees: %w", err)
 	}
 	return out, nil
+}
+
+// WorktreeByPath finds the checkout that contains path.
+//
+// It exists for the remote workspace: every Workspace method receives only the
+// root a session already resolved, and docker mode has to turn that host path
+// back into the sandbox that owns it. It is deliberately user-unscoped, for the
+// same reason WorktreeByID is — the caller proved ownership before asking — and
+// it picks the deepest match so a worktree is never shadowed by the checkout it
+// lives beside.
+func (s *Store) WorktreeByPath(ctx context.Context, path string) (*contracts.Worktree, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, fmt.Errorf("store: worktree by path: empty path: %w", ErrInvalid)
+	}
+	rows, err := s.r.QueryContext(ctx, `SELECT `+worktreeCols+` FROM worktrees`)
+	if err != nil {
+		return nil, fmt.Errorf("store: worktree by path: %w", err)
+	}
+	defer rows.Close()
+
+	var best *contracts.Worktree
+	bestLen := -1
+	for rows.Next() {
+		wt, err := scanWorktree(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: worktree by path: %w", err)
+		}
+		if !pathContains(wt.Path, path) {
+			continue
+		}
+		if n := len(filepath.Clean(wt.Path)); n > bestLen {
+			best, bestLen = wt, n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: worktree by path: %w", err)
+	}
+	if best == nil {
+		return nil, fmt.Errorf("store: no worktree contains %q: %w", path, ErrNotFound)
+	}
+	return best, nil
+}
+
+// pathContains reports whether target is root or lives below it. Windows paths
+// are compared case-insensitively, the way the OS does.
+func pathContains(root, target string) bool {
+	root = filepath.Clean(root)
+	target = filepath.Clean(target)
+	if runtime.GOOS == "windows" {
+		root = strings.ToLower(root)
+		target = strings.ToLower(target)
+	}
+	if target == root {
+		return true
+	}
+	return strings.HasPrefix(target, strings.TrimSuffix(root, string(filepath.Separator))+string(filepath.Separator))
 }
 
 func scanWorktree(sc interface{ Scan(dest ...any) error }) (*contracts.Worktree, error) {

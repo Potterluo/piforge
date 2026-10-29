@@ -87,7 +87,7 @@ func (s *Service) searchNames(ctx context.Context, rootAbs, q string) ([]contrac
 				if strings.HasPrefix(p, ".git/") {
 					continue
 				}
-				if !matchName(p, q) {
+				if !MatchName(p, q) {
 					continue
 				}
 				results = append(results, contracts.SearchResult{Path: p})
@@ -141,7 +141,7 @@ func (s *Service) walkSearch(ctx context.Context, rootAbs, q string, byContent b
 		rel = filepath.ToSlash(rel)
 
 		if !byContent {
-			if matchName(rel, q) {
+			if MatchName(rel, q) {
 				results = append(results, contracts.SearchResult{Path: rel})
 			}
 			if len(results) >= s.cfg.SearchLimit {
@@ -186,9 +186,9 @@ func (s *Service) walkSearch(ctx context.Context, rootAbs, q string, byContent b
 	return results, nil
 }
 
-// matchName reports whether the path matches the query as a case-insensitive
+// MatchName reports whether the path matches the query as a case-insensitive
 // substring or as an ordered subsequence ("srcrd" matches "src/readme.md").
-func matchName(p, q string) bool {
+func MatchName(p, q string) bool {
 	lp := strings.ToLower(filepath.ToSlash(p))
 	lq := strings.ToLower(q)
 	if strings.Contains(lp, lq) {

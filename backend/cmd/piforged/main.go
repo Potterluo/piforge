@@ -46,6 +46,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/sandbox"
 	"github.com/piforge/piforge/backend/internal/store"
 	"github.com/piforge/piforge/backend/internal/term"
+	"github.com/piforge/piforge/backend/internal/workspaceremote"
 )
 
 func main() {
@@ -88,7 +89,10 @@ type options struct {
 	// sandboxTerminal is "host" (default) or "remote": remote runs the shell
 	// inside the docker sandbox instead of on the host.
 	sandboxTerminal string
-	sandboxAPIKey   string
+	// sandboxFiles is "host" (default) or "remote": remote reads and writes the
+	// workspace through the sandbox's file API instead of the host directory.
+	sandboxFiles  string
+	sandboxAPIKey string
 	// sandboxKind picks the sandbox provider: "local" (directories) or "docker".
 	sandboxKind    string
 	sandboxImage   string
@@ -126,6 +130,8 @@ func run() error {
 		"browser placement: host, or remote (inside the docker sandbox)")
 	flag.StringVar(&opt.sandboxTerminal, "sandbox-terminal", envOr("PIFORGE_SANDBOX_TERMINAL", "host"),
 		"terminal placement: host, or remote (inside the docker sandbox)")
+	flag.StringVar(&opt.sandboxFiles, "sandbox-files", envOr("PIFORGE_SANDBOX_FILES", "host"),
+		"workspace files: host, or remote (read and written through the docker sandbox)")
 	flag.StringVar(&opt.sandboxAPIKey, "sandbox-api-key", envOr("PIFORGE_SANDBOX_API_KEY", ""),
 		"API key the sandbox container was started with")
 	flag.StringVar(&opt.sandboxImage, "sandbox-image", envOr("PIFORGE_SANDBOX_IMAGE", ""),
@@ -207,7 +213,7 @@ func run() error {
 		// boundary the rest of the product already uses. The AIO image publishes one
 		// HTTP port; the browser and terminal reach it through that published port.
 		apiPort := 0
-		if opt.sandboxBrowser == "remote" || opt.sandboxTerminal == "remote" {
+		if opt.sandboxBrowser == "remote" || opt.sandboxTerminal == "remote" || opt.sandboxFiles == "remote" {
 			apiPort = 8080
 		}
 		dockerProvider, derr := sandbox.NewDocker(sandbox.DockerConfig{
@@ -247,6 +253,34 @@ func run() error {
 			logger.Debug("file mutation", "path", ev.Path, "action", ev.Action, "bytes", ev.Size)
 		},
 	})
+
+	// The panel's file tree, preview and editor read the host directory unless
+	// asked otherwise. With a docker sandbox, "otherwise" is the point: the agent
+	// edits files inside the container, so the panel must ask the container too
+	// or the two views drift. Git goes through the same bridge, because the two
+	// sides disagreeing about what is staged is the same bug one layer up.
+	var files contracts.Workspace = fs
+	if opt.sandboxFiles == "remote" {
+		if opt.sandboxKind != "docker" || dockerSB == nil {
+			return fmt.Errorf("-sandbox-files remote needs -sandbox docker: there is no sandbox file API to talk to")
+		}
+		fileBackend := &sandboxFileBackend{provider: dockerSB, store: st, apiKey: opt.sandboxAPIKey}
+		executor := workspaceremote.ShellExecutor{Backend: fileBackend}
+		remoteFiles, rerr := workspaceremote.New(workspaceremote.Config{
+			Backend: fileBackend,
+			// Same runner, same parsing: only the machine executing git changes.
+			Git: gitx.New(gitx.Config{Exec: executor.Run}),
+			Audit: func(ev fsx.AuditEvent) {
+				logger.Debug("file mutation via sandbox", "path", ev.Path, "action", ev.Action, "bytes", ev.Size)
+			},
+		})
+		if rerr != nil {
+			return fmt.Errorf("init remote workspace: %w", rerr)
+		}
+		files = remoteFiles
+		logger.Info("workspace files are read and written through the sandbox",
+			"sandbox", opt.sandboxKind)
+	}
 
 	// 4. The agent runtime.
 	launcher, err := isolate.New(isolate.Options{
@@ -495,7 +529,7 @@ func run() error {
 		Store:           st,
 		Auth:            authn,
 		Runtime:         rt,
-		Workspace:       fs,
+		Workspace:       files,
 		DefaultProvider: opt.defaultProvider,
 		Sandbox:         sb,
 		Secrets:         box,

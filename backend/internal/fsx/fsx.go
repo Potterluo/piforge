@@ -44,8 +44,8 @@ const (
 	DefaultGitBinary    = "git"
 )
 
-// truncationMarker separates the head and the tail of a large file preview.
-const truncationMarker = "\n\n… (truncated) …\n\n"
+// TruncationMarker separates the head and the tail of a large file preview.
+const TruncationMarker = "\n\n… (truncated) …\n\n"
 
 // ErrNoGitBackend is returned by the git methods when Config.Git is nil.
 var ErrNoGitBackend = errors.New("fsx: no git backend configured")
@@ -378,7 +378,7 @@ func (s *Service) ReadFile(ctx context.Context, root, relPath string) (*contract
 		return nil, fmt.Errorf("fsx: read %q: %w", relPath, rerr)
 	}
 	head = head[:n]
-	binary := looksBinary(head)
+	binary := LooksBinary(head)
 
 	content := &contracts.FileContent{
 		Path:     filepath.ToSlash(trimRel(relPath)),
@@ -662,9 +662,9 @@ func (s *Service) Adopt(ctx context.Context, sourceRoot, targetRoot, message str
 // Helpers
 // ---------------------------------------------------------------------------
 
-// looksBinary reports whether the sample contains a NUL byte, which is the
+// LooksBinary reports whether the sample contains a NUL byte, which is the
 // sniff git and most editors use.
-func looksBinary(sample []byte) bool {
+func LooksBinary(sample []byte) bool {
 	return bytes.IndexByte(sample, 0) >= 0
 }
 
@@ -694,9 +694,9 @@ func readHeadTail(f *os.File, size, headBytes, tailBytes int64) (string, error) 
 	}
 
 	var b strings.Builder
-	b.Grow(len(head) + len(tail) + len(truncationMarker))
+	b.Grow(len(head) + len(tail) + len(TruncationMarker))
 	b.Write(head)
-	b.WriteString(truncationMarker)
+	b.WriteString(TruncationMarker)
 	b.Write(tail)
 	return b.String(), nil
 }

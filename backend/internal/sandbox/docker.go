@@ -31,8 +31,9 @@ const containerWorkspace = "/workspace"
 //
 // Scope of this provider: the lifecycle (create / pause / resume / destroy / exec) and
 // the workspace layout. The browser and terminal can attach to the container's services
-// (see internal/browser and internal/term); the control plane's own workspace IO still
-// reads the bind-mounted host directory.
+// (see internal/browser and internal/term); the control plane's workspace IO reads the
+// bind-mounted host directory unless -sandbox-files remote selects the container's file
+// API (see internal/workspaceremote).
 type Docker struct {
 	cfg DockerConfig
 }
