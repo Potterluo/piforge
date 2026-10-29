@@ -112,7 +112,7 @@
 | FR-11.8 截图入 workspace | DONE | `browser_screenshot.go` `handleBrowserScreenshot` + `20-screenshot.spec.ts`（两例） |
 | FR-11.9 profile 持久化（sandbox 内 .piforge-browser） | DONE | `browser.go` `profile := filepath.Join(profileRoot, ".piforge-browser")` + `--user-data-dir`；`profile_test.go` `TestRealChromeProfileIsStableAcrossSessions`（边界已注明） |
 | FR-12.1 Diff 作用域（未暂存/已暂存/某提交/分支 vs 基准/本轮） | PARTIAL | `parseDiffScope` 支持 unstaged/staged/branch/commit；前端 `git-panel.tsx` 的 `SCOPES` 只有 3 项（**无「某次提交」**），且无「本轮」作用域 |
-| FR-12.2 逐文件 + 逐 hunk stage/unstage/revert | PARTIAL | `handleGitStage`/`handleGitUnstage` + `git-changes.tsx`（文件级、可整组 stage）；**无 hunk 级操作、无 revert** |
+| FR-12.2 逐文件 + 逐 hunk stage/unstage/revert | PARTIAL（逐 hunk 只有 API，UI 是逐文件） | `gitx/hunks.go`（客户端只传 index，补丁由服务端重建）；`POST …/git/hunk`、`POST …/git/discard`；变更面板每行「丢弃」（带确认）；`hunks_test.go`、`37-hunks.spec.ts`。**diff 视图里没有逐 hunk 按钮** |
 | FR-12.3 行内评论 → 作为 steer 发给 agent | MISSING | diff 组件没有评论入口，也无 `streaming_behavior:"steer"` 的调用链 |
 | FR-12.4 变更概览（增删行数 + 风险标记） | PARTIAL | `git-changes.tsx` 分组 + 文件列表；**无 +/- 行数汇总，无 lockfile/CI 风险标记**（`GitStatus` 也没有这些字段） |
 | FR-12.5 测试结果面板 | MISSING | 无解析/面板；`tool-trace.tsx` 只是把输出当文本 |

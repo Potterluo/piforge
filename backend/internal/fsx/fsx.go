@@ -74,6 +74,10 @@ type GitOps interface {
 	CreateBranch(ctx context.Context, root, name string) error
 	Checkout(ctx context.Context, root, name string) error
 	Adopt(ctx context.Context, sourceRoot, targetRoot, message string) (contracts.AdoptResult, error)
+	StageHunk(ctx context.Context, root, path string, index int) error
+	UnstageHunk(ctx context.Context, root, path string, index int) error
+	DiscardHunk(ctx context.Context, root, path string, index int) error
+	DiscardFile(ctx context.Context, root, path string) error
 	Push(ctx context.Context, root string) (contracts.RemoteResult, error)
 	Pull(ctx context.Context, root string) (contracts.RemoteResult, error)
 	Fetch(ctx context.Context, root string) error
@@ -753,4 +757,34 @@ func (s *Service) AheadBehind(ctx context.Context, root string) (int, int, error
 		return 0, 0, ErrNoGitBackend
 	}
 	return s.cfg.Git.AheadBehind(ctx, root)
+}
+
+// Hunk-level operations delegate to the git backend (FR-12.2).
+
+func (s *Service) StageHunk(ctx context.Context, root, path string, index int) error {
+	if s.cfg.Git == nil {
+		return ErrNoGitBackend
+	}
+	return s.cfg.Git.StageHunk(ctx, root, path, index)
+}
+
+func (s *Service) UnstageHunk(ctx context.Context, root, path string, index int) error {
+	if s.cfg.Git == nil {
+		return ErrNoGitBackend
+	}
+	return s.cfg.Git.UnstageHunk(ctx, root, path, index)
+}
+
+func (s *Service) DiscardHunk(ctx context.Context, root, path string, index int) error {
+	if s.cfg.Git == nil {
+		return ErrNoGitBackend
+	}
+	return s.cfg.Git.DiscardHunk(ctx, root, path, index)
+}
+
+func (s *Service) DiscardFile(ctx context.Context, root, path string) error {
+	if s.cfg.Git == nil {
+		return ErrNoGitBackend
+	}
+	return s.cfg.Git.DiscardFile(ctx, root, path)
 }

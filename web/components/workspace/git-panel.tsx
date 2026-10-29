@@ -160,6 +160,22 @@ export function GitChangesPanel() {
     [git.sessionId, mutate],
   );
 
+  // Discarding is the one action here that cannot be undone, so it asks first and names
+  // the file. A confirmation that only says "are you sure" trains people to click through.
+  const discard = React.useCallback(
+    (path: string) => {
+      const untracked = changes.some((change) => change.path === path && change.worktree === "?");
+      toast.warning(untracked ? `删除新文件 ${path}？` : `丢弃 ${path} 的改动？`, {
+        description: untracked ? "这个文件还没有被 git 跟踪，删除后无法恢复。" : "会还原到上一次提交的内容，无法撤销。",
+        action: {
+          label: "丢弃",
+          onClick: () => void mutate(() => api.git.discardFile(git.sessionId, path)),
+        },
+      });
+    },
+    [changes, git.sessionId, mutate],
+  );
+
   const commit = React.useCallback(() => {
     const trimmed = message.trim();
     if (!trimmed) {
@@ -241,6 +257,7 @@ export function GitChangesPanel() {
                   onSelect={setSelectedPath}
                   onStage={stage}
                   onUnstage={unstage}
+                  onDiscard={discard}
                   busy={busy}
                 />
               )}

@@ -482,6 +482,13 @@ type Workspace interface {
 
 	// The remote workflow (PRD FR-8.7). Fast-forward only: a pull that needs a merge
 	// is refused with ErrDiverged rather than half-done.
+	// Hunk-level work (PRD FR-12.2). Index is a position in the diff the server
+	// produced, never a patch from the client.
+	StageHunk(ctx context.Context, root, path string, index int) error
+	UnstageHunk(ctx context.Context, root, path string, index int) error
+	DiscardHunk(ctx context.Context, root, path string, index int) error
+	DiscardFile(ctx context.Context, root, path string) error
+
 	Push(ctx context.Context, root string) (RemoteResult, error)
 	Pull(ctx context.Context, root string) (RemoteResult, error)
 	Fetch(ctx context.Context, root string) error

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -709,4 +710,31 @@ func (f *fakeWorkspace) Fetch(context.Context, string) error { return f.remoteEr
 
 func (f *fakeWorkspace) AheadBehind(context.Context, string) (int, int, error) {
 	return f.ahead, f.behind, f.remoteErr
+}
+func (f *fakeWorkspace) StageHunk(_ context.Context, root, path string, index int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.roots = append(f.roots, fmt.Sprintf("stage-hunk:%s:%s:%d", root, path, index))
+	return f.err
+}
+
+func (f *fakeWorkspace) UnstageHunk(_ context.Context, root, path string, index int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.roots = append(f.roots, fmt.Sprintf("unstage-hunk:%s:%s:%d", root, path, index))
+	return f.err
+}
+
+func (f *fakeWorkspace) DiscardHunk(_ context.Context, root, path string, index int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.roots = append(f.roots, fmt.Sprintf("discard-hunk:%s:%s:%d", root, path, index))
+	return f.err
+}
+
+func (f *fakeWorkspace) DiscardFile(_ context.Context, root, path string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.roots = append(f.roots, fmt.Sprintf("discard-file:%s:%s", root, path))
+	return f.err
 }

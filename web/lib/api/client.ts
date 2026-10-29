@@ -305,6 +305,16 @@ export const git = {
   },
   log: (sessionId: string, limit = 200) =>
     request<GitGraph>(`/v1/sessions/${sessionId}/git/log?limit=${limit}`),
+  hunk: (sessionId: string, path: string, index: number, action: "stage" | "unstage" | "discard") =>
+    request<{ ok: boolean }>(`/v1/sessions/${sessionId}/git/hunk`, {
+      method: "POST",
+      body: { path, index, action },
+    }),
+  discardFile: (sessionId: string, path: string) =>
+    request<{ ok: boolean }>(`/v1/sessions/${sessionId}/git/discard`, {
+      method: "POST",
+      body: { path },
+    }),
   remote: (sessionId: string) =>
     request<{ remote: boolean; ahead: number; behind: number }>(
       `/v1/sessions/${sessionId}/git/remote`,

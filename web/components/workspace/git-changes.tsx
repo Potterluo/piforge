@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ChevronRightIcon, MinusIcon, PlusIcon } from "lucide-react";
+import { ChevronRightIcon, MinusIcon, PlusIcon, Undo2Icon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -29,6 +29,7 @@ function ChangeRow({
   change,
   action,
   onAction,
+  onDiscard,
   selected,
   onSelect,
   busy,
@@ -36,6 +37,8 @@ function ChangeRow({
   change: GitChange;
   action: "stage" | "unstage";
   onAction: (path: string) => void;
+  /** Restores the file, or deletes it when it is new. The one action that cannot be undone. */
+  onDiscard: (path: string) => void;
   selected: boolean;
   onSelect: (path: string) => void;
   busy: boolean;
@@ -85,6 +88,27 @@ function ChangeRow({
           >
             {action === "stage" ? <PlusIcon /> : <MinusIcon />}
           </TooltipTrigger>
+          <TooltipContent>{action === "stage" ? "暂存这个文件" : "取消暂存"}</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                aria-label="丢弃改动"
+                data-testid="git-discard"
+                data-path={change.path}
+                disabled={busy}
+                onClick={(event: React.MouseEvent) => {
+                  event.stopPropagation();
+                  onDiscard(change.path);
+                }}
+              />
+            }
+          >
+            <Undo2Icon />
+          </TooltipTrigger>
           <TooltipContent side="left">{action === "stage" ? "暂存此文件" : "取消暂存"}</TooltipContent>
         </Tooltip>
       </ItemActions>
@@ -99,6 +123,7 @@ function Group({
   selectedPath,
   onSelect,
   onAction,
+  onDiscard,
   busy,
 }: {
   title: string;
@@ -107,6 +132,7 @@ function Group({
   selectedPath: string | null;
   onSelect: (path: string) => void;
   onAction: (path: string) => void;
+  onDiscard: (path: string) => void;
   busy: boolean;
 }) {
   const [open, setOpen] = React.useState(true);
@@ -127,6 +153,7 @@ function Group({
               change={change}
               action={action}
               onAction={onAction}
+              onDiscard={onDiscard}
               selected={selectedPath === change.path}
               onSelect={onSelect}
               busy={busy}
@@ -144,6 +171,8 @@ export interface ChangeGroupsProps {
   onSelect: (path: string) => void;
   onStage: (paths: string[]) => void;
   onUnstage: (paths: string[]) => void;
+  /** Discards one file's changes, after the caller has confirmed it. */
+  onDiscard: (path: string) => void;
   busy: boolean;
 }
 
@@ -154,6 +183,7 @@ export function ChangeGroups({
   onSelect,
   onStage,
   onUnstage,
+  onDiscard,
   busy,
 }: ChangeGroupsProps) {
   const groups = React.useMemo(() => groupChanges(changes), [changes]);
@@ -175,6 +205,7 @@ export function ChangeGroups({
         selectedPath={selectedPath}
         onSelect={onSelect}
         onAction={(path) => onUnstage([path])}
+        onDiscard={onDiscard}
         busy={busy}
       />
       <Group
@@ -184,6 +215,7 @@ export function ChangeGroups({
         selectedPath={selectedPath}
         onSelect={onSelect}
         onAction={(path) => onStage([path])}
+        onDiscard={onDiscard}
         busy={busy}
       />
       <Group
@@ -193,6 +225,7 @@ export function ChangeGroups({
         selectedPath={selectedPath}
         onSelect={onSelect}
         onAction={(path) => onStage([path])}
+        onDiscard={onDiscard}
         busy={busy}
       />
       {unstagedPaths.length > 0 ? (
