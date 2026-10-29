@@ -53,6 +53,15 @@ type Config struct {
 	Launcher isolate.Launcher
 	// Now is injectable for tests.
 	Now func() time.Time
+	// RemoteAPIKey is sent on the devtools handshake when Remote is used, because the
+	// sandbox proxies CDP and guards it with the same key as its HTTP API.
+	RemoteAPIKey string
+	// Remote resolves a CDP websocket for a sandbox instead of launching one.
+	//
+	// This is the AIO Sandbox integration: the browser lives in the sandbox container,
+	// next to the files the agent edits, and the control plane only speaks CDP to it.
+	// When it returns a URL, no process is started here.
+	Remote func(ctx context.Context, sandboxID string) (wsURL string, debugHTTP string, err error)
 }
 
 // Session is one running browser inside one sandbox.
@@ -63,6 +72,9 @@ type Session struct {
 	PID       int
 	Started   time.Time
 
+	// remote means this session attached to a browser it does not own.
+	remote   bool
+	apiKey   string
 	proc     *exec.Cmd
 	client   *cdp
 	stopOnce sync.Once
@@ -120,7 +132,9 @@ func (m *Manager) Configured() bool { return strings.TrimSpace(m.cfg.Binary) != 
 // sandbox, so a paused sandbox takes the browser state with it and a deleted
 // sandbox deletes the cookies.
 func (m *Manager) Ensure(ctx context.Context, sandboxID, profileRoot string) (*Session, error) {
-	if !m.Configured() {
+	// A remote browser needs no local binary: the "configured" question is whether there
+	// is a browser at all, and a sandbox container answers it by existing.
+	if !m.Configured() && m.cfg.Remote == nil {
 		return nil, ErrNotConfigured
 	}
 	if strings.TrimSpace(sandboxID) == "" {
@@ -210,6 +224,14 @@ func (m *Manager) launch(ctx context.Context, sandboxID, profileRoot string) (*S
 	if len(argv) == 0 {
 		return nil, errors.New("browser: empty command")
 	}
+	// A remote browser is attached to, not started: the sandbox owns the process, and
+	// killing it here would kill the user's browser.
+	if m.cfg.Remote != nil {
+		if wsURL, debugHTTP, rerr := m.cfg.Remote(ctx, sandboxID); rerr == nil && wsURL != "" {
+			return m.attachRemote(ctx, sandboxID, profile, wsURL, debugHTTP)
+		}
+	}
+
 	//nolint:gosec // the binary path is operator configuration, not user input
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdout = nil
@@ -227,7 +249,7 @@ func (m *Manager) launch(ctx context.Context, sandboxID, profileRoot string) (*S
 		return nil, err
 	}
 
-	client, err := dialCDP(ctx, wsURL)
+	client, err := dialCDP(ctx, wsURL, nil)
 	if err != nil {
 		_ = cmd.Process.Kill()
 		return nil, err
@@ -323,10 +345,14 @@ func (s *Session) Stop() {
 		// written since the last flush, which is how a login in the panel failed to
 		// survive into the next session (PRD FR-11.9).
 		if s.client != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			var ignored struct{}
-			_ = s.client.call(ctx, "Browser.close", nil, &ignored)
-			cancel()
+			// A remote browser belongs to the sandbox: closing it would close somebody
+			// else's window, and the next viewer would find it gone.
+			if !s.remote {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				var ignored struct{}
+				_ = s.client.call(ctx, "Browser.close", nil, &ignored)
+				cancel()
+			}
 			// Give it a moment to exit on its own before taking the process down.
 			if s.proc != nil && s.proc.Process != nil {
 				done := make(chan struct{})
@@ -610,7 +636,19 @@ func decodeBase64(s string) []byte {
 // read it": the caller writes the bytes into the checkout, where the file tree and
 // the agent both see them (PRD FR-11.8).
 func (s *Session) Screenshot(ctx context.Context) ([]byte, error) {
-	return captureOn(ctx, s.client)
+	frame, err := captureOn(ctx, s.client)
+	if err == nil {
+		return frame, nil
+	}
+	// A remote page can be replaced under us (a navigation, a sandbox restarting its
+	// browser). Re-attaching once is cheaper than making the caller reload the panel, and
+	// it is the difference between "screenshot is broken" and "the page moved".
+	if s.remote && strings.Contains(err.Error(), "not attached") {
+		if aerr := s.client.attachToPage(ctx); aerr == nil {
+			return captureOn(ctx, s.client)
+		}
+	}
+	return nil, err
 }
 
 // captureOn takes a screenshot over a given connection (one tab).
@@ -634,4 +672,43 @@ func captureOn(ctx context.Context, client *cdp) ([]byte, error) {
 		return nil, fmt.Errorf("browser: decode screenshot: %w", err)
 	}
 	return raw, nil
+}
+
+// attachRemote builds a Session over a browser that is already running elsewhere.
+//
+// The tab bookkeeping is the same as the local path — a browser-level connection can only
+// talk to Target.*, so a page session is attached here too. What differs is ownership:
+// Stop() closes the connection and leaves the process alone.
+func (m *Manager) attachRemote(ctx context.Context, sandboxID, profile, wsURL, debugHTTP string) (*Session, error) {
+	client, err := dialCDP(ctx, wsURL, m.remoteHeaders())
+	if err != nil {
+		return nil, err
+	}
+	if err := client.attachToPage(ctx); err != nil {
+		client.close()
+		return nil, err
+	}
+	return &Session{
+		SandboxID:  sandboxID,
+		Profile:    profile,
+		WSURL:      wsURL,
+		Started:    m.cfg.Now(),
+		remote:     true,
+		apiKey:     m.cfg.RemoteAPIKey,
+		client:     client,
+		stopped:    make(chan struct{}),
+		tabs:       map[string]*cdp{},
+		debugHTTP:  debugHTTP,
+		defaultTab: client.sessionID,
+	}, nil
+}
+
+// remoteHeaders are the headers a remote devtools handshake needs.
+func (m *Manager) remoteHeaders() http.Header {
+	if strings.TrimSpace(m.cfg.RemoteAPIKey) == "" {
+		return nil
+	}
+	header := http.Header{}
+	header.Set("X-AIO-API-Key", m.cfg.RemoteAPIKey)
+	return header
 }

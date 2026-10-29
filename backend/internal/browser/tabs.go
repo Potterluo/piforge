@@ -41,7 +41,7 @@ func (s *Session) tabClient(ctx context.Context, tabID string) (*cdp, error) {
 	if err != nil {
 		return nil, err
 	}
-	client, err := dialCDP(ctx, wsURL)
+	client, err := dialCDP(ctx, wsURL, s.remoteHeader())
 	if err != nil {
 		return nil, err
 	}
@@ -249,4 +249,15 @@ func (s *Session) TabScreenshot(ctx context.Context, tabID string) ([]byte, erro
 		return nil
 	})
 	return png, err
+}
+
+// remoteHeader carries the sandbox API key on tab connections, which go through the same
+// protected CDP proxy as the browser-level one.
+func (s *Session) remoteHeader() http.Header {
+	if strings.TrimSpace(s.apiKey) == "" {
+		return nil
+	}
+	header := http.Header{}
+	header.Set("X-AIO-API-Key", s.apiKey)
+	return header
 }

@@ -29,6 +29,17 @@ agent、浏览器、终端指过去。这条不变量在任何 provider 上都�
 `internal/sandbox/docker_test.go` 会真的起一个容器跑完整生命周期；没有 docker 或
 daemon 不可达时**跳过并说明原因**，不会假装通过。
 
+## 浏览器：已能连上容器里的 Chromium
+
+`browser.Manager` 加了 `Remote` 解析器：给出 CDP 地址就直接**连**过去，不再本机起 Chrome。
+对着真镜像验证过：
+
+- 握手带 `X-AIO-API-Key`（它的 `/cdp/*` 反代和 HTTP API 共用一个 key，不带就是 401）；
+- **attach + navigate 已经通了**；
+- **截图还没通**：它给的 page session 在 `Page.captureScreenshot` 时不是 active。
+  目前可行路径是沙箱自己的 `/v1/browser/page/screenshot`（`internal/aio` 已封装并实测出图）。
+  `TestAttachToARemoteBrowser` 把这一段显式 skip 掉，不伪装成通过。
+
 ## 还没做的（这一节是重点）
 
 **浏览器和终端仍然跑在宿主上。** 也就是说：换成 docker provider 之后，agent 改的文件

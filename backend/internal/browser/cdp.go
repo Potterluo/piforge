@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -46,8 +47,13 @@ type rawResult struct {
 	Params json.RawMessage `json:"params,omitempty"`
 }
 
-func dialCDP(ctx context.Context, wsURL string) (*cdp, error) {
-	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{})
+// dialCDP connects to a devtools websocket.
+//
+// The extra headers exist for sandboxes that protect the CDP proxy with an API key (the
+// AIO image does): the handshake is where that key has to go, because the connection is a
+// websocket and there is no request body to put it in.
+func dialCDP(ctx context.Context, wsURL string, headers http.Header) (*cdp, error) {
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: headers})
 	if err != nil {
 		return nil, fmt.Errorf("browser: connect to devtools: %w", err)
 	}
