@@ -63,6 +63,7 @@ level=WARN msg="sandbox placement is mixed: these features still run on the host
 
 - `Ensure`：按 `(user, project)` 派生容器名 `piforge-<hash8>`，不存在就 `docker run -d`，
   存在就复用；`/workspace` 绑定到数据目录，暂停/重启不丢工作区；
+- `Ensure` 还在容器起来之后、返回 READY 之前把 `/workspace/repo` 变成 checkout，见下一节；
 - `RootDir`：**宿主侧**那个绑定目录，不是容器里的 `/workspace`。控制面自己的 git/文件读写跑在
   宿主上，写的位置必须正好是容器看到的位置；`ContainerPath` 负责把它翻译成 `/workspace/...`；
 - 沙箱记录用容器名当 id：后续的 pause/resume/destroy/endpoint/exec 都拿这个 id 去找容器，
@@ -72,6 +73,56 @@ level=WARN msg="sandbox placement is mixed: these features still run on the host
 - `Resume`：`docker start`；
 - `Destroy`：`docker rm -f`，**不删数据卷**——删掉别人未提交的工作不该由"销毁沙箱"来代决；
 - `Exec`：`docker exec`。
+
+## 工作区：checkout 由沙箱用户创建，且只在缺失时创建
+
+`-sandbox docker` 此前只 `docker run`，`/workspace/repo` 里永远没有 `.git`：新建项目后
+`GET /git/status`、`POST /git/stage`、`POST /git/commit` 全是 500，容器里 git 的原话是
+
+```
+fatal: not a git repository (or any parent up to mount point /)
+```
+
+第二层同样重要：宿主（或容器里的 root）建出来的 `.git` 在容器看来是别人的，面板 git 以 `gem`
+（uid 1000）运行时失败：
+
+```
+fatal: Unable to create '/workspace/repo/.git/index.lock': Permission denied
+```
+
+所以 `Ensure` 在容器 up 之后、返回 READY 之前，用 `docker exec -u gem -w /workspace/repo`
+把 checkout 建出来（`planCheckout`，纯函数，argv 逐条被单元测试钉住）：
+
+| 情况 | 执行 |
+|---|---|
+| 已有 `.git` 且 `HEAD` 可解析 | 什么都不做：不 re-init、不 reset、不补第二个空提交 |
+| 无 `repo_url` | `git init -q -b <branch>`（默认 `main`）+ 仓库内身份 + 一个空提交 |
+| 有 `repo_url` | `git clone --quiet -- <url> .`，再 `git checkout -q <branch>`；分支只存在于远端时用 `git checkout -q -b <branch>`（对齐 Local 的 `CreateAndCheckout`） |
+
+- 身份写在 checkout 里（`PiForge Sandbox <sandbox@piforge.local>`），不是用 `-c` 临时传：
+  面板后续的提交会沿用同一个作者（`gitx.identityArgs` 先读 config），`git log` 因此能证明
+  这条历史是容器里的 git 写的；
+- 绑定挂载的布局没变：控制面仍然往同一个宿主目录写文件，容器看到的是同一批字节，这一步只决定
+  `.git` 归谁；
+- 失败即失败：`Ensure` 报错会点名步骤（`init` / `clone` / `checkout` / `commit`），不会返回一个
+  不能提交的"READY"沙箱；刚 create 出来的容器会被删掉，下一次从干净状态重试；
+- 镜像的 `gem` 账号是 entrypoint 里的 `useradd` 建的，`docker run -d` 刚返回时它可能还不存在
+  （实测约 0.4s）。`docker exec -u gem` 对这一种报错会重试到账号出现为止，**不退回 root**：
+  root 拥有的 `.git` 正是要修的缺陷。
+
+2026-10-29 实测（`piforged -sandbox docker`，容器 `piforge-81042b4b785a90cf`，仓库
+`prj_01M633SAZ9E7C21X519XEB8AEB`）：
+
+| 步骤 | 证据 |
+|---|---|
+| 建会话（provision 触发 `Ensure`） | `SESSION 201`，`worktree_id=wt_...`；容器内 `stat -c %U /workspace/repo/.git` → `gem` |
+| `git status`（容器内，gem） | 退出码 0；`git log` 已有 `f158c62 piforge: initial commit` |
+| `PUT /files?path=notes.txt` | `200 {"ok":true}` |
+| `GET /git/status` | `200 {"branch":"main","clean":false,"changes":[{"path":"notes.txt","index":"?","worktree":"?"}]}` |
+| `POST /git/stage` | `200 {"ok":true}` |
+| `POST /git/commit` | `200 {"commit":"78f0be3ebf1cfc84d3d46996074ea36ac838e541"}` |
+| `docker exec -u gem <c> git -C /workspace/repo log -1 --format='%an\|%ae\|%s'` | `PiForge Sandbox\|sandbox@piforge.local\|feat: prove docker commits work` |
+| 同一个 `Ensure` 再来一次（provider 测试） | `HEAD` 不变、提交数不变（`TestDockerProviderInitialisesTheCheckout`） |
 
 `internal/sandbox/docker_test.go` 会真的起一个容器跑完整生命周期；没有 docker 或
 daemon 不可达时**跳过并说明原因**，不会假装通过。
@@ -238,8 +289,10 @@ WS   /v1/sessions/<id>/pty               "echo e2e-docker-ok\r\n" + "e2e-docker-
 - `GET /files?download=1` 仍然用宿主路径流文件（bind mount 下是同一批文件）。当控制面与
   Docker daemon 不在同一台机器、宿主路径不存在时，它回退到预览 body，大文件下载会被截断；
 - 容器内的文件 API 没有 rename/move 端点，面板也没有这个功能，所以没有补；
-- `-sandbox-files remote` 只影响面板这一侧；provision 仍然用宿主 git 建 checkout（同一份
-  绑定目录），这没有变。
+- `-sandbox-files remote` 只影响面板这一侧；主 checkout 现在由容器里的 `gem` 建（见上一节），
+  但**分支会话的 linked worktree 仍由宿主 git 创建**（`provision` 走 `git.worktree add`）。那份
+  `.git/worktrees/<slug>/` 元数据和工作树目录在容器里是 root 所有，`gem` 往里面 stage 仍会遇到
+  同样的 `index.lock: Permission denied`。主会话（`kind=main`）不受影响；
 
 终端本身也还有边界，应该明确：
 
