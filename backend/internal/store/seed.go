@@ -48,8 +48,8 @@ type SeedOptions struct {
 	DemoEmail  string
 	DemoName   string
 	// AdminPassword / DemoPassword are used verbatim when set (the e2e suite
-	// pins them). When empty each account gets its own generated password,
-	// returned in SeedResult so the binary can print it once.
+	// pins them). When empty each account gets its own generated password
+	// that the caller receives in SeedResult — it is not logged.
 	AdminPassword string
 	DemoPassword  string
 	// HashPassword is required: the store does not import bcrypt, the auth
@@ -61,8 +61,8 @@ type SeedOptions struct {
 }
 
 // SeedResult reports what EnsureAdminSeed did. Passwords are returned in
-// clear so the caller can print them exactly once; they are never stored in
-// clear anywhere.
+// clear only so a caller that explicitly wants them can use them; the product
+// never logs them, and they are never stored in clear anywhere.
 type SeedResult struct {
 	Created        bool
 	Admin          *contracts.User

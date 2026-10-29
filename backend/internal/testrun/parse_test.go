@@ -1,8 +1,13 @@
 package testrun
 
 import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDetect(t *testing.T) {
@@ -24,6 +29,13 @@ func TestDetect(t *testing.T) {
 		{command: "npx --yes vitest run", want: RunnerVitest, ok: true},
 		{command: "pnpm vitest run", want: RunnerVitest, ok: true},
 		{command: "pnpm exec jest", want: RunnerJest, ok: true},
+		{command: "node --test", want: RunnerNode, ok: true},
+		{command: "node --test test/math.test.js", want: RunnerNode, ok: true},
+		{command: "node --experimental-strip-types --test src/", want: RunnerNode, ok: true},
+		{command: "tsx --test", want: RunnerTSX, ok: true},
+		{command: "tsx --test src/math.test.ts", want: RunnerTSX, ok: true},
+		{command: "npx tsx --test", want: RunnerTSX, ok: true},
+		{command: "node script.js --test", ok: false},
 		{command: "poetry run pytest -q", want: RunnerPytest, ok: true},
 		{command: "uv run pytest", want: RunnerPytest, ok: true},
 		{command: "CI=1 cargo test --all", want: RunnerCargo, ok: true},
@@ -399,6 +411,185 @@ func TestParseDotnet(t *testing.T) {
 	}
 }
 
+// TestParseTAP is the table the drill's fragile point needed: each shape Node's
+// built-in runner emits, including the ones that must stay unrecognized rather
+// than show an invented zero.
+func TestParseTAP(t *testing.T) {
+	full := "TAP version 13\n" +
+		"# Subtest: adds\n" +
+		"ok 1 - adds\n" +
+		"  ---\n" +
+		"  duration_ms: 0.6\n" +
+		"  ...\n" +
+		"# Subtest: subtracts\n" +
+		"ok 2 - subtracts\n" +
+		"  ---\n" +
+		"  duration_ms: 0.4\n" +
+		"  ...\n" +
+		"# Subtest: skips\n" +
+		"ok 3 - skips # SKIP not today\n" +
+		"  ---\n" +
+		"  ...\n" +
+		"1..3\n" +
+		"# tests 3\n" +
+		"# suites 0\n" +
+		"# pass 2\n" +
+		"# fail 0\n" +
+		"# cancelled 0\n" +
+		"# skipped 1\n" +
+		"# todo 0\n" +
+		"# duration_ms 42.75\n"
+
+	failing := "TAP version 13\n" +
+		"# Subtest: adds\n" +
+		"not ok 1 - adds one and one\n" +
+		"  ---\n" +
+		"  duration_ms: 0.9\n" +
+		"  location: '/repo/math.test.js:12:5'\n" +
+		"  failureType: 'testCodeFailure'\n" +
+		"  error: '1 == 2'\n" +
+		"  ...\n" +
+		"1..1\n" +
+		"# tests 1\n" +
+		"# pass 0\n" +
+		"# fail 1\n" +
+		"# skipped 0\n" +
+		"# duration_ms 12.5\n"
+
+	// TAP v13 plan only: no `#` summary at all. The plan states the total and
+	// the top-level result lines state the outcomes.
+	planOnly := "TAP version 13\n" +
+		"1..2\n" +
+		"ok 1 - adds\n" +
+		"not ok 2 - subtracts\n" +
+		"  ---\n" +
+		"  duration_ms: 0.2\n" +
+		"  error: '2 != 1'\n" +
+		"  ...\n"
+
+	// Only the counts the runner actually printed. total and skipped must stay
+	// zero (unknown), not become pass+fail.
+	countsOnly := "TAP version 13\n" +
+		"# pass 2\n" +
+		"# fail 1\n"
+
+	malformed := "TAP version 13\n" +
+		"# Subtest: adds\n" +
+		"not ok - no test number\n" +
+		"# pass nope\n"
+
+	tests := []struct {
+		name       string
+		output     string
+		runner     Runner
+		recognized bool
+		total      int
+		passed     int
+		failed     int
+		skipped    int
+		durationMS int64
+		failure    *Failure
+	}{
+		{name: "full summary", output: full, runner: RunnerNode, recognized: true,
+			total: 3, passed: 2, failed: 0, skipped: 1, durationMS: 42},
+		{name: "failing test with location", output: failing, runner: RunnerNode, recognized: true,
+			total: 1, passed: 0, failed: 1, skipped: 0, durationMS: 12,
+			failure: &Failure{Name: "adds one and one", File: "/repo/math.test.js", Line: 12, Message: "1 == 2"}},
+		{name: "plan only", output: planOnly, runner: RunnerNode, recognized: true,
+			total: 2, passed: 1, failed: 1, skipped: 0, durationMS: 0,
+			failure: &Failure{Name: "subtracts", Message: "2 != 1"}},
+		{name: "counts only keep total unknown", output: countsOnly, runner: RunnerNode, recognized: true,
+			total: 0, passed: 2, failed: 1, skipped: 0, durationMS: 0},
+		{name: "malformed", output: malformed, runner: RunnerNode, recognized: false},
+		{name: "tsx reads the same tap", output: failing, runner: RunnerTSX, recognized: true,
+			total: 1, passed: 0, failed: 1, skipped: 0, durationMS: 12,
+			failure: &Failure{Name: "adds one and one", File: "/repo/math.test.js", Line: 12, Message: "1 == 2"}},
+		// The drill's recorded case: the command is `npm test`, but the script
+		// underneath is node --test. The row keeps the npm runner label and now
+		// carries the TAP counts instead of 未识别格式.
+		{name: "npm wrapper around node tap", output: "> primes@1.0.0 test\n> node --test\n\n" + full,
+			runner: RunnerNPM, recognized: true,
+			total: 3, passed: 2, failed: 0, skipped: 1, durationMS: 42},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Parse(string(tc.runner), tc.output)
+			assertSummary(t, got, tc.recognized, tc.total, tc.passed, tc.failed, tc.skipped, tc.durationMS)
+			if !tc.recognized {
+				if len(got.Failures) != 0 {
+					t.Fatalf("unrecognised TAP kept failures: %+v", got.Failures)
+				}
+				return
+			}
+			if tc.failure == nil {
+				if len(got.Failures) != 0 {
+					t.Fatalf("failures = %+v, want none", got.Failures)
+				}
+				return
+			}
+			if len(got.Failures) != 1 {
+				t.Fatalf("failures = %+v, want one", got.Failures)
+			}
+			if got.Failures[0] != *tc.failure {
+				t.Fatalf("failure = %+v, want %+v", got.Failures[0], *tc.failure)
+			}
+		})
+	}
+}
+
+// TestParseRealNodeTestRun is the "not a fixture" half: it runs the installed
+// node against a throwaway file and parses the bytes the runner really printed.
+// Node 24's default reporter is spec, so the TAP reporter is requested
+// explicitly; it is still the same node:test run and the same TAP the container
+// emits by default on Node 22.
+func TestParseRealNodeTestRun(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed")
+	}
+	dir := t.TempDir()
+	passing := "const test = require('node:test');\n" +
+		"const assert = require('node:assert');\n" +
+		"test('adds', () => { assert.equal(1 + 1, 2); });\n"
+	failing := "const test = require('node:test');\n" +
+		"const assert = require('node:assert');\n" +
+		"test('subtracts', () => { assert.equal(2 - 1, 2); });\n"
+	if err := os.WriteFile(filepath.Join(dir, "pass.test.js"), []byte(passing), 0o644); err != nil {
+		t.Fatalf("write passing test: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "fail.test.js"), []byte(failing), 0o644); err != nil {
+		t.Fatalf("write failing test: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, node, "--test", "--test-reporter=tap")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	// A failing test makes node exit non-zero; the output is the evidence, not
+	// the exit code.
+	if ctx.Err() != nil {
+		t.Fatalf("node --test timed out: %v\n%s", ctx.Err(), out)
+	}
+	_ = err
+
+	got := Parse(string(RunnerNode), string(out))
+	if !got.Recognized {
+		t.Fatalf("real node --test output was unrecognized:\n%s", out)
+	}
+	if got.Total != 2 || got.Passed != 1 || got.Failed != 1 {
+		t.Fatalf("real node --test counts = total:%d passed:%d failed:%d\n%s",
+			got.Total, got.Passed, got.Failed, out)
+	}
+	if len(got.Failures) != 1 || got.Failures[0].Name != "subtracts" {
+		t.Fatalf("real node --test failures = %+v\n%s", got.Failures, out)
+	}
+	if got.Failures[0].Line != 3 || !strings.HasSuffix(got.Failures[0].File, "fail.test.js") {
+		t.Fatalf("real node --test failure location = %s:%d\n%s",
+			got.Failures[0].File, got.Failures[0].Line, out)
+	}
+}
+
 func TestParseMakeWrapsTheUnderlyingRunner(t *testing.T) {
 	output := "go test ./...\n" +
 		"--- PASS: TestAdd (0.01s)\n" +
@@ -433,6 +624,9 @@ func TestComplete(t *testing.T) {
 		{RunnerPytest, "1 failed, 2 passed in 0.12s\n", true},
 		{RunnerJest, "Tests:       1 failed, 1 passed, 2 total\n", true},
 		{RunnerVitest, "      Tests  2 passed (2)\n", true},
+		{RunnerNode, "# pass 2\n", true},
+		{RunnerNode, "1..2\n", false}, // a plan alone is not a finished run
+		{RunnerTSX, "# fail 0\n", true},
 		{RunnerCargo, "test result: ok. 2 passed; 0 failed; 0 ignored; finished in 0.01s\n", true},
 		{RunnerMaven, "[INFO] BUILD SUCCESS\n", true},
 		{RunnerDotnet, "Passed!  - Failed: 0, Passed: 3, Skipped: 0, Total: 3, Duration: 8 ms - A.dll\n", true},

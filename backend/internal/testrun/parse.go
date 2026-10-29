@@ -36,6 +36,18 @@ func Parse(runner string, output string) Result {
 		res = parsePytest(out)
 	case RunnerNPM, RunnerJest, RunnerVitest:
 		res = parseJS(out)
+		// `npm test` is usually a script, and a Node project's script is often
+		// `node --test`. The JS summary parser knows jest/vitest but not TAP, so
+		// the drill's exact case — an npm wrapper around Node's runner — stayed
+		// "unrecognized" even though the raw output said `# pass 2`. Fall back
+		// to the TAP parser only when the JS summary was not found.
+		if !res.Recognized {
+			if tap := parseTAP(out); tap.Recognized {
+				res = tap
+			}
+		}
+	case RunnerNode, RunnerTSX:
+		res = parseTAP(out)
 	case RunnerCargo:
 		res = parseCargo(out)
 	case RunnerMaven:
@@ -71,7 +83,9 @@ func Parse(runner string, output string) Result {
 // Order matters only for ambiguous output; the runner summaries do not overlap
 // in practice.
 func parseAny(out string) Result {
-	for _, parser := range []func(string) Result{parseGo, parseCargo, parsePytest, parseJS, parseMaven, parseDotnet} {
+	// TAP first: a make target or a wrapper script may run node --test, and no
+	// other family claims a `# pass N` summary.
+	for _, parser := range []func(string) Result{parseTAP, parseGo, parseCargo, parsePytest, parseJS, parseMaven, parseDotnet} {
 		if res := parser(out); res.Recognized {
 			return res
 		}
@@ -91,6 +105,8 @@ func Complete(runner string, output string) bool {
 		return pytestBanner.MatchString(out) || pytestShort.MatchString(out)
 	case RunnerNPM, RunnerJest, RunnerVitest:
 		return jsComplete.MatchString(out)
+	case RunnerNode, RunnerTSX:
+		return tapSummaryComplete.MatchString(out)
 	case RunnerCargo:
 		return cargoResult.MatchString(out)
 	case RunnerMaven:
@@ -100,7 +116,8 @@ func Complete(runner string, output string) bool {
 	case RunnerMake:
 		return goComplete.MatchString(out) || cargoResult.MatchString(out) ||
 			pytestBanner.MatchString(out) || jsComplete.MatchString(out) ||
-			mavenBuild.MatchString(out) || dotnetSummary.MatchString(out)
+			mavenBuild.MatchString(out) || dotnetSummary.MatchString(out) ||
+			tapSummaryComplete.MatchString(out)
 	}
 	return false
 }

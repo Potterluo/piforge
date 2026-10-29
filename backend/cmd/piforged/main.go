@@ -759,6 +759,7 @@ func run() error {
 		Secrets:         box,
 		WebUpstream:     opt.webUpstream,
 		SkillsDir:       filepath.Join(opt.dataDir, "skills"),
+		ArtifactsDir:    filepath.Join(opt.dataDir, "artifacts"),
 		LLMGateway:      gateway,
 		Browser:         browsers,
 		Term:            termAdapter{m: terminals},
@@ -1037,6 +1038,23 @@ func resolveFakePi(opt options) (string, error) {
 	return out, nil
 }
 
+// logSeededAccounts says which first-run accounts were created, and never says
+// their password.
+//
+// The container log is copied into tickets and CI output; a generated password
+// printed once there is a credential leak, not a convenience. An operator who
+// needs a password sets PIFORGE_SEED_PASSWORD / PIFORGE_SEED_USER_PASSWORD (the
+// deployment docs show how), or resets it from the admin users page.
+func logSeededAccounts(logger *slog.Logger, res *store.SeedResult) {
+	if res.Admin != nil {
+		logger.Info("created the first admin account", "email", res.Admin.Email)
+	}
+	if res.Demo != nil {
+		logger.Info("created the demo account", "email", res.Demo.Email)
+	}
+	logger.Info("seeded the first accounts")
+}
+
 // seed creates the first accounts. It is idempotent: an existing admin is left
 // alone, so restarting the server never resets a password.
 func seed(ctx context.Context, st *store.Store, opt options, logger *slog.Logger) error {
@@ -1063,20 +1081,7 @@ func seed(ctx context.Context, st *store.Store, opt options, logger *slog.Logger
 		return nil
 	}
 
-	// Printed once, on first boot, and never again.
-	fmt.Println()
-	fmt.Println("──────────────────────────────────────────────────────")
-	fmt.Println(" PiForge first boot — these credentials are shown once")
-	fmt.Println("──────────────────────────────────────────────────────")
-	if res.Admin != nil {
-		fmt.Printf("  admin: %s / %s\n", res.Admin.Email, res.AdminPassword)
-	}
-	if res.Demo != nil {
-		fmt.Printf("  user : %s / %s\n", res.Demo.Email, res.DemoPassword)
-	}
-	fmt.Println("──────────────────────────────────────────────────────")
-	fmt.Println()
-	logger.Info("seeded the first accounts")
+	logSeededAccounts(logger, res)
 
 	// A deployment with no skills makes the feature look broken: the page says "write
 	// one" and there is nothing to try. Three shared skills ship with the binary

@@ -78,8 +78,9 @@ export function WorkspacePanels({
   // A second pane (PRD FR-3.4): watching the diff while the terminal runs is the
   // common case, and it should not need a tab switch that tears the terminal down.
   const [split, setSplit] = React.useState<string | null>(null);
-  // Bumped whenever something writes into the checkout from the UI side (a browser
-  // screenshot today): the file tree refetches and the preview can open the result.
+  // Bumped whenever the UI writes something the panels show: the file tree
+  // refetches, and a screenshot opens from the session's artifact path (which is
+  // outside the checkout, so it is not in that tree).
   const [revision, setRevision] = React.useState(0);
   const [openPath, setOpenPath] = React.useState<string | null>(null);
   // The line a test failure pointed at. Kept next to the path so the editor can

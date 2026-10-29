@@ -3,15 +3,18 @@ import { expect, test } from "@playwright/test";
 import { USER, apiWrite, login, openNewSession, sendPrompt } from "./helpers";
 
 /**
- * FR-11.8: what you see in the built-in browser can become a file the agent can
- * read. The endpoint writes into the checkout, so the file tree and the agent see
- * the same bytes.
+ * FR-11.8: what you see in the built-in browser can become a previewable file.
  *
  * The old spec asserted `bytes > 1000`. The defect it missed: with the panel on a
  * real page the endpoint captured a different target and wrote a 661×750
  * all-white 3008-byte PNG of `about:blank`, which passes any byte-count check.
  * So this spec navigates first and then *decodes* the PNG: a white rectangle has
  * one colour, and a page cannot.
+ *
+ * Captures now go to the session's control-plane artifacts directory, not the
+ * checkout. The regression this spec locks down is the second half of the
+ * drill's fragile point 6.5: several captures in a row must leave `git status`
+ * clean, and the panel must still preview the newest one.
  */
 
 /** The page the sandbox browser navigates to. It is served by the e2e webServer. */
@@ -33,6 +36,15 @@ test.describe("browser screenshot", () => {
     await page.getByTestId("browser-url").press("Enter");
     await expect(panel).toHaveAttribute("data-browser-painted", "1", { timeout: 30_000 });
 
+    // A capture must not touch the checkout. Assert the starting point, because
+    // "clean after" is only meaningful from a clean start.
+    const gitStatus = async () => {
+      const res = await page.request.get(`/v1/sessions/${sessionId}/git/status`);
+      expect(res.status()).toBe(200);
+      return (await res.json()) as { clean: boolean; changes?: { path?: string }[] };
+    };
+    expect((await gitStatus()).clean, "the session did not start with a clean checkout").toBe(true);
+
     // Two captures in a row: the second one used to fail with 422 "浏览器正忙".
     const shots: { path: string; bytes: number }[] = [];
     for (let i = 0; i < 2; i += 1) {
@@ -42,14 +54,17 @@ test.describe("browser screenshot", () => {
     }
 
     const body = shots[0];
-    expect(body.path.startsWith("screenshots/")).toBe(true);
+    // Screenshots live under the control plane, not the checkout: a virtual
+    // path the panel can preview, with no file under the worktree.
+    expect(body.path.startsWith(`artifacts/${sessionId}/screenshots/`)).toBe(true);
     expect(body.path.endsWith(".png")).toBe(true);
     expect(body.bytes).toBeGreaterThan(1000);
+    const artifactRel = body.path.slice(`artifacts/${sessionId}/`.length);
 
-    // Decode the PNG in a page context and count distinct RGB values. A white
-    // image is exactly one colour; any real page has far more.
+    // Decode the PNG through the artifacts route and count distinct RGB values.
+    // A white image is exactly one colour; any real page has far more.
     const inline = await page.request.get(
-      `/v1/sessions/${sessionId}/files?path=${encodeURIComponent(body.path)}&inline=1`,
+      `/v1/sessions/${sessionId}/artifacts?path=${encodeURIComponent(artifactRel)}&inline=1`,
     );
     expect(inline.status()).toBe(200);
     const base64 = Buffer.from(await inline.body()).toString("base64");
@@ -78,9 +93,9 @@ test.describe("browser screenshot", () => {
         "the endpoint captured a blank page instead of the panel's page",
     ).toBeGreaterThan(8);
 
-    // The file really exists in the checkout and is a PNG.
+    // The metadata the preview reads (binary with a PNG mime type).
     const file = await page.request.get(
-      `/v1/sessions/${sessionId}/files?path=${encodeURIComponent(body.path)}`,
+      `/v1/sessions/${sessionId}/artifacts?path=${encodeURIComponent(artifactRel)}`,
     );
     expect(file.status()).toBe(200);
     const content = (await file.json()) as { mime_type: string; size: number; binary: boolean };
@@ -88,17 +103,31 @@ test.describe("browser screenshot", () => {
     expect(content.size).toBeGreaterThan(1000);
     expect(content.binary).toBe(true);
 
-    // The preview must show the picture, not a download card: the file API returns
-    // images with an empty body, so the preview has to use the inline endpoint.
-    const projectId = /\/p\/([^/]+)\//.exec(page.url())?.[1] ?? "";
-    await page.goto(`/p/${projectId}/s/${sessionId}`);
-    await expect(page.getByTestId("file-tree")).toBeVisible({ timeout: 40_000 });
-    const tree = page.getByTestId("file-tree");
-    await tree.getByText("screenshots", { exact: false }).first().click();
-    await tree.getByText(body.path.split("/").pop()!, { exact: false }).first().click();
+    // Two captures, and the checkout is still clean: no untracked screenshots/
+    // and no change row to commit by accident.
+    const after = await gitStatus();
+    expect(after.clean, `captures dirtied the checkout: ${JSON.stringify(after.changes)}`).toBe(true);
+    expect(
+      (after.changes ?? []).some((change) => (change.path ?? "").includes("screenshots")),
+      "a screenshot appeared in the change list",
+    ).toBe(false);
+    const leftover = await page.request.get(`/v1/sessions/${sessionId}/files/tree?path=screenshots`);
+    if (leftover.status() === 200) {
+      const nodes = ((await leftover.json()) as { nodes?: unknown[] }).nodes ?? [];
+      expect(nodes, "a capture wrote screenshots/ into the checkout").toHaveLength(0);
+    } else {
+      expect(leftover.status()).toBe(404);
+    }
+
+    // The panel still previews the newest capture: the camera button writes the
+    // artifact and opens it in the file pane, whose image comes from the
+    // artifacts inline route.
     const preview = page.getByTestId("image-preview");
-    await expect(preview).toBeVisible({ timeout: 20_000 });
+    await page.getByTestId("browser-screenshot").click();
+    await expect(preview).toBeVisible({ timeout: 30_000 });
+    await expect(preview).toHaveAttribute("src", /\/artifacts\?path=/);
     await expect(preview).toHaveAttribute("src", /inline=1/);
+    expect((await gitStatus()).clean, "the panel's capture dirtied the checkout").toBe(true);
 
     // And a page that really has nothing on it is refused, not saved: the
     // request names the tab explicitly, so it cannot accidentally capture the
@@ -126,12 +155,7 @@ test.describe("browser screenshot", () => {
     expect(bare.status).toBe(422);
     expect((bare.body as { error?: { message?: string } }).error?.message ?? "").toContain("空白");
 
-    const listed = await page.request.get(`/v1/sessions/${sessionId}/files/tree?path=screenshots`);
-    expect(listed.status()).toBe(200);
-    const nodes = ((await listed.json()) as { nodes?: { name: string }[] }).nodes ?? [];
-    expect(nodes.length, "a blank capture wrote a file into the workspace").toBe(
-      new Set(shots.map((shot) => shot.path)).size,
-    );
+    expect((await gitStatus()).clean, "a refused capture dirtied the checkout").toBe(true);
   });
 
   test("the panel's camera button captures what it shows", async ({ page }) => {
@@ -153,10 +177,14 @@ test.describe("browser screenshot", () => {
     await page.getByTestId("browser-url").press("Enter");
     await expect(panel).toHaveAttribute("data-browser-painted", "1", { timeout: 30_000 });
 
-    const toast = page.locator("[data-sonner-toast]").filter({ hasText: "已保存到工作区" });
+    const toast = page.locator("[data-sonner-toast]").filter({ hasText: "已保存到会话附件" });
     await page.getByTestId("browser-screenshot").click();
     await expect(toast.first()).toBeVisible({ timeout: 30_000 });
-    await expect(toast.first()).toContainText("screenshots/");
-    void sessionId;
+    await expect(toast.first()).toContainText(`artifacts/${sessionId}/screenshots/`);
+    // The panel opens what it captured, and the image is served from the
+    // artifact route rather than the workspace.
+    const preview = page.getByTestId("image-preview");
+    await expect(preview).toBeVisible({ timeout: 20_000 });
+    await expect(preview).toHaveAttribute("src", /\/artifacts\?path=/);
   });
 });

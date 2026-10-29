@@ -665,15 +665,26 @@ try {
     Assert-Check "POST /v1/sessions/{id}/browser/screenshot captured the page" ($null -ne $shotResp -and $shotResp.Status -eq 201) "last error: $lastShotError"
     $shotPath = $shotResp.Body.path
     $shotBytes = [int]$shotResp.Body.bytes
-    Assert-Check "the screenshot is a PNG in screenshots/" ($shotPath -match "^screenshots/.*\.png$") $shotPath
+    Assert-Check "the screenshot is a PNG in the session's artifacts (not the checkout)" `
+        ($shotPath -match "^artifacts/.+/screenshots/.*\.png$") $shotPath
     Assert-Check "the screenshot has more than 1000 bytes" ($shotBytes -gt 1000) "bytes=$shotBytes"
 
     $localShot = Join-Path $ArtifactDir "browser-panel.png"
-    $encodedShot = [uri]::EscapeDataString($shotPath)
-    Invoke-WebRequest -UseBasicParsing -Uri "$BaseUrl/v1/sessions/$sessionID/files?path=$encodedShot&download=1" `
+    # The client path is virtual: artifacts/<session>/<relative>. The route takes
+    # the session-relative part, so a screenshot can be previewed without a
+    # screenshots/ directory ever appearing in the user's repository.
+    $shotRel = $shotPath -replace "^artifacts/$([regex]::Escape($sessionID))/", ""
+    $encodedShot = [uri]::EscapeDataString($shotRel)
+    Invoke-WebRequest -UseBasicParsing -Uri "$BaseUrl/v1/sessions/$sessionID/artifacts?path=$encodedShot&download=1" `
         -WebSession $user.Session -OutFile $localShot
     $downloaded = (Get-Item $localShot).Length
-    Assert-Check "the PNG downloads from the workspace byte-for-byte" ($downloaded -eq $shotBytes) "api=$shotBytes downloaded=$downloaded"
+    Assert-Check "the PNG downloads from the artifacts route byte-for-byte" ($downloaded -eq $shotBytes) "api=$shotBytes downloaded=$downloaded"
+
+    # The capture is a file the user can preview, not untracked work in their
+    # repository: `git status` must still be clean after it.
+    $shotStatus = Invoke-Docker -Arguments @("exec", $ContainerName, "git", "-C", $worktree, "status", "--porcelain")
+    Assert-Check "the checkout is still clean after the capture" (-not $shotStatus.Output) `
+        $(if ($shotStatus.Output) { $shotStatus.Output -replace "`r?`n", "; " } else { "<clean>" })
 
     $imageMeta = [ordered]@{ path = $shotPath; bytes = $shotBytes; width = 0; height = 0; colours = 0 }
     try {

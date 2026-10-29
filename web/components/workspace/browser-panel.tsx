@@ -314,15 +314,15 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
     canvas.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
   }, []);
 
-  // Capture writes the page into the checkout rather than into the browser: that is
-  // what makes it useful to the agent (PRD FR-11.8).
+  // Capture writes the page into the session's control-plane artifacts, not the
+  // checkout: previewing it must not turn the user's repository dirty (FR-11.8).
   const [capturing, setCapturing] = React.useState(false);
   const capture = async () => {
     if (capturing) return;
     setCapturing(true);
     try {
       const result = await api.sessions.screenshot(sessionId, tabId ?? undefined);
-      toast.success("已保存到工作区", { description: result.path });
+      toast.success("已保存到会话附件", { description: result.path });
       onCaptured?.(result.path);
     } catch (error) {
       toast.error("截图失败", {

@@ -31,6 +31,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/browser"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/crypto"
+	"github.com/piforge/piforge/backend/internal/fsx"
 	"github.com/piforge/piforge/backend/internal/store"
 )
 
@@ -93,6 +94,17 @@ type Deps struct {
 	// SkillsDir is where uploaded skill bundles live, one directory per skill.
 	// Empty means uploads are refused with a typed error.
 	SkillsDir string
+	// ArtifactsDir is the control plane's own artifacts root (for example
+	// <dataDir>/artifacts). Browser screenshots are written under
+	// <ArtifactsDir>/<session>/screenshots, never into the checkout: a capture
+	// must not appear as the user's untracked work. Empty falls back to a
+	// directory under the OS temp dir so hand-built test dependencies still
+	// work, but a deployment always sets it.
+	ArtifactsDir string
+	// ScreenshotCapture overrides the sandbox browser for a screenshot. Nil is
+	// the normal path (Acquire + ScreenshotTab); tests use it to exercise the
+	// handler's persistence and serving without launching Chrome.
+	ScreenshotCapture func(ctx context.Context, sandboxID, profileRoot, tabID string) ([]byte, error)
 	// WebUpstream is the Next.js server to forward page requests to. It is how a
 	// container serves one port: the API stays here, the UI is proxied. Empty
 	// means "API only", which is what the e2e suite and local development use.
@@ -140,6 +152,10 @@ type server struct {
 	// kept across socket reconnects that the PTY itself survives.
 	tapsMu sync.Mutex
 	taps   map[string]*testTap
+	// artifacts reads and writes ArtifactsDir. It is deliberately not the
+	// session's Workspace: in a remote-placement deployment that interface
+	// speaks to the sandbox, and artifacts belong to the control plane.
+	artifacts *fsx.Service
 }
 
 // NewRouter builds the complete HTTP handler, including the recover middleware.
@@ -169,6 +185,9 @@ func newServer(d Deps) *server {
 		hub:          newHub(d.Store, d.Runtime, d.Logger),
 		ssePoll:      200 * time.Millisecond,
 		sseKeepalive: 15 * time.Second,
+		// No git backend: artifacts are plain files, and this service must not
+		// pretend a checkout exists under the data directory.
+		artifacts: fsx.New(fsx.Config{}),
 	}
 }
 
@@ -235,6 +254,8 @@ func (s *server) routes() http.Handler {
 	// Workspace: files, search, git. All delegate to Deps.Workspace.
 	mux.Handle("GET /v1/sessions/{id}/files/tree", s.authed(s.handleFileTree))
 	mux.Handle("GET /v1/sessions/{id}/files", s.authed(s.handleReadFile))
+	// Control-plane artifacts (browser screenshots live outside the checkout).
+	mux.Handle("GET /v1/sessions/{id}/artifacts", s.authed(s.handleArtifactFile))
 	mux.Handle("PUT /v1/sessions/{id}/files", s.mutatingBearer(s.handleWriteFile))
 	mux.Handle("DELETE /v1/sessions/{id}/files", s.mutatingBearer(s.handleDeleteFile))
 	mux.Handle("GET /v1/sessions/{id}/search", s.authed(s.handleSearch))

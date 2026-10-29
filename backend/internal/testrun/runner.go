@@ -42,6 +42,12 @@ const (
 	RunnerNPM    Runner = "npm test"
 	RunnerJest   Runner = "jest"
 	RunnerVitest Runner = "vitest"
+	// RunnerNode is Node's built-in test runner (`node --test`). Its console
+	// output is TAP, not a jest/vitest summary, so it has its own parser.
+	RunnerNode Runner = "node --test"
+	// RunnerTSX is the TypeScript runner (`tsx --test`), which prints the same
+	// TAP because it runs the same node:test harness.
+	RunnerTSX    Runner = "tsx --test"
 	RunnerCargo  Runner = "cargo test"
 	RunnerMake   Runner = "make test"
 	RunnerMaven  Runner = "mvn test"
@@ -277,11 +283,24 @@ func detectSegment(segment string) (Runner, bool) {
 			return RunnerJest, true
 		} else if target == "vitest" {
 			return RunnerVitest, true
+		} else if target == "tsx" {
+			return RunnerTSX, true
 		}
 	case "jest":
 		return RunnerJest, true
 	case "vitest":
 		return RunnerVitest, true
+	case "node", "nodejs":
+		// `node --test`, `node --test path/to/x.test.js`, and the flag after
+		// other node options. A script that merely takes --test is not a test
+		// run: the flag has to appear before the first positional argument.
+		if hasTestFlag(rest) {
+			return RunnerNode, true
+		}
+	case "tsx":
+		if hasTestFlag(rest) {
+			return RunnerTSX, true
+		}
 	case "cargo":
 		if first == "test" {
 			return RunnerCargo, true
@@ -300,6 +319,32 @@ func detectSegment(segment string) (Runner, bool) {
 		}
 	}
 	return "", false
+}
+
+// hasTestFlag reports whether a node/tsx argv selects the built-in test runner.
+//
+// The scan stops at the first positional argument: `node script.js --test` is a
+// script that happens to take that flag, while `node --test script.js` is the
+// test runner. Node options that take a value (`--require x`) would otherwise
+// make `x` look positional, so the loop also skips a flag's obvious value — but
+// only when the next token is not itself the --test flag, which is what keeps
+// `node --require ./setup.cjs --test` detected.
+func hasTestFlag(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		arg := strings.Trim(args[i], `"'`)
+		if arg == "--test" || strings.HasPrefix(arg, "--test=") {
+			return true
+		}
+		if !strings.HasPrefix(arg, "-") {
+			// First positional argument: everything after it belongs to the
+			// program, not to node.
+			return false
+		}
+		if i+1 < len(args) && !strings.HasPrefix(strings.Trim(args[i+1], `"'`), "-") {
+			i++ // skip a flag's value
+		}
+	}
+	return false
 }
 
 // managerTarget finds the program a package-manager invocation runs, skipping

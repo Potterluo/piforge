@@ -323,14 +323,35 @@ export function eventsUrl(sessionId: string, afterSeq = 0): string {
 // Workspace: files
 // ---------------------------------------------------------------------------
 
+/**
+ * A screenshot now lives outside the checkout, at a virtual path:
+ * `artifacts/<session>/screenshots/<name>.png`. The panel keeps passing plain
+ * path strings around, so the three read functions recognise that prefix and
+ * use the artifacts route. Every other path — including `screenshots/…` written
+ * by an older build inside the checkout — still goes to /files.
+ */
+const ARTIFACT_ROOT = "artifacts/";
+
+function artifactRel(sessionId: string, path: string): string | null {
+  const prefix = `${ARTIFACT_ROOT}${sessionId}/`;
+  return path.startsWith(prefix) ? path.slice(prefix.length) : null;
+}
+
+function fileReadUrl(sessionId: string, path: string, flag?: "download" | "inline"): string {
+  const artifact = artifactRel(sessionId, path);
+  const base = artifact
+    ? `/v1/sessions/${sessionId}/artifacts?path=${encodeURIComponent(artifact)}`
+    : `/v1/sessions/${sessionId}/files?path=${encodeURIComponent(path)}`;
+  return flag ? `${base}&${flag}=1` : base;
+}
+
 export const files = {
   tree: (sessionId: string, path = "", depth = 2, includeIgnored = false) =>
     request<{ nodes: FileNode[] }>(
       `/v1/sessions/${sessionId}/files/tree?path=${encodeURIComponent(path)}&depth=${depth}` +
         (includeIgnored ? "&include_ignored=1" : ""),
     ),
-  read: (sessionId: string, path: string) =>
-    request<FileContent>(`/v1/sessions/${sessionId}/files?path=${encodeURIComponent(path)}`),
+  read: (sessionId: string, path: string) => request<FileContent>(fileReadUrl(sessionId, path)),
   write: (sessionId: string, path: string, body: string) =>
     request<{ ok: boolean }>(`/v1/sessions/${sessionId}/files?path=${encodeURIComponent(path)}`, {
       method: "PUT",
@@ -346,10 +367,10 @@ export const files = {
       `/v1/sessions/${sessionId}/search?q=${encodeURIComponent(query)}&type=${byContent ? "content" : "name"}`,
     ),
   downloadUrl: (sessionId: string, path: string) =>
-    `${BASE}/v1/sessions/${sessionId}/files?path=${encodeURIComponent(path)}&download=1`,
+    `${BASE}${fileReadUrl(sessionId, path, "download")}`,
   /** Same bytes, but the browser is allowed to render them (used for PDFs). */
   inlineUrl: (sessionId: string, path: string) =>
-    `${BASE}/v1/sessions/${sessionId}/files?path=${encodeURIComponent(path)}&inline=1`,
+    `${BASE}${fileReadUrl(sessionId, path, "inline")}`,
 };
 
 // ---------------------------------------------------------------------------
