@@ -353,6 +353,21 @@ export interface Provider {
   created_at: string;
 }
 
+/**
+ * The deterministic first-run answer from GET /v1/setup.
+ *
+ * `needs_provider` is the server's copy of `hasUsableModel`: enabled, keyed and
+ * at least one model. `shared_provider_available` says the deployment already
+ * has one every account inherits. `bootstrap` (when present) is the non-secret
+ * prefill from PIFORGE_BOOTSTRAP_PROVIDER — never a key.
+ */
+export interface SetupStatus {
+  needs_provider: boolean;
+  is_admin: boolean;
+  shared_provider_available: boolean;
+  bootstrap?: { name: string; base_url?: string; model: string };
+}
+
 export interface Skill {
   id: string;
   scope: "admin" | "user";

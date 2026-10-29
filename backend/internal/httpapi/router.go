@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/auth"
+	"github.com/piforge/piforge/backend/internal/bootstrap"
 	"github.com/piforge/piforge/backend/internal/browser"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/crypto"
@@ -112,6 +113,10 @@ type Deps struct {
 	// sessions simply have no worktree and the workspace endpoints report
 	// sandbox_unavailable.
 	Provisioner Provisioner
+	// SetupDefaults is the prefill a deployment documents through
+	// PIFORGE_BOOTSTRAP_PROVIDER. It is non-secret by construction (name,
+	// endpoint, model) and empty unless the operator set the variable.
+	SetupDefaults bootstrap.Defaults
 	// Now defaults to time.Now.
 	Now func() time.Time
 	// Logger defaults to slog.Default().
@@ -181,6 +186,9 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/auth/login", s.handleLogin)
 	mux.Handle("POST /v1/auth/logout", s.authed(s.handleLogout))
 	mux.Handle("GET /v1/auth/me", s.authed(s.handleMe))
+	// First-run state: one boolean instead of every screen re-deriving it from
+	// the provider list (QA-16's fresh volume answered 400 no_model everywhere).
+	mux.Handle("GET /v1/setup", s.authed(s.handleSetup))
 
 	// Projects.
 	mux.Handle("GET /v1/projects", s.authed(s.handleListProjects))

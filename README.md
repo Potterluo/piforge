@@ -138,6 +138,25 @@ browser socket when TLS is terminated in front of the app.
 `PIFORGE_BROWSER_IDLE_TIMEOUT` is the same knob as `-browser-idle-timeout` (a Go
 duration, e.g. `90s`).
 
+**First run without a UI visit.** A fresh deployment has accounts and no model
+account, so every send answers `400 no_model` until somebody opens Settings. An
+unattended deployment (CI, a demo box, a customer's trial) can make that a
+startup step instead:
+
+```sh
+PIFORGE_BOOTSTRAP_PROVIDER='volc|https://ark.cn-beijing.volces.com/api/v3|doubao-seed-1-6'
+PIFORGE_BOOTSTRAP_PROVIDER_KEY='...'
+```
+
+`name|base_url|model` is an OpenAI-compatible provider; `base_url` may be empty.
+On startup it creates the shared provider **only when no usable shared provider
+already exists**, so a restart never replaces an operator's provider (including
+its key). The key is sealed before it reaches the database and is never logged.
+The same values, minus the key, are exposed by `GET /v1/setup` as the admin
+first-run form's prefill. The home page and the composer also show a setup panel
+whose admin action creates the shared provider in place; `GET /v1/setup` returns
+`{needs_provider, is_admin, shared_provider_available}`.
+
 ## How the moving parts fit
 
 **Model traffic never carries a real key.** A session's process is started with

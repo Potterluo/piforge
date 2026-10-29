@@ -131,6 +131,22 @@ export function useProviders() {
   });
 }
 
+/**
+ * The first-run answer (GET /v1/setup).
+ *
+ * Short stale time and a key of its own: after an admin creates the shared
+ * provider the panel must disappear without a reload, and `providers` is
+ * invalidated at the same time by the one-click flow.
+ */
+export function useSetup() {
+  return useQuery({
+    queryKey: ["setup"],
+    queryFn: () => api.setup.get(),
+    staleTime: 10_000,
+    refetchOnWindowFocus: true,
+  });
+}
+
 export function useCreateProject() {
   const client = useQueryClient();
   return useMutation({

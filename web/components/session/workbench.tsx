@@ -48,6 +48,7 @@ import { Composer, type ModelOption } from "./composer";
 import { ContextMeter } from "./context-marker";
 import { ForkDialog } from "./fork-dialog";
 import { NoModelBar, hasUsableModel } from "./no-model-bar";
+import { FirstRunSetup } from "@/components/setup/first-run-setup";
 import { NoWorktreeState } from "./no-worktree-state";
 import { SessionEventsProvider, useSessionEventState } from "./session-events-provider";
 import { SessionStream } from "./session-stream";
@@ -368,8 +369,12 @@ function WorkbenchBody({
               }}
             />
             {hasModel === false || modelRefusal ? (
-              <div className="px-3 pt-3" data-testid="no-model-slot">
+              <div className="flex flex-col gap-2 px-3 pt-3" data-testid="no-model-slot">
                 <NoModelBar error={modelRefusal ?? undefined} />
+                {/* The composer's half of the first-run step: what is missing,
+                    the way to settings, and (for an admin) the one-click shared
+                    provider. It disappears when the account becomes usable. */}
+                <FirstRunSetup />
               </div>
             ) : null}
             <Composer

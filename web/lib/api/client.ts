@@ -27,6 +27,7 @@ import {
   type Session,
   type SessionSkill,
   type SessionStats,
+  type SetupStatus,
   type Skill,
   type TestRunsResponse,
   type TreeEntry,
@@ -567,6 +568,22 @@ export const apiKeys = {
     request<{ api_key: APIKey }>(`/v1/api-keys/${id}`, { method: "DELETE" }),
 };
 
+// ---------------------------------------------------------------------------
+// First run (QA-16)
+// ---------------------------------------------------------------------------
+
+/**
+ * What a signed-in account needs to send its first message.
+ *
+ * The provider list already says what exists; this says whether anything is
+ * usable, whether the caller can fix it deployment-wide, and what a documented
+ * deployment prefill offers. The home page and the composer read the same
+ * answer, so they cannot disagree about "there is nothing to send to".
+ */
+export const setup = {
+  get: () => request<SetupStatus>("/v1/setup"),
+};
+
 export const api = {
   auth,
   projects,
@@ -581,5 +598,6 @@ export const api = {
   support,
   features,
   apiKeys,
+  setup,
 };
 export default api;

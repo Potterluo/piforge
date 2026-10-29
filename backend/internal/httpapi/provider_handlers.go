@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"sort"
 
@@ -26,16 +27,25 @@ type providerResponse struct {
 // override rather than a copy of the whole config.
 func (s *server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 	user := auth.MustUser(r.Context())
-
-	inherited, err := s.deps.Store.InheritedProviders(r.Context(), user.ID)
+	merged, err := s.mergedProviders(r.Context(), user.ID)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	own, err := s.deps.Store.ListProviders(r.Context(), user.ID)
+	writeJSON(w, http.StatusOK, providersResponse{Providers: merged})
+}
+
+// mergedProviders is the inherited-over-own shadowing rule in one place, so the
+// settings page and the first-run state cannot disagree about what the account
+// can actually send to.
+func (s *server) mergedProviders(ctx context.Context, userID string) ([]*contracts.Provider, error) {
+	inherited, err := s.deps.Store.InheritedProviders(ctx, userID)
 	if err != nil {
-		s.fail(w, r, err)
-		return
+		return nil, err
+	}
+	own, err := s.deps.Store.ListProviders(ctx, userID)
+	if err != nil {
+		return nil, err
 	}
 
 	merged := make(map[string]*contracts.Provider, len(inherited)+len(own))
@@ -50,7 +60,7 @@ func (s *server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	writeJSON(w, http.StatusOK, providersResponse{Providers: out})
+	return out, nil
 }
 
 // handleCreateProvider creates a private provider.

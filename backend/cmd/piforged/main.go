@@ -33,6 +33,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/aio"
 	"github.com/piforge/piforge/backend/internal/auth"
+	"github.com/piforge/piforge/backend/internal/bootstrap"
 	"github.com/piforge/piforge/backend/internal/browser"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/crypto"
@@ -300,6 +301,22 @@ func run() error {
 	box, err := crypto.NewFromEnv(opt.dataDir)
 	if err != nil {
 		return fmt.Errorf("init secret box: %w", err)
+	}
+
+	// A deployment that sets PIFORGE_BOOTSTRAP_PROVIDER should not be dead on
+	// arrival: create the shared provider once, never overwrite an existing one,
+	// and never put the key in the log (see internal/bootstrap).
+	setupDefaults, err := bootstrap.FromEnv()
+	if err != nil {
+		return fmt.Errorf("bootstrap provider: %w", err)
+	}
+	if !setupDefaults.Empty() {
+		if _, _, berr := bootstrap.Ensure(ctx, st, box, logger, setupDefaults, os.Getenv(bootstrap.EnvKey)); berr != nil {
+			// Not fatal: the deployment still works, and an operator can add the
+			// provider in the UI. Saying so once beats a crash loop whose message
+			// is buried in a restart.
+			logger.Warn("bootstrap provider was not created", "error", berr.Error())
+		}
 	}
 	signingKey := make([]byte, 32)
 	if _, rerr := rand.Read(signingKey); rerr != nil {
@@ -746,6 +763,7 @@ func run() error {
 		Browser:         browsers,
 		Term:            termAdapter{m: terminals},
 		Provisioner:     prov,
+		SetupDefaults:   setupDefaults,
 		Now:             time.Now,
 		Logger:          logger,
 	})

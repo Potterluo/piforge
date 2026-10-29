@@ -285,6 +285,62 @@ func (s *Store) AdminListProviders(ctx context.Context, callerID string) ([]*con
 		`SELECT `+providerCols+` FROM providers WHERE scope = 'admin' ORDER BY name ASC`)
 }
 
+// EnsureBootstrapProvider creates the deployment's first shared provider and
+// reports whether it created one.
+//
+// This is the startup path for PIFORGE_BOOTSTRAP_PROVIDER, not an admin action,
+// which is why it finds an admin to own the row instead of taking a caller: a
+// fresh deployment always has the seeded admin, and requiring a signed-in
+// request would defeat the point of configuring the first boot.
+//
+// The safety rules are the product requirement:
+//   - a shared provider with the same name is never touched. An operator's
+//     provider (including its key) is not replaced by an environment variable
+//     that happened to survive in a compose file.
+//   - a *usable* shared provider means the deployment is not dead on arrival, so
+//     nothing is added.
+//   - a placeholder another boot step created (the seeded `shared-anthropic`
+//     has no key) does not block this: it cannot answer a prompt, and treating
+//     it as "already configured" is exactly the dead deployment this removes.
+func (s *Store) EnsureBootstrapProvider(ctx context.Context, in ProviderInput) (*contracts.Provider, bool, error) {
+	if err := in.validate(); err != nil {
+		return nil, false, err
+	}
+	existing, err := s.queryProviders(ctx,
+		`SELECT `+providerCols+` FROM providers WHERE scope = 'admin' ORDER BY name ASC`)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, provider := range existing {
+		if provider.Name == in.Name {
+			return provider, false, nil
+		}
+	}
+	for _, provider := range existing {
+		if provider.Enabled && provider.HasKey && len(provider.Models) > 0 {
+			return provider, false, nil
+		}
+	}
+
+	var adminID string
+	err = s.r.QueryRowContext(ctx,
+		`SELECT id FROM users
+		  WHERE role = 'admin' AND status = 'active' AND deleted_at IS NULL
+		  ORDER BY created_at ASC LIMIT 1`).Scan(&adminID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, fmt.Errorf("store: bootstrap provider: no active admin account: %w", ErrNotFound)
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("store: bootstrap provider: find an admin: %w", err)
+	}
+
+	provider, err := s.UpsertAdminProvider(ctx, adminID, in)
+	if err != nil {
+		return nil, false, err
+	}
+	return provider, true, nil
+}
+
 func (s *Store) queryProviders(ctx context.Context, q string, args ...any) ([]*contracts.Provider, error) {
 	rows, err := s.r.QueryContext(ctx, q, args...)
 	if err != nil {

@@ -5,6 +5,7 @@ import { useMemo, useState } from "react";
 import { FolderGit2, Plus } from "lucide-react";
 
 import { NewProjectDialog } from "@/components/shell/new-project-dialog";
+import { FirstRunSetup } from "@/components/setup/first-run-setup";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -74,6 +75,10 @@ export function HomePage() {
           </div>
         ) : null}
       </header>
+
+      {/* First run is a step, not a 400 on the first send: a fresh deployment
+          has accounts and no model account, and this is where that is fixed. */}
+      <FirstRunSetup className="m-4 mb-0" />
 
       <div className="p-4">
         {projects.isPending ? (
