@@ -5,22 +5,26 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
 )
 
-// containerWorkspace is where DockerConfig.DataRoot is mounted.
+// containerWorkspace is where one project's host directory is mounted.
 const containerWorkspace = "/workspace"
 
 // containerRepoDir is the main checkout inside the container. It is the container
-// side of provision.RepoDir(sb): the provider reports DockerConfig.DataRoot as the
-// sandbox's RootDir and mounts it at /workspace, so <RootDir>/repo is /workspace/repo.
+// side of provision.RepoDir(sb): the provider mounts <pair dir> at /workspace and
+// reports <pair dir> as the sandbox's RootDir, so <RootDir>/repo is /workspace/repo.
 const containerRepoDir = containerWorkspace + "/" + repoSubdir
 
 // sandboxUser is the unprivileged account the sandbox image creates for its shell,
@@ -91,8 +95,10 @@ type DockerConfig struct {
 	// default for a self-hosted single-user box and a bad one for a shared deployment.
 	CPUs   string
 	Memory string
-	// DataRoot is the host directory bind-mounted at /workspace, so a page refresh or a
-	// pause does not lose the checkout.
+	// DataRoot is the host directory that holds one workspace per (user, project):
+	// <DataRoot>/<userID>/<projectID>. Only a project's own directory is mounted at
+	// /workspace for that project, so a page refresh or a pause does not lose the
+	// checkout and two projects never share one working tree.
 	DataRoot string
 	// APIPort is the container port that serves the sandbox HTTP API (8080 for AIO
 	// Sandbox). Zero means "do not publish anything", which is what the lifecycle-only
@@ -114,6 +120,13 @@ func NewDocker(cfg DockerConfig) (*Docker, error) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		return nil, fmt.Errorf("sandbox: docker: the docker CLI is not on PATH: %w", err)
 	}
+	// The mount source is compared with what Docker reports back after a restart, so
+	// the configured root has to be the same absolute, cleaned path every time.
+	root, err := filepath.Abs(cfg.DataRoot)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: docker: abs data root %q: %w", cfg.DataRoot, err)
+	}
+	cfg.DataRoot = filepath.Clean(root)
 	return &Docker{cfg: cfg}, nil
 }
 
@@ -128,6 +141,28 @@ func (d *Docker) containerName(userID, projectID string) string {
 	return "piforge-" + hex.EncodeToString(sum[:8])
 }
 
+// workspacePath is the host directory bind-mounted at /workspace for one (user,
+// project) pair: <DataRoot>/<userID>/<projectID>.
+//
+// It is derived from exactly the pair the container name is derived from, so the
+// same container always sees the same directory across restarts, and two projects
+// (or two users on one project) can never resolve to one checkout. The layout
+// matches the local provider's, which keeps the two providers interchangeable on
+// one data directory.
+func (d *Docker) workspacePath(userID, projectID string) (string, error) {
+	if err := safeSegment(userID); err != nil {
+		return "", err
+	}
+	if err := safeSegment(projectID); err != nil {
+		return "", err
+	}
+	p := filepath.Join(d.cfg.DataRoot, userID, projectID)
+	if !isInside(d.cfg.DataRoot, p) {
+		return "", fmt.Errorf("%w: workspace path escapes the data root", ErrInvalidID)
+	}
+	return p, nil
+}
+
 // Ensure creates the container if it is missing and returns its state.
 //
 // It also makes sure the container has a usable checkout before reporting READY.
@@ -135,19 +170,50 @@ func (d *Docker) containerName(userID, projectID string) string {
 // allowed to discover is missing: without .git, every git endpoint answers 500,
 // and the failure surfaces far from the step that caused it.
 func (d *Docker) Ensure(ctx context.Context, userID, projectID, repoURL, branch string) (*contracts.Sandbox, error) {
+	dir, err := d.workspacePath(userID, projectID)
+	if err != nil {
+		return nil, err
+	}
 	name := d.containerName(userID, projectID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("sandbox: docker: create workspace %s: %w", dir, err)
+	}
+
 	created := false
-	if state, err := d.inspect(ctx, name); err == nil {
-		if state != "running" {
+	state, inspectErr := d.inspect(ctx, name)
+	switch {
+	case inspectErr == nil:
+		mount, mountErr := d.workspaceMount(ctx, name)
+		if mountErr != nil || !sameHostDir(mount, dir) {
+			// A container created before this provider gave each pair its own
+			// directory mounts the shared data root (or something else entirely).
+			// Reusing it would show this project another tenant's working tree, so
+			// replace the container. The old tree is left on disk: tearing down a
+			// sandbox must not decide that somebody's uncommitted work is disposable.
+			slog.Warn("sandbox: docker: container workspace does not belong to this project; recreating the container",
+				"container", name,
+				"want", dir,
+				"got", mount,
+				"mount_error", mountErr)
+			if _, err := d.docker(ctx, "rm", "-f", name); err != nil {
+				return nil, err
+			}
+			created = true
+			if err := d.runContainer(ctx, name, userID, projectID, dir); err != nil {
+				return nil, err
+			}
+		} else if state != "running" {
 			if _, err := d.docker(ctx, "start", name); err != nil {
 				return nil, err
 			}
 		}
-	} else {
+	case errors.Is(inspectErr, ErrNotFound):
 		created = true
-		if err := d.runContainer(ctx, name, userID, projectID); err != nil {
+		if err := d.runContainer(ctx, name, userID, projectID, dir); err != nil {
 			return nil, err
 		}
+	default:
+		return nil, inspectErr
 	}
 
 	// Idempotent by construction (see planCheckout), so a container adopted after a
@@ -164,15 +230,16 @@ func (d *Docker) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 	return d.describe(ctx, userID, projectID, name)
 }
 
-// runContainer starts the per-(user, project) container.
-func (d *Docker) runContainer(ctx context.Context, name, userID, projectID string) error {
+// runContainer starts the per-(user, project) container, mounting only that pair's
+// host directory at /workspace.
+func (d *Docker) runContainer(ctx context.Context, name, userID, projectID, workspace string) error {
 	args := []string{
 		"run", "-d",
 		"--name", name,
 		"--label", "piforge.user=" + userID,
 		"--label", "piforge.project=" + projectID,
 		"--workdir", containerWorkspace,
-		"-v", d.cfg.DataRoot + ":" + containerWorkspace,
+		"-v", workspace + ":" + containerWorkspace,
 		"--restart", "unless-stopped",
 	}
 	if d.cfg.Network != "" {
@@ -358,11 +425,13 @@ func (d *Docker) execAsSandboxUser(ctx context.Context, name, dir string, argv .
 }
 
 // Get reports the current state of the container.
+//
+// RootDir is read back from the container's own /workspace mount rather than
+// remembered: after a restart that mount is the only durable statement of which
+// host directory this sandbox actually sees, and the control plane must write to
+// the same one.
 func (d *Docker) Get(ctx context.Context, sandboxID string) (*contracts.Sandbox, error) {
-	name := sandboxID
-	if !strings.HasPrefix(name, "piforge-") {
-		name = "piforge-" + sandboxID
-	}
+	name := d.resolve(sandboxID)
 	state, err := d.inspect(ctx, name)
 	if err != nil {
 		return nil, err
@@ -371,7 +440,9 @@ func (d *Docker) Get(ctx context.Context, sandboxID string) (*contracts.Sandbox,
 		ID:       name,
 		Provider: d.Name(),
 		Image:    d.cfg.Image,
-		RootDir:  d.cfg.DataRoot,
+	}
+	if mount, merr := d.workspaceMount(ctx, name); merr == nil {
+		out.RootDir = mount
 	}
 	out.State = dockerState(state)
 	return out, nil
@@ -427,6 +498,10 @@ func (d *Docker) describe(ctx context.Context, userID, projectID, name string) (
 	if err != nil {
 		return nil, err
 	}
+	dir, err := d.workspacePath(userID, projectID)
+	if err != nil {
+		return nil, err
+	}
 	return &contracts.Sandbox{
 		ID:        name,
 		UserID:    userID,
@@ -434,13 +509,14 @@ func (d *Docker) describe(ctx context.Context, userID, projectID, name string) (
 		State:     dockerState(state),
 		Provider:  d.Name(),
 		Image:     d.cfg.Image,
-		// RootDir is the host side of the bind mount, because the control plane's own
-		// git and file IO runs here and has to write where the container looks.
-		// ContainerPath translates it to /workspace for anything that speaks to the
-		// container. Reporting the container path made provisioning create the repo
-		// on the host at "/workspace", i.e. outside the mount: the container then saw
-		// an empty workspace.
-		RootDir:      d.cfg.DataRoot,
+		// RootDir is the host side of this pair's bind mount, because the control
+		// plane's own git and file IO runs here and has to write where the container
+		// looks. Reporting the shared DataRoot (the old behaviour) made every project
+		// resolve to <DataRoot>/repo and therefore to one checkout. Reporting the
+		// container path was the bug before that: provisioning wrote to "/workspace"
+		// on the host. ContainerPath translates this directory to /workspace for
+		// anything that speaks to the container.
+		RootDir:      dir,
 		CreatedAt:    time.Now().UTC(),
 		LastActiveAt: time.Now().UTC(),
 	}, nil
@@ -478,7 +554,11 @@ func (d *Docker) docker(ctx context.Context, args ...string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	text := strings.TrimSpace(string(out))
 	if err != nil {
-		if strings.Contains(text, "No such object") || strings.Contains(text, "No such container") {
+		// Docker 29 answers "error: no such object: ..." in lower case while older
+		// releases wrote "No such object"; both mean the container is absent, which
+		// Ensure must be able to tell from a daemon failure.
+		lower := strings.ToLower(text)
+		if strings.Contains(lower, "no such object") || strings.Contains(lower, "no such container") {
 			return "", fmt.Errorf("%w: %s", ErrNotFound, d.lastArg(args))
 		}
 		return "", fmt.Errorf("sandbox: docker %s: %w: %s", strings.Join(args, " "), err, text)
@@ -493,6 +573,67 @@ func (d *Docker) lastArg(args []string) string {
 		}
 	}
 	return ""
+}
+
+// workspaceMount returns the host directory the container has mounted at
+// /workspace. It is the container's own statement of what it can see, which is
+// what Ensure compares against the pair's directory before reusing a container.
+func (d *Docker) workspaceMount(ctx context.Context, name string) (string, error) {
+	out, err := d.docker(ctx, "inspect", "--format", "{{json .Mounts}}", name)
+	if err != nil {
+		return "", err
+	}
+	var mounts []struct {
+		Type        string `json:"Type"`
+		Source      string `json:"Source"`
+		Destination string `json:"Destination"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &mounts); err != nil {
+		return "", fmt.Errorf("sandbox: docker: inspect mounts %s: %w", name, err)
+	}
+	for _, mount := range mounts {
+		if path.Clean(filepath.ToSlash(mount.Destination)) == containerWorkspace {
+			return mount.Source, nil
+		}
+	}
+	return "", fmt.Errorf("sandbox: docker: %s has no %s mount", name, containerWorkspace)
+}
+
+// sameHostDir reports whether two host paths name the same directory. Docker
+// echoes the mount source it was given, which on Windows may differ only by
+// case; a symlinked data root may differ by resolution. Both are the same tree.
+func sameHostDir(a, b string) bool {
+	if strings.TrimSpace(a) == "" || strings.TrimSpace(b) == "" {
+		return false
+	}
+	aa, err := filepath.Abs(a)
+	if err != nil {
+		return false
+	}
+	bb, err := filepath.Abs(b)
+	if err != nil {
+		return false
+	}
+	aa, bb = filepath.Clean(aa), filepath.Clean(bb)
+	if equalHostPath(aa, bb) {
+		return true
+	}
+	ra, err := filepath.EvalSymlinks(aa)
+	if err != nil {
+		return false
+	}
+	rb, err := filepath.EvalSymlinks(bb)
+	if err != nil {
+		return false
+	}
+	return equalHostPath(filepath.Clean(ra), filepath.Clean(rb))
+}
+
+func equalHostPath(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // dockerState maps Docker's status to our state machine.
@@ -536,12 +677,15 @@ func (d *Docker) Endpoint(ctx context.Context, sandboxID string) (string, error)
 	return "http://127.0.0.1:" + address, nil
 }
 
-// ContainerPath maps a host path under DataRoot to the path the same file has
-// inside the container.
+// ContainerPath maps a host path inside one project's workspace to the path the
+// same file has inside that project's container.
 //
 // The terminal needs it: the store knows a worktree's host path, while the
-// container shell must start in the mounted path. Anything outside the mount is
-// an error rather than a best guess.
+// container shell must start in the mounted path. Each container mounts only
+// <DataRoot>/<userID>/<projectID>, so that pair of leading segments is stripped.
+// Anything outside a project workspace is an error rather than a best guess: the
+// shared DataRoot and its immediate children are not mounted anywhere any more,
+// and mapping them to /workspace would silently address the wrong tree.
 func (d *Docker) ContainerPath(hostPath string) (string, error) {
 	// A sandbox record may already carry a container path: provision lays out
 	// repositories from RootDir, which is containerWorkspace.
@@ -563,10 +707,19 @@ func (d *Docker) ContainerPath(hostPath string) (string, error) {
 		return "", fmt.Errorf("sandbox: docker: %q relative to %q: %w", abs, root, err)
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("sandbox: docker: %q is outside the workspace %q", abs, root)
+		return "", fmt.Errorf("sandbox: docker: %q is outside the data root %q", abs, root)
 	}
-	if rel == "." {
+	segments := strings.Split(filepath.ToSlash(rel), "/")
+	if rel == "." || len(segments) < 2 {
+		return "", fmt.Errorf("sandbox: docker: %q is not inside a project workspace under %q", abs, root)
+	}
+	for _, segment := range segments[:2] {
+		if err := safeSegment(segment); err != nil {
+			return "", fmt.Errorf("sandbox: docker: %q: %w", abs, err)
+		}
+	}
+	if len(segments) == 2 {
 		return containerWorkspace, nil
 	}
-	return path.Join(containerWorkspace, filepath.ToSlash(rel)), nil
+	return path.Join(containerWorkspace, path.Join(segments[2:]...)), nil
 }

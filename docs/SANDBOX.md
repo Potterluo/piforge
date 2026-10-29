@@ -61,11 +61,16 @@ level=WARN msg="sandbox placement is mixed: these features still run on the host
 
 ## docker provider 现在做了什么
 
-- `Ensure`：按 `(user, project)` 派生容器名 `piforge-<hash8>`，不存在就 `docker run -d`，
-  存在就复用；`/workspace` 绑定到数据目录，暂停/重启不丢工作区；
+- `Ensure`：按 `(user, project)` 派生容器名 `piforge-<hash8>` 和工作区宿主目录
+  `<data>/sandboxes/<user>/<project>`，不存在就 `docker run -d`，存在就复用；**只把这个项目的
+  目录**挂到 `/workspace`，暂停/重启不丢工作区；
 - `Ensure` 还在容器起来之后、返回 READY 之前把 `/workspace/repo` 变成 checkout，见下一节；
-- `RootDir`：**宿主侧**那个绑定目录，不是容器里的 `/workspace`。控制面自己的 git/文件读写跑在
-  宿主上，写的位置必须正好是容器看到的位置；`ContainerPath` 负责把它翻译成 `/workspace/...`；
+- `RootDir`：**宿主侧**那个 per-project 绑定目录，不是容器里的 `/workspace`。控制面自己的
+  git/文件读写跑在宿主上，写的位置必须正好是容器看到的位置；`ContainerPath` 负责把
+  `<data>/sandboxes/<user>/<project>/...` 翻译成 `/workspace/...`；
+- 复用已有容器前先 `docker inspect` 它的 `/workspace` 挂载源：与这个 pair 的目录不一致
+  （例如旧版本把共享的 `<data>/sandboxes` 挂进来的容器）就**删容器重建**，宿主目录和里面的
+  文件一律保留。旧容器共享的目录不会被任何新项目"继承"；
 - 沙箱记录用容器名当 id：后续的 pause/resume/destroy/endpoint/exec 都拿这个 id 去找容器，
   记录里另造一个 uuid 会让它们全都找不到人；
 - `Get`：`docker inspect` 的 `.State` 映射到 `READY / PAUSED / MISSING`；
@@ -73,6 +78,19 @@ level=WARN msg="sandbox placement is mixed: these features still run on the host
 - `Resume`：`docker start`；
 - `Destroy`：`docker rm -f`，**不删数据卷**——删掉别人未提交的工作不该由"销毁沙箱"来代决；
 - `Exec`：`docker exec`。
+
+### 为什么工作区必须按项目分目录
+
+这是租户边界，不是目录偏好。旧实现把整个 `<data>/sandboxes` 挂进每个容器，于是所有项目都
+解析到 `<data>/sandboxes/repo`：第二个项目会直接看到第一个项目的 checkout——未提交的改动、
+`.env` 里的密钥、提交历史都在里面；两个用户各自的项目也会互相看见。现在宿主目录和容器名
+由同一对 `(user, project)` 派生，同一项目重启后仍落到同一目录，不同项目则一定不同。
+
+`internal/sandbox/docker_test.go` 里钉住这条边界（需要 AIO 镜像，没有镜像时跳过并说明）：
+`TestDockerWorkspacePathIsPerPair`（纯函数，无 Docker）、
+`TestDockerProviderSeparatesProjectWorkspaces`（两个项目互不可见）、
+`TestDockerProviderReusesTheProjectWorkspace`（同一项目幂等，同目录同容器）、
+`TestDockerProviderRecreatesAContainerWithTheWrongMount`（挂载不匹配就重建，旧目录保留）。
 
 ## 工作区：checkout 由沙箱用户创建，且只在缺失时创建
 
