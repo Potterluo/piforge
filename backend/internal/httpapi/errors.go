@@ -65,7 +65,13 @@ func (e *statusErr) Unwrap() error { return e.api }
 
 // withStatus builds an error that renders as api but with an explicit status.
 func withStatus(status int, code, message string) error {
-	return &statusErr{status: status, api: &contracts.APIError{Code: code, Message: message}}
+	return withStatusDetails(status, code, message, nil)
+}
+
+// withStatusDetails is withStatus plus machine-readable details, for refusals the
+// UI has to explain (the parallel limit names both the cap and what is running).
+func withStatusDetails(status int, code, message string, details map[string]any) error {
+	return &statusErr{status: status, api: &contracts.APIError{Code: code, Message: message, Details: details}}
 }
 
 // apiErr is a shorthand for a typed API error.

@@ -19,17 +19,23 @@ func TestAdminStatusCountsAndIsAdminOnly(t *testing.T) {
 	env.mkUser("dev@piforge.local", "devpw", contracts.RoleUser)
 	dev := env.login("dev@piforge.local", "devpw")
 	env.mkSessionFor(adminUser.ID, "repo")
+	// FR-3.3: the effective parallel cap is part of the operator's screen, so
+	// "what is it set to" does not require reading the startup flag.
+	env.deps.ParallelLimit = 5
+	env.rebuild()
 
 	rec := env.doAuthed(http.MethodGet, "/v1/admin/status", nil, admin)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: %d %s", rec.Code, rec.Body.String())
 	}
 	var body struct {
-		Users       int `json:"users"`
-		UsersActive int `json:"users_active"`
-		Sessions    int `json:"sessions"`
-		Projects    int `json:"projects"`
-		Providers   int `json:"providers"`
+		Users            int `json:"users"`
+		UsersActive      int `json:"users_active"`
+		Sessions         int `json:"sessions"`
+		Projects         int `json:"projects"`
+		Providers        int `json:"providers"`
+		ParallelLimit    int `json:"parallel_limit"`
+		ParallelLimitMax int `json:"parallel_limit_max"`
 	}
 	env.mustJSON(rec, &body)
 	if body.Users < 2 || body.Sessions < 1 || body.Projects < 1 {
@@ -37,6 +43,12 @@ func TestAdminStatusCountsAndIsAdminOnly(t *testing.T) {
 	}
 	if body.UsersActive != body.Users {
 		t.Fatalf("every user in this fixture is active: %+v", body)
+	}
+	if body.ParallelLimit != 5 {
+		t.Fatalf("parallel_limit = %d, want the configured 5", body.ParallelLimit)
+	}
+	if body.ParallelLimitMax != MaxParallelLimit {
+		t.Fatalf("parallel_limit_max = %d, want %d", body.ParallelLimitMax, MaxParallelLimit)
 	}
 
 	if rec := env.doAuthed(http.MethodGet, "/v1/admin/status", nil, dev); rec.Code != http.StatusForbidden {

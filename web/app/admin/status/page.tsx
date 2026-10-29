@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Boxes, Cpu, MessagesSquare, Server, Users } from "lucide-react";
+import { Activity, Boxes, Cpu, GitBranch, MessagesSquare, Server, Users } from "lucide-react";
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Item, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "@/components/ui/item";
@@ -91,7 +91,20 @@ export default function AdminStatusPage() {
               <CardTitle className="text-sm">配置</CardTitle>
               <CardDescription>这些东西不需要健康检查，但看错数字的人需要。</CardDescription>
             </CardHeader>
-            <CardContent className="grid gap-3 sm:grid-cols-3">
+            <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <Item variant="outline" data-testid="stat-parallel-limit">
+                <ItemMedia variant="icon">
+                  <GitBranch />
+                </ItemMedia>
+                <ItemContent>
+                  <ItemTitle data-testid="parallel-limit-value">
+                    {data.parallel_limit}
+                  </ItemTitle>
+                  <ItemDescription>
+                    并行分支上限（1–{data.parallel_limit_max}，来自 -parallel-limit）
+                  </ItemDescription>
+                </ItemContent>
+              </Item>
               <Item variant="outline">
                 <ItemMedia variant="icon">
                   <Server />

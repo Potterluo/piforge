@@ -12,6 +12,7 @@ vi.mock("@/lib/api/client", () => ({
 }));
 
 import { api } from "@/lib/api/client";
+import { ApiError } from "@/lib/types";
 import { Composer } from "@/components/session/composer";
 
 const send = vi.mocked(api.sessions.send);
@@ -115,8 +116,7 @@ describe("Composer", () => {
     await waitFor(() => expect(interrupt).toHaveBeenCalledTimes(1));
   });
 
-  it("renders queued prompts above the input", () => {
-    render(
+  it("renders queued prompts above the input", () => {    render(
       <Composer
         sessionId="s1"
         running
@@ -131,5 +131,24 @@ describe("Composer", () => {
     expect(queue).toHaveTextContent("下一轮要跑的");
     expect(queue).toHaveTextContent("马上改口");
     expect(queue).toHaveTextContent("立即改口");
+  });
+
+  it("shows a parallel-limit refusal as the server's sentence, keeping the draft", async () => {
+    const message = "并行上限是 1 个分支，现在有 1 个在运行（hello），先让其中一个跑完";
+    send.mockRejectedValue(
+      new ApiError(429, { error: { code: "rate_limited", message } }),
+    );
+    const textarea = renderComposer(false);
+
+    fireEvent.keyDown(textarea, { key: "Enter" });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("parallel-limit-reason")).toHaveTextContent(message),
+    );
+    expect(screen.getByTestId("parallel-limit-reason")).toHaveTextContent(
+      "并行上限是 1 个分支",
+    );
+    // A refusal is not a sent message: the draft must still be editable.
+    expect(textarea.value).toBe("修一下缓存");
   });
 });

@@ -336,10 +336,14 @@ type fakeRuntime struct {
 	cloned     []string
 
 	status contracts.RuntimeStatus
-	tree   []*contracts.TreeEntry
-	entri  []*contracts.TreeEntry
-	leaf   string
-	points []contracts.ForkPoint
+	// stayRunning keeps Status().Running true after Prompt, per session, which is
+	// how a test models several branches of one session running at the same time.
+	stayRunning bool
+	prompted    map[string]bool
+	tree        []*contracts.TreeEntry
+	entri       []*contracts.TreeEntry
+	leaf        string
+	points      []contracts.ForkPoint
 
 	// Model-switch bookkeeping. startedModel is what the live process was
 	// launched with; modelLive says whether there is one. Zero values mean "no
@@ -353,6 +357,7 @@ func newFakeRuntime() *fakeRuntime {
 	return &fakeRuntime{
 		promptRes: contracts.PromptResult{Accepted: true, Disposition: "started", RunID: "run_scripted"},
 		status:    contracts.RuntimeStatus{Running: true, Streaming: true, LastSeq: 7},
+		prompted:  map[string]bool{},
 		tree: []*contracts.TreeEntry{
 			{EntryID: "e1", Type: "message", Role: "user", Preview: "hi"},
 		},
@@ -401,11 +406,15 @@ func (f *fakeRuntime) Prompt(_ context.Context, req contracts.PromptRequest) (co
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.prompts = append(f.prompts, req)
+	if f.prompted == nil {
+		f.prompted = map[string]bool{}
+	}
+	f.prompted[req.SessionID] = true
 	// A prompt runs and then settles. Modelling that (instead of a permanently
 	// running agent) is what lets a handler ask "is a turn in flight?" — the
 	// sidecar promote does, and a stuck-true fake made every such check refuse.
-	f.status.Running = false
-	f.status.Streaming = false
+	f.status.Running = f.stayRunning
+	f.status.Streaming = f.stayRunning
 	if f.promptErr != nil {
 		return contracts.PromptResult{}, f.promptErr
 	}
@@ -424,6 +433,11 @@ func (f *fakeRuntime) Status(_ context.Context, sessionID string) (contracts.Run
 	defer f.mu.Unlock()
 	st := f.status
 	st.SessionID = sessionID
+	if f.stayRunning {
+		// Only the branches that were actually prompted are running.
+		st.Running = f.prompted[sessionID]
+		st.Streaming = f.prompted[sessionID]
+	}
 	return st, nil
 }
 

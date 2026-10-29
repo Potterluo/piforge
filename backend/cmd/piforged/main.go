@@ -118,6 +118,31 @@ type options struct {
 	// webUpstream makes this process serve the UI as well as the API, which is
 	// how a container exposes a single port.
 	webUpstream string
+	// parallelLimit caps how many branches of one session run at once (FR-3.3).
+	// It is validated before anything is created; see resolveParallelLimit.
+	parallelLimit int
+}
+
+// defineParallelLimit registers the FR-3.3 knob on fs. It lives in one function so
+// the daemon and the flag-resolution test register the very same flag.
+func defineParallelLimit(fs *flag.FlagSet, dst *int) {
+	fs.IntVar(dst, "parallel-limit", httpapi.DefaultParallelLimit,
+		fmt.Sprintf("max branches of one session running at once, 1-%d (env PIFORGE_PARALLEL_LIMIT)", httpapi.MaxParallelLimit))
+}
+
+// resolveParallelLimit reads the parsed flag plus the environment into the value
+// the router enforces. The flag wins when it was passed explicitly; otherwise
+// PIFORGE_PARALLEL_LIMIT supplies the value. A 0, an out-of-range number or a
+// non-integer is a startup error rather than a silent default: an operator who
+// configured a cap must be able to trust that this deployment runs with it.
+func resolveParallelLimit(fs *flag.FlagSet, value *int) (int, error) {
+	setByFlag := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "parallel-limit" {
+			setByFlag = true
+		}
+	})
+	return httpapi.ResolveParallelLimit(*value, setByFlag, os.Getenv("PIFORGE_PARALLEL_LIMIT"))
 }
 
 func run() error {
@@ -138,6 +163,7 @@ func run() error {
 		"public base URL of the model gateway handed to agents (default http://<addr>)")
 	flag.StringVar(&opt.defaultProvider, "default-provider", envOr("PIFORGE_DEFAULT_PROVIDER", "shared-anthropic"),
 		"provider used when a session has no model_ref")
+	defineParallelLimit(flag.CommandLine, &opt.parallelLimit)
 	flag.DurationVar(&opt.agentIdleTTL, "agent-idle-ttl", envDuration("PIFORGE_AGENT_IDLE_TTL", 30*time.Minute),
 		"stop an agent process after it has been idle this long")
 	flag.DurationVar(&opt.sandboxIdlePause, "sandbox-idle-pause", envDuration("PIFORGE_SANDBOX_IDLE_PAUSE", 30*time.Minute),
@@ -180,6 +206,14 @@ func run() error {
 		"explicit path to the jail launcher")
 	flag.Parse()
 
+	// FR-3.3: the cap is configuration, not a constant. Resolve and validate it
+	// before anything is created, so a bad value fails the startup instead of
+	// leaving a server that quietly runs with the default.
+	parallelLimit, err := resolveParallelLimit(flag.CommandLine, &opt.parallelLimit)
+	if err != nil {
+		return fmt.Errorf("invalid parallel limit: %w", err)
+	}
+
 	// Normalise the provider name before anything compares it: placement resolution
 	// ignores case, and the wiring below does not, so "-sandbox Docker" must mean
 	// the same thing in both places.
@@ -216,6 +250,9 @@ func run() error {
 		"browser", opt.sandboxBrowser,
 		"terminal", opt.sandboxTerminal,
 		"files", opt.sandboxFiles)
+	// The cap is invisible otherwise: parallel runs are opt-in per user, and the
+	// only other place it surfaces is a refusal. Say it once at startup.
+	logger.Info("parallel branch limit", "branches", parallelLimit, "max", httpapi.MaxParallelLimit)
 	// A mixed deployment is allowed, never accidental. Saying it out loud is the
 	// difference between a bug report about "the panel shows the wrong file" and a
 	// log line that described the deployment before it did any work.
@@ -684,6 +721,7 @@ func run() error {
 		Runtime:         rt,
 		Workspace:       files,
 		DefaultProvider: opt.defaultProvider,
+		ParallelLimit:   parallelLimit,
 		Sandbox:         sb,
 		Secrets:         box,
 		WebUpstream:     opt.webUpstream,

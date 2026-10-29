@@ -79,7 +79,9 @@ type Deps struct {
 	Runtime   contracts.AgentRuntime
 	Workspace contracts.Workspace
 	// ParallelLimit caps how many branches of one session may run at once (FR-3.3).
-	// Zero means the default; anything above UnlockableParallelLimit is clamped.
+	// cmd/piforged fills it from -parallel-limit / PIFORGE_PARALLEL_LIMIT and
+	// refuses to start outside 1..MaxParallelLimit; the zero fallback only serves
+	// hand-built test dependencies.
 	ParallelLimit int
 
 	// DefaultProvider is the provider a session falls back to when it pins no

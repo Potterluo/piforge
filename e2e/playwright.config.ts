@@ -90,6 +90,10 @@ export default defineConfig({
         PIFORGE_SEED_USER_EMAIL: "dev@piforge.local",
         PIFORGE_SEED_USER_PASSWORD: "piforge-dev-123",
         PIFORGE_FAKE_PI_DELAY_MS: "40",
+        // FR-3.3: the parallel cap arrives the way an operator sets it, so the
+        // spec asserts the deployed configuration rather than a Deps field it
+        // poked itself. It only matters when parallel mode is enabled per user.
+        PIFORGE_PARALLEL_LIMIT: "2",
         // Eighty sessions in one run would otherwise leave eighty agent processes
         // alive, and the machine gets slower with each spec until late-suite logins
         // start timing out. Reaping is a product behaviour; the harness uses a short

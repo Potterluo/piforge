@@ -9,6 +9,7 @@ import {
   PencilLine,
   Sparkles,
   SquareStop,
+  TriangleAlert,
   X,
   Zap,
 } from "lucide-react";
@@ -54,7 +55,7 @@ import { api } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
 import { shortModel, truncate } from "@/lib/session/format";
 import type { QueuedPrompt } from "@/lib/session/reduce";
-import { type SessionSkill, type Skill } from "@/lib/types";
+import { ApiError, type SessionSkill, type Skill } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { skillInvocation, skillVersionLabel, SkillPalette } from "./skill-palette";
@@ -217,6 +218,10 @@ export function Composer({
   const [interrupting, setInterrupting] = useState(false);
   const [modelOverride, setModelOverride] = useState<string | null>(null);
   const [thinkingOverride, setThinkingOverride] = useState<string | null>(null);
+  // FR-3.3: a parallel-limit refusal is a product answer, not an outage. It is
+  // kept inline (with the server's own sentence naming the cap and the branches
+  // occupying it) instead of a toast titled "发送失败", which hid the reason.
+  const [refusal, setRefusal] = useState<string | null>(null);
   // The palette closes on Escape and on insert even though the draft still
   // starts with "/", so the open state needs to be more than "text starts with
   // slash". Any further typing reopens it: the user is editing the command.
@@ -280,12 +285,19 @@ export function Composer({
 
       setText("");
       setImages([]);
+      setRefusal(null);
       if (result.disposition === "queued") {
         toast.success(`已加入队列（第 ${result.queue_position} 位）`, {
           description: behavior === "steer" ? "立即打断并改口" : "下一轮执行",
         });
       }
     } catch (error) {
+      // The server explained exactly what is running (FR-3.3). Show that
+      // sentence, keep the draft, and do not dress it up as a generic failure.
+      if (error instanceof ApiError && error.status === 429) {
+        setRefusal(humanizeError(error));
+        return;
+      }
       toast.error("发送失败", {
         description: humanizeError(error),
       });
@@ -421,6 +433,33 @@ export function Composer({
 
   return (
     <div className={cn("flex flex-col gap-2 border-t border-border bg-background p-3", className)}>
+      {refusal ? (
+        <div
+          role="alert"
+          data-testid="parallel-limit-refusal"
+          className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-2 text-xs"
+        >
+          <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-destructive" />
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="font-medium text-destructive">这次没有发出去</span>
+            <span data-testid="parallel-limit-reason" className="break-words text-muted-foreground">
+              {refusal}
+            </span>
+            <span className="text-[11px] text-muted-foreground">
+              草稿还在输入框里。停掉其中一个分支，或等它跑完，再发一次。
+            </span>
+          </div>
+          <button
+            type="button"
+            aria-label="关闭提示"
+            title="关闭提示"
+            className="rounded-sm p-0.5 text-muted-foreground hover:text-foreground"
+            onClick={() => setRefusal(null)}
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
+      ) : null}
       {queue.length > 0 ? (
         <div
           className="flex flex-col gap-1"

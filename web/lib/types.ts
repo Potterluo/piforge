@@ -439,6 +439,10 @@ export interface DeploymentStatus {
   skills: number;
   mcp_servers: number;
   events: number;
+  /** The effective FR-3.3 cap (from -parallel-limit / PIFORGE_PARALLEL_LIMIT). */
+  parallel_limit: number;
+  /** The largest value the cap may be configured to. */
+  parallel_limit_max: number;
 }
 /**
  * One recorded admin read of a session (PRD FR-16.8). The owner sees these; they

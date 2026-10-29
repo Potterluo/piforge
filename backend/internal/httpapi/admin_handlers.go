@@ -199,5 +199,9 @@ func (s *server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		"skills":         stats.Skills,
 		"mcp_servers":    stats.MCP,
 		"events":         stats.Events,
+		// FR-3.3: the effective cap, not the compile-time default. "What is it set
+		// to" has to have an answer that does not involve reading the flag.
+		"parallel_limit":     s.parallelLimit(),
+		"parallel_limit_max": MaxParallelLimit,
 	})
 }
