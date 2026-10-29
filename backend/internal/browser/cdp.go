@@ -24,7 +24,11 @@ type cdp struct {
 	pending map[int64]chan json.RawMessage
 	// sessionID is the flattened target session Page/Input commands go to.
 	sessionID string
-	lastErr   error
+	// targetID is the page target behind sessionID. Tab ids on the wire are
+	// target ids, so keeping this is what lets the default page be named the
+	// same way as every other tab.
+	targetID string
+	lastErr  error
 
 	events chan rawEvent
 	closed chan struct{}
@@ -211,6 +215,13 @@ func (c *cdp) session() string {
 	return c.sessionID
 }
 
+// target returns the page target this connection is attached to.
+func (c *cdp) target() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.targetID
+}
+
 // attachToPage finds (or creates) a page target and attaches to it, which is
 // what makes the Page and Input domains usable. Chrome's browser endpoint
 // exposes only Target.* until this happens.
@@ -255,6 +266,7 @@ func (c *cdp) attachToPage(ctx context.Context) error {
 	}
 	c.mu.Lock()
 	c.sessionID = attached.SessionID
+	c.targetID = targetID
 	c.mu.Unlock()
 	return nil
 }

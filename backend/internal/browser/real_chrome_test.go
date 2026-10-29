@@ -1,7 +1,12 @@
 package browser
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"image/png"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -152,6 +157,113 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestRealChromeScreenshotFollowsTheActiveTab is the defect, end to end against
+// the real browser: with two pages open, a screenshot must be the page the panel
+// is showing. It used to be whichever target Chrome attached to at launch, so the
+// endpoint wrote a white about:blank while the panel showed a real page (FR-11.8).
+//
+// The two pages are told apart by the colour they paint, which is a stronger
+// assertion than "not blank": it proves *which* page was captured.
+func TestRealChromeScreenshotFollowsTheActiveTab(t *testing.T) {
+	binary := findChrome(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		background := map[string]string{"/red": "#c22", "/blue": "#12c"}[r.URL.Path]
+		if background == "" {
+			background = "#fff"
+		}
+		_, _ = w.Write([]byte(`<html><body style="margin:0;background:` + background +
+			`;color:#fff;font:48px sans-serif"><h1>` + r.URL.Path + `</h1></body></html>`))
+	}))
+	defer server.Close()
+
+	manager := NewManager(Config{Binary: binary, Headless: true, Width: 640, Height: 480})
+	defer manager.CloseAll()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	session, err := manager.Ensure(ctx, "sb_shot", t.TempDir())
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	if err := session.Navigate(ctx, server.URL+"/red"); err != nil {
+		t.Fatalf("Navigate: %v", err)
+	}
+	// The launch page must be the one captured before a second tab exists.
+	if got := captureBackgroundColour(t, ctx, session, ""); got != "red" {
+		t.Fatalf("the launch page captured %q, want red", got)
+	}
+
+	second, err := session.OpenTab(ctx, server.URL+"/blue")
+	if err != nil {
+		t.Fatalf("OpenTab: %v", err)
+	}
+	if got := session.ActiveTab(); got != second.ID {
+		t.Fatalf("active tab = %q, want the page that was just opened (%q)", got, second.ID)
+	}
+	// Opening a tab makes it the panel's page, so a bare screenshot must capture
+	// blue — this is the exact case that produced the white file.
+	if got := captureBackgroundColour(t, ctx, session, ""); got != "blue" {
+		t.Fatalf("the active page captured %q, want blue (the launch tab is red)", got)
+	}
+	// Twice in a row: the second capture must not be the one that hangs.
+	if got := captureBackgroundColour(t, ctx, session, ""); got != "blue" {
+		t.Fatalf("the second consecutive capture is %q, want blue", got)
+	}
+
+	// Switching back to the first tab is a statement about which page the panel
+	// shows, and the capture follows it.
+	session.SetActiveTab(session.DefaultTabID())
+	if got := captureBackgroundColour(t, ctx, session, ""); got != "red" {
+		t.Fatalf("after switching back the capture is %q, want red", got)
+	}
+}
+
+// captureBackgroundColour takes a screenshot and names the colour of its
+// top-left pixel. It retries while the page is still painting: a fresh tab is
+// allowed to be blank for a moment, and the point of the test is which page is
+// captured, not how fast it loads.
+func captureBackgroundColour(t *testing.T, ctx context.Context, session *Session, tabID string) string {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		raw, err := session.ScreenshotTab(ctx, tabID)
+		if err == nil {
+			img, derr := png.Decode(bytes.NewReader(raw))
+			if derr != nil {
+				lastErr = derr
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+			r, g, b, _ := img.At(img.Bounds().Min.X+2, img.Bounds().Min.Y+2).RGBA()
+			return colourName(uint8(r>>8), uint8(g>>8), uint8(b>>8))
+		}
+		lastErr = err
+		if !errors.Is(err, ErrBlankCapture) {
+			t.Fatalf("ScreenshotTab: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("the page never produced a usable capture: %v", lastErr)
+	return ""
+}
+
+// colourName maps the test pages' background colours to their names.
+func colourName(r, g, b uint8) string {
+	switch {
+	case r > 150 && g < 100 && b < 100:
+		return "red"
+	case b > 150 && r < 100:
+		return "blue"
+	case r > 220 && g > 220 && b > 220:
+		return "white"
+	}
+	return "other"
 }
 
 // recordingLauncher captures the argv it is asked to wrap and runs it unchanged.

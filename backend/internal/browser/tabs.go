@@ -59,11 +59,36 @@ func (s *Session) tabClient(ctx context.Context, tabID string) (*cdp, error) {
 	return client, nil
 }
 
-// DefaultTabID is the tab the session started with.
+// DefaultTabID is the page the session started with.
 func (s *Session) DefaultTabID() string {
 	s.tabMu.Lock()
 	defer s.tabMu.Unlock()
 	return s.defaultTab
+}
+
+// SetActiveTab records which page the viewer is showing. Screenshots follow it,
+// so "the page in the panel" and "the page written into the workspace" are the
+// same target even when several tabs are open (FR-11.8).
+//
+// An empty id clears the choice, which falls back to the page the browser
+// opened with.
+func (s *Session) SetActiveTab(tabID string) {
+	s.tabMu.Lock()
+	s.activeTab = strings.TrimSpace(tabID)
+	s.tabMu.Unlock()
+}
+
+// ActiveTab is the page the viewer is showing, or the launch page when no
+// viewer has said anything yet.
+func (s *Session) ActiveTab() string {
+	s.tabMu.Lock()
+	active := s.activeTab
+	def := s.defaultTab
+	s.tabMu.Unlock()
+	if active != "" {
+		return active
+	}
+	return def
 }
 
 // targetWSURL asks Chrome where a target's own devtools socket is.
@@ -141,6 +166,8 @@ func (s *Session) OpenTab(ctx context.Context, url string) (TabInfo, error) {
 	if created.TargetID == "" {
 		return TabInfo{}, errors.New("browser: chrome did not return a target id")
 	}
+	// The page the user just asked for is the one they are looking at.
+	s.SetActiveTab(created.TargetID)
 	return TabInfo{ID: created.TargetID, URL: url}, nil
 }
 
@@ -162,6 +189,11 @@ func (s *Session) CloseTab(ctx context.Context, tabID string) error {
 	if client, ok := s.tabs[tabID]; ok {
 		delete(s.tabs, tabID)
 		client.close()
+	}
+	if s.activeTab == tabID {
+		// Nothing is being shown from that page any more; follow the launch page
+		// rather than remembering a target that no longer exists.
+		s.activeTab = ""
 	}
 	s.tabMu.Unlock()
 	return nil
@@ -212,7 +244,13 @@ func (s *Session) TabNavigate(ctx context.Context, tabID, url string) error {
 		return fmt.Errorf("browser: %q is not an http(s) url", url)
 	}
 	return s.tabScoped(ctx, tabID, func(client *cdp) error {
-		return client.call(ctx, "Page.navigate", map[string]any{"url": url}, nil)
+		if err := client.call(ctx, "Page.navigate", map[string]any{"url": url}, nil); err != nil {
+			return err
+		}
+		// Navigating a page is the clearest statement of which page the viewer
+		// is looking at, so a screenshot taken afterwards follows it.
+		s.SetActiveTab(tabID)
+		return nil
 	})
 }
 
@@ -239,16 +277,7 @@ func (s *Session) TabResize(ctx context.Context, tabID string, width, height int
 
 // TabScreenshot captures one tab.
 func (s *Session) TabScreenshot(ctx context.Context, tabID string) ([]byte, error) {
-	var png []byte
-	err := s.tabScoped(ctx, tabID, func(client *cdp) error {
-		out, err := captureOn(ctx, client)
-		if err != nil {
-			return err
-		}
-		png = out
-		return nil
-	})
-	return png, err
+	return s.ScreenshotTab(ctx, tabID)
 }
 
 // remoteHeader carries the sandbox API key on tab connections, which go through the same

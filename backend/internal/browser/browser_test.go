@@ -32,6 +32,25 @@ type fakeCDP struct {
 	badFrame bool
 	// silent stops pushing frames, which is what a paused page looks like.
 	silent bool
+	// capturePNG is what Page.captureScreenshot returns. Nil means the fake
+	// answers with no data, which the client reports as an empty screenshot.
+	capturePNG []byte
+	// captureErr, when set, makes Page.captureScreenshot answer with an error —
+	// "Unable to capture screenshot", the shape a background page fails with.
+	captureErr string
+	// pageURL is what Page.getNavigationHistory reports.
+	pageURL string
+	// captures counts Page.captureScreenshot calls.
+	captures int
+	// activateErr, when set, makes Target.activateTarget fail.
+	activateErr string
+	// requireActivate models the container's Chromium: a page that was never
+	// brought to the front is not composited, and capturing it does not answer.
+	// The test then fails on the code that skipped activation, which is exactly
+	// how the second capture turned into "browser busy".
+	requireActivate bool
+	// activated is whether Target.activateTarget has been called on this page.
+	activated bool
 }
 
 func newFakeCDP(t *testing.T) *fakeCDP {
@@ -82,16 +101,59 @@ func (f *fakeCDP) serve(t *testing.T, conn *websocket.Conn) {
 		f.received = append(f.received, msg.Method)
 		f.params = append(f.params, msg.Params)
 		silent := f.silent
+		capturePNG := append([]byte(nil), f.capturePNG...)
+		captureErr := f.captureErr
+		pageURL := f.pageURL
+		activateErr := f.activateErr
+		requireActivate := f.requireActivate
 		f.mu.Unlock()
 
 		reply := func(result any) {
 			payload, _ := json.Marshal(map[string]any{"id": msg.ID, "result": result})
 			_ = conn.Write(ctx, websocket.MessageText, payload)
 		}
+		replyErr := func(message string) {
+			payload, _ := json.Marshal(map[string]any{
+				"id":    msg.ID,
+				"error": map[string]any{"code": -32000, "message": message},
+			})
+			_ = conn.Write(ctx, websocket.MessageText, payload)
+		}
 
 		switch msg.Method {
 		case "Page.enable", "Input.dispatchMouseEvent", "Input.dispatchKeyEvent",
 			"Input.insertText", "Page.navigate":
+			reply(map[string]any{})
+		case "Page.captureScreenshot":
+			f.mu.Lock()
+			f.captures++
+			activatedNow := f.activated
+			f.mu.Unlock()
+			if captureErr != "" {
+				replyErr(captureErr)
+				continue
+			}
+			if requireActivate && !activatedNow {
+				// The measured behaviour: a background page does not produce a
+				// frame, and the command never answers. An error is the closest a
+				// fake can get without hanging the test.
+				replyErr("Unable to capture screenshot")
+				continue
+			}
+			reply(map[string]any{"data": base64.StdEncoding.EncodeToString(capturePNG)})
+		case "Page.getNavigationHistory":
+			reply(map[string]any{
+				"currentIndex": 0,
+				"entries":      []map[string]any{{"url": pageURL, "id": 1}},
+			})
+		case "Target.activateTarget":
+			if activateErr != "" {
+				replyErr(activateErr)
+				continue
+			}
+			f.mu.Lock()
+			f.activated = true
+			f.mu.Unlock()
 			reply(map[string]any{})
 		case "Page.startScreencast":
 			// Real Chrome refuses a second cast with "Screencast is already active".

@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -89,10 +90,17 @@ type Session struct {
 	stopped  chan struct{}
 
 	// Tab state (PRD FR-11.7): one devtools connection per extra page.
-	tabMu      sync.Mutex
-	tabs       map[string]*cdp
-	debugHTTP  string
+	tabMu     sync.Mutex
+	tabs      map[string]*cdp
+	debugHTTP string
+	// defaultTab is the target id of the page the browser opened with. It is a
+	// target id, not a CDP session id: pages are named by target id on the wire,
+	// so the tab list, the panel and every tab-scoped call mean the same thing.
 	defaultTab string
+	// activeTab is the page the panel is showing. Screenshots follow it, which
+	// is the difference between "a file of the page in front of me" and "a file
+	// of whatever target Chrome attached to first" (FR-11.8).
+	activeTab string
 }
 
 // Snapshot is what the API reports about a browser.
@@ -294,7 +302,7 @@ func (m *Manager) launch(ctx context.Context, sandboxID, profileRoot string) (*S
 		stopped:    make(chan struct{}),
 		tabs:       map[string]*cdp{},
 		debugHTTP:  fmt.Sprintf("http://127.0.0.1:%d", port),
-		defaultTab: client.sessionID,
+		defaultTab: client.target(),
 	}
 	// Watch the process so a crash shows up as a dead session, not a hang.
 	go func() {
@@ -651,25 +659,88 @@ func decodeBase64(s string) []byte {
 	return data
 }
 
-// Screenshot captures the viewport as PNG.
+// Screenshot captures the page the panel is showing as PNG.
 //
 // It is the one action that turns "I can see it in the panel" into "the agent can
 // read it": the caller writes the bytes into the checkout, where the file tree and
 // the agent both see them (PRD FR-11.8).
+//
+// "The page the panel is showing" is the active tab, not the target Chrome
+// attached to when it launched: those differ as soon as a second page exists
+// (PRD FR-11.7), and capturing the launch target is how the endpoint wrote a
+// white `about:blank` while the panel showed a real page.
 func (s *Session) Screenshot(ctx context.Context) ([]byte, error) {
-	frame, err := captureOn(ctx, s.client)
-	if err == nil {
-		return frame, nil
+	return s.ScreenshotTab(ctx, "")
+}
+
+// ScreenshotTab captures one page, or the active one when tabID is empty.
+//
+// The target is brought to the front first. Chrome only composites the active
+// page: `Page.captureScreenshot` on a background tab does not answer at all in
+// the container's headless Chromium, which is what the panel's second
+// consecutive capture used to hit — a 20-second hang reported as "browser busy".
+// Activating the target makes the capture deterministic no matter how many pages
+// are open.
+func (s *Session) ScreenshotTab(ctx context.Context, tabID string) ([]byte, error) {
+	if strings.TrimSpace(tabID) == "" {
+		tabID = s.ActiveTab()
 	}
-	// A remote page can be replaced under us (a navigation, a sandbox restarting its
-	// browser). Re-attaching once is cheaper than making the caller reload the panel, and
-	// it is the difference between "screenshot is broken" and "the page moved".
-	if s.remote && strings.Contains(err.Error(), "not attached") {
-		if aerr := s.client.attachToPage(ctx); aerr == nil {
-			return captureOn(ctx, s.client)
+	client, err := s.tabClient(ctx, tabID)
+	if err != nil {
+		return nil, err
+	}
+	target := tabID
+	if target == "" {
+		target = s.DefaultTabID()
+	}
+	if target != "" {
+		var ignored struct{}
+		if err := s.client.call(ctx, "Target.activateTarget", map[string]any{"targetId": target}, &ignored); err != nil {
+			// Not fatal: a browser that will not focus a page can still capture
+			// the one that is already in front.
+			slog.Debug("could not activate the page before a screenshot", "target", target, "error", err.Error())
 		}
 	}
-	return nil, err
+
+	png, err := captureOn(ctx, client)
+	if err != nil {
+		// A remote page can be replaced under us (a navigation, a sandbox
+		// restarting its browser). Re-attaching once is cheaper than making the
+		// caller reload the panel, and it is the difference between "screenshot
+		// is broken" and "the page moved".
+		if !s.remote || !strings.Contains(err.Error(), "not attached") {
+			return nil, err
+		}
+		if aerr := s.client.attachToPage(ctx); aerr != nil {
+			return nil, err
+		}
+		if png, err = captureOn(ctx, client); err != nil {
+			return nil, err
+		}
+	}
+	if cerr := inspectCapture(png, pageURLOn(ctx, client)); cerr != nil {
+		return nil, cerr
+	}
+	return png, nil
+}
+
+// pageURLOn reads the address of the page a connection is attached to. An
+// unknown URL is returned empty rather than as an error: it only weakens the
+// blank check, which still inspects the pixels.
+func pageURLOn(ctx context.Context, client *cdp) string {
+	var history struct {
+		CurrentIndex int `json:"currentIndex"`
+		Entries      []struct {
+			URL string `json:"url"`
+		} `json:"entries"`
+	}
+	if err := client.call(ctx, "Page.getNavigationHistory", nil, &history); err != nil {
+		return ""
+	}
+	if history.CurrentIndex < 0 || history.CurrentIndex >= len(history.Entries) {
+		return ""
+	}
+	return strings.TrimSpace(history.Entries[history.CurrentIndex].URL)
 }
 
 // captureOn takes a screenshot over a given connection (one tab).
@@ -728,7 +799,7 @@ func (m *Manager) attachRemote(ctx context.Context, sandboxID, profile, wsURL, d
 		stopped:    make(chan struct{}),
 		tabs:       map[string]*cdp{},
 		debugHTTP:  debugHTTP,
-		defaultTab: client.sessionID,
+		defaultTab: client.target(),
 	}, nil
 }
 

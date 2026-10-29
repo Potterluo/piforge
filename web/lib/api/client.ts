@@ -248,11 +248,16 @@ export const sessions = {
     }),
   closeTab: (id: string, tabId: string) =>
     request<{ ok: boolean }>(`/v1/sessions/${id}/browser/tabs/${tabId}`, { method: "DELETE" }),
-  /** Captures the sandbox browser into the checkout, for the agent to read. */
-  screenshot: (id: string) =>
-    request<{ path: string; bytes: number }>(`/v1/sessions/${id}/browser/screenshot`, {
-      method: "POST",
-    }),
+  /**
+   * Captures the page the panel is showing into the checkout, for the agent to
+   * read. The tab is passed explicitly: with several pages open, "the page in
+   * the panel" is a fact only the viewer has.
+   */
+  screenshot: (id: string, tabId?: string) =>
+    request<{ path: string; bytes: number }>(
+      `/v1/sessions/${id}/browser/screenshot${tabId ? `?tab=${encodeURIComponent(tabId)}` : ""}`,
+      { method: "POST" },
+    ),
   archive: (id: string, archived: boolean) =>
     request<{ session: Session }>(`/v1/sessions/${id}`, {
       method: "PATCH",

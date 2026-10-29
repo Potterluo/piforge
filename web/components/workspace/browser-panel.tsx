@@ -292,7 +292,7 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
     if (capturing) return;
     setCapturing(true);
     try {
-      const result = await api.sessions.screenshot(sessionId);
+      const result = await api.sessions.screenshot(sessionId, tabId ?? undefined);
       toast.success("已保存到工作区", { description: result.path });
       onCaptured?.(result.path);
     } catch (error) {

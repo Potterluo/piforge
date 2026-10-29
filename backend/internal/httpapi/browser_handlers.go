@@ -117,6 +117,10 @@ func (s *server) handleSessionBrowser(w http.ResponseWriter, r *http.Request) {
 	if tabID == "" {
 		tabID = session.DefaultTabID()
 	}
+	// Remember what the panel is showing. A screenshot is "save what I see", and
+	// with several pages open the only thing that knows which one that is, is the
+	// viewer that just connected (FR-11.8).
+	session.SetActiveTab(tabID)
 
 	_ = conn.Write(ctx, websocket.MessageText, mustJSON(map[string]any{
 		"type":    "ready",
