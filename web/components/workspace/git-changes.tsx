@@ -33,6 +33,7 @@ function ChangeRow({
   selected,
   onSelect,
   busy,
+  partial = false,
 }: {
   change: GitChange;
   action: "stage" | "unstage";
@@ -42,6 +43,8 @@ function ChangeRow({
   selected: boolean;
   onSelect: (path: string) => void;
   busy: boolean;
+  /** True when this path is partly staged and partly not. */
+  partial?: boolean;
 }) {
   const letter = changeLetter(change);
 
@@ -69,6 +72,17 @@ function ChangeRow({
         >
           {change.path}
         </ItemTitle>
+        {partial ? (
+          // A file can legitimately appear in both lists: part of it is staged and part
+          // is not. Saying so is the difference between a bug report and an explanation.
+          <span
+            data-testid="git-partial"
+            className="text-[10px] text-muted-foreground"
+            title="这个文件已暂存一部分，还有一部分没暂存"
+          >
+            部分暂存
+          </span>
+        ) : null}
       </ItemContent>
       <ItemActions className="shrink-0">
         <Tooltip>
@@ -125,6 +139,7 @@ function Group({
   onAction,
   onDiscard,
   busy,
+  partial,
 }: {
   title: string;
   changes: GitChange[];
@@ -134,6 +149,7 @@ function Group({
   onAction: (path: string) => void;
   onDiscard: (path: string) => void;
   busy: boolean;
+  partial: Set<string>;
 }) {
   const [open, setOpen] = React.useState(true);
   if (changes.length === 0) return null;
@@ -154,6 +170,7 @@ function Group({
               action={action}
               onAction={onAction}
               onDiscard={onDiscard}
+              partial={partial.has(change.path)}
               selected={selectedPath === change.path}
               onSelect={onSelect}
               busy={busy}
@@ -187,6 +204,11 @@ export function ChangeGroups({
   busy,
 }: ChangeGroupsProps) {
   const groups = React.useMemo(() => groupChanges(changes), [changes]);
+  // Paths that appear in both lists: partly staged, partly not.
+  const partial = React.useMemo(() => {
+    const staged = new Set(groups.staged.map((change) => change.path));
+    return new Set(groups.unstaged.filter((change) => staged.has(change.path)).map((c) => c.path));
+  }, [groups]);
   const unstagedPaths = React.useMemo(
     () => [...groups.unstaged, ...groups.untracked].map((change) => change.path),
     [groups],
@@ -206,6 +228,7 @@ export function ChangeGroups({
         onSelect={onSelect}
         onAction={(path) => onUnstage([path])}
         onDiscard={onDiscard}
+        partial={partial}
         busy={busy}
       />
       <Group
@@ -216,6 +239,7 @@ export function ChangeGroups({
         onSelect={onSelect}
         onAction={(path) => onStage([path])}
         onDiscard={onDiscard}
+        partial={partial}
         busy={busy}
       />
       <Group
@@ -226,6 +250,7 @@ export function ChangeGroups({
         onSelect={onSelect}
         onAction={(path) => onStage([path])}
         onDiscard={onDiscard}
+        partial={partial}
         busy={busy}
       />
       {unstagedPaths.length > 0 ? (

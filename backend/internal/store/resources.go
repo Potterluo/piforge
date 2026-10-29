@@ -509,3 +509,14 @@ func (s *Store) ListSnapshots(ctx context.Context, userID, sandboxID string) ([]
 	}
 	return out, nil
 }
+
+// DeleteSharedSkill removes an admin-owned skill. It is separate from DeleteSkill on
+// purpose: deleting something every user can see is a different act from cleaning up
+// your own, and only an admin route may call this.
+func (s *Store) DeleteSharedSkill(ctx context.Context, skillID string) error {
+	res, err := s.w.ExecContext(ctx, `DELETE FROM skills WHERE id = ? AND scope = 'admin'`, skillID)
+	if err != nil {
+		return fmt.Errorf("store: delete shared skill %q: %w", skillID, err)
+	}
+	return requireOneRow(res, "store: delete shared skill "+skillID)
+}

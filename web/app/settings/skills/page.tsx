@@ -31,11 +31,15 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { api, type SkillFile } from "@/lib/api/client";
 import { formatRelative } from "@/lib/session/format";
-import { qk } from "@/lib/session/queries";
+import { qk, useCurrentUser } from "@/lib/session/queries";
 
 export default function SkillsPage() {
   const queryClient = useQueryClient();
   const skills = useQuery({ queryKey: qk.skills, queryFn: () => api.skills.list() });
+  // A shared skill belongs to the deployment: only an admin may delete one, so the
+  // button has to know who is looking.
+  const me = useCurrentUser();
+  const isAdmin = me.data?.user.role === "admin";
   const [dialogOpen, setDialogOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const importMutation = useMutation({
@@ -190,9 +194,23 @@ export default function SkillsPage() {
                   size="icon-xs"
                   variant="ghost"
                   aria-label="删除 Skill"
-                  disabled={skill.scope === "admin" || remove.isPending}
-                  title={skill.scope === "admin" ? "共享 Skill 由管理员维护" : "删除"}
-                  onClick={() => remove.mutate(skill.id)}
+                  disabled={(skill.scope === "admin" && !isAdmin) || remove.isPending}
+                  title={
+                    skill.scope === "admin"
+                      ? isAdmin
+                        ? "删除共享 Skill（对所有用户生效）"
+                        : "共享 Skill 由管理员维护"
+                      : "删除"
+                  }
+                  data-testid="skill-delete"
+                  onClick={() => {
+                    // Deleting a skill removes what a run depends on, and there is no
+                    // undo; asking first is the difference between a slip and a loss.
+                    toast.warning(`删除 Skill「${skill.name}」？`, {
+                      description: "已挂载到现有会话里的副本不会被自动移除。",
+                      action: { label: "删除", onClick: () => remove.mutate(skill.id) },
+                    });
+                  }}
                 >
                   <Trash />
                 </Button>

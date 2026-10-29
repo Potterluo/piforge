@@ -156,3 +156,41 @@ func TestHunkIndexIsValidated(t *testing.T) {
 		t.Fatal("a path escaping the repository was accepted")
 	}
 }
+
+// QA found 取消暂存 doing nothing. The command was right; the path it sent was not the
+// one git knows: the row carries a cleaned path (Windows separators included), and git
+// wants the slash form in its index.
+func TestUnstageTakesAFileBackOutOfTheIndex(t *testing.T) {
+	dir := hunkRepo(t)
+	r := NewRunner()
+	ctx := context.Background()
+
+	if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("fresh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Stage(ctx, dir, []string{"new.txt"}); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	staged, err := r.Diff(ctx, dir, contracts.DiffRequest{Scope: contracts.ScopeStaged})
+	if err != nil {
+		t.Fatalf("staged Diff: %v", err)
+	}
+	if len(staged) == 0 {
+		t.Fatal("nothing was staged")
+	}
+
+	if err := r.Unstage(ctx, dir, []string{"new.txt"}); err != nil {
+		t.Fatalf("Unstage: %v", err)
+	}
+	after, err := r.Diff(ctx, dir, contracts.DiffRequest{Scope: contracts.ScopeStaged})
+	if err != nil {
+		t.Fatalf("staged Diff after unstage: %v", err)
+	}
+	if len(after) != 0 {
+		t.Fatalf("the file is still staged: %+v", after)
+	}
+	// The worktree is untouched: unstaging is not discarding.
+	if _, err := os.Stat(filepath.Join(dir, "new.txt")); err != nil {
+		t.Fatalf("the file was deleted: %v", err)
+	}
+}

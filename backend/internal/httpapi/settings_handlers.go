@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/piforge/piforge/backend/internal/auth"
@@ -109,9 +111,31 @@ func (s *server) handleCreateSkill(w http.ResponseWriter, r *http.Request) {
 // handleDeleteSkill removes one of the caller's skills.
 func (s *server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
 	user := auth.MustUser(r.Context())
-	if err := s.deps.Store.DeleteSkill(r.Context(), user.ID, pathID(r)); err != nil {
+	skill, err := s.deps.Store.Skill(r.Context(), user.ID, pathID(r))
+	if err != nil {
 		s.fail(w, r, err)
 		return
+	}
+	// A shared skill is everybody's, so deleting one is an admin act. Refusing without
+	// offering the admin path is what made the UI say 共享 Skill 由管理员维护 with no way
+	// for an admin to do it either.
+	if skill.Scope == contracts.SkillAdmin {
+		if user.Role != contracts.RoleAdmin {
+			s.fail(w, r, apiErr(contracts.ErrForbidden, "共享 Skill 由管理员维护"))
+			return
+		}
+		if err := s.deps.Store.DeleteSharedSkill(r.Context(), skill.ID); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	} else if err := s.deps.Store.DeleteSkill(r.Context(), user.ID, skill.ID); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	// The bundle on disk goes with it: leaving the directory behind meant a re-created
+	// skill with the same name silently inherited the old content.
+	if s.deps.SkillsDir != "" {
+		_ = os.RemoveAll(filepath.Join(s.deps.SkillsDir, skill.ID))
 	}
 	writeOK(w)
 }
