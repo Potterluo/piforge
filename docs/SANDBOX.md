@@ -140,6 +140,19 @@ WS   /v1/sessions/<id>/pty               "echo e2e-docker-ok\r\n" + "e2e-docker-
 容器里 `ls /workspace` 能看到 provision 写下的 `repo`，截图也落在容器的同一路径下：宿主目录和
 容器目录现在是同一个目录，不是两份各写各的。
 
+## 端到端：容器由 piforged 自己创建，浏览器与终端都在里面
+
+2026-10-29 实测（提交 `24b0703`），容器 `piforge-<hash8>`，`127.0.0.1:46249->8080`：
+
+| 项目 | 证据 |
+|---|---|
+| 截图 | `201 {"bytes":30230}`，首字节 `89 50 4e 47`；容器内同一文件在 `/workspace/repo/screenshots/…` |
+| 浏览器 WS | ready 帧带容器 CDP 地址，随后 14434 字节 JPEG 帧 |
+| 终端 | 发 `echo e2e-docker-ok\n` 收到 `e2e-docker-ok\n`；身份探测 `Linux 6.18.54.1-microsoft-standard-WSL2 / 9dfb57b19fb5 / /workspace/repo`（容器，不是宿主） |
+| 工作区 | 容器内 `ls /workspace` 有 provisioned 的 repo |
+
+这条链路此前有三处断线，都已修：数据库存的沙箱 id 与容器名不一致、`RootDir` 报的是容器内路径（导致往宿主 `C:\workspace` 写）、浏览器门禁看的是"本机有没有 Chrome"。另外容器里的 Chromium 需要镜像自带的 `BROWSER_NO_SANDBOX=--no-sandbox`（比放开容器 seccomp 更窄）。
+
 ## 还没做的（这一节是重点）
 
 浏览器和终端已经能连容器，**但工作区的文件读写与 git 仍然走宿主目录**。单机部署下 bind
