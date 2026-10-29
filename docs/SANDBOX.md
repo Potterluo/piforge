@@ -364,6 +364,9 @@ WS   /v1/sessions/<id>/pty               "echo e2e-docker-ok\r\n" + "e2e-docker-
 
 - 文件树、预览、编辑、搜索走容器的 `/v1/file/*`（list / read / write / glob / grep）。
   没有 delete 端点，删除是唯一一条 shell 命令（`rm -rf`，并区分"本来就不存在"）；
+- 下载（`?download=1` / `?inline=1`）走容器的 `GET /v1/file/download?path=…`，原样流式返回
+  字节，不经过预览的 UTF-8 解码，也不受 2 MiB 预览窗口截断：PNG 和文本一样能下，`Content-Length`
+  取自响应；
 - 大文件按本地同样的阈值分档：≤2 MiB 全文，≤20 MiB 用 `head`/`tail` 取头尾并标记截断，
   更大的只给元数据；
 - git 不另写一套解析：`internal/gitx` 的 porcelain v2 解析、路径校验、"nothing to commit"
@@ -394,8 +397,11 @@ WS   /v1/sessions/<id>/pty               "echo e2e-docker-ok\r\n" + "e2e-docker-
 
 浏览器、终端和**文件读写**都已经能连容器。剩下的边界：
 
-- `GET /files?download=1` 仍然用宿主路径流文件（bind mount 下是同一批文件）。当控制面与
-  Docker daemon 不在同一台机器、宿主路径不存在时，它回退到预览 body，大文件下载会被截断；
+- 下载已经改走容器的 `GET /v1/file/download`，不再是宿主路径 + 预览回退；服务端还不会转发
+  `Range` 请求头，所以下载是整文件 200，不是分片 206（容器端点本身支持 Range）；
+- 没有下载的普通预览（`GET /files?path=…`）仍然走 `/v1/file/read`：小体积二进制文件会因
+  UTF-8 解码返回 500，这是预览路径原有的边界，和下载无关；大文件预览走 `head`/`tail` 采样，
+  能正确标记 `binary`；
 - 容器内的文件 API 没有 rename/move 端点，面板也没有这个功能，所以没有补；
 - `-sandbox-files remote` 只影响面板这一侧；主 checkout 现在由容器里的 `gem` 建（见上一节），
   但**分支会话的 linked worktree 仍由宿主 git 创建**（`provision` 走 `git.worktree add`）。那份
@@ -447,8 +453,9 @@ Chromium 冷启动）大约 5–8 分钟；Go 构建缓存和镜像层都热时�
 脚本把二进制、data 目录和日志放在自己的临时目录里，`finally` 中停止进程、`docker rm -f`
 它创建的每个容器（按会话取到的容器名，以及带本项目 label 的容器），再删除临时目录。它只
 按自己创建的项目 id 和记录下来的容器名删除，**不会碰 `pf-local` 或 `piforge`**，重复运行
-不会留下状态。截图检查直接比较容器内文件和绑定挂载的宿主文件，不走
-`GET /files?download=1`：remote 文件 API 的预览读取按 UTF-8 解码，二进制 PNG 在那里会失败。
+不会留下状态。截图检查直接比较容器内文件和绑定挂载的宿主文件，不走 HTTP 下载；脚本本身不
+重复下载检查。`GET /files?download=1` 现在走容器的 `/v1/file/download`，由 httpapi 与
+workspaceremote 的单测覆盖，PNG 和文本都能原样取回。
 
 ## 为什么不是一个共享容器
 

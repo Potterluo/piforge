@@ -3,7 +3,10 @@ package workspaceremote
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"path"
 	"path/filepath"
 	"sort"
@@ -309,6 +312,44 @@ func (w *Workspace) ReadFile(ctx context.Context, root, relPath string) (*contra
 		content.MimeType = fsx.GuessMime(container, content.Binary)
 		return content, nil
 	}
+}
+
+// OpenFile opens a file for a raw byte stream through the sandbox's download
+// endpoint. ReadFile is the wrong tool for a binary file: it reads through
+// /v1/file/read, whose UTF-8 codec rejects a PNG at the first byte. The live
+// image's download endpoint (probed on 1.11.0) returns the bytes with a
+// Content-Length and supports Range, so no exec/base64 fallback is needed and
+// none is used: a base64 round-trip would buffer the whole file in memory.
+func (w *Workspace) OpenFile(ctx context.Context, root, relPath string) (io.ReadCloser, int64, error) {
+	relClean, err := fsx.CleanRel(relPath)
+	if err != nil {
+		return nil, -1, err
+	}
+	if relClean == "" {
+		return nil, -1, fmt.Errorf("fsx: read %q: %w", relPath, fsx.ErrIsDir)
+	}
+	tgt, err := w.target(ctx, root)
+	if err != nil {
+		return nil, -1, err
+	}
+	container := joinContainer(tgt.Root, filepath.ToSlash(relClean))
+	body, size, err := tgt.Client.OpenFile(ctx, container)
+	if err != nil {
+		if aio.IsNotFound(err) {
+			return nil, -1, fmt.Errorf("%w: %q", fsx.ErrNotExist, relPath)
+		}
+		// A directory is a 400 from the download endpoint ("Path is not a
+		// file"). Its metadata is the cheap way to keep that a client error
+		// instead of letting the generic 500 path swallow it.
+		var httpErr *aio.HTTPError
+		if errors.As(err, &httpErr) && httpErr.Status == http.StatusBadRequest {
+			if meta, serr := w.stat(ctx, tgt, path.Dir(container), path.Base(container)); serr == nil && meta.IsDir {
+				return nil, -1, fmt.Errorf("fsx: read %q: %w", relPath, fsx.ErrIsDir)
+			}
+		}
+		return nil, -1, fmt.Errorf("workspaceremote: open %q: %w", relPath, err)
+	}
+	return body, size, nil
 }
 
 // stat reads one path's metadata with an exact-name glob. The file API reports

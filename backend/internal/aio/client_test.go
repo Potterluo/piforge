@@ -1,9 +1,12 @@
 package aio
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -207,6 +210,65 @@ func TestClientSurfacesErrors(t *testing.T) {
 	}
 	if _, err := client.Exec(context.Background(), "true", ""); err == nil {
 		t.Fatal("an unauthorized answer returned no error")
+	}
+}
+
+// OpenFile is the one file call that must not go through the JSON envelope:
+// the download endpoint answers the bytes themselves, and only a raw body can
+// carry a PNG.
+func TestOpenFileStreamsRawBytes(t *testing.T) {
+	binary := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff}
+	var seenPath, seenKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/file/download" {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		seenPath = r.URL.Query().Get("path")
+		seenKey = r.Header.Get("X-AIO-API-Key")
+		if seenPath == "/home/gem/missing.png" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"success":false,"message":"File does not exist: /home/gem/missing.png"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", "10")
+		_, _ = w.Write(binary)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL, APIKey: "pf-test-key"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+
+	body, size, err := client.OpenFile(ctx, "/home/gem/icon.png")
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	got, err := io.ReadAll(body)
+	_ = body.Close()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, binary) || size != int64(len(binary)) {
+		t.Fatalf("stream = %x size=%d", got, size)
+	}
+	if seenPath != "/home/gem/icon.png" {
+		t.Fatalf("path query = %q", seenPath)
+	}
+	if seenKey != "pf-test-key" {
+		t.Fatalf("api key header = %q", seenKey)
+	}
+
+	_, _, err = client.OpenFile(ctx, "/home/gem/missing.png")
+	if err == nil || !IsNotFound(err) {
+		t.Fatalf("missing download error = %v", err)
+	}
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Status != http.StatusNotFound {
+		t.Fatalf("error is not a 404 HTTPError: %#v", err)
 	}
 }
 

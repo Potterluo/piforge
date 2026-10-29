@@ -29,6 +29,10 @@ type Client struct {
 	base string
 	key  string
 	http *http.Client
+	// stream is the client for endpoints that answer with a file body. The
+	// request client's Timeout covers the whole transfer, which would cut a
+	// large download off mid-stream; here only the request context bounds it.
+	stream *http.Client
 	// Root is the workspace directory inside the container ("/home/gem" upstream).
 	Root string
 }
@@ -63,10 +67,11 @@ func New(cfg Config) (*Client, error) {
 		root = "/home/gem"
 	}
 	return &Client{
-		base: base,
-		key:  strings.TrimSpace(cfg.APIKey),
-		http: &http.Client{Timeout: timeout},
-		Root: root,
+		base:   base,
+		key:    strings.TrimSpace(cfg.APIKey),
+		http:   &http.Client{Timeout: timeout},
+		stream: &http.Client{},
+		Root:   root,
 	}, nil
 }
 
@@ -210,7 +215,21 @@ func IsNotFound(err error) bool {
 	if errors.As(err, &op) {
 		return op.Type == "not_found" || op.ErrnoName == "ENOENT"
 	}
-	return false
+	var httpErr *HTTPError
+	return errors.As(err, &httpErr) && httpErr.Status == http.StatusNotFound
+}
+
+// HTTPError is a non-2xx answer from an endpoint that returns a raw body
+// instead of the file API's usual 200-with-success:false envelope. The live
+// download endpoint answers 404 for a missing path and 400 for a directory.
+type HTTPError struct {
+	Status  int
+	Path    string
+	Message string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("aio: %s: %d: %s", e.Path, e.Status, e.Message)
 }
 
 // fileRequest posts to one /v1/file/* endpoint and unwraps the envelope.
@@ -264,6 +283,47 @@ func (c *Client) ReadFile(ctx context.Context, path string) (FileContent, error)
 		return FileContent{}, err
 	}
 	return out, nil
+}
+
+// OpenFile opens a file for a raw byte stream through the download endpoint.
+//
+// This is a GET of /v1/file/download?path=..., which the 1.11.0 image answers
+// with the bytes themselves, a Content-Length and range support — not with the
+// JSON envelope /v1/file/read uses. ReadFile cannot be used for a binary file:
+// it hands the bytes through a UTF-8 decoder and fails on the first invalid
+// sequence, which is exactly the bug this call exists to avoid.
+//
+// size is the response's Content-Length, or -1 when the server omitted it. The
+// caller must close the reader.
+func (c *Client) OpenFile(ctx context.Context, path string) (io.ReadCloser, int64, error) {
+	endpoint := c.base + "/v1/file/download?path=" + url.QueryEscape(path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, -1, fmt.Errorf("aio: download %s: %w", path, err)
+	}
+	if c.key != "" {
+		req.Header.Set("X-AIO-API-Key", c.key)
+	}
+	// The bytes are the payload: do not let the transport negotiate gzip and
+	// transparently decode it, which would make Content-Length a lie.
+	req.Header.Set("Accept-Encoding", "identity")
+	res, err := c.stream.Do(req)
+	if err != nil {
+		return nil, -1, fmt.Errorf("aio: download %s: %w", path, err)
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		defer res.Body.Close()
+		payload, _ := io.ReadAll(io.LimitReader(res.Body, 4<<10))
+		message := strings.TrimSpace(string(payload))
+		var envelope struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(payload, &envelope) == nil && envelope.Message != "" {
+			message = envelope.Message
+		}
+		return nil, -1, &HTTPError{Status: res.StatusCode, Path: path, Message: message}
+	}
+	return res.Body, res.ContentLength, nil
 }
 
 // WriteFile writes a UTF-8 file inside the sandbox. Parent directories are

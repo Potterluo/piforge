@@ -465,6 +465,13 @@ type fakeWorkspace struct {
 	behind    int
 	remoteErr error
 	content   *contracts.FileContent
+	// readErr fails only the text preview, the way the remote workspace fails
+	// when /v1/file/read hits a binary file. OpenFile deliberately ignores it:
+	// a download must not depend on the preview decode.
+	readErr error
+	// fileBytes is what OpenFile streams when it is set; otherwise the preview
+	// body stands in for the file.
+	fileBytes []byte
 	status    *contracts.GitStatus
 	diffs     []contracts.FileDiff
 	graph     *contracts.GitGraph
@@ -533,9 +540,30 @@ func (f *fakeWorkspace) ReadFile(_ context.Context, root, relPath string) (*cont
 	if err := f.guard(root); err != nil {
 		return nil, err
 	}
+	f.mu.Lock()
+	readErr := f.readErr
 	c := *f.content
+	f.mu.Unlock()
+	if readErr != nil {
+		return nil, readErr
+	}
 	c.Path = relPath
 	return &c, nil
+}
+
+// OpenFile serves raw bytes. It never consults readErr and never truncates,
+// which is what the download handler is required to rely on.
+func (f *fakeWorkspace) OpenFile(_ context.Context, root, _ string) (io.ReadCloser, int64, error) {
+	if err := f.guard(root); err != nil {
+		return nil, -1, err
+	}
+	f.mu.Lock()
+	raw := append([]byte(nil), f.fileBytes...)
+	if f.fileBytes == nil && f.content != nil {
+		raw = []byte(f.content.Body)
+	}
+	f.mu.Unlock()
+	return io.NopCloser(bytes.NewReader(raw)), int64(len(raw)), nil
 }
 
 func (f *fakeWorkspace) WriteFile(_ context.Context, root, relPath string, body []byte) error {

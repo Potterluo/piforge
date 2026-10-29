@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1013,6 +1014,38 @@ func TestWorkspaceEndpoints(t *testing.T) {
 		}
 		if rec.Body.String() != "package main" {
 			t.Fatalf("body = %q", rec.Body.String())
+		}
+	})
+
+	t.Run("download streams binary bytes without the text preview", func(t *testing.T) {
+		// The preview decode fails for this file (as /v1/file/read does for a
+		// PNG); a download must not touch it.
+		png := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0xfe}
+		env.workspace.fileBytes = png
+		env.workspace.readErr = errors.New("'utf-8' codec can't decode byte 0x89")
+		defer func() {
+			env.workspace.fileBytes = nil
+			env.workspace.readErr = nil
+		}()
+
+		rec := env.doAuthed(http.MethodGet, base+"/files?path=icon.png&download=1", nil, c)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d body %s", rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Content-Type"); got != "image/png" {
+			t.Fatalf("content type = %q", got)
+		}
+		if got := rec.Header().Get("Content-Length"); got != strconv.Itoa(len(png)) {
+			t.Fatalf("content length = %q, want %d", got, len(png))
+		}
+		if got := rec.Header().Get("Content-Disposition"); got != `attachment; filename="icon.png"` {
+			t.Fatalf("content disposition = %q", got)
+		}
+		if !bytes.Equal(rec.Body.Bytes(), png) {
+			t.Fatalf("body = %x, want %x", rec.Body.Bytes(), png)
+		}
+		if got := rec.Header().Get("X-PF-Truncated"); got != "" {
+			t.Fatalf("download was marked truncated: %q", got)
 		}
 	})
 

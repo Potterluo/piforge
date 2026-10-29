@@ -9,6 +9,7 @@ package contracts
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"time"
 )
 
@@ -465,6 +466,11 @@ type Workspace interface {
 	// hides: the filtering happens here.
 	TreeWithOptions(ctx context.Context, root, relPath string, depth int, includeIgnored bool) ([]*FileNode, error)
 	ReadFile(ctx context.Context, root, relPath string) (*FileContent, error)
+	// OpenFile opens relPath for a raw byte stream. Unlike ReadFile it does not
+	// decode text, so it is the only correct way to serve a downloaded binary
+	// file. The caller closes the reader. size is the number of bytes the
+	// stream will produce, or -1 when the implementation cannot know it.
+	OpenFile(ctx context.Context, root, relPath string) (io.ReadCloser, int64, error)
 	WriteFile(ctx context.Context, root, relPath string, body []byte) error
 	DeleteFile(ctx context.Context, root, relPath string) error
 	Search(ctx context.Context, root, query string, byContent bool) ([]SearchResult, error)

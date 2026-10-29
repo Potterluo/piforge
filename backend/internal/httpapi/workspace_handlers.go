@@ -2,11 +2,9 @@ package httpapi
 
 import (
 	"errors"
-	"fmt"
 	"github.com/piforge/piforge/backend/internal/gitx"
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 
@@ -62,75 +60,67 @@ func (s *server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "path is required"))
 		return
 	}
+
+	// `download=1` streams the whole file; `inline=1` streams it too but lets the
+	// browser render it (the PDF preview is an iframe of exactly this URL). Both
+	// must open the raw bytes first: a preview is decoded as UTF-8 and truncated,
+	// so routing a binary download through it fails before the download branch is
+	// ever reached (and a large text download would be silently shortened).
+	if queryBool(r, "download") || queryBool(r, "inline") {
+		s.streamFile(w, r, root, path, queryBool(r, "inline"))
+		return
+	}
+
 	content, err := s.deps.Workspace.ReadFile(r.Context(), root, path)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
+	writeJSON(w, http.StatusOK, content)
+}
 
-	// `download=1` streams the whole file; `inline=1` streams it too but lets the
-	// browser render it (the PDF preview is an iframe of exactly this URL). The
-	// preview body is not used here: it is deliberately truncated, and a truncated
-	// download or a truncated PDF is a bug that only shows up on large files.
-	if queryBool(r, "download") || queryBool(r, "inline") {
-		inline := queryBool(r, "inline")
-		resolved, err := fsx.Resolve(root, path)
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		file, err := os.Open(resolved)
-		if err != nil {
-			// The workspace may be backed by something that is not a plain file on
-			// this host (a test double, a remote provider). Fall back to the preview
-			// body and say it may be truncated, rather than pretending the file is
-			// missing.
-			if content.Body != "" {
-				mime := content.MimeType
-				if mime == "" {
-					mime = "application/octet-stream"
-				}
-				w.Header().Set("Content-Type", mime)
-				if !inline {
-					w.Header().Set("Content-Disposition",
-						`attachment; filename="`+strings.ReplaceAll(pathBase(path), `"`, "")+`"`)
-				}
-				if content.Truncated {
-					w.Header().Set("X-PF-Truncated", "1")
-				}
-				w.WriteHeader(http.StatusOK)
-				_, _ = io.WriteString(w, content.Body)
-				return
-			}
-			s.fail(w, r, fmt.Errorf("%w: %s", fsx.ErrNotExist, path))
-			return
-		}
-		defer file.Close()
-		info, err := file.Stat()
-		if err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		if info.IsDir() {
-			s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "path is a directory"))
-			return
-		}
-
-		mime := content.MimeType
-		if mime == "" {
-			mime = "application/octet-stream"
-		}
-		w.Header().Set("Content-Type", mime)
-		w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
-		if !inline {
-			w.Header().Set("Content-Disposition",
-				`attachment; filename="`+strings.ReplaceAll(pathBase(path), `"`, "")+`"`)
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.Copy(w, file)
+// streamFile serves one file byte-for-byte, without the preview's UTF-8 decode
+// or truncation. It copies the reader into the response instead of buffering,
+// so a download larger than memory still works.
+func (s *server) streamFile(w http.ResponseWriter, r *http.Request, root, path string, inline bool) {
+	body, size, err := s.deps.Workspace.OpenFile(r.Context(), root, path)
+	if err != nil {
+		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, content)
+	defer body.Close()
+
+	w.Header().Set("Content-Type", fsx.GuessMime(path, true))
+	if size >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	}
+	if !inline {
+		w.Header().Set("Content-Disposition",
+			`attachment; filename="`+dispositionName(path)+`"`)
+	}
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(w, body); err != nil {
+		// The status and headers are already on the wire, so s.fail would append
+		// a JSON error to the partial file. Log the broken stream instead.
+		s.log.Warn("file download interrupted", "path", path, "error", err)
+	}
+}
+
+// dispositionName is the file name for a Content-Disposition header. It keeps
+// the last path element and drops the characters that could break out of the
+// quoted string or the header line itself.
+func dispositionName(p string) string {
+	name := strings.Map(func(r rune) rune {
+		switch r {
+		case '"', '\r', '\n', 0:
+			return -1
+		}
+		return r
+	}, pathBase(p))
+	if name == "" {
+		return "download"
+	}
+	return name
 }
 
 // handleWriteFile saves a manual edit. The body is raw text/plain, not JSON,

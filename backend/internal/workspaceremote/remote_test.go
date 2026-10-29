@@ -1,11 +1,13 @@
 package workspaceremote
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -52,6 +54,7 @@ func (f *fakeSandbox) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/file/list", f.handleList)
 	mux.HandleFunc("/v1/file/read", f.handleRead)
+	mux.HandleFunc("/v1/file/download", f.handleDownload)
 	mux.HandleFunc("/v1/file/write", f.handleWrite)
 	mux.HandleFunc("/v1/file/glob", f.handleGlob)
 	mux.HandleFunc("/v1/file/grep", f.handleGrep)
@@ -157,6 +160,39 @@ func (f *fakeSandbox) handleRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	okData(w, map[string]any{"content": string(raw), "file": body.File})
+}
+
+func (f *fakeSandbox) handleDownload(w http.ResponseWriter, r *http.Request) {
+	containerPath := r.URL.Query().Get("path")
+	hostPath, ok := f.host(containerPath)
+	if !ok {
+		downloadError(w, http.StatusNotFound, "File does not exist: "+containerPath)
+		return
+	}
+	info, err := os.Stat(hostPath)
+	if err != nil {
+		downloadError(w, http.StatusNotFound, "File does not exist: "+containerPath)
+		return
+	}
+	if info.IsDir() {
+		// The live 1.11.0 image answers 400, not the file API's JSON envelope.
+		downloadError(w, http.StatusBadRequest, "Path is not a file: "+containerPath)
+		return
+	}
+	raw, err := os.ReadFile(hostPath)
+	if err != nil {
+		downloadError(w, http.StatusInternalServerError, "Failed to read file")
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatInt(int64(len(raw)), 10))
+	_, _ = w.Write(raw)
+}
+
+func downloadError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "message": message})
 }
 
 func (f *fakeSandbox) handleWrite(w http.ResponseWriter, r *http.Request) {
@@ -590,6 +626,48 @@ func TestReadFileClassifiesMissingDirectoryAndBinary(t *testing.T) {
 	}
 	if content.Body != "" || !content.Truncated || content.Language != "" {
 		t.Fatalf("metadata preview = %+v", content)
+	}
+}
+
+func TestOpenFileStreamsRawBytesWithoutTextDecoding(t *testing.T) {
+	fake := newFakeSandbox(t)
+	ws, _ := newTestWorkspace(t, fake, Config{})
+	ctx := context.Background()
+	root := `C:\host\sandboxes\repo`
+
+	// A real PNG header plus bytes that are invalid UTF-8: /v1/file/read would
+	// reject this, which is exactly why OpenFile must not use it.
+	binary := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0xfe, 0x01}
+	if err := os.WriteFile(filepath.Join(fake.root, "icon.png"), binary, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body, size, err := ws.OpenFile(ctx, root, "icon.png")
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	got, err := io.ReadAll(body)
+	_ = body.Close()
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	if !bytes.Equal(got, binary) {
+		t.Fatalf("stream = %x, want %x", got, binary)
+	}
+	if size != int64(len(binary)) {
+		t.Fatalf("size = %d, want %d", size, len(binary))
+	}
+	if execs := fake.execsSeen(); len(execs) != 0 {
+		t.Fatalf("download shelled out instead of streaming: %v", execs)
+	}
+
+	if _, _, err := ws.OpenFile(ctx, root, "nope.png"); !errors.Is(err, fsx.ErrNotExist) {
+		t.Fatalf("missing file error = %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(fake.root, "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ws.OpenFile(ctx, root, "dir"); !errors.Is(err, fsx.ErrIsDir) {
+		t.Fatalf("directory error = %v", err)
 	}
 }
 

@@ -418,6 +418,37 @@ func (s *Service) ReadFile(ctx context.Context, root, relPath string) (*contract
 	return content, nil
 }
 
+// OpenFile opens a file for a raw byte stream. It deliberately skips the UTF-8
+// decode and the size classification of ReadFile: a download must deliver every
+// byte, including a binary one that is not valid text.
+func (s *Service) OpenFile(ctx context.Context, root, relPath string) (io.ReadCloser, int64, error) {
+	rootAbs, err := absRoot(root)
+	if err != nil {
+		return nil, -1, err
+	}
+	abs, err := Resolve(rootAbs, relPath)
+	if err != nil {
+		return nil, -1, err
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, -1, fmt.Errorf("%w: %q", ErrNotExist, relPath)
+		}
+		return nil, -1, fmt.Errorf("fsx: open %q: %w", relPath, err)
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, -1, fmt.Errorf("fsx: stat %q: %w", relPath, err)
+	}
+	if fi.IsDir() {
+		_ = f.Close()
+		return nil, -1, fmt.Errorf("fsx: read %q: %w", relPath, ErrIsDir)
+	}
+	return f, fi.Size(), nil
+}
+
 // WriteFile creates or replaces a file, creating parent directories.
 func (s *Service) WriteFile(ctx context.Context, root, relPath string, body []byte) error {
 	if err := ctx.Err(); err != nil {

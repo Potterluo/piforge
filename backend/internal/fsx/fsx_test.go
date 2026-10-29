@@ -1,8 +1,10 @@
 package fsx
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -329,6 +331,36 @@ func TestReadFileSizes(t *testing.T) {
 	}
 	if meta.Size != 500 {
 		t.Errorf("size = %d", meta.Size)
+	}
+}
+
+func TestOpenFileSkipsTextDecoding(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+	png := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0xfe}
+	if err := os.WriteFile(filepath.Join(root, "icon.png"), png, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{})
+
+	body, size, err := s.OpenFile(ctx, root, "icon.png")
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	got, err := io.ReadAll(body)
+	_ = body.Close()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, png) || size != int64(len(png)) {
+		t.Fatalf("stream = %x size=%d, want %x size=%d", got, size, png, len(png))
+	}
+
+	if _, _, err := s.OpenFile(ctx, root, "nope.png"); !errors.Is(err, ErrNotExist) {
+		t.Fatalf("missing file error = %v", err)
+	}
+	if _, _, err := s.OpenFile(ctx, root, "."); !errors.Is(err, ErrIsDir) {
+		t.Fatalf("directory error = %v", err)
 	}
 }
 
