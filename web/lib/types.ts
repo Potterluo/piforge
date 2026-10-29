@@ -361,6 +361,24 @@ export interface Skill {
   created_at: string;
 }
 
+/**
+ * The skill version a session was actually mounted with (FR-14.5).
+ *
+ * A copy, not a join: editing the skill afterwards leaves this record alone, so
+ * the session keeps saying what it used. `content_hash` is derived from the
+ * mounted files, which is what distinguishes two undeclared versions.
+ */
+export interface SessionSkill {
+  session_id: string;
+  skill_id: string;
+  name: string;
+  version: string;
+  content_hash: string;
+  description?: string;
+  mounted_path: string;
+  recorded_at: string;
+}
+
 export interface MCPServer {
   id: string;
   scope: "admin" | "user";

@@ -14,6 +14,7 @@ export const qk = {
   /** Cross-project search, kept apart from the project list's cache entry. */
   sessionSearch: (query: string, limit: number) => ["sessions", "search", query, limit] as const,
   session: (id: string) => ["session", id] as const,
+  sessionSkills: (id: string) => ["session-skills", id] as const,
   stats: (id: string) => ["stats", id] as const,
   sandbox: (id: string) => ["sandbox", id] as const,
   providers: ["providers"] as const,
@@ -93,6 +94,32 @@ export function useSession(sessionId: string) {
     // A 404 means the session does not exist; retrying it three times only
     // delays the not-found page. Every other failure keeps its retries.
     retry: (attempt, error) => !(error instanceof ApiError && error.status === 404) && attempt < 2,
+  });
+}
+
+/**
+ * The skill versions a session was mounted with (FR-14.5).
+ *
+ * Deliberately not refetched on every keystroke: the record is write-once, so
+ * once a session has answered there is nothing newer to learn. A session that
+ * has not been provisioned yet answers `[]`, so the UI must distinguish "not
+ * yet" from "none" by the worktree state, not by polling this.
+ */
+export function useSessionSkills(sessionId: string) {
+  return useQuery({
+    queryKey: qk.sessionSkills(sessionId),
+    queryFn: () => api.sessions.skills(sessionId),
+    enabled: sessionId.length > 0,
+    staleTime: 60_000,
+  });
+}
+
+/** The whole account's skill library, for the `/` palette. */
+export function useSkills() {
+  return useQuery({
+    queryKey: qk.skills,
+    queryFn: () => api.skills.list(),
+    staleTime: 30_000,
   });
 }
 

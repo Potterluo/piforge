@@ -1,12 +1,13 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
   CornerDownLeft,
   LoaderCircle,
   Paperclip,
   PencilLine,
+  Sparkles,
   SquareStop,
   X,
   Zap,
@@ -22,6 +23,7 @@ import {
   AttachmentMedia,
   AttachmentTitle,
 } from "@/components/ui/attachment";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -52,8 +54,10 @@ import { api } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
 import { shortModel, truncate } from "@/lib/session/format";
 import type { QueuedPrompt } from "@/lib/session/reduce";
-import { ApiError } from "@/lib/types";
+import { type SessionSkill, type Skill } from "@/lib/types";
 import { cn } from "@/lib/utils";
+
+import { skillInvocation, skillVersionLabel, SkillPalette } from "./skill-palette";
 
 export interface ModelOption {
   value: string;
@@ -86,6 +90,16 @@ export interface ComposerProps {
   noModel?: boolean;
   placeholder?: string;
   className?: string;
+  /** Skills the account can invoke; typing `/` lists these (FR-14.6). */
+  skills?: Skill[];
+  /** True while the account's skill library is still loading. */
+  skillsLoading?: boolean;
+  /**
+   * The versions this session was mounted with (FR-14.5). The invocation chip
+   * reads this, so it shows the version the run will actually use rather than
+   * whatever the skill's row says today.
+   */
+  sessionSkills?: SessionSkill[];
   /** The sidecar reuses this composer with its own e2e hooks. */
   testIds?: ComposerTestIds;
 }
@@ -122,6 +136,56 @@ function readAsDataUrl(file: File): Promise<string> {
 }
 
 /**
+ * slashQuery returns what the palette should filter by, or null when the draft
+ * is not a bare command token.
+ *
+ * A space ends the token on purpose: `/skill:review 看下 diff` is a complete
+ * prompt, not a command still being typed, so the palette must get out of the
+ * way before the user finishes their sentence.
+ */
+export function slashQuery(text: string): string | null {
+  if (!text.startsWith("/") || text.includes("\n")) return null;
+  if (/\s/.test(text)) return null;
+  const raw = text.slice(1);
+  const prefix = "skill:";
+  return raw.toLowerCase().startsWith(prefix) ? raw.slice(prefix.length) : raw;
+}
+
+/** filterSkills is the palette's search: name first, description second. */
+export function filterSkills(skills: Skill[], query: string): Skill[] {
+  const needle = query.trim().toLowerCase();
+  return skills.filter((skill) => {
+    if (!skill.enabled) return false;
+    if (!needle) return true;
+    return `${skill.name}\n${skill.description}`.toLowerCase().includes(needle);
+  });
+}
+
+const INVOCATION_RE = /^\/skill:([^\s]+)/i;
+
+/**
+ * matchInvocation finds the skill named by a leading `/skill:name`.
+ *
+ * The record wins over the current row: the chip must describe what this
+ * session will actually run, and after an edit those are different versions.
+ */
+function matchInvocation(
+  text: string,
+  skills: Skill[],
+  records: SessionSkill[],
+): { skill: Skill | null; record: SessionSkill | null; name: string } | null {
+  const match = INVOCATION_RE.exec(text.trimStart());
+  if (!match) return null;
+  const name = match[1];
+  const needle = name.toLowerCase();
+  return {
+    skill: skills.find((skill) => skill.name.toLowerCase() === needle) ?? null,
+    record: records.find((record) => record.name.toLowerCase() === needle) ?? null,
+    name,
+  };
+}
+
+/**
  * The dual-queue composer (PRD §10.5.1).
  *
  * The two behaviours are genuinely different Pi paths, so they are two
@@ -142,6 +206,9 @@ export function Composer({
   disabled = false,
   placeholder,
   className,
+  skills = [],
+  skillsLoading = false,
+  sessionSkills = [],
   testIds,
 }: ComposerProps) {
   const [text, setText] = useState("");
@@ -150,10 +217,48 @@ export function Composer({
   const [interrupting, setInterrupting] = useState(false);
   const [modelOverride, setModelOverride] = useState<string | null>(null);
   const [thinkingOverride, setThinkingOverride] = useState<string | null>(null);
+  // The palette closes on Escape and on insert even though the draft still
+  // starts with "/", so the open state needs to be more than "text starts with
+  // slash". Any further typing reopens it: the user is editing the command.
+  const [paletteDismissed, setPaletteDismissed] = useState(false);
+  const [paletteIndex, setPaletteIndex] = useState(0);
   const model = modelOverride ?? (modelRef || "inherit");
   const thinking = thinkingOverride ?? (thinkingLevel || "default");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const paletteId = useId();
+
+  const query = slashQuery(text);
+  const enabledSkills = useMemo(() => skills.filter((skill) => skill.enabled), [skills]);
+  const paletteItems = useMemo(
+    () => (query === null ? [] : filterSkills(skills, query)),
+    [skills, query],
+  );
+  const paletteOpen = !disabled && query !== null && !paletteDismissed;
+  const activeIndex =
+    paletteItems.length === 0 ? -1 : Math.min(paletteIndex, paletteItems.length - 1);
+  const invocation = useMemo(
+    () => matchInvocation(text, enabledSkills, sessionSkills),
+    [text, enabledSkills, sessionSkills],
+  );
+
+  // A new filter starts at the top: the cursor must not stay on item five of a
+  // list that no longer has five items. Reset happens where the filter changes
+  // (the input), not in an effect that would re-render the whole composer.
+
+  const insertSkill = (skill: Skill) => {
+    setText(skillInvocation(skill));
+    setPaletteDismissed(true);
+    setPaletteIndex(0);
+    // The textarea is where the user continues typing; a click on an option must
+    // not leave focus on a button that is about to disappear.
+    requestAnimationFrame(() => {
+      const input = textareaRef.current;
+      if (!input) return;
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    });
+  };
 
   const submit = async (behavior?: "steer" | "follow_up") => {
     const trimmed = text.trim();
@@ -222,6 +327,36 @@ export function Composer({
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.nativeEvent.isComposing) return;
+
+    // The palette owns the arrow keys and Enter while it is open (FR-14.6).
+    // Escape closes it before it can mean "interrupt": a user dismissing a
+    // suggestion list must not stop the agent.
+    if (paletteOpen) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        if (paletteItems.length > 0) {
+          const delta = event.key === "ArrowDown" ? 1 : -1;
+          setPaletteIndex(
+            (current) => (current + delta + paletteItems.length) % paletteItems.length,
+          );
+        }
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setPaletteDismissed(true);
+        return;
+      }
+      if (event.key === "Enter" && !event.shiftKey) {
+        // Enter picks the highlighted skill instead of sending "/skill:" as a
+        // prompt. With no match there is nothing to pick, and sending a
+        // half-typed command is never what the user meant.
+        event.preventDefault();
+        const picked = paletteItems[activeIndex];
+        if (picked) insertSkill(picked);
+        return;
+      }
+    }
 
     if (event.key === "Escape") {
       event.preventDefault();
@@ -327,6 +462,44 @@ export function Composer({
         </div>
       ) : null}
 
+      {invocation && (invocation.record || invocation.skill) ? (
+        <div className="flex flex-wrap items-center gap-2" data-testid="composer-skill-chip"
+          data-name={invocation.record?.name ?? invocation.skill?.name ?? invocation.name}
+          data-version={invocation.record?.version ?? invocation.skill?.version ?? ""}
+          data-hash={invocation.record?.content_hash ?? invocation.skill?.content_hash ?? ""}
+        >
+          <Badge variant="secondary" className="max-w-full gap-1.5 text-[11px]">
+            <Sparkles className="size-3 shrink-0" />
+            <span className="truncate font-medium">
+              {invocation.record?.name ?? invocation.skill?.name ?? invocation.name}
+            </span>
+            <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+              {invocation.record
+                ? `v${invocation.record.version} · ${invocation.record.content_hash.slice(0, 8)}`
+                : skillVersionLabel(invocation.skill!)}
+            </span>
+          </Badge>
+          <span className="text-[10px] text-muted-foreground">
+            {invocation.record
+              ? "本会话挂载的版本"
+              : "当前版本：下次创建会话时才会挂载"}
+          </span>
+        </div>
+      ) : null}
+
+      {paletteOpen ? (
+        <SkillPalette
+          id={paletteId}
+          items={paletteItems}
+          total={enabledSkills.length}
+          activeIndex={activeIndex}
+          query={query ?? ""}
+          loading={skillsLoading}
+          onSelect={insertSkill}
+          onHover={setPaletteIndex}
+        />
+      ) : null}
+
       <InputGroup className="h-auto flex-col items-stretch">
         {images.length > 0 ? (
           <InputGroupAddon align="block-start" className="flex-wrap gap-2">
@@ -358,7 +531,14 @@ export function Composer({
           ref={textareaRef}
           data-testid={testIds?.input ?? "composer-input"}
           value={text}
-          onChange={(event) => setText(event.target.value)}
+          onChange={(event) => {
+            setText(event.target.value);
+            // Any edit reopens a palette closed with Escape (the user is editing
+            // the command) and restarts the cursor at the first match, so the
+            // highlighted row is always one the current filter produced.
+            setPaletteDismissed(false);
+            setPaletteIndex(0);
+          }}
           onKeyDown={onKeyDown}
           onPaste={(event) => {
             const files = Array.from(event.clipboardData?.files ?? []);
@@ -374,6 +554,18 @@ export function Composer({
             (running ? "补充说明：Enter 下一轮执行 · ⌘↵ 立即改口" : "描述你想让 agent 做的事…")
           }
           aria-label="消息输入"
+          // Combobox semantics: focus stays in the textarea and the active
+          // option is announced through aria-activedescendant, which is what
+          // makes the palette usable with a screen reader (FR-14.6).
+          role="combobox"
+          aria-expanded={paletteOpen}
+          aria-controls={paletteOpen ? paletteId : undefined}
+          aria-autocomplete="list"
+          aria-activedescendant={
+            paletteOpen && activeIndex >= 0 && paletteItems[activeIndex]
+              ? `${paletteId}-${paletteItems[activeIndex].id}`
+              : undefined
+          }
           className="max-h-40 min-h-9 field-sizing-content text-sm"
         />
 

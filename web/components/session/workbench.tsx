@@ -36,7 +36,7 @@ import { humanizeError } from "@/lib/errors";
 import { ApiError } from "@/lib/types";
 import { toast } from "sonner";
 import { sessionKindLabel, shortModel } from "@/lib/session/format";
-import { qk, useProject, useProviders, useSession } from "@/lib/session/queries";
+import { qk, useProject, useProviders, useSession, useSessionSkills, useSkills } from "@/lib/session/queries";
 import { collectBashOutput, runningToolCount, selectTimeline, type Turn } from "@/lib/session/reduce";
 import type { StreamStatus } from "@/lib/session/use-session-events";
 import type { ForkPoint } from "@/lib/types";
@@ -187,6 +187,10 @@ function WorkbenchBody({
   }, [settled, queryClient, sessionId, projectId]);
   const project = useProject(projectId);
   const providers = useProviders();
+  // The `/` palette lists what the account can invoke, and the composer's chip
+  // shows the version this session was actually mounted with (FR-14.5/14.6).
+  const skills = useSkills();
+  const sessionSkills = useSessionSkills(sessionId);
   const runtime = useQuery({
     queryKey: ["session-status", sessionId],
     queryFn: () => api.sessions.status(sessionId),
@@ -356,6 +360,9 @@ function WorkbenchBody({
               modelRef={detail?.model_ref}
               thinkingLevel={detail?.thinking_level}
               models={models}
+              skills={skills.data?.skills ?? []}
+              skillsLoading={skills.isPending}
+              sessionSkills={sessionSkills.data?.skills ?? []}
             />
           </div>
         </ResizablePanel>

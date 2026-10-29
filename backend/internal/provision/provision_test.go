@@ -306,6 +306,113 @@ func TestEnsureWorktreeMountsSkillsAndMCPServers(t *testing.T) {
 	if len(manifest.MCPServers) != 1 || manifest.MCPServers[0] != "playwright" {
 		t.Fatalf("manifest mcp servers = %v", manifest.MCPServers)
 	}
+
+	// FR-14.5: the session records the version it was actually given. The hash is
+	// derived from the mounted files, not copied from the skill row ("h"), which
+	// is what makes an undeclared version identifiable.
+	records, err := e.store.SessionSkills(ctx, e.user.ID, sess.ID)
+	if err != nil {
+		t.Fatalf("SessionSkills: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("session skill records = %d, want 1", len(records))
+	}
+	got := records[0]
+	if got.SkillID == "" || got.Name != "Code Review" || got.Version != "1" {
+		t.Fatalf("record identity = %+v", got)
+	}
+	wantHash, err := materialize.Digest(filepath.Join(wt.Path, ".pi", "skills", "code-review"))
+	if err != nil {
+		t.Fatalf("Digest: %v", err)
+	}
+	if got.ContentHash != wantHash || got.ContentHash == "h" {
+		t.Fatalf("record hash = %q, want the mounted bundle's digest %q", got.ContentHash, wantHash)
+	}
+	if want := filepath.ToSlash(filepath.Join(wt.Path, ".pi", "skills", "code-review")); got.MountedPath != want {
+		t.Fatalf("mounted path = %q, want %q", got.MountedPath, want)
+	}
+	if got.RecordedAt.IsZero() {
+		t.Fatal("recorded_at is zero")
+	}
+}
+
+// TestMountRecordsTheVersionOncePerSession covers the FR-14.5 invariant across a
+// skill edit: the session created before the edit keeps reporting the old
+// version, while a session created after it records the new one.
+func TestMountRecordsTheVersionOncePerSession(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+
+	bundle := filepath.Join(e.svc.cfg.SkillsDir, "review-1")
+	if err := os.MkdirAll(bundle, 0o755); err != nil {
+		t.Fatalf("mkdir bundle: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "SKILL.md"), []byte("# Review\nRead the diff.\n"), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	skill, err := e.store.CreateSkill(ctx, e.user.ID, contracts.Skill{
+		Name: "Code Review", BundleKey: "review-1", Version: "1", ContentHash: "hash-v1", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateSkill: %v", err)
+	}
+
+	projectA := e.project()
+	sessA := e.session(projectA, contracts.KindMain, "main", "")
+	wtA, err := e.svc.EnsureWorktree(ctx, e.user.ID, projectA, sessA)
+	if err != nil {
+		t.Fatalf("EnsureWorktree A: %v", err)
+	}
+	before, err := e.store.SessionSkills(ctx, e.user.ID, sessA.ID)
+	if err != nil || len(before) != 1 {
+		t.Fatalf("session A records = %v, %v", before, err)
+	}
+
+	// Edit the skill: new bundle content and a new stored hash.
+	if err := os.WriteFile(filepath.Join(bundle, "SKILL.md"), []byte("# Review\nRead every hunk twice.\n"), 0o644); err != nil {
+		t.Fatalf("rewrite SKILL.md: %v", err)
+	}
+	if _, err := e.store.UpdateSkillBundle(ctx, e.user.ID, skill.ID, "review-1", "hash-v2"); err != nil {
+		t.Fatalf("UpdateSkillBundle: %v", err)
+	}
+
+	projectB, err := e.store.CreateProject(ctx, e.user.ID, store.NewProject{Name: "demo-2", DefaultBranch: "main"})
+	if err != nil {
+		t.Fatalf("create project B: %v", err)
+	}
+	sessB := e.session(projectB, contracts.KindMain, "main", "")
+	wtB, err := e.svc.EnsureWorktree(ctx, e.user.ID, projectB, sessB)
+	if err != nil {
+		t.Fatalf("EnsureWorktree B: %v", err)
+	}
+	after, err := e.store.SessionSkills(ctx, e.user.ID, sessB.ID)
+	if err != nil || len(after) != 1 {
+		t.Fatalf("session B records = %v, %v", after, err)
+	}
+
+	newHash, err := materialize.Digest(filepath.Join(wtB.Path, ".pi", "skills", "code-review"))
+	if err != nil {
+		t.Fatalf("Digest B: %v", err)
+	}
+	if after[0].ContentHash != newHash {
+		t.Fatalf("session B hash = %q, want %q", after[0].ContentHash, newHash)
+	}
+	if before[0].ContentHash == newHash {
+		t.Fatal("the two sessions recorded the same version despite different content")
+	}
+
+	// Session A's record is a fact and does not drift, even though the code path
+	// that wrote it is gone.
+	rereadA, err := e.store.SessionSkills(ctx, e.user.ID, sessA.ID)
+	if err != nil {
+		t.Fatalf("SessionSkills A again: %v", err)
+	}
+	if rereadA[0].ContentHash != before[0].ContentHash || rereadA[0].MountedPath != before[0].MountedPath {
+		t.Fatalf("session A's record changed: %+v -> %+v", before[0], rereadA[0])
+	}
+	if wtA.Path == wtB.Path {
+		t.Fatal("the two projects shared one checkout, so this test mounted the same directory twice")
+	}
 }
 
 // fakeWorktreeSandbox is a SandboxProvider that can also run its own worktree

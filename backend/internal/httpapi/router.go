@@ -201,6 +201,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /v1/sessions/{id}/logs", s.authed(s.handleSessionLogs))
 	mux.Handle("GET /v1/sessions/{id}/pty", s.authed(s.handleSessionPTY))
 	mux.Handle("GET /v1/sessions/{id}/tooling", s.authed(s.handleSessionTooling))
+	mux.Handle("GET /v1/sessions/{id}/skills", s.authed(s.handleSessionSkills))
 	mux.Handle("GET /v1/sessions/{id}/browser", s.authed(s.handleSessionBrowser))
 	mux.Handle("GET /v1/sessions/{id}/browser/tabs", s.authed(s.handleListBrowserTabs))
 	mux.Handle("POST /v1/sessions/{id}/browser/tabs", s.mutatingBearer(s.handleOpenBrowserTab))

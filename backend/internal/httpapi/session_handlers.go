@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/materialize"
 	"github.com/piforge/piforge/backend/internal/store"
 )
 
@@ -757,6 +759,12 @@ func (s *server) sessionSpec(userID string, sess *contracts.Session) contracts.S
 	}
 	if root, err := s.worktreeRoot(context.Background(), userID, sess); err == nil {
 		spec.Worktree = root
+		// The mount exists on disk, but Pi only loads project-local skills from
+		// `.pi/skills` after the *project* has been trusted — which this product
+		// deliberately never does (a cloned repository could ship extensions).
+		// The agent launch passes this directory explicitly with `--skill`, so
+		// what the platform mounted is what the agent is told about (FR-14.5).
+		spec.SkillsDir = filepath.Join(root, filepath.FromSlash(materialize.SkillsRoot))
 	}
 	return spec
 }

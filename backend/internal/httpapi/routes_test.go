@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -53,6 +54,7 @@ func TestEveryRouteIsRegistered(t *testing.T) {
 		{http.MethodGet, "/v1/sessions/{id}/fork-points"},
 		{http.MethodGet, "/v1/sessions/{id}/status"},
 		{http.MethodGet, "/v1/sessions/{id}/stats"},
+		{http.MethodGet, "/v1/sessions/{id}/skills"},
 		{http.MethodPost, "/v1/sessions/{id}/fork"},
 		{http.MethodPost, "/v1/sessions/{id}/sidecar"},
 		{http.MethodPost, "/v1/sessions/{id}/compact"},
@@ -308,6 +310,13 @@ func TestFirstPromptGetsTheProvisionedWorktree(t *testing.T) {
 	}
 	if starts[0].Worktree != "/srv/wt/"+sess.ID {
 		t.Fatalf("spec.Worktree = %q", starts[0].Worktree)
+	}
+	// FR-14.5: the agent is pointed at the mounted skills explicitly, because
+	// project-local discovery is gated on trusting the repository and this
+	// product does not do that.
+	wantSkills := filepath.Join("/srv/wt", sess.ID, ".pi", "skills")
+	if starts[0].SkillsDir != wantSkills {
+		t.Fatalf("spec.SkillsDir = %q, want %q", starts[0].SkillsDir, wantSkills)
 	}
 	if starts[0].ProjectID != project.ID {
 		t.Fatalf("spec.ProjectID = %q", starts[0].ProjectID)

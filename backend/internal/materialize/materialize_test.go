@@ -1,6 +1,9 @@
 package materialize
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -304,5 +307,98 @@ func TestMountFollowsWorktreeGitFile(t *testing.T) {
 	}
 	if !strings.Contains(string(exclude), "/.pi/skills") {
 		t.Fatalf("worktree exclude = %s", exclude)
+	}
+}
+
+// TestDigestIsContentAddressed covers the version derivation behind FR-14.5:
+// the same files always fingerprint the same, and any content or path change
+// produces a different one. Without the second half, editing a skill would look
+// like no edit at all and two sessions would wrongly report the same version.
+func TestDigestIsContentAddressed(t *testing.T) {
+	first := t.TempDir()
+	if err := os.WriteFile(filepath.Join(first, "SKILL.md"), []byte("# Review\nRead the diff.\n"), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(first, "scripts"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(first, "scripts", "check.sh"), []byte("echo hi\n"), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	base, err := Digest(first)
+	if err != nil {
+		t.Fatalf("Digest: %v", err)
+	}
+	if len(base) != 64 {
+		t.Fatalf("Digest = %q, want a sha256 hex string", base)
+	}
+
+	// Same content, different directory: the digest must not depend on where the
+	// bundle was written or the order the filesystem returns files in.
+	second := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(second, "scripts"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(second, "scripts", "check.sh"), []byte("echo hi\n"), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(second, "SKILL.md"), []byte("# Review\nRead the diff.\n"), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	same, err := Digest(second)
+	if err != nil {
+		t.Fatalf("Digest: %v", err)
+	}
+	if same != base {
+		t.Fatalf("same content gave different digests: %s vs %s", base, same)
+	}
+
+	// A changed byte changes the version.
+	if err := os.WriteFile(filepath.Join(second, "SKILL.md"), []byte("# Review\nRead the diff carefully.\n"), 0o644); err != nil {
+		t.Fatalf("rewrite SKILL.md: %v", err)
+	}
+	changed, err := Digest(second)
+	if err != nil {
+		t.Fatalf("Digest: %v", err)
+	}
+	if changed == base {
+		t.Fatal("changed content kept the same digest, so a session could not tell two versions apart")
+	}
+
+	// Renaming a file with identical bytes is also a different bundle: the agent
+	// sees a different path, and the digest is of the mounted tree.
+	if err := os.Rename(filepath.Join(second, "scripts", "check.sh"), filepath.Join(second, "scripts", "verify.sh")); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	renamed, err := Digest(second)
+	if err != nil {
+		t.Fatalf("Digest: %v", err)
+	}
+	if renamed == changed {
+		t.Fatal("a renamed file kept the same digest")
+	}
+}
+
+// TestDigestMatchesTheUploadHash locks the derivation to the hash the upload path
+// stores, so an untouched bundle records the same content hash it was created
+// with. Two algorithms would make "the session's hash" disagree with the skill
+// centre for the same bytes.
+func TestDigestMatchesTheUploadHash(t *testing.T) {
+	dir := t.TempDir()
+	body := "---\nname: review\n---\n# Review\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := Digest(dir)
+	if err != nil {
+		t.Fatalf("Digest: %v", err)
+	}
+
+	// The same framing writeSkillBundle uses: "<path>\x00<content>\x00", sorted.
+	hasher := sha256.New()
+	fmt.Fprintf(hasher, "%s\x00%s\x00", "SKILL.md", body)
+	if want := hex.EncodeToString(hasher.Sum(nil)); got != want {
+		t.Fatalf("Digest = %s, upload hash = %s", got, want)
 	}
 }

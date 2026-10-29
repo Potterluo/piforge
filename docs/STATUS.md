@@ -133,8 +133,8 @@
 | FR-14.2 挂载到 worktree（只读 bind mount + content_hash） | PARTIAL | `materialize.Mount` 把 bundle **复制**到 `.pi/skills/<slug>`（不是 `.agents/skills/`、不是只读 bind mount）；`content_hash` 只存 DB，目录里没有；`materialize_test.go` |
 | FR-14.3 Skill 中心（浏览/搜索/详情/SKILL.md 渲染） | PARTIAL | `web/app/settings/skills/page.tsx`：列表/新建/删除/上传（含 `SKILL.md` 文本域）；无搜索框、无详情页（不渲染文件树与脚本预览） |
 | FR-14.4 一键安装（Git URL / zip）+ 可禁用 | PARTIAL（Git 有，zip 没有） | `POST /v1/skills/import`：克隆仓库、按含 SKILL.md 的目录逐个导入、只取该目录下文件、4 MB 上限；`skill_import_test.go`、`38-skill-import.spec.ts`；UI 在设置页「从仓库导入」。**zip 上传未实现** |
-| FR-14.5 会话记录所用 skill@version | MISSING | `skills.version` 只在自己表里，`sessions.config` 未记录任何 skill 版本；无相关代码 |
-| FR-14.6 `/skill:name` + `/` 命令面板 | MISSING | `command-palette.tsx` 只有会话/项目命令；无 `/` 斜杠命令、无 skill 调用 |
+| FR-14.5 会话记录所用 skill@version | DONE | 挂载时把 `skill_id/name/version + 内容 sha256 + mounted_path` 写进 `session_skills`（`store/session_skills.go`，`ON CONFLICT DO NOTHING` ⇒ 写一次即事实，之后编辑 Skill 不改写）；hash 由 `materialize.Digest` 对挂载目录「路径+内容」排序计算，与上传路径的 hash 同算法；`GET /v1/sessions/{id}/skills`；日志/信息抽屉新增只读「本会话使用的 Skill」；侧车复制父会话记录；`TestDigestIsContentAddressed`、`TestSessionSkillRecordIsWriteOnce`、`SessionSkillsEndpoint`、`63-skill-version.spec.ts`。**额外修复**：Pi 只在信任项目后才加载 `.pi/skills`，此前 agent 实际从未被告知挂载的 skill；现在启动参数显式带 `--skill <worktree>/.pi/skills`（`sessionSpec.SkillsDir`），容器实测系统提示词含 `<skills>` 列表且模型按 skill 作答 |
+| FR-14.6 `/skill:name` + `/` 命令面板 | DONE | 输入框开头 `/` 打开 skill 面板（`skill-palette.tsx`，`role=listbox` + `aria-activedescendant`）；输入过滤、↑↓ 选择、Enter 插入 `/skill:name `、Esc 关闭且不中断 run；无 skill 时空态链接 Skill 中心；插入的文本走既有消息路径（不是第二套调用机制），Pi 把 `/skill:name` 展开成 `<skill name … location …>` 并加载 SKILL.md；`skill-palette.test.tsx`（6 例）、`64-skill-palette.spec.ts` |
 | FR-14.7 内置开箱可用 skill | DONE | `store/skill_seed.go` 三个内置技能（code-review / test-gap / explain-codebase），admin 共享、首次启动安装、已存在则不动；`skill_seed_test.go`、`39-builtin-skills.spec.ts` |
 | FR-15.1 MCP server 配置 | DONE | `pimodel.WriteMCP` 在启动时写 `<agent dir>/mcp.json`；`mcpEntriesFor` 汇总用户与共享 server；`mcp_test.go`（形状取自镜像里的 `pi mcp add`）；容器实测 `pi mcp list` 认出了写入的 server |
 | FR-15.2 MCP 凭据加密 + 注入 | DONE | AES-GCM 落库（`store/secrets.go`）；启动时解密并经 `ParseMCPSecrets` 写成 `env`（不进命令行）；`secrets_test.go`、`mcp_test.go`；容器实测 mcp.json 内含 env |
@@ -167,7 +167,7 @@
 10. **FR-10.2 终端只有一个 tab**——后端支持 `?tab=`，前端没有 tab 条、不能重命名/关闭；PRD 要求 ≥5 个独立 PTY。
 11. **FR-12.5 / 12.6 测试结果面板与一键开 PR**——两者都没有；`FR-12.1` 的「某次提交/本轮」作用域也缺（前端 `SCOPES` 只有 3 项）。
 12. **FR-2.3 / FR-8.5 / FR-8.6 分支与 commit 的可视化只到一半**——分支树画的是 Pi entry 树而非分支图（无创建时间/diff 规模）；点 commit 只有元数据 sheet，`git-commit-sheet.tsx` 自己写明「取不到该 commit 的 diff」。
-13. **FR-14.6 / 14.7 skill 无法被显式调用**——没有 `/skill:name`、没有 `/` 命令面板、没有内置 skill，skill 只能靠模型自己判断去读。
+13. **FR-14.2 / 14.4 skill 交付仍差两截**——挂载是「复制到 `.pi/skills`」而不是 PRD 写的只读 bind mount（沙箱内可写）；一键安装只有 Git URL，zip 仍缺。FR-14.5 / 14.6 / 14.7 已有实现与测试（见上表），不在缺口里。
 14. **FR-5.7 / 5.8 / 16.4 / 16.6 运维面整体缺失**——端口发现、资源护栏、镜像管理、护栏配置都没有端点；`admin/status` 只有计数，没有水位与镜像告警。
 15. **FR-4.3 / 4.4 sidecar 引用与独立模型**——引用卡（`@main:msg_xxx`）不存在；独立模型 API 支持但 UI 不提供。
 

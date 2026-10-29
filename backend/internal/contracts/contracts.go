@@ -647,6 +647,32 @@ type Skill struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// SessionSkill is the immutable record of one skill version a session actually
+// materialised into its checkout (PRD FR-14.5).
+//
+// It is deliberately a copy, not a join: `skills` describes what is configured
+// *now*, while a running session must be able to say what it was given when it
+// started. Editing a skill later changes the row in `skills`; this record keeps
+// the version and the content hash it was mounted with, so a session stays
+// reproducible after its skill has moved on.
+type SessionSkill struct {
+	SessionID string `json:"session_id"`
+	SkillID   string `json:"skill_id"`
+	Name      string `json:"name"`
+	// Version is the skill's declared version at mount time ("0.0.0" when the
+	// author never set one).
+	Version string `json:"version"`
+	// ContentHash is derived from the mounted bundle's files and content, so it
+	// changes exactly when what the agent can read changes — which is what makes
+	// it useful for two undeclared versions of the same skill.
+	ContentHash string `json:"content_hash"`
+	// Description is the one-line summary the palette shows; copied so the
+	// record survives the skill being deleted.
+	Description string    `json:"description,omitempty"`
+	MountedPath string    `json:"mounted_path"`
+	RecordedAt  time.Time `json:"recorded_at"`
+}
+
 // MCPTransport is stdio or streamable HTTP. stdio is unrestricted by design
 // (product decision): the user already has a shell.
 type MCPTransport string

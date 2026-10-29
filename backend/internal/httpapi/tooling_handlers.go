@@ -59,3 +59,31 @@ func (s *server) handleSessionTooling(w http.ResponseWriter, r *http.Request) {
 	resp.Mounted = materialize.Read(root)
 	writeJSON(w, http.StatusOK, resp)
 }
+
+// sessionSkillsResponse is what a session was actually mounted with (FR-14.5).
+//
+// It is a record, not a view over `skills`: a skill edited after this session
+// started does not change what is reported here. `skills` is never null so the
+// browser can render "none" without a null check.
+type sessionSkillsResponse struct {
+	Skills []*contracts.SessionSkill `json:"skills"`
+}
+
+// handleSessionSkills lists the skill versions materialised for a session.
+func (s *server) handleSessionSkills(w http.ResponseWriter, r *http.Request) {
+	user := auth.MustUser(r.Context())
+	sess, err := s.deps.Store.Session(r.Context(), user.ID, pathID(r))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	list, err := s.deps.Store.SessionSkills(r.Context(), user.ID, sess.ID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if list == nil {
+		list = []*contracts.SessionSkill{}
+	}
+	writeJSON(w, http.StatusOK, sessionSkillsResponse{Skills: list})
+}

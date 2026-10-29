@@ -11,9 +11,12 @@ vi.mock("@/lib/api/client", () => ({
       interrupt: vi.fn(),
       update: vi.fn(),
       entries: vi.fn(),
+      // The composer's `/` palette and version chip (FR-14.5/14.6).
+      skills: vi.fn(),
     },
     projects: { get: vi.fn() },
     providers: { list: vi.fn() },
+    skills: { list: vi.fn() },
   },
   eventsUrl: () => "/v1/sessions/s1/events",
 }));
@@ -82,6 +85,8 @@ beforeEach(() => {
     },
   });
   vi.mocked(api.providers.list).mockResolvedValue({ providers: [] });
+  vi.mocked(api.sessions.skills).mockResolvedValue({ skills: [] });
+  vi.mocked(api.skills.list).mockResolvedValue({ skills: [] });
 });
 
 describe("Workbench", () => {

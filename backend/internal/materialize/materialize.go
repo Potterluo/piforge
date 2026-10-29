@@ -12,6 +12,8 @@
 package materialize
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +43,13 @@ type Bundle struct {
 	Dir string
 }
 
+// wantedSkill is one skill selected for mounting: the name the user gave it and
+// the directory its content comes from.
+type wantedSkill struct {
+	name   string
+	source string
+}
+
 // Manifest is the record of what this package last wrote, so a later mount can
 // remove things that are no longer configured instead of leaving stale skills
 // in the agent's context forever.
@@ -64,10 +73,24 @@ func (m Manifest) normalized() Manifest {
 	return m
 }
 
+// MountedSkill is one skill directory this package wrote, with enough identity
+// to record which version the session got (FR-14.5). The directory is resolved,
+// not the path the caller passed: recording a relative path would make the
+// session's own report depend on the process's working directory.
+type MountedSkill struct {
+	// Name is the skill's name as configured, not the directory slug.
+	Name string
+	// Dir is the absolute directory inside the worktree that holds SKILL.md.
+	Dir string
+}
+
 // Result reports the outcome of a mount.
 type Result struct {
 	// Skills are the skill directories now present.
 	Skills []string
+	// Mounted carries the same skills with their names and absolute paths, so
+	// the caller can fingerprint and record them without re-deriving slugs.
+	Mounted []MountedSkill
 	// Skipped lists skills whose content was missing, with the reason.
 	Skipped map[string]string
 	// MCPServers are the server names written to the config.
@@ -98,11 +121,11 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 		return Result{}, fmt.Errorf("materialize: create root: %w", err)
 	}
 
-	result := Result{Skills: []string{}, MCPServers: []string{}, Skipped: map[string]string{}}
+	result := Result{Skills: []string{}, Mounted: []MountedSkill{}, MCPServers: []string{}, Skipped: map[string]string{}}
 	previous := readManifest(root)
 
 	// --- skills ---------------------------------------------------------
-	wanted := map[string]string{} // dir name -> source dir
+	wanted := map[string]wantedSkill{} // dir name -> name and source dir
 	for _, skill := range skills {
 		if skill == nil || !skill.Enabled {
 			continue
@@ -126,7 +149,7 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 			result.Skipped[skill.Name] = "no content bundle on disk"
 			continue
 		}
-		wanted[slug] = source
+		wanted[slug] = wantedSkill{name: skill.Name, source: source}
 	}
 
 	skillsRoot, err := safeJoin(root, SkillsRoot)
@@ -144,13 +167,13 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 	sort.Strings(names)
 
 	for _, slug := range names {
-		source := wanted[slug]
+		entry := wanted[slug]
 		target := filepath.Join(skillsRoot, slug)
 		// Rewrite wholesale so an updated bundle never leaves stale files.
 		if err := os.RemoveAll(target); err != nil {
 			return Result{}, fmt.Errorf("materialize: clear skill %s: %w", slug, err)
 		}
-		if err := copyTree(source, target); err != nil {
+		if err := copyTree(entry.source, target); err != nil {
 			return Result{}, fmt.Errorf("materialize: mount skill %s: %w", slug, err)
 		}
 		if _, err := os.Stat(filepath.Join(target, "SKILL.md")); err != nil {
@@ -160,7 +183,12 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 			result.Skipped[slug] = "bundle has no SKILL.md"
 			continue
 		}
+		absTarget, err := filepath.Abs(target)
+		if err != nil {
+			return Result{}, fmt.Errorf("materialize: resolve mounted skill %s: %w", slug, err)
+		}
 		result.Skills = append(result.Skills, slug)
+		result.Mounted = append(result.Mounted, MountedSkill{Name: entry.name, Dir: absTarget})
 	}
 
 	// Remove skills we mounted last time that are no longer configured.
@@ -331,6 +359,62 @@ func copyTree(source, target string) error {
 // package writes. A missing manifest is not an error: it means nothing was
 // mounted yet.
 func Read(root string) Manifest { return readManifest(root).normalized() }
+
+// Digest is a stable fingerprint of a mounted skill bundle (FR-14.5).
+//
+// It hashes every file's path and bytes, in sorted path order, so the same
+// files always produce the same value regardless of directory-walk order and a
+// changed byte anywhere produces a different one. This is what lets a session
+// record a version even when the skill's author never declared one, and it is
+// the same shape the upload path hashes — an unchanged bundle therefore has the
+// same digest in `skills.content_hash` and in the session's record.
+func Digest(dir string) (string, error) {
+	if strings.TrimSpace(dir) == "" {
+		return "", errors.New("materialize: digest: directory is required")
+	}
+
+	type file struct {
+		rel  string
+		data []byte
+	}
+	files := make([]file, 0, 8)
+
+	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			// A bundle with a symlink is refused at mount time; hashing the
+			// link's target would make the digest depend on the host.
+			return fmt.Errorf("skill bundle contains a symlink: %s", p)
+		}
+		rel, rerr := filepath.Rel(dir, p)
+		if rerr != nil {
+			return rerr
+		}
+		data, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return rerr
+		}
+		files = append(files, file{rel: filepath.ToSlash(rel), data: data})
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("materialize: digest %s: %w", dir, err)
+	}
+
+	sort.Slice(files, func(i, j int) bool { return files[i].rel < files[j].rel })
+	hasher := sha256.New()
+	for _, f := range files {
+		// Same framing as the upload path: path, NUL, content, NUL. Without the
+		// separators "ab"+"c" and "a"+"bc" would hash the same.
+		fmt.Fprintf(hasher, "%s\x00%s\x00", f.rel, f.data)
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
 
 func readManifest(root string) Manifest {
 	var m Manifest

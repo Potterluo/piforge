@@ -209,6 +209,23 @@ CREATE TABLE IF NOT EXISTS skills (
 CREATE UNIQUE INDEX IF NOT EXISTS skills_scope_owner_name_version
     ON skills (scope, COALESCE(owner_id, ''), name, version);
 
+-- What a session was actually handed (PRD FR-14.5). Copied at mount time rather
+-- than joined, so editing or deleting a skill never rewrites a session's history.
+-- written_at is the fact's timestamp; the primary key makes the record
+-- write-once: a later mount of the same skill cannot replace it.
+CREATE TABLE IF NOT EXISTS session_skills (
+    session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    skill_id     TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    version      TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    description  TEXT NOT NULL DEFAULT '',
+    mounted_path TEXT NOT NULL DEFAULT '',
+    recorded_at  TEXT NOT NULL,
+    PRIMARY KEY (session_id, skill_id)
+);
+CREATE INDEX IF NOT EXISTS session_skills_session ON session_skills (session_id, name);
+
 -- ============ snapshots ============
 CREATE TABLE IF NOT EXISTS snapshots (
     id           TEXT PRIMARY KEY,

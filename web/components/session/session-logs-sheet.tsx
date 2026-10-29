@@ -15,6 +15,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
 
+import { SessionSkillsSection } from "./session-skills-section";
+
 /**
  * The agent's stderr tail (PRD FR-5.10).
  *
@@ -83,6 +85,10 @@ export function SessionLogsSheet({
           </Button>
           {loading ? <span className="text-[11px] text-muted-foreground">读取中…</span> : null}
         </div>
+
+        {/* FR-14.5: what this session actually ran with, next to the agent's
+            stderr because both answer "why did it behave like that". */}
+        <SessionSkillsSection sessionId={sessionId} />
 
         {error ? (
           <p className="rounded-md bg-destructive/10 p-2 text-xs text-destructive">{error}</p>

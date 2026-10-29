@@ -485,11 +485,22 @@ func run() error {
 				"session", spec.SessionID, "error", werr.Error())
 		}
 
+		// A sidecar shares its parent's checkout, so it must not be able to write
+		// to it (FR-4.2). The restriction is passed to Pi as a tool denylist for
+		// this run, not merely recorded as an intention.
+		args := pi.ArgsForKind(res.Args, spec.Kind)
+		// Tell Pi exactly where the platform-mounted skills are. Project-local
+		// discovery would need project trust, and the platform does not trust a
+		// user's repository with the right to load extensions just to get skills.
+		// An explicit `--skill` is the narrow grant: these directories, no more.
+		if spec.SkillsDir != "" {
+			if info, serr := os.Stat(spec.SkillsDir); serr == nil && info.IsDir() {
+				args = append(args, "--skill", spec.SkillsDir)
+			}
+		}
+
 		return agentSetup{
-			// A sidecar shares its parent's checkout, so it must not be able to write
-			// to it (FR-4.2). The restriction is passed to Pi as a tool denylist for
-			// this run, not merely recorded as an intention.
-			Args: pi.ArgsForKind(res.Args, spec.Kind),
+			Args: args,
 			// PI_CODING_AGENT_DIR is the authoritative pointer; the *_BASE_URL
 			// variables stay for clients that read them directly.
 			Env: []string{

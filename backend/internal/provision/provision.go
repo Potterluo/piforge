@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -130,6 +131,12 @@ func (s *Service) EnsureWorktree(
 		if err := s.attach(ctx, userID, sess.ID, parentWT.ID); err != nil {
 			return nil, err
 		}
+		// The sidecar shares the parent's checkout, so the skill versions it can
+		// see are the parent's. Copying the records keeps its own report a fact
+		// instead of a join that changes when the parent is re-provisioned.
+		if _, err := s.cfg.Store.CopySessionSkills(ctx, userID, parent.ID, sess.ID); err != nil {
+			return nil, fmt.Errorf("provision: copy parent skill records: %w", err)
+		}
 		return parentWT, nil
 	}
 
@@ -155,7 +162,7 @@ func (s *Service) EnsureWorktree(
 			if err := s.attach(ctx, userID, sess.ID, existing.ID); err != nil {
 				return nil, err
 			}
-			if err := s.mountTooling(ctx, userID, existing.Path); err != nil {
+			if err := s.mountTooling(ctx, userID, sess.ID, existing.Path); err != nil {
 				return nil, err
 			}
 			return existing, nil
@@ -177,7 +184,7 @@ func (s *Service) EnsureWorktree(
 		if err := s.attach(ctx, userID, sess.ID, wt.ID); err != nil {
 			return nil, err
 		}
-		if err := s.mountTooling(ctx, userID, wt.Path); err != nil {
+		if err := s.mountTooling(ctx, userID, sess.ID, wt.Path); err != nil {
 			return nil, err
 		}
 		return wt, nil
@@ -192,6 +199,12 @@ func (s *Service) EnsureWorktree(
 		return nil, err
 	} else if existing != nil {
 		if err := s.attach(ctx, userID, sess.ID, existing.ID); err != nil {
+			return nil, err
+		}
+		// A branch session has its own checkout, so the mount has to happen here
+		// too: sharing the projection with the main checkout would leave the
+		// agent with no skills at all.
+		if err := s.mountTooling(ctx, userID, sess.ID, existing.Path); err != nil {
 			return nil, err
 		}
 		return existing, nil
@@ -216,6 +229,9 @@ func (s *Service) EnsureWorktree(
 		return nil, fmt.Errorf("provision: record worktree: %w", err)
 	}
 	if err := s.attach(ctx, userID, sess.ID, wt.ID); err != nil {
+		return nil, err
+	}
+	if err := s.mountTooling(ctx, userID, sess.ID, wt.Path); err != nil {
 		return nil, err
 	}
 	return wt, nil
@@ -247,13 +263,23 @@ func (s *Service) addWorktree(ctx context.Context, sb *contracts.Sandbox, repoDi
 	return s.cfg.Git.AddWorktree(ctx, repoDir, path, branch, true)
 }
 
-// mountTooling projects the user's skills and MCP servers into a checkout.
+// mountTooling projects the user's skills and MCP servers into a checkout and
+// records which skill versions the session was given (FR-14.5).
 //
 // It runs on every provisioning pass rather than only the first, because the
 // configuration can change while a session lives: adding an MCP server should
 // reach existing sessions the next time they are touched, and the mount is
-// idempotent by construction.
-func (s *Service) mountTooling(ctx context.Context, userID, root string) error {
+// idempotent by construction. The *record*, however, is written once: a later
+// pass cannot rewrite what this session was mounted with.
+func (s *Service) mountTooling(ctx context.Context, userID, sessionID, root string) error {
+	// A provider that creates the worktree itself (the docker sandbox) already
+	// has it on this path; a provider that has not must not be second-guessed by
+	// creating a *host* directory that the sandbox will never see. The old bug
+	// this guards against is the host's git touching a container-owned checkout.
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		slog.Warn("tooling not mounted: the checkout is not on this filesystem", "root", root)
+		return nil
+	}
 	skills, err := s.cfg.Store.ListSkills(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("provision: list skills: %w", err)
@@ -272,6 +298,48 @@ func (s *Service) mountTooling(ctx context.Context, userID, root string) error {
 	}
 	for name, reason := range result.Skipped {
 		slog.Warn("skill not mounted", "skill", name, "reason", reason)
+	}
+
+	if sessionID != "" && len(result.Mounted) > 0 {
+		byName := make(map[string]*contracts.Skill, len(skills))
+		for _, skill := range skills {
+			if skill != nil {
+				byName[skill.Name] = skill
+			}
+		}
+		records := make([]store.NewSessionSkill, 0, len(result.Mounted))
+		for _, mounted := range result.Mounted {
+			skill := byName[mounted.Name]
+			if skill == nil {
+				continue
+			}
+			// The digest is taken from the mounted copy, not from the source
+			// bundle: what the agent reads is the fact worth recording.
+			digest, derr := materialize.Digest(mounted.Dir)
+			if derr != nil {
+				slog.Warn("mounted skill could not be fingerprinted",
+					"skill", mounted.Name, "error", derr)
+				continue
+			}
+			version := skill.Version
+			if version == "" {
+				version = "0.0.0"
+			}
+			records = append(records, store.NewSessionSkill{
+				SkillID:     skill.ID,
+				Name:        skill.Name,
+				Version:     version,
+				ContentHash: digest,
+				Description: skill.Description,
+				// Recorded with forward slashes: the API and the UI show this path,
+				// and a Windows host path with backslashes would render as one
+				// unreadable run once it reaches JSON (the backslash is an escape).
+				MountedPath: filepath.ToSlash(mounted.Dir),
+			})
+		}
+		if _, err := s.cfg.Store.RecordSessionSkills(ctx, userID, sessionID, records); err != nil {
+			return fmt.Errorf("provision: record mounted skills: %w", err)
+		}
 	}
 	return nil
 }

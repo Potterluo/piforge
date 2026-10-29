@@ -123,19 +123,10 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	spec := contracts.SessionSpec{
-		SessionID:     sess.ID,
-		UserID:        user.ID,
-		Kind:          sess.Kind,
-		ProjectID:     sess.ProjectID,
-		ModelRef:      sess.ModelRef,
-		ReadOnlyTools: sess.Kind == contracts.KindSidecar,
-	}
-	// A missing worktree is not fatal for submitting a prompt: the runtime can
-	// still start, and the workspace endpoints report the missing sandbox.
-	if root, err := s.worktreeRoot(r.Context(), user.ID, sess); err == nil {
-		spec.Worktree = root
-	}
+	// One builder for every spec: the composer path and the runtime-start path
+	// must agree about the worktree and the mounted skills, or an agent started
+	// after a model switch loses the skill grant the first one had.
+	spec := s.sessionSpec(user.ID, sess)
 
 	// The composer's model picker writes the session row; a live process keeps
 	// the model it resolved at startup, so the two have to be reconciled before
