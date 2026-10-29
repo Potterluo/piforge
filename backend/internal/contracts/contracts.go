@@ -509,10 +509,27 @@ type RemoteResult struct {
 	Changed bool `json:"changed"`
 }
 
-// AdoptResult says what a branch hand-off carried.
+// AdoptResult says what a branch hand-off carried (PRD FR-2.6).
+//
+// A branch can hand over two different things — commits and uncommitted work —
+// and the result distinguishes them instead of collapsing both into one patch:
+//
+//   - Mode is merge | fast-forward | working-tree, or a "+working-tree" suffix
+//     when commits were merged and loose edits were applied on top.
+//   - Commits lists the branch commits the target now has (oldest first).
+//   - MergeCommit is the commit created on the target for a non-fast-forward
+//     merge; empty for a fast-forward or a working-tree-only hand-off.
+//   - BranchCommit is the commit the branch-side uncommitted work was captured
+//     in, when there was any.
+//   - Commit is the id to look at: the target's new HEAD when commits travelled,
+//     and the branch-side commit for a working-tree-only adopt.
 type AdoptResult struct {
-	Commit string   `json:"commit"`
-	Files  []string `json:"files"`
+	Commit       string   `json:"commit"`
+	Files        []string `json:"files"`
+	Mode         string   `json:"mode"`
+	Commits      []string `json:"commits"`
+	MergeCommit  string   `json:"merge_commit,omitempty"`
+	BranchCommit string   `json:"branch_commit,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

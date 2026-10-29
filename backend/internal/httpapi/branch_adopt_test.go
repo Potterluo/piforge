@@ -39,13 +39,21 @@ func TestAdoptCarriesABranchBackToItsSource(t *testing.T) {
 	}
 	var body struct {
 		Adopted struct {
-			Commit string   `json:"commit"`
-			Files  []string `json:"files"`
+			Commit      string   `json:"commit"`
+			Files       []string `json:"files"`
+			Mode        string   `json:"mode"`
+			Commits     []string `json:"commits"`
+			MergeCommit string   `json:"merge_commit"`
 		} `json:"adopted"`
 	}
 	env.mustJSON(rec, &body)
 	if body.Adopted.Commit == "" {
 		t.Fatal("no commit reported")
+	}
+	// The response has to say *how* the work travelled: a committed branch produces
+	// commits and a merge/ff mode, not a working-tree patch.
+	if body.Adopted.Mode != "merge" || len(body.Adopted.Commits) != 1 || body.Adopted.MergeCommit == "" {
+		t.Fatalf("adopted = %+v, want the merge shape", body.Adopted)
 	}
 
 	// The hand-off really pointed at the branch's worktree and its source.
@@ -76,20 +84,27 @@ func TestAdoptExplainsRefusals(t *testing.T) {
 	}
 	attachSecondWorktree(t, env, user.ID, project.ID, parent.ID, branch.ID)
 
+	// Every refusal is a 409 with an actionable sentence: never a 500, and never a
+	// conflict reported as if the target were untouched when the merge half landed.
 	for _, tc := range []struct {
 		name string
 		err  error
-		want string
+		want []string
 	}{
-		{"nothing to adopt", gitx.ErrNothingToAdopt, "没有可采纳的改动"},
-		{"target dirty", gitx.ErrTargetDirty, "目标 checkout 有未提交的改动"},
+		{"nothing to adopt", gitx.ErrNothingToAdopt, []string{"没有可采纳的改动", "提交", "未提交"}},
+		{"target dirty", gitx.ErrTargetDirty, []string{"目标会话的工作区有未提交的改动", "先", "再重试"}},
+		{"no common history", gitx.ErrNoCommonBase, []string{"没有共同历史"}},
+		{"merge conflict", &gitx.MergeConflictError{Files: []string{"a.txt", "b.txt"}, Stage: "commits"},
+			[]string{"a.txt、b.txt", "目标没有改动", "回滚"}},
+		{"working-tree conflict", &gitx.MergeConflictError{Files: []string{"c.txt"}, Stage: "working-tree"},
+			[]string{"c.txt", "提交已经合并", "没有应用"}},
 	} {
 		env.workspace.err = tc.err
 		rec := env.doAuthed(http.MethodPost, "/v1/sessions/"+branch.ID+"/adopt", nil, c)
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("%s: status = %d", tc.name, rec.Code)
 		}
-		if !containsAll(rec.Body.String(), tc.want) {
+		if !containsAll(rec.Body.String(), tc.want...) {
 			t.Fatalf("%s: body = %s", tc.name, rec.Body.String())
 		}
 	}

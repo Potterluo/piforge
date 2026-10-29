@@ -487,9 +487,23 @@ export interface CompareRow {
   tokens_in: number;
   tokens_out: number;
   cost_usd: number;
+  /** The part of the usage numbers that came from the cloned/forked conversation. */
+  inherited_user_messages: number;
+  inherited_tool_calls: number;
+  inherited_tokens_in: number;
+  inherited_tokens_out: number;
+  inherited_cost_usd: number;
   files_changed: number;
   additions: number;
   deletions: number;
+  /** Committed since the merge base (`git diff <trunk>...<branch>`). */
+  committed_files: number;
+  committed_additions: number;
+  committed_deletions: number;
+  /** Staged, unstaged and untracked in the branch's working tree. */
+  uncommitted_files: number;
+  uncommitted_additions: number;
+  uncommitted_deletions: number;
   /** Present when the change size could not be measured, instead of a fake zero. */
   diff_error?: string;
 }

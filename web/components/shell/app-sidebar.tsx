@@ -137,6 +137,24 @@ function activeIds(pathname: string): { projectId: string | null; sessionId: str
   return { projectId: project?.[1] ?? null, sessionId: null };
 }
 
+/** How a branch's work travelled into the target (FR-2.6). */
+function adoptModeLabel(mode: string): string {
+  switch (mode) {
+    case "merge":
+      return "已合并提交";
+    case "fast-forward":
+      return "已快进提交";
+    case "working-tree":
+      return "已应用到工作区（未提交）";
+    case "merge+working-tree":
+      return "已合并提交，剩余改动在工作区";
+    case "fast-forward+working-tree":
+      return "已快进提交，剩余改动在工作区";
+    default:
+      return "已采纳";
+  }
+}
+
 function StatusDot({ status }: { status: SessionStatus }) {
   const tone = sessionStatusTone(status);
   return (
@@ -893,7 +911,9 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
                   .adopt(session.id)
                   .then((data) =>
                     toast.success("已采纳回主干", {
-                      description: `${data.adopted.commit} · ${data.adopted.files.length} 个文件`,
+                      // Say how the work travelled: commits merge as commits, loose
+                      // files stay uncommitted on the target.
+                      description: `${adoptModeLabel(data.adopted.mode)} · ${data.adopted.commit} · ${data.adopted.files.length} 个文件`,
                     }),
                   )
                   .catch((error: unknown) =>

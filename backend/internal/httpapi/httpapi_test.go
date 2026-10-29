@@ -741,7 +741,13 @@ func (w *fakeWorkspace) Adopt(_ context.Context, sourceRoot, targetRoot, message
 		return contracts.AdoptResult{}, w.err
 	}
 	w.adopted = append(w.adopted, sourceRoot+"->"+targetRoot+"#"+message)
-	return contracts.AdoptResult{Commit: "abc1234", Files: []string{"feature.txt"}}, nil
+	return contracts.AdoptResult{
+		Commit:      "abc1234",
+		Files:       []string{"feature.txt"},
+		Mode:        "merge",
+		Commits:     []string{"abc1234"},
+		MergeCommit: "abc1234",
+	}, nil
 }
 func (f *fakeWorkspace) Push(_ context.Context, root string) (contracts.RemoteResult, error) {
 	f.mu.Lock()

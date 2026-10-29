@@ -98,6 +98,20 @@ export function ComparePage({ projectId, ids }: { projectId: string; ids: string
 }
 
 function CompareColumn({ projectId, row }: { projectId: string; row: CompareRow }) {
+  // The split is the point of the committed/uncommitted fix: a branch can be
+  // "1 个文件" because it committed the file, or because it left it dirty. The
+  // total is the union, and the note says where each half came from.
+  const split =
+    row.committed_files > 0 || row.uncommitted_files > 0
+      ? `已提交 ${row.committed_files} · 未提交 ${row.uncommitted_files}`
+      : undefined;
+  const inheritedTurns =
+    row.inherited_user_messages > 0 ? `含继承 ${row.inherited_user_messages}` : undefined;
+  const inheritedTokens =
+    row.inherited_tokens_in + row.inherited_tokens_out > 0
+      ? `含继承 ${row.inherited_tokens_in.toLocaleString()} / ${row.inherited_tokens_out.toLocaleString()}`
+      : undefined;
+
   return (
     <div
       className="flex flex-col gap-2 rounded-md border border-border p-3"
@@ -117,12 +131,12 @@ function CompareColumn({ projectId, row }: { projectId: string; row: CompareRow 
       </div>
 
       <dl className="grid grid-cols-2 gap-x-2 gap-y-1 text-[11px]">
-        <Metric label="改动" value={`${row.files_changed} 个文件`} hint={row.diff_error} />
+        <Metric label="改动" value={`${row.files_changed} 个文件`} hint={row.diff_error} note={split} />
         <Metric label="增删" value={`+${row.additions} / -${row.deletions}`} />
-        <Metric label="轮次" value={`${row.user_messages}`} />
+        <Metric label="轮次" value={`${row.user_messages}`} note={inheritedTurns} />
         <Metric label="工具调用" value={`${row.tool_calls}`} />
         <Metric label="输入 token" value={row.tokens_in.toLocaleString()} />
-        <Metric label="输出 token" value={row.tokens_out.toLocaleString()} />
+        <Metric label="输出 token" value={row.tokens_out.toLocaleString()} note={inheritedTokens} />
         <Metric label="最近活动" value={formatRelative(row.last_active_at)} />
         <Metric label="模型" value={row.model_ref || "跟随默认"} />
       </dl>
@@ -136,11 +150,22 @@ function CompareColumn({ projectId, row }: { projectId: string; row: CompareRow 
   );
 }
 
-function Metric({ label, value, hint }: { label: string; value: string; hint?: string }) {
+function Metric({
+  label,
+  value,
+  hint,
+  note,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  note?: string;
+}) {
   return (
     <div className="flex min-w-0 flex-col">
       <dt className="truncate text-muted-foreground">{label}</dt>
       <dd className="truncate">{value}</dd>
+      {note ? <dd className="truncate text-[10px] text-muted-foreground">{note}</dd> : null}
       {hint ? <dd className="truncate text-[10px] text-amber-600">{hint}</dd> : null}
     </div>
   );

@@ -216,10 +216,22 @@ export const sessions = {
   remove: (id: string) => request<{ ok: boolean }>(`/v1/sessions/${id}`, { method: "DELETE" }),
   /** Carries a branch's work back to the session it came from (FR-2.6). */
   adopt: (id: string, message?: string) =>
-    request<{ adopted: { commit: string; files: string[] }; branch: string; target: string }>(
-      `/v1/sessions/${id}/adopt`,
-      { method: "POST", body: { message: message ?? "" } },
-    ),
+    request<{
+      adopted: {
+        commit: string;
+        files: string[];
+        /** merge | fast-forward | working-tree, plus a "+working-tree" suffix. */
+        mode: string;
+        commits: string[];
+        merge_commit?: string;
+        branch_commit?: string;
+      };
+      branch: string;
+      target: string;
+    }>(`/v1/sessions/${id}/adopt`, {
+      method: "POST",
+      body: { message: message ?? "" },
+    }),
   /** Copies a session into a parallel attempt with its own checkout (FR-2.7). */
   clone: (id: string) =>
     request<{ session: Session }>(`/v1/sessions/${id}/clone`, { method: "POST" }),
