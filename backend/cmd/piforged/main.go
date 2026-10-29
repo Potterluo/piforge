@@ -81,6 +81,12 @@ type options struct {
 	browserProxy string
 	// agentIdleTTL is how long an agent process may sit unused before it is stopped.
 	agentIdleTTL time.Duration
+	// sandboxKind picks the sandbox provider: "local" (directories) or "docker".
+	sandboxKind    string
+	sandboxImage   string
+	sandboxNetwork string
+	sandboxCPUs    string
+	sandboxMemory  string
 	// webUpstream makes this process serve the UI as well as the API, which is
 	// how a container exposes a single port.
 	webUpstream string
@@ -106,6 +112,16 @@ func run() error {
 		"provider used when a session has no model_ref")
 	flag.DurationVar(&opt.agentIdleTTL, "agent-idle-ttl", envDuration("PIFORGE_AGENT_IDLE_TTL", 30*time.Minute),
 		"stop an agent process after it has been idle this long")
+	flag.StringVar(&opt.sandboxKind, "sandbox", envOr("PIFORGE_SANDBOX", "local"),
+		"sandbox provider: local (directories) or docker (one container per project)")
+	flag.StringVar(&opt.sandboxImage, "sandbox-image", envOr("PIFORGE_SANDBOX_IMAGE", ""),
+		"image for the docker sandbox provider")
+	flag.StringVar(&opt.sandboxNetwork, "sandbox-network", envOr("PIFORGE_SANDBOX_NETWORK", ""),
+		"docker network for sandboxes (empty: bridge)")
+	flag.StringVar(&opt.sandboxCPUs, "sandbox-cpus", envOr("PIFORGE_SANDBOX_CPUS", ""),
+		"CPU limit per sandbox")
+	flag.StringVar(&opt.sandboxMemory, "sandbox-memory", envOr("PIFORGE_SANDBOX_MEMORY", ""),
+		"memory limit per sandbox, e.g. 2g")
 	flag.StringVar(&opt.chrome, "chrome", envOr("PIFORGE_CHROME", ""),
 		"chrome/chromium binary for the browser panel (empty disables it)")
 	flag.BoolVar(&opt.headlessBrowser, "headless-browser", envOr("PIFORGE_HEADLESS_BROWSER", "1") != "0",
@@ -170,12 +186,31 @@ func run() error {
 
 	// 3. Sandboxes. The local provider runs on the host; swapping in the
 	// Firecracker provider is a one-line change here and nowhere else.
-	sb, err := sandbox.NewLocal(sandbox.LocalConfig{
-		Root:          filepath.Join(opt.dataDir, "sandboxes"),
-		InitialBranch: "main",
-	})
-	if err != nil {
-		return fmt.Errorf("init sandbox provider: %w", err)
+	var sb contracts.SandboxProvider
+	if opt.sandboxKind == "docker" {
+		// One container per (user, project): the isolation boundary matches the tenancy
+		// boundary the rest of the product already uses. Lifecycle only for now — the
+		// browser and the terminal still run on the host, and docs/SANDBOX.md says so.
+		dockerProvider, derr := sandbox.NewDocker(sandbox.DockerConfig{
+			Image:    opt.sandboxImage,
+			Network:  opt.sandboxNetwork,
+			CPUs:     opt.sandboxCPUs,
+			Memory:   opt.sandboxMemory,
+			DataRoot: filepath.Join(opt.dataDir, "sandboxes"),
+		})
+		if derr != nil {
+			return fmt.Errorf("init docker sandbox provider: %w", derr)
+		}
+		sb = dockerProvider
+	} else {
+		local, lerr := sandbox.NewLocal(sandbox.LocalConfig{
+			Root:          filepath.Join(opt.dataDir, "sandboxes"),
+			InitialBranch: "main",
+		})
+		if lerr != nil {
+			return fmt.Errorf("init sandbox provider: %w", lerr)
+		}
+		sb = local
 	}
 
 	// 3. Git and the filesystem. fsx takes gitx as its git backend so file
