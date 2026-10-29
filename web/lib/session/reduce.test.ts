@@ -341,6 +341,31 @@ describe("queue, compaction and usage", () => {
     });
   });
 
+  it("draws no marker when the API reported compacted:false", () => {
+    // Pi emits compaction_start/compaction_end even when the session is too
+    // small, and POST /compact then answers {compacted:false}. The end of that
+    // attempt carries no result and writes no entry, so drawing 「上下文已压缩」
+    // contradicted the inline reason, the toast and /entries at once (QA-16 C).
+    const state = reduceAll([
+      event(EV.compaction, { phase: "start", reason: "manual" }, { seq: 1 }),
+      event(EV.compaction, { phase: "end", reason: "manual" }, { seq: 2 }),
+    ]);
+
+    expect(state.markers).toHaveLength(0);
+    expect(selectTimeline(state)).toHaveLength(0);
+  });
+
+  it("draws no marker when a compaction was aborted", () => {
+    const state = reduceAll([
+      event(
+        EV.compaction,
+        { phase: "end", reason: "manual", aborted: true },
+        { seq: 1 },
+      ),
+    ]);
+    expect(state.markers).toHaveLength(0);
+  });
+
   it("tracks live context usage", () => {
     const state = reduceAll([
       event(EV.contextUsage, { context_tokens: 1200, context_window: 8000, context_percent: 15 }, { seq: 1 }),
@@ -377,7 +402,11 @@ describe("selectors", () => {
   it("keeps turn order and injects markers before later turns", () => {
     const events: PfEvent[] = [
       event(EV.msgStarted, { message_id: "u1", role: "user" }, { seq: 1, ts: "2026-01-01T00:00:01.000Z" }),
-      event(EV.compaction, { reason: "manual" }, { seq: 2, ts: "2026-01-01T00:00:03.000Z" }),
+      event(
+        EV.compaction,
+        { phase: "end", reason: "manual", summary: "压缩完成" },
+        { seq: 2, ts: "2026-01-01T00:00:03.000Z" },
+      ),
       event(EV.msgStarted, { message_id: "a1", role: "assistant" }, { seq: 3, ts: "2026-01-01T00:00:04.000Z" }),
     ];
     const state = reduceAll(events);
@@ -397,7 +426,11 @@ describe("selectors", () => {
   it("appends markers that happened after the last turn", () => {
     const events: PfEvent[] = [
       event(EV.msgStarted, { message_id: "a1", role: "assistant" }, { seq: 1, ts: "2026-01-01T00:00:01.000Z" }),
-      event(EV.compaction, { reason: "overflow" }, { seq: 2, ts: "2026-01-01T00:00:05.000Z" }),
+      event(
+        EV.compaction,
+        { phase: "end", reason: "overflow", summary: "溢出后压缩" },
+        { seq: 2, ts: "2026-01-01T00:00:05.000Z" },
+      ),
     ];
     const timeline = selectTimeline(reduceAll(events));
     expect(timeline.map((item) => item.kind)).toEqual(["turn", "marker"]);

@@ -104,6 +104,10 @@ func repoBasename(raw string) string {
 // deriveProjectName fills the name the user did not have to invent. A repository
 // address already carries one; a blank workspace falls back to its date so two
 // empty projects are still distinguishable in a list.
+//
+// The caller passes a UTC clock: the dialog previews this same name from the
+// browser, and a deployment whose TZ is not UTC used to create a name one day
+// off from the one the dialog promised (QA-16 minor).
 func deriveProjectName(repoURL string, now time.Time) string {
 	if name := repoBasename(repoURL); name != "" {
 		return name
@@ -187,7 +191,7 @@ func (s *server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	// with the same basename (`frontend`) used to be a dead end with a 409 the
 	// user could not act on. Allocate the first free suffix instead, and
 	// re-allocate if another create takes it between the check and the insert.
-	base := deriveProjectName(repoURL, time.Now())
+	base := deriveProjectName(repoURL, time.Now().UTC())
 	var project *contracts.Project
 	for attempt := 0; attempt < projectCreateAttempts; attempt++ {
 		candidate, err := freeProjectName(base, func(candidate string) (bool, error) {
@@ -283,6 +287,15 @@ func (s *server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 		DefaultBranch: in.DefaultBranch,
 	})
 	if err != nil {
+		// A duplicate name is the one conflict the user can fix in this dialog.
+		// The store only knows it is a unique violation; naming the conflicting
+		// project is the API's job, and it is the same sentence create answers
+		// with — otherwise rename showed 「操作失败，请稍后重试」 and threw away the
+		// only actionable fact (QA-16, FIX B).
+		if in.Name != nil && errors.Is(err, store.ErrConflict) {
+			s.fail(w, r, projectNameConflict(strings.TrimSpace(*in.Name)))
+			return
+		}
 		s.fail(w, r, err)
 		return
 	}

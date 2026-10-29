@@ -18,6 +18,63 @@ import { USER, apiWrite, ensureProject, login, openSession } from "./helpers";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ARTIFACTS = path.resolve(HERE, "../.artifacts/ux-fix3");
 mkdirSync(ARTIFACTS, { recursive: true });
+const QA16_ARTIFACTS = path.resolve(HERE, "../.artifacts/fix-qa16");
+mkdirSync(QA16_ARTIFACTS, { recursive: true });
+
+/**
+ * Renaming onto a name another project owns must show the server's exact sentence
+ * under the field, the way create does. The regression was not cosmetic: the 409
+ * was real and actionable, and the dialog replaced it with 「操作失败，请稍后重试」
+ * — a message that tells nobody what to change (QA-16, FIX B).
+ */
+test("renaming to an existing name shows the server's conflict message", async ({ page }) => {
+  await login(page, USER);
+  const stamp = Date.now();
+  const taken = `qa16-taken-${stamp}`;
+  const mine = `qa16-rename-${stamp}`;
+  const takenId = await ensureProject(page, taken);
+  const mineId = await ensureProject(page, mine);
+
+  await page.goto(`/p/${mineId}`);
+  await expect(page.getByTestId("project-title")).toHaveText(mine);
+  await page.getByTestId("project-actions").click();
+  await page.getByTestId("project-rename").click();
+
+  const input = page.getByTestId("project-rename-input");
+  await expect(input).toHaveValue(mine);
+  await input.fill(taken);
+  await page.getByTestId("project-rename-submit").click();
+
+  const error = page.getByTestId("project-rename-error");
+  await expect(error).toBeVisible({ timeout: 20_000 });
+  await expect(error).toHaveText(
+    `项目名称「${taken}」已存在（不区分大小写），请换一个名称`,
+  );
+  // The dialog stays open on the field the user has to fix, and the project did
+  // not change.
+  await expect(input).toBeVisible();
+  await expect(input).toHaveAttribute("aria-invalid", "true");
+  await expect(page.getByTestId("project-title")).toHaveText(mine);
+
+  // The generic failure that used to replace the server's sentence is gone.
+  await expect(
+    page.locator("[data-sonner-toast]").filter({ hasText: "操作失败，请稍后重试" }),
+  ).toHaveCount(0);
+  await page.screenshot({ path: path.join(QA16_ARTIFACTS, "B-rename-conflict-inline.png") });
+
+  // Closing without saving leaves the name alone, and the API agrees.
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("project-title")).toHaveText(mine);
+  const stored = (await (await page.request.get(`/v1/projects/${mineId}`)).json()) as {
+    project: { name: string };
+  };
+  expect(stored.project.name).toBe(mine);
+
+  for (const id of [mineId, takenId]) {
+    const gone = await apiWrite(page, "DELETE", `/v1/projects/${id}`);
+    expect(gone.status).toBeLessThan(300);
+  }
+});
 
 test("a project can be renamed from its kebab", async ({ page }) => {
   await login(page, USER);

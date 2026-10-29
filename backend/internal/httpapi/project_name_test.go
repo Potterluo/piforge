@@ -32,7 +32,9 @@ func TestRepoBasename(t *testing.T) {
 }
 
 func TestDeriveProjectName(t *testing.T) {
-	now := time.Date(2026, 10, 29, 21, 0, 0, 0, time.Local)
+	// UTC is what the handler passes: the web dialog previews the same date in
+	// UTC, so a +08:00 browser and a UTC server agree (QA-16 minor).
+	now := time.Date(2026, 10, 29, 21, 0, 0, 0, time.UTC)
 	if got := deriveProjectName("https://github.com/octocat/Spoon-Knife.git", now); got != "Spoon-Knife" {
 		t.Errorf("derived name = %q, want Spoon-Knife", got)
 	}
@@ -174,5 +176,54 @@ func TestDeleteProjectRefusesWhileRunning(t *testing.T) {
 	}
 	if rec := env.doAuthed(http.MethodDelete, "/v1/projects/"+project.ID, nil, c); rec.Code != http.StatusOK {
 		t.Fatalf("delete idle = %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Renaming onto an existing name has to answer with the same sentence create
+// does. The store only reports "unique violation", so the patch path used to
+// leak an English 409 that the UI could only render as 「操作失败，请稍后重试」 —
+// the one message with no information in it (QA-16, FIX B).
+func TestRenameToATakenNameNamesTheConflict(t *testing.T) {
+	env := newTestEnv(t)
+	user := env.mkUser("dev@piforge.local", "pw", contracts.RoleUser)
+	c := env.login("dev@piforge.local", "pw")
+	ctx := context.Background()
+
+	first, err := env.store.CreateProject(ctx, user.ID, store.NewProject{Name: "frontend", DefaultBranch: "main"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := env.store.CreateProject(ctx, user.ID, store.NewProject{Name: "frontend-2", DefaultBranch: "main"}); err != nil {
+		t.Fatalf("create second: %v", err)
+	}
+
+	rec := env.doAuthed(http.MethodPatch, "/v1/projects/"+first.ID, map[string]any{"name": "frontend-2"}, c)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("rename to a taken name = %d %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error *contracts.APIError `json:"error"`
+	}
+	env.mustJSON(rec, &body)
+	if body.Error == nil || !strings.Contains(body.Error.Message, "项目名称「frontend-2」已存在") {
+		t.Fatalf("error = %+v, want the precise conflict sentence the dialog shows", body.Error)
+	}
+
+	// Names are unique per user; the message names the exact duplicate.
+	rec = env.doAuthed(http.MethodPatch, "/v1/projects/"+first.ID, map[string]any{"name": "frontend-2"}, c)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "frontend-2") {
+		t.Fatalf("duplicate rename = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// The project was not renamed, and a free name still works.
+	stored, err := env.store.Project(ctx, user.ID, first.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if stored.Name != "frontend" {
+		t.Fatalf("the refused rename changed the name to %q", stored.Name)
+	}
+	if rec := env.doAuthed(http.MethodPatch, "/v1/projects/"+first.ID, map[string]any{"name": "frontend-3"}, c); rec.Code != http.StatusOK {
+		t.Fatalf("free rename = %d %s", rec.Code, rec.Body.String())
 	}
 }

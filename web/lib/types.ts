@@ -192,7 +192,11 @@ export interface SettledPayload {
 
 /** Payload of context.compaction. */
 export interface CompactionPayload {
+  /** "start" or "end"; the end of a failed attempt has neither a summary nor a kept entry. */
+  phase?: "start" | "end";
   reason: "manual" | "threshold" | "overflow";
+  /** Pi sets this when a compaction was stopped before it produced anything. */
+  aborted?: boolean;
   summary?: string;
   first_kept_entry_id?: string;
   tokens_before?: number;

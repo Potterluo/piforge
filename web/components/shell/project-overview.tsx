@@ -42,7 +42,7 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
-import { Field, FieldLabel } from "@/components/ui/field";
+import { Field, FieldError, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "@/components/ui/item";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -56,7 +56,7 @@ import {
 import { humanizeError } from "@/lib/errors";
 import { useDeleteProject, useProject, useProjectSessions, useUpdateProject } from "@/lib/session/queries";
 import { cn } from "@/lib/utils";
-import type { SessionStatus } from "@/lib/types";
+import { ApiError, type SessionStatus } from "@/lib/types";
 
 function StatusDot({ status }: { status: SessionStatus }) {
   const tone = sessionStatusTone(status);
@@ -95,6 +95,11 @@ export function ProjectOverview({ projectId }: { projectId: string }) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameName, setRenameName] = useState("");
+  // A taken name is a field error, not a mystery toast: the server's 409 names
+  // the conflict precisely ("项目名称「x」已存在…") and the field is where the user
+  // can fix it. The create dialog has done this since FR-2.4; rename showed
+  // 「操作失败，请稍后重试」 instead, which described nothing.
+  const [renameError, setRenameError] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const rename = useUpdateProject(projectId);
   const remove = useDeleteProject();
@@ -103,6 +108,7 @@ export function ProjectOverview({ projectId }: { projectId: string }) {
 
   const startRename = () => {
     setRenameName(data?.name ?? "");
+    setRenameError(null);
     setRenameOpen(true);
   };
 
@@ -133,12 +139,21 @@ export function ProjectOverview({ projectId }: { projectId: string }) {
       {
         onSuccess: () => {
           toast.success("项目已重命名", { description: name });
+          setRenameError(null);
           setRenameOpen(false);
         },
-        onError: (error) =>
+        onError: (error) => {
+          // Keep the dialog open and put the server's own sentence under the
+          // input, exactly like create. A generic toast here was the whole bug:
+          // it threw away "名称已存在" and left rename looking broken.
+          if (error instanceof ApiError && error.code === "conflict") {
+            setRenameError(humanizeError(error));
+            return;
+          }
           toast.error("重命名失败", {
             description: humanizeError(error),
-          }),
+          });
+        },
       },
     );
   };
@@ -333,15 +348,20 @@ export function ProjectOverview({ projectId }: { projectId: string }) {
               <DialogTitle>重命名项目</DialogTitle>
               <DialogDescription>只改变名字，不影响仓库、沙箱和会话。</DialogDescription>
             </DialogHeader>
-            <Field>
+            <Field data-invalid={renameError ? true : undefined}>
               <FieldLabel htmlFor="project-rename-input">名称</FieldLabel>
               <Input
                 id="project-rename-input"
                 data-testid="project-rename-input"
                 value={renameName}
-                onChange={(event) => setRenameName(event.target.value)}
+                aria-invalid={renameError ? true : undefined}
+                onChange={(event) => {
+                  setRenameName(event.target.value);
+                  setRenameError(null);
+                }}
                 autoFocus
               />
+              <FieldError data-testid="project-rename-error">{renameError}</FieldError>
             </Field>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setRenameOpen(false)}>

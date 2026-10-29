@@ -426,6 +426,13 @@ func (s *server) handleCompact(c command) {
 	// is what lets the no-op path (200 + reason, not a 500) be tested end to end.
 	if !s.bigContext {
 		s.mu.Unlock()
+		// The real agent still announces the attempt: compaction_start and a
+		// compaction_end with no result, then the command fails. That pair is
+		// exactly what the transcript used to turn into a 「上下文已压缩」 marker
+		// while the API said compacted:false, so the fake has to emit it for the
+		// end-to-end regression to be about the product and not the fake.
+		s.emit(map[string]any{"type": "compaction_start", "reason": "manual"})
+		s.emit(map[string]any{"type": "compaction_end", "reason": "manual"})
 		s.fail(c, "Nothing to compact (session too small)")
 		return
 	}

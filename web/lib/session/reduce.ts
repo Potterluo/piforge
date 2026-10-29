@@ -644,6 +644,18 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
       if (phase === "start") return state;
 
       const compaction = event.payload as CompactionPayload | undefined;
+      // A failed or no-op compaction still produces a start/end pair: Pi runs the
+      // command, finds nothing worth compacting, and answers `compacted:false`.
+      // The end of that attempt carries no result and nothing was written to the
+      // session's entries, so drawing 「上下文已压缩」 for it contradicts the API,
+      // the inline reason and the entry list all at once (QA-16, FIX C).
+      //
+      // A real compaction always has a summary — first_kept_entry_id alone is
+      // enough too — and that is the only signal the marker needs.
+      if (compaction?.aborted || (!compaction?.summary && !compaction?.first_kept_entry_id)) {
+        return state;
+      }
+
       const marker: ContextMarker = {
         id: `compaction-${event.seq}`,
         seq: event.seq,
