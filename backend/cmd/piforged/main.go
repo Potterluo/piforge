@@ -245,18 +245,17 @@ func run() error {
 	if opt.sandboxKind == "docker" {
 		// One container per (user, project): the isolation boundary matches the tenancy
 		// boundary the rest of the product already uses. The AIO image publishes one
-		// HTTP port; the browser and terminal reach it through that published port.
-		apiPort := 0
-		if opt.sandboxBrowser == "remote" || opt.sandboxTerminal == "remote" || opt.sandboxFiles == "remote" {
-			apiPort = 8080
-		}
+		// HTTP port, and the checkout is provisioned through that API (as the sandbox
+		// user), so the port is published even when every panel feature stays on the
+		// host: without it Ensure could not create /workspace/repo. The browser and
+		// terminal reach the same endpoint when they are remote.
 		dockerProvider, derr := sandbox.NewDocker(sandbox.DockerConfig{
 			Image:    opt.sandboxImage,
 			Network:  opt.sandboxNetwork,
 			CPUs:     opt.sandboxCPUs,
 			Memory:   opt.sandboxMemory,
 			DataRoot: filepath.Join(opt.dataDir, "sandboxes"),
-			APIPort:  apiPort,
+			APIPort:  8080,
 			APIKey:   opt.sandboxAPIKey,
 		})
 		if derr != nil {

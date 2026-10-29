@@ -396,16 +396,15 @@ AIO 镜像是 GB 级（一篇实测记录里 `agent-infra/sandbox` 在本地是 
 2. **沙箱内自己的 HTTP API**（AIO 的 `/v1/shell/exec`）：**这才是我现在真正在用的那条**。
    面板的 git、文件读写、行式终端全部走它（`workspaceremote/exec.go`、`term/remote.go`）。
 
-结论：K8s 迁移**不需要**先把 `Exec` 搬到 `pods/exec`。真正要搬的是 `ensureCheckout`
-（现在用 `docker exec -u gem`）——把它换成 AIO 的 `/v1/shell/exec`，provider 就只剩
-"生命周期 + 端点"。
+结论：K8s 迁移**不需要**先把 `Exec` 搬到 `pods/exec`。`ensureCheckout` 已经从
+`docker exec -u gem` 改走 AIO 的 `/v1/shell/exec`，provider 只剩"生命周期 + 端点"。
 
 **(f) Pod 安全策略与 seccomp：两个会当场炸的细节**
 
 - **PSA `restricted` 与 AIO 镜像冲突**：镜像的 entrypoint 用 `useradd` 创建 `gem` 账号
   （`docs/SANDBOX.md` 的 checkout 一节记录了这个行为），这需要 root 和可写的
-  `/etc/passwd`。`restricted` 要求 `runAsNonRoot: true`，于是 `gem` 不存在，
-  `ensureCheckout` 的 `exec -u gem` 永远等不到账号，`Ensure` 失败。**要么用 `baseline`、
+  `/etc/passwd`。`restricted` 要求 `runAsNonRoot: true`，于是 `gem` 不存在，镜像里的
+  shell 也起不来，`ensureCheckout` 的 `/v1/shell/exec` 不可能成功，`Ensure` 失败。**要么用 `baseline`、
   自己收紧其余项，要么把 `gem` 烘进镜像**（更干净，但那是镜像的事，不是部署的事）。
 - **seccomp**：`SeccompDefault` 在 1.27 GA，但**是否真的套 `RuntimeDefault` 取决于
   kubelet 的 `--seccomp-default`** 和托管集群的默认值（[seccomp 教程](https://kubernetes.io/docs/tutorials/security/seccomp/)）。
@@ -650,8 +649,9 @@ Pod 没有"暂停"。三种候选，逐个排除：
 
 ### 第一条要走的路（按可验收拆，每步能单独合）
 
-1. **把"在沙箱里跑命令"从 `docker exec` 换成 AIO 客户端**：`Docker.ensureCheckout` /
-   `checkoutReady` / `execAsSandboxUser` 改走 `aio.Client.Exec`。
+1. **（已完成）把"在沙箱里跑命令"从 `docker exec` 换成 AIO 客户端**：
+   `Docker.ensureCheckout` 现在把 `planCheckout` 的每一步交给 `aio.Client.Exec`，
+   就绪探针跑在同一个 API 上，`checkoutReady` / `execAsSandboxUser` 已删除。
    验收：`planCheckout` 的用例一条不改；`docker_test.go` 的生命周期测试仍然过；provider
    里不再有 `exec -u gem`。
    为什么先做这条：它同时是 K8s 和 E2B 的前置条件，且不改变任何对外行为。

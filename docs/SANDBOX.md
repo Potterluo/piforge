@@ -108,8 +108,10 @@ fatal: not a git repository (or any parent up to mount point /)
 fatal: Unable to create '/workspace/repo/.git/index.lock': Permission denied
 ```
 
-所以 `Ensure` 在容器 up 之后、返回 READY 之前，用 `docker exec -u gem -w /workspace/repo`
-把 checkout 建出来（`planCheckout`，纯函数，argv 逐条被单元测试钉住）：
+所以 `Ensure` 在容器 up 之后、返回 READY 之前，通过沙箱自己的 HTTP API
+（`POST /v1/shell/exec`，`internal/aio`）把 checkout 建出来。命令由镜像自己的 shell 执行，
+它已经是 `gem`（uid 1000），不需要再指定用户，也不需要控制面有 docker CLI 或本机 daemon
+（`planCheckout` 仍是纯函数，argv 逐条被单元测试钉住）：
 
 | 情况 | 执行 |
 |---|---|
@@ -122,11 +124,14 @@ fatal: Unable to create '/workspace/repo/.git/index.lock': Permission denied
   这条历史是容器里的 git 写的；
 - 绑定挂载的布局没变：控制面仍然往同一个宿主目录写文件，容器看到的是同一批字节，这一步只决定
   `.git` 归谁；
+- 目录是命令本身显式进入的：镜像会忽略请求里的 `cwd`，所以 `aio.Client.Exec` 把
+  `cd -- <dir> &&` 拼进真正发给 API 的命令行；
+- 每条 git 都带 `-c safe.directory=/workspace/repo`：绑定挂载在 Docker Desktop 等宿主上可能
+  显示成别的 owner，git 2.34 会以 "detected dubious ownership" 拒绝它；
+- `docker run -d` 返回时容器的服务还没开始监听，第一次探针会重试到 45s，超时报错点名 checkout，
+  **不退回 `docker exec`**：一个只能在有 daemon 的机器上工作的 checkout 正是这次要修的东西；
 - 失败即失败：`Ensure` 报错会点名步骤（`init` / `clone` / `checkout` / `commit`），不会返回一个
   不能提交的"READY"沙箱；刚 create 出来的容器会被删掉，下一次从干净状态重试；
-- 镜像的 `gem` 账号是 entrypoint 里的 `useradd` 建的，`docker run -d` 刚返回时它可能还不存在
-  （实测约 0.4s）。`docker exec -u gem` 对这一种报错会重试到账号出现为止，**不退回 root**：
-  root 拥有的 `.git` 正是要修的缺陷。
 
 2026-10-29 实测（`piforged -sandbox docker`，容器 `piforge-81042b4b785a90cf`，仓库
 `prj_01M633SAZ9E7C21X519XEB8AEB`）：
@@ -141,6 +146,15 @@ fatal: Unable to create '/workspace/repo/.git/index.lock': Permission denied
 | `POST /git/commit` | `200 {"commit":"78f0be3ebf1cfc84d3d46996074ea36ac838e541"}` |
 | `docker exec -u gem <c> git -C /workspace/repo log -1 --format='%an\|%ae\|%s'` | `PiForge Sandbox\|sandbox@piforge.local\|feat: prove docker commits work` |
 | 同一个 `Ensure` 再来一次（provider 测试） | `HEAD` 不变、提交数不变（`TestDockerProviderInitialisesTheCheckout`） |
+
+checkout 改走 `/v1/shell/exec` 之后再跑同一条链路（容器 `piforge-c90d42c4509bae67`，
+`127.0.0.1:44885`）：`PUT /files?path=x.txt` → `200 {"ok":true}`，`GET /git/status` → 200
+（`x.txt` 未跟踪），`POST /git/stage` → `200 {"ok":true}`，`POST /git/commit` →
+`200 {"commit":"0418758…"}`；`docker exec -u gem <c> git -C /workspace/repo log --oneline -3`
+给出 `0418758 feat: prove the api checkout` / `20f67bc piforge: initial commit`，`.git` 仍归
+`gem`。checkout 的探针、mkdir 和四条 git 都由 AIO 客户端执行，
+`TestDockerProviderCheckoutUsesTheSandboxAPI` 用只有 API 的假客户端钉住了这条路径，
+`TestDockerProviderCheckoutCrossesTheSandboxAPI` 在真镜像上记录实际发出的命令。
 
 `internal/sandbox/docker_test.go` 会真的起一个容器跑完整生命周期；没有 docker 或
 daemon 不可达时**跳过并说明原因**，不会假装通过。

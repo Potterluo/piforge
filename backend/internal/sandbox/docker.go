@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/piforge/piforge/backend/internal/aio"
 	"github.com/piforge/piforge/backend/internal/contracts"
 )
 
@@ -27,31 +28,29 @@ const containerWorkspace = "/workspace"
 // reports <pair dir> as the sandbox's RootDir, so <RootDir>/repo is /workspace/repo.
 const containerRepoDir = containerWorkspace + "/" + repoSubdir
 
-// sandboxUser is the unprivileged account the sandbox image creates for its shell,
-// its file service and its terminal. The checkout has to be created by that same
-// user: files written through the bind mount (by the host, or by root in the
-// container) belong to somebody else in the container's view, and the panel's git
-// then dies with
+// checkoutAPIWait bounds how long the checkout step waits for the container's
+// HTTP API after `docker run -d` returns.
 //
-//	fatal: Unable to create '/workspace/repo/.git/index.lock': Permission denied
-//
-// or, with git run as root, "fatal: detected dubious ownership". Creating the
-// repository as gem is the fix; a chown afterwards would leave the same failure
-// one container restart away.
-const sandboxUser = "gem"
+// Starting a container and starting the services inside it are two different
+// events: the AIO image's entrypoint needs a moment before /v1/shell/exec
+// answers. The checkout is provisioned over that API now, so the first probe is
+// retried until it answers. Measured on 1.11.0: a few hundred milliseconds;
+// 45s leaves room for a loaded host without turning a broken container into a
+// hang.
+const checkoutAPIWait = 45 * time.Second
 
-// sandboxUserWait bounds how long the checkout step waits for the image's
-// entrypoint to create sandboxUser.
-//
-// `docker run -d` returns as soon as the container starts, while the AIO image's
-// gem.sh runs useradd on the way up, so the first `docker exec -u gem` can answer
-// "unable to find user gem: no matching entries in passwd file". Measured on
-// 1.11.0: the account exists ~0.4s after start. Waiting is deliberate — falling
-// back to root here is exactly the ownership bug this step exists to avoid.
-const sandboxUserWait = 20 * time.Second
+// checkoutAPIPoll is how often that API is retried while it comes up.
+const checkoutAPIPoll = 250 * time.Millisecond
 
-// sandboxUserPoll is how often that account is retried.
-const sandboxUserPoll = 100 * time.Millisecond
+// checkoutProbeTimeout bounds one readiness probe. A refused connection fails
+// immediately; this only stops a socket that accepts and then never answers
+// from eating the whole checkoutAPIWait budget in one attempt.
+const checkoutProbeTimeout = 5 * time.Second
+
+// checkoutRequestTimeout bounds one checkout command. `git clone` of a real
+// repository is not instant, and the default client timeout (60s) is too close
+// to a slow clone.
+const checkoutRequestTimeout = 3 * time.Minute
 
 // The identity the container's own git records for the bootstrap commit, and the
 // one the panel's later commits inherit (gitx.identityArgs reads config before
@@ -64,6 +63,13 @@ const (
 	// leave one commit behind so worktrees have a base (PRD §6.3-坑1).
 	initialCommit = "piforge: initial commit"
 )
+
+// checkoutShell runs one command inside the sandbox through its HTTP API. It is
+// the slice of *aio.Client the checkout needs, and a seam so a test can record
+// the commands without a container.
+type checkoutShell interface {
+	Exec(ctx context.Context, command, cwd string) (aio.ShellResult, error)
+}
 
 // Docker is a sandbox provider that runs each (user, project) in its own container.
 //
@@ -83,6 +89,10 @@ const (
 // API (see internal/workspaceremote).
 type Docker struct {
 	cfg DockerConfig
+	// openCheckout builds the shell the checkout runs on. Nil means the
+	// container's published AIO endpoint; tests replace it to fake or record the
+	// commands, which also pins that no checkout command is a `docker exec`.
+	openCheckout func(ctx context.Context, sandboxID string) (checkoutShell, error)
 }
 
 // DockerConfig configures the container provider.
@@ -101,8 +111,10 @@ type DockerConfig struct {
 	// checkout and two projects never share one working tree.
 	DataRoot string
 	// APIPort is the container port that serves the sandbox HTTP API (8080 for AIO
-	// Sandbox). Zero means "do not publish anything", which is what the lifecycle-only
-	// mode wants.
+	// Sandbox). It is how the checkout is provisioned as the sandbox user, so a
+	// provider that will call Ensure must publish it; zero is only useful for
+	// lifecycle-only calls, and Ensure then reports that no API is published
+	// rather than falling back to `docker exec`.
 	APIPort int
 	// APIKey is passed to the container as SANDBOX_API_KEY when non-empty, so every
 	// service in it requires the header.
@@ -333,30 +345,43 @@ func planCheckout(ready bool, repoURL, branch string) []checkoutStep {
 
 // ensureCheckout makes /workspace/repo a git checkout owned by the sandbox user.
 //
-// Every command runs as sandboxUser, so the .git directory and its objects belong
-// to the account that later runs stage and commit through the panel. The host-side
-// provisioning keeps writing into the same bind-mounted directory (the mount layout
-// is untouched); the two see one filesystem, and this only decides who owns the
-// repository metadata.
+// The commands run through the container's AIO API (/v1/shell/exec), not through
+// `docker exec`. The image's shell already runs as the sandbox user (`gem`, uid
+// 1000), so the .git directory and its objects still belong to the account that
+// later stages and commits through the panel. That ownership is the point: a
+// checkout created by the host (or as root) makes the panel's git die with
+// "Unable to create '.git/index.lock': Permission denied", and chowning it
+// afterwards leaves the same failure one container restart away. What changes is
+// the dependency: provisioning needs only the endpoint the provider publishes,
+// not a docker CLI on the control plane and not a daemon on the same host, so it
+// also works when the container was created somewhere else (compose, k8s).
+// planCheckout still decides which commands run, in what order, and what an
+// error names; this is only their execution.
+//
+// There is deliberately no `docker exec` fallback: a deployment that cannot
+// reach the API gets a clear failure instead of a checkout that only works on
+// the machine holding the daemon.
 func (d *Docker) ensureCheckout(ctx context.Context, name, repoURL, branch string) error {
-	ready, err := d.checkoutReady(ctx, name)
+	shell, ready, err := d.waitForCheckoutShell(ctx, name)
 	if err != nil {
-		return fmt.Errorf("sandbox: docker: inspect %s: %w", containerRepoDir, err)
+		return fmt.Errorf("sandbox: docker: checkout %s: %w", containerRepoDir, err)
 	}
 	steps := planCheckout(ready, repoURL, branch)
 	if len(steps) == 0 {
 		return nil
 	}
-	if _, err := d.execAsSandboxUser(ctx, name, containerWorkspace, "mkdir", "-p", containerRepoDir); err != nil {
+	if res, err := shell.Exec(ctx, "mkdir -p -- "+aio.Quote(containerRepoDir), containerWorkspace); err != nil {
 		return fmt.Errorf("sandbox: docker: prepare %s: %w", containerRepoDir, err)
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("sandbox: docker: prepare %s: %s", containerRepoDir, commandFailure(res))
 	}
 	for _, step := range steps {
-		_, err := d.execAsSandboxUser(ctx, name, containerRepoDir, step.argv...)
+		err := runCheckoutStep(ctx, shell, step.argv)
 		if err == nil {
 			continue
 		}
 		if step.fallback != nil {
-			_, ferr := d.execAsSandboxUser(ctx, name, containerRepoDir, step.fallback...)
+			ferr := runCheckoutStep(ctx, shell, step.fallback)
 			if ferr == nil {
 				continue
 			}
@@ -367,61 +392,154 @@ func (d *Docker) ensureCheckout(ctx context.Context, name, repoURL, branch strin
 	return nil
 }
 
-// checkoutReady reports whether /workspace/repo already holds a repository with a
-// commit.
+// waitForCheckoutShell waits until the container's HTTP API answers, then
+// reports whether the checkout is already usable.
 //
-// The probe runs as the sandbox user and always exits 0, so a non-zero status here
-// means "the container could not answer", which is an error — not "there is no
-// repository", which is the normal first-run answer.
-func (d *Docker) checkoutReady(ctx context.Context, name string) (bool, error) {
-	out, err := d.execAsSandboxUser(ctx, name, containerWorkspace, "sh", "-c",
-		`if [ -d `+containerRepoDir+`/.git ] && git -C `+containerRepoDir+
-			` rev-parse --verify --quiet HEAD >/dev/null 2>&1; then echo ready; else echo absent; fi`)
-	if err != nil {
-		return false, err
+// `docker run -d` returns before the image's services are listening, so the
+// first calls can fail with connection refused. Only that startup window is
+// retried, and it is bounded: a container that never serves the API is an error
+// naming the checkout, not an invitation to shell out to Docker. The readiness
+// answer comes from the same probe used by every earlier build, just executed by
+// the sandbox's own shell this time.
+func (d *Docker) waitForCheckoutShell(ctx context.Context, name string) (checkoutShell, bool, error) {
+	if d.cfg.APIPort <= 0 && d.openCheckout == nil {
+		return nil, false, fmt.Errorf("the checkout runs through the sandbox API, but this provider publishes no api port (DockerConfig.APIPort); " +
+			"the docker CLI is not a fallback")
 	}
-	return strings.TrimSpace(out) == "ready", nil
-}
-
-// execAsSandboxUser runs argv inside the container as the sandbox user, in dir.
-//
-// The account is created by the image's own entrypoint (AIO's gem.sh runs useradd),
-// so in the first moments after `docker run -d` it does not exist yet and docker
-// answers "unable to find user gem". That one condition is retried until the
-// account exists; every other failure is returned unchanged. Nothing here ever
-// falls back to root: root-owned checkout metadata is the defect, not a shortcut.
-func (d *Docker) execAsSandboxUser(ctx context.Context, name, dir string, argv ...string) (string, error) {
-	if len(argv) == 0 {
-		return "", fmt.Errorf("sandbox: docker: exec needs a command")
-	}
-	args := []string{"exec", "-u", sandboxUser}
-	if dir != "" {
-		args = append(args, "-w", dir)
-	}
-	args = append(args, name)
-	args = append(args, argv...)
-
-	deadline := time.Now().Add(sandboxUserWait)
+	deadline := time.Now().Add(checkoutAPIWait)
+	var shell checkoutShell
+	var lastErr error
 	for {
-		out, err := d.docker(ctx, args...)
-		if err == nil {
-			return out, nil
+		// Resolve the endpoint once. It cannot move while this container exists
+		// (the port is assigned at creation), and `docker port` is an exec per
+		// call: retrying the probe must not spawn one every 250ms while the
+		// image's services come up.
+		if shell == nil {
+			opened, err := d.shellFor(ctx, name)
+			if err == nil {
+				shell = opened
+			} else {
+				lastErr = err
+			}
 		}
-		if !strings.Contains(err.Error(), "unable to find user") {
-			return "", err
+		if shell != nil {
+			ready, probeErr := probeCheckoutReady(ctx, shell)
+			if probeErr == nil {
+				return shell, ready, nil
+			}
+			lastErr = probeErr
 		}
 		if time.Now().After(deadline) {
-			return "", fmt.Errorf("sandbox: docker: this image never created the %q user the sandbox shell runs as, "+
-				"so the checkout cannot be owned by it: %w", sandboxUser, err)
+			return nil, false, fmt.Errorf("the sandbox API did not answer within %s: %w", checkoutAPIWait, lastErr)
 		}
-		timer := time.NewTimer(sandboxUserPoll)
+		timer := time.NewTimer(checkoutAPIPoll)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return "", ctx.Err()
+			return nil, false, ctx.Err()
 		case <-timer.C:
 		}
 	}
+}
+
+// probeCheckoutReady reports whether /workspace/repo already holds a repository
+// with a commit.
+//
+// The probe always exits 0 when the shell answers, so an error here means "the
+// container could not answer" — the startup condition waitForCheckoutShell
+// retries — not "there is no repository", which is the normal first-run answer.
+func probeCheckoutReady(ctx context.Context, shell checkoutShell) (bool, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, checkoutProbeTimeout)
+	defer cancel()
+	script := `if [ -d ` + containerRepoDir + `/.git ] && git -C ` + containerRepoDir +
+		` rev-parse --verify --quiet HEAD >/dev/null 2>&1; then echo ready; else echo absent; fi`
+	res, err := shell.Exec(probeCtx, script, containerWorkspace)
+	if err != nil {
+		return false, err
+	}
+	if res.ExitCode != 0 {
+		return false, fmt.Errorf("exit %d: %s", res.ExitCode, strings.TrimSpace(res.Output))
+	}
+	return strings.TrimSpace(res.Output) == "ready", nil
+}
+
+// runCheckoutStep runs one planned argv in the checkout directory.
+func runCheckoutStep(ctx context.Context, shell checkoutShell, argv []string) error {
+	command, err := checkoutCommand(argv)
+	if err != nil {
+		return err
+	}
+	// The image accepts cwd but ignores it, so aio.Client.Exec prefixes the
+	// command with `cd -- <dir> &&`; the directory is in the command line that
+	// actually crosses the API, not only in JSON the image may drop.
+	res, err := shell.Exec(ctx, command, containerRepoDir)
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return errors.New(commandFailure(res))
+	}
+	return nil
+}
+
+// checkoutCommand turns one planned argv into the shell string the sandbox API
+// runs, as the sandbox user.
+//
+// git gets `-c safe.directory=<containerRepoDir>`. A checkout arrived through a
+// bind mount, and on a Docker Desktop/drvfs host the mount can show it as owned
+// by somebody other than the shell account; git 2.34 then refuses the repository
+// with "detected dubious ownership", which turned every panel git view into a
+// 500. The path is exactly the workspace this sandbox owns, so trusting it is
+// narrower than `safe.directory=*`.
+func checkoutCommand(argv []string) (string, error) {
+	if len(argv) == 0 {
+		return "", fmt.Errorf("sandbox: docker: checkout step has no command")
+	}
+	quoted := make([]string, 0, len(argv)+3)
+	quoted = append(quoted, aio.Quote(argv[0]), aio.Quote("-c"), aio.Quote("safe.directory="+containerRepoDir))
+	for _, arg := range argv[1:] {
+		quoted = append(quoted, aio.Quote(arg))
+	}
+	return strings.Join(quoted, " "), nil
+}
+
+// commandFailure renders a non-zero sandbox shell result for an error.
+func commandFailure(res aio.ShellResult) string {
+	if out := strings.TrimSpace(res.Output); out != "" {
+		return fmt.Sprintf("exit %d: %s", res.ExitCode, out)
+	}
+	return fmt.Sprintf("exit %d", res.ExitCode)
+}
+
+// shellFor returns the command runner for a container: the injected one in a
+// test, otherwise a client pointed at the container's published AIO endpoint.
+func (d *Docker) shellFor(ctx context.Context, sandboxID string) (checkoutShell, error) {
+	if d.openCheckout != nil {
+		return d.openCheckout(ctx, sandboxID)
+	}
+	return d.sandboxShell(ctx, sandboxID)
+}
+
+// sandboxShell builds the AIO client for one container.
+//
+// It asks Endpoint() rather than remembering a port: the published port is
+// assigned at creation and survives a control-plane restart, and a number kept
+// in memory would be wrong after either.
+func (d *Docker) sandboxShell(ctx context.Context, sandboxID string) (checkoutShell, error) {
+	endpoint, err := d.Endpoint(ctx, sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox %s has no reachable API endpoint: %w", sandboxID, err)
+	}
+	client, err := aio.New(aio.Config{
+		BaseURL: endpoint,
+		APIKey:  d.cfg.APIKey,
+		Root:    containerWorkspace,
+		Timeout: checkoutRequestTimeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("sandbox %s: %w", sandboxID, err)
+	}
+	return client, nil
 }
 
 // Get reports the current state of the container.

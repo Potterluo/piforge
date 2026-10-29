@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/piforge/piforge/backend/internal/aio"
 	"github.com/piforge/piforge/backend/internal/contracts"
 )
 
@@ -35,6 +37,9 @@ func newDockerForTest(t *testing.T) *Docker {
 		DataRoot: t.TempDir(),
 		CPUs:     "1",
 		Memory:   "256m",
+		// Ensure provisions the checkout through the container's HTTP API, so the
+		// port has to be published even though these tests never use the browser.
+		APIPort: 8080,
 	})
 	if err != nil {
 		t.Fatalf("NewDocker: %v", err)
@@ -531,7 +536,187 @@ func TestDockerProviderRecreatesAContainerWithTheWrongMount(t *testing.T) {
 	}
 }
 
+// recordedShellCall is one command the checkout asked the sandbox to run.
+type recordedShellCall struct {
+	command string
+	cwd     string
+}
+
+// fakeCheckoutShell records commands and answers the readiness probe. It has no
+// Docker connection at all, which is how the test below proves the checkout path
+// needs neither the CLI nor a local daemon.
+type fakeCheckoutShell struct {
+	mu    sync.Mutex
+	calls []recordedShellCall
+	ready bool
+}
+
+func (f *fakeCheckoutShell) Exec(ctx context.Context, command, cwd string) (aio.ShellResult, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, recordedShellCall{command: command, cwd: cwd})
+	f.mu.Unlock()
+	if strings.Contains(command, "echo ready") {
+		if f.ready {
+			return aio.ShellResult{Output: "ready"}, nil
+		}
+		return aio.ShellResult{Output: "absent"}, nil
+	}
+	return aio.ShellResult{ExitCode: 0}, nil
+}
+
+// recordingCheckoutShell wraps the real AIO-backed shell so a Docker test can
+// inspect the commands that actually crossed /v1/shell/exec.
+type recordingCheckoutShell struct {
+	inner checkoutShell
+	mu    *sync.Mutex
+	calls *[]recordedShellCall
+}
+
+func (r recordingCheckoutShell) Exec(ctx context.Context, command, cwd string) (aio.ShellResult, error) {
+	r.mu.Lock()
+	*r.calls = append(*r.calls, recordedShellCall{command: command, cwd: cwd})
+	r.mu.Unlock()
+	return r.inner.Exec(ctx, command, cwd)
+}
+
+// The checkout is provisioned by commands sent to the sandbox's HTTP API, as the
+// image's own shell user. This test has no container and no Docker daemon: the
+// only thing the provider can reach is the injected shell, so a `docker exec`
+// anywhere on the path would fail here.
+func TestDockerProviderCheckoutUsesTheSandboxAPI(t *testing.T) {
+	const name = "piforge-apishell"
+
+	newProvider := func(t *testing.T, shell *fakeCheckoutShell) *Docker {
+		t.Helper()
+		provider := &Docker{cfg: DockerConfig{DataRoot: filepath.Join(t.TempDir(), "sandboxes")}}
+		provider.openCheckout = func(ctx context.Context, sandboxID string) (checkoutShell, error) {
+			if sandboxID != name {
+				t.Fatalf("checkout asked for sandbox %q, want %q", sandboxID, name)
+			}
+			return shell, nil
+		}
+		return provider
+	}
+
+	t.Run("a fresh checkout", func(t *testing.T) {
+		shell := &fakeCheckoutShell{}
+		provider := newProvider(t, shell)
+		if err := provider.ensureCheckout(context.Background(), name, "", "main"); err != nil {
+			t.Fatalf("ensureCheckout: %v", err)
+		}
+		calls := shell.calls
+		if len(calls) != 6 {
+			t.Fatalf("ran %d commands, want the probe, mkdir and four checkout steps: %+v", len(calls), calls)
+		}
+		if !strings.Contains(calls[0].command, "rev-parse --verify --quiet HEAD") || calls[0].cwd != containerWorkspace {
+			t.Fatalf("first command = %+v, want the readiness probe in /workspace", calls[0])
+		}
+		if calls[1].command != "mkdir -p -- '/workspace/repo'" || calls[1].cwd != containerWorkspace {
+			t.Fatalf("prepare command = %+v, want mkdir of the checkout", calls[1])
+		}
+		want := []string{
+			`'git' '-c' 'safe.directory=/workspace/repo' 'init' '-q' '-b' 'main'`,
+			`'git' '-c' 'safe.directory=/workspace/repo' 'config' 'user.name' 'PiForge Sandbox'`,
+			`'git' '-c' 'safe.directory=/workspace/repo' 'config' 'user.email' 'sandbox@piforge.local'`,
+			`'git' '-c' 'safe.directory=/workspace/repo' 'commit' '--allow-empty' '--no-gpg-sign' '-q' '-m' 'piforge: initial commit'`,
+		}
+		for i, command := range want {
+			call := calls[i+2]
+			if call.command != command {
+				t.Fatalf("command %d = %q\nwant %q", i+2, call.command, command)
+			}
+			// The image ignores cwd, so the directory has to be explicit on every
+			// command that touches the checkout.
+			if call.cwd != containerRepoDir {
+				t.Fatalf("command %d runs in %q, want %q", i+2, call.cwd, containerRepoDir)
+			}
+		}
+		for _, call := range calls {
+			lower := strings.ToLower(call.command)
+			if strings.Contains(lower, "exit") {
+				t.Fatalf("checkout sent an explicit exit, which wedges the image's shell: %q", call.command)
+			}
+			if strings.Contains(lower, "docker") {
+				t.Fatalf("checkout command mentions docker: %q", call.command)
+			}
+		}
+	})
+
+	t.Run("a repository with a commit is left alone", func(t *testing.T) {
+		shell := &fakeCheckoutShell{ready: true}
+		provider := newProvider(t, shell)
+		if err := provider.ensureCheckout(context.Background(), name, "", "main"); err != nil {
+			t.Fatalf("ensureCheckout: %v", err)
+		}
+		if len(shell.calls) != 1 || !strings.Contains(shell.calls[0].command, "echo ready") {
+			t.Fatalf("a ready checkout ran %+v, want only the readiness probe", shell.calls)
+		}
+	})
+
+	t.Run("no published API port fails instead of shelling out", func(t *testing.T) {
+		provider := &Docker{cfg: DockerConfig{DataRoot: filepath.Join(t.TempDir(), "sandboxes")}}
+		err := provider.ensureCheckout(context.Background(), name, "", "main")
+		if err == nil || !strings.Contains(err.Error(), "no api port") {
+			t.Fatalf("ensureCheckout = %v, want the missing API port named", err)
+		}
+		if !strings.Contains(err.Error(), "not a fallback") {
+			t.Fatalf("error = %v, want it to say the docker CLI is not a fallback", err)
+		}
+	})
+}
+
+// The real image proves the same path end to end: the commands go through
+// /v1/shell/exec (the recorded wrapper is the actual AIO client), and the
+// checkout they leave behind is owned by the account that shell runs as.
+func TestDockerProviderCheckoutCrossesTheSandboxAPI(t *testing.T) {
+	provider := newDockerForTest(t)
+	requireCheckoutImage(t, provider)
+	ctx := context.Background()
+	const userID, projectID = "usr_api", "prj_api"
+
+	var mu sync.Mutex
+	var calls []recordedShellCall
+	provider.openCheckout = func(ctx context.Context, sandboxID string) (checkoutShell, error) {
+		inner, err := provider.sandboxShell(ctx, sandboxID)
+		if err != nil {
+			return nil, err
+		}
+		return recordingCheckoutShell{inner: inner, mu: &mu, calls: &calls}, nil
+	}
+
+	created, err := provider.Ensure(ctx, userID, projectID, "", "main")
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	t.Cleanup(func() { _ = provider.Destroy(context.Background(), created.ID) })
+
+	mu.Lock()
+	recorded := append([]recordedShellCall(nil), calls...)
+	mu.Unlock()
+	if len(recorded) < 6 {
+		t.Fatalf("checkout crossed the API %d times, want the probe, mkdir and steps: %+v", len(recorded), recorded)
+	}
+	if !strings.Contains(recorded[0].command, "echo ready") {
+		t.Fatalf("first API call = %+v, want the readiness probe", recorded[0])
+	}
+	gitCalls := 0
+	for _, call := range recorded {
+		if strings.Contains(call.command, "safe.directory="+containerRepoDir) {
+			gitCalls++
+		}
+	}
+	if gitCalls < 4 {
+		t.Fatalf("only %d of %d API commands carried safe.directory: %+v", gitCalls, len(recorded), recorded)
+	}
+	t.Logf("checkout ran %d commands through /v1/shell/exec", len(recorded))
+
+	if owner, err := execAsGem(t, created.ID, "stat", "-c", "%U", "/workspace/repo/.git"); err != nil || owner != "gem" {
+		t.Fatalf(".git is owned by %q (%v), want gem", owner, err)
+	}
+}
+
 // The checkout argv is the contract: each case is pinned exactly, because these
+
 // commands run inside the container as `gem` and a silently different list would
 // bring back either a missing repository (no commit to branch worktrees from) or a
 // root-owned one the sandbox user cannot stage in.
@@ -624,8 +809,9 @@ func TestPlanCheckout(t *testing.T) {
 // is not writable by the sandbox user, and `git stage` then fails with
 // "Unable to create '.git/index.lock': Permission denied".
 //
-// Every assertion below runs as `gem`, through the same `docker exec -u gem` the
-// panel's git effectively uses.
+// Every assertion below runs as `gem` — through `docker exec` for inspection
+// only; the checkout itself was provisioned over the sandbox API (see
+// TestDockerProviderCheckoutUsesTheSandboxAPI).
 func TestDockerProviderInitialisesTheCheckout(t *testing.T) {
 	provider := newDockerForTest(t)
 	requireCheckoutImage(t, provider)
