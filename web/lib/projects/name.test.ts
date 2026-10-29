@@ -32,8 +32,17 @@ describe("deriveProjectName", () => {
   });
 
   it("dates a blank workspace so two empty projects are distinguishable", () => {
-    expect(deriveProjectName("", new Date(2026, 9, 29))).toBe("空白工作区 · 10-29");
-    expect(deriveProjectName("", new Date(2026, 0, 3))).toBe("空白工作区 · 01-03");
+    expect(deriveProjectName("", new Date(Date.UTC(2026, 9, 29, 20, 42)))).toBe(
+      "空白工作区 · 10-29",
+    );
+    expect(deriveProjectName("", new Date(Date.UTC(2026, 0, 3, 9, 0)))).toBe("空白工作区 · 01-03");
+  });
+
+  it("uses the server's UTC date, not the browser's local one", () => {
+    // 2026-01-03T23:30Z is 2026-01-04 in +08:00. The preview must still say
+    // 01-03, because that is the name the API derives and stores (QA-16 minor).
+    const lateUtc = new Date(Date.UTC(2026, 0, 3, 23, 30));
+    expect(deriveProjectName("", lateUtc)).toBe("空白工作区 · 01-03");
   });
 });
 

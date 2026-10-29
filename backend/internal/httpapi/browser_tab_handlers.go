@@ -63,6 +63,11 @@ func (s *server) handleListBrowserTabs(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleOpenBrowserTab opens a page.
+//
+// An empty url means 新标签页: a real blank page, not a copy of whatever the panel
+// was showing. The URL policy is checked here, before a launch, so a bad address
+// is a 400 that names the rule instead of a slow 422 from a browser that was
+// started only to refuse it.
 func (s *server) handleOpenBrowserTab(w http.ResponseWriter, r *http.Request) {
 	user := auth.MustUser(r.Context())
 	if s.featureDenied(w, r, user.ID, string(store.FeatureBrowser)) {
@@ -73,6 +78,14 @@ func (s *server) handleOpenBrowserTab(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decodeOptionalJSON(r, &in); err != nil {
 		s.fail(w, r, err)
+		return
+	}
+	if err := browser.ValidateNavigationURL(in.URL); err != nil {
+		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "%s", err.Error()))
+		return
+	}
+	if s.deps.Browser == nil || !s.deps.Browser.Available() {
+		s.fail(w, r, apiErr(contracts.ErrSandboxUnavail, "no chrome binary is configured on this server"))
 		return
 	}
 	bn, _, err := s.browserFor(r)

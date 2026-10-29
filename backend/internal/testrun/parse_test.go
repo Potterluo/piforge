@@ -291,6 +291,37 @@ func TestParseVitest(t *testing.T) {
 	}
 }
 
+// vitest's detailed block points at the failing line as " ❯ tests/x.test.js:12:5".
+// The space after ❯ used to defeat the pattern, so the panel offered a file with
+// no line and the click landed at the top of the file (QA-16 minor).
+func TestParseVitestKeepsTheFailingLine(t *testing.T) {
+	output := " ❯ tests/math.test.js (1 test | 1 failed) 12ms\n" +
+		"   × adds two numbers 4ms\n" +
+		"     → expected 2 to be 3 // Object.is equality\n\n" +
+		"⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n" +
+		" FAIL  tests/math.test.js > adds two numbers\n" +
+		"AssertionError: expected 2 to be 3 // Object.is equality\n\n" +
+		" ❯ tests/math.test.js:12:5\n" +
+		"     10| \n" +
+		"     11| test('adds two numbers', () => {\n" +
+		"     12|   expect(add(1, 2)).toBe(3)\n" +
+		"       |                    ^\n\n" +
+		" Test Files  1 failed (1)\n" +
+		"      Tests  1 failed (1)\n" +
+		"   Duration  210ms\n"
+	got := Parse(string(RunnerVitest), output)
+	if len(got.Failures) != 1 {
+		t.Fatalf("failures = %d, want 1: %+v", len(got.Failures), got.Failures)
+	}
+	f := got.Failures[0]
+	if f.File != "tests/math.test.js" {
+		t.Fatalf("file = %q", f.File)
+	}
+	if f.Line != 12 {
+		t.Fatalf("line = %d, want 12 from the ❯ file:line:col pointer", f.Line)
+	}
+}
+
 func TestParseCargo(t *testing.T) {
 	output := "running 3 tests\n" +
 		"test calc::tests::passes ... ok\n" +

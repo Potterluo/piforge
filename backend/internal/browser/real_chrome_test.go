@@ -100,8 +100,10 @@ func TestRealChromeScreencastAndInput(t *testing.T) {
 	if err := session.Navigate(ctx, "data:text/html,<h1>piforge</h1>"); err == nil {
 		t.Fatal("Navigate accepted a data: URL")
 	}
-	if err := session.Navigate(ctx, "about:blank"); err == nil {
-		t.Fatal("Navigate accepted about:blank")
+	// about:blank is allowed: the panel's 新标签页 opens one and the URL bar has
+	// to be able to point at it (QA-16, FIX D).
+	if err := session.Navigate(ctx, "about:blank"); err != nil {
+		t.Fatalf("Navigate refused about:blank: %v", err)
 	}
 
 	frames := make(chan []byte, 4)

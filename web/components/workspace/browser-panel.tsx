@@ -49,6 +49,23 @@ function wsBase(): string {
   return `${proto}//${window.location.host}`;
 }
 
+/**
+ * The address to send for what was typed.
+ *
+ * `about:blank` must survive verbatim: prefixing it produced
+ * `https://about:blank`, which is a hostname that does not exist, so the blank
+ * page the capture refusal is about was unreachable from the UI (QA-16, FIX D).
+ * http(s) is already complete; anything else is treated as a hostname.
+ */
+export function navigationTarget(raw: string): string {
+  const target = raw.trim();
+  if (!target) return "";
+  const lower = target.toLowerCase();
+  if (lower === "about:blank") return "about:blank";
+  if (lower.startsWith("http://") || lower.startsWith("https://")) return target;
+  return `https://${target}`;
+}
+
 export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelProps) {
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const socketRef = React.useRef<WebSocket | null>(null);
@@ -273,17 +290,29 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
   };
 
   const navigate = () => {
-    const target = url.trim();
+    const target = navigationTarget(url);
     if (!target) return;
+    // Show what was actually sent: a bare host becoming https://… is a fact the
+    // address bar should not hide.
+    setUrl(target);
     // The old page stays on the canvas until the new one paints; clearing the
     // flag here is what keeps the loading hint honest about which page it is for.
     setPainted(false);
-    send({ type: "navigate", url: target.startsWith("http") ? target : `https://${target}` });
+    send({ type: "navigate", url: target });
     // A page that refuses to load sends no frame at all, and an overlay that
     // never clears is indistinguishable from a broken panel. Give up explaining
     // after this long and let the browser's own error page show through.
     window.setTimeout(() => setPainted(true), 15_000);
   };
+
+  // Switching pages must not leave the previous page's pixels on the canvas: a
+  // blank tab paints no frame at all, so without this the panel showed the old
+  // site while claiming to be on about:blank.
+  const clearSurface = React.useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
+  }, []);
 
   // Capture writes the page into the checkout rather than into the browser: that is
   // what makes it useful to the agent (PRD FR-11.8).
@@ -306,9 +335,18 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
 
   const queryClient = useQueryClient();
   const openTabMutation = useMutation({
-    mutationFn: () => api.sessions.openTab(sessionId, url),
+    // 新标签页 is a blank page, not a copy of the current one: sending `url` here
+    // made the plus button open the same site twice and left the blank-page
+    // capture refusal unreachable from the UI.
+    mutationFn: () => api.sessions.openTab(sessionId),
     onSuccess: (data) => {
       setTabId(data.tab.id);
+      // The blank page is what is in front now; the address bar must say so. A
+      // blank page is also already "painted": there is nothing to wait for, and
+      // a spinner over it would suggest a load that is never going to happen.
+      setUrl(data.tab.url || "about:blank");
+      setPainted(true);
+      clearSurface();
       void queryClient.invalidateQueries({ queryKey: ["browser-tabs", sessionId] });
     },
     onError: (error) =>
@@ -362,7 +400,14 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
               data-tab={tab.id}
               data-active={tab.id === tabId ? "1" : "0"}
               title={tab.url}
-              onClick={() => setTabId(tab.id)}
+              onClick={() => {
+                setTabId(tab.id);
+                // The address bar follows the page you switched to; otherwise it
+                // keeps showing the previous tab's URL next to a different page.
+                setUrl(tab.url || "about:blank");
+                // Drop the previous page's pixels before the new page paints.
+                clearSurface();
+              }}
               className={cn(
                 "max-w-40 truncate rounded-t px-2 py-1 text-[11px]",
                 tab.id === tabId

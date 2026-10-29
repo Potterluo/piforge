@@ -30,12 +30,17 @@ export function repoBasename(repoUrl: string): string {
 /**
  * The name to create a project with: the repository's basename, or a dated
  * blank workspace. `now` is injectable so the date in a test is not today.
+ *
+ * The date is formatted in UTC because the server derives the same name from its
+ * own clock and stores it. Formatting it locally promised 「空白工作区 · 10-30」
+ * in a +08:00 browser while the API created 「空白工作区 · 10-29」 — a preview that
+ * described a name the server was not going to use (QA-16 minor).
  */
 export function deriveProjectName(repoUrl: string, now = new Date()): string {
   const basename = repoBasename(repoUrl);
   if (basename) return basename;
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
+  const month = String(now.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(now.getUTCDate()).padStart(2, "0");
   return `空白工作区 · ${month}-${day}`;
 }
 

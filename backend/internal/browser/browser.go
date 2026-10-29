@@ -720,17 +720,35 @@ type Meta struct {
 	Timestamp       float64 `json:"timestamp"`
 }
 
+// ValidateNavigationURL is the one place the browser's navigation policy lives.
+//
+// http(s) is the normal case. `about:blank` is allowed because a blank tab is a
+// real page the UI offers (新标签页) and the previous refusal made the URL bar
+// unable to reach it at all. Everything else — file:, javascript:, data: — stays
+// refused: the agent must not be able to make the browser read local files or
+// execute script through a URL scheme.
+//
+// An empty string means "the blank page", matching OpenTab's default.
+func ValidateNavigationURL(url string) error {
+	url = strings.TrimSpace(url)
+	if url == "" || strings.EqualFold(url, "about:blank") {
+		return nil
+	}
+	lower := strings.ToLower(url)
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+		return fmt.Errorf("browser: %q is not an http(s) url", url)
+	}
+	return nil
+}
+
 // Navigate points the browser at a URL.
 func (s *Session) Navigate(ctx context.Context, url string) error {
 	url = strings.TrimSpace(url)
 	if url == "" {
 		return errors.New("browser: url is required")
 	}
-	lower := strings.ToLower(url)
-	// The agent must not be able to make the browser read local files or hit
-	// internal metadata endpoints through a javascript: / file: URL.
-	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
-		return fmt.Errorf("browser: %q is not an http(s) url", url)
+	if err := ValidateNavigationURL(url); err != nil {
+		return err
 	}
 	return s.client.call(ctx, "Page.navigate", map[string]any{"url": url}, nil)
 }

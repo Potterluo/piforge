@@ -19,7 +19,9 @@ const ARTIFACTS = path.resolve(HERE, "../.artifacts/ux-fix2");
 mkdirSync(ARTIFACTS, { recursive: true });
 
 function monthDay(date: Date): string {
-  return `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  // UTC, like the dialog and the API: a +08:00 browser used to preview tomorrow's
+  // date while the server created yesterday's (QA-16 minor).
+  return `${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
 }
 
 /**

@@ -370,9 +370,30 @@ func TestNavigateOnlyAllowsHTTP(t *testing.T) {
 	if !fake.has("Page.navigate") {
 		t.Fatal("Page.navigate was never sent")
 	}
+	// A blank page is a target the UI offers (新标签页), so navigation must accept
+	// it; the URL bar used to rewrite it to https://about:blank, which reaches no
+	// page at all (QA-16, FIX D).
+	if err := session.Navigate(ctx, "about:blank"); err != nil {
+		t.Fatalf("Navigate(about:blank) was refused: %v", err)
+	}
 	for _, bad := range []string{"file:///etc/passwd", "javascript:alert(1)", "data:text/html,x", ""} {
 		if err := session.Navigate(ctx, bad); err == nil {
 			t.Fatalf("Navigate(%q) was allowed", bad)
+		}
+	}
+}
+
+// The policy function every navigation path shares, including the HTTP handler
+// that opens a tab before Chrome exists.
+func TestValidateNavigationURL(t *testing.T) {
+	for _, allowed := range []string{"about:blank", "ABOUT:BLANK", "http://127.0.0.1:3100/login", "https://example.com", ""} {
+		if err := ValidateNavigationURL(allowed); err != nil {
+			t.Fatalf("ValidateNavigationURL(%q) = %v", allowed, err)
+		}
+	}
+	for _, refused := range []string{"file:///etc/passwd", "javascript:alert(1)", "data:text/html,x", "chrome://settings"} {
+		if err := ValidateNavigationURL(refused); err == nil {
+			t.Fatalf("ValidateNavigationURL(%q) was allowed", refused)
 		}
 	}
 }

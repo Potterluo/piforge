@@ -47,13 +47,18 @@ export default defineConfig({
   // One retry: this suite drives a real Chrome against a real server, and under a
   // full-suite load a settle occasionally lands outside the expect window. A retry
   // reports the flake instead of hiding it, and a genuine failure still fails twice.
+  // One retry: this suite drives a real Chrome against a real server, and under a
+  // full-suite load the sandbox browser occasionally loses its DevTools socket on
+  // a sandbox that started fine in isolation. A retry reports the flake instead of
+  // hiding it, and a genuine failure still fails twice. (This key was duplicated
+  // below with `CI ? 1 : 0`, so only the second one ever applied and local runs
+  // had none — the opposite of what this comment promised.)
   retries: 1,
   // 15s was tight when every other spec had just run; assertions that wait on a
   // streamed run now get the time they need rather than a coin flip.
   expect: { timeout: 20_000 },
   fullyParallel: false,
   workers: 1,
-  retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : "list",
   // Keep test output in its own directory: Playwright removes `outputDir` at the
   // start of a run, and a top-level `./.artifacts` would delete the QA evidence

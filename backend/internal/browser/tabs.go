@@ -152,10 +152,10 @@ func (s *Session) OpenTab(ctx context.Context, url string) (TabInfo, error) {
 	if url == "" {
 		url = "about:blank"
 	}
-	// Same rule as Navigate: no file:// or javascript: from the API.
-	lower := strings.ToLower(url)
-	if url != "about:blank" && !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
-		return TabInfo{}, fmt.Errorf("browser: %q is not an http(s) url", url)
+	// Same rule as Navigate: no file:// or javascript: from the API, and a blank
+	// page is an explicitly supported target.
+	if err := ValidateNavigationURL(url); err != nil {
+		return TabInfo{}, err
 	}
 	var created struct {
 		TargetID string `json:"targetId"`
@@ -239,9 +239,8 @@ func (s *Session) TabNavigate(ctx context.Context, tabID, url string) error {
 	if url == "" {
 		return errors.New("browser: url is required")
 	}
-	lower := strings.ToLower(url)
-	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
-		return fmt.Errorf("browser: %q is not an http(s) url", url)
+	if err := ValidateNavigationURL(url); err != nil {
+		return err
 	}
 	return s.tabScoped(ctx, tabID, func(client *cdp) error {
 		if err := client.call(ctx, "Page.navigate", map[string]any{"url": url}, nil); err != nil {

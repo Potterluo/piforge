@@ -1,6 +1,13 @@
 import { expect, test } from "@playwright/test";
+import { mkdirSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { USER, apiWrite, login, openNewSession, sendPrompt } from "./helpers";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const ARTIFACTS = path.resolve(HERE, "../.artifacts/fix-qa16");
+mkdirSync(ARTIFACTS, { recursive: true });
 
 /**
  * FR-11.7: more than one page per sandbox. The tabs must be independent — opening a
@@ -86,4 +93,57 @@ test("the browser panel keeps several pages", async ({ page }) => {
     `/v1/sessions/${sessionId}/browser/tabs/${list.tabs[0].id}`,
   );
   expect(refused.status).toBe(400);
+});
+
+/**
+ * 新标签页 is a blank page, not a copy of the page in front (QA-16, FIX D).
+ *
+ * The old plus button opened a tab pointed at the URL bar's value, so pressing it
+ * twice produced the same site twice. `about:blank` was unreachable as well: the
+ * address bar prefixed `https://` onto it, and the server refused every non-http
+ * URL — which also made the blank-capture refusal from FR-11.8 impossible to hit
+ * from the UI.
+ */
+test("新标签页 opens a blank page and capturing it is refused", async ({ page }) => {
+  await login(page, USER);
+  const sessionId = await openNewSession(page);
+  await sendPrompt(page, "hello");
+
+  await page.getByTestId("panel-tab-browser").click();
+  const panel = page.getByTestId("browser-panel");
+  await expect(panel).toHaveAttribute("data-browser-status", "open", { timeout: 40_000 });
+
+  // Start from a real page: a copy of the current URL is what used to happen.
+  await page.getByTestId("browser-url").fill("http://127.0.0.1:3100/login");
+  await page.getByTestId("browser-url").press("Enter");
+  await expect(panel).toHaveAttribute("data-browser-painted", "1", { timeout: 30_000 });
+
+  const before = await page.getByTestId("browser-tab").count();
+  await page.getByTestId("browser-tab-add").click();
+
+  // The address bar says what the new page is, and the server agrees: a blank
+  // target, not the login page again.
+  await expect(page.getByTestId("browser-url")).toHaveValue("about:blank", { timeout: 20_000 });
+  await expect
+    .poll(async () => {
+      const response = await page.request.get(`/v1/sessions/${sessionId}/browser/tabs`);
+      if (response.status() !== 200) return -1;
+      const body = (await response.json()) as { tabs?: { id: string; url: string }[] };
+      return (body.tabs ?? []).filter((tab) => tab.url === "about:blank").length;
+    }, { timeout: 30_000 })
+    .toBe(1);
+  await expect(page.getByTestId("browser-tab")).toHaveCount(before + 1, { timeout: 20_000 });
+  await page.screenshot({ path: path.join(ARTIFACTS, "D-new-tab-about-blank.png") });
+
+  // And the blank page is capturable enough to be refused, with the message that
+  // names the reason rather than "浏览器正忙".
+  await expect(panel).toHaveAttribute("data-browser-status", "open", { timeout: 40_000 });
+  const shoot = page.getByTestId("browser-screenshot");
+  await expect(shoot).toBeEnabled({ timeout: 30_000 });
+  await shoot.click();
+  const toast = page.locator("[data-sonner-toast]").filter({ hasText: "截图失败" });
+  await expect(toast).toBeVisible({ timeout: 30_000 });
+  await expect(toast).toContainText("空白");
+  await expect(toast).toContainText("about:blank");
+  await page.screenshot({ path: path.join(ARTIFACTS, "D-blank-capture-refused.png") });
 });

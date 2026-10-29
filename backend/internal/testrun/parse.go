@@ -437,7 +437,11 @@ var (
 	jsJestHead   = regexp.MustCompile(`(?m)^\s*●\s+(.+?)\s*$`)
 	jsVitestFail = regexp.MustCompile(`(?m)^\s*[×✗]\s+(.+?)\s*$`)
 	jsAt         = regexp.MustCompile(`\(([^()]+):(\d+):(\d+)\)`)
-	jsFileLine   = regexp.MustCompile(`(?:❯|at\s+)(?:file://)?([\w./\\-]+\.(?:js|jsx|ts|tsx|mjs|cjs)):(\d+):(\d+)`)
+	// vitest prints its code-frame pointer as " ❯ tests/x.test.js:12:5" — with a
+	// space after the marker. Requiring the path to touch ❯ meant that form never
+	// matched, so the panel showed a file with no line and the click jumped to the
+	// top of the file (QA-16 minor).
+	jsFileLine   = regexp.MustCompile(`(?:❯\s*|at\s+)(?:file://)?([\w./\\-]+\.(?:js|jsx|ts|tsx|mjs|cjs)):(\d+):(\d+)`)
 	jsArrow      = regexp.MustCompile(`^\s*→\s*(.*)$`)
 	jsVitestFile = regexp.MustCompile(`(?:[❯✓]|^FAIL)\s+(?:file://)?([\w./\\-]+\.(?:js|jsx|ts|tsx|mjs|cjs))`)
 	jsVitestMs   = regexp.MustCompile(`\s+\d+(?:\.\d+)?\s*m?s$`)
