@@ -86,7 +86,7 @@
 | FR-8.4 分支操作（新建/切换/删除/合并/rebase） | PARTIAL | 只有 `POST …/git/branch`（`handleGitBranch`）与 `…/git/checkout`（`handleGitCheckout`）；`gitx/ops.go` 无 Merge/Rebase，无删除分支，无冲突指引 |
 | FR-8.5 历史列表 + 点击看该 commit diff | PARTIAL | `git-history.tsx` 列表 + `git-commit-sheet.tsx`，但 sheet 注释明说「无法按 commit 取 diff」，只展示元数据；`api.git.diff` 不接受 commit 参数 |
 | FR-8.6 Git 树（SVG DAG + ref 标签 + merge 线 + 点击详情） | PARTIAL | `git-graph.tsx`（`assignLanes`、28/18/4.5、ref 最多 3 个 + `+N`）+ `lib/git/lanes.test.ts` + `04-git.spec.ts`（`git-graph-row` 渲染）；无 HoverCard，点击只有元数据 sheet（无 diff） |
-| FR-8.7 与分支会话联动（图上高亮「谁跑的分支」） | MISSING | `git-graph.tsx`/`git-data.tsx` 没有 worktree/session ↔ 分支的映射，也没有高亮 |
+| FR-8.7 push / pull | DONE | `gitx/remote.go`（fast-forward only，分叉返回 `ErrDiverged` 并说明）；`GET /git/remote` 报 ahead/behind；`git-panel.tsx` 的推送/拉取按钮；`remote_test.go`（真实 bare 仓库）、`git_remote_test.go`、`34-push-pull.spec.ts` |
 | FR-8.8 远端操作 fetch/pull/push + 开 PR | MISSING | 无 `…/git/push`、`pull`、`fetch`、无 `…/pr` 路由；`gitx/ops.go` 无 push/fetch；"pull" 全仓库零命中 |
 | FR-9.1 跟随终端数据源（tool_execution_* partialResult） | DONE | `pi/normalize.go` `ToolProgressPayload` → `EvToolProgress`（tool_execution_update）、`PtyStreamPayload` → `EvPtyStream`；`normalize_test.go`、`web/lib/session/reduce.ts` 消费 `tool.progress` |
 | FR-9.2 跟随终端 | DONE | `FollowTerminal` 已挂到面板条「跟随」；`collectBashOutput` 从时间线的 bash 工具块取内容；`33-follow-terminal.spec.ts` |
