@@ -130,7 +130,7 @@
 | FR-14.1 两层作用域（admin 共享 + 用户私有，同名覆盖） | PARTIAL | `store/resources.go` `ListSkills` 的 `WHERE (scope='user' AND owner_id=?) OR scope='admin'` 只做「并集」，无同名 shadow/去重；且没有 admin 写共享 skill 的入口 |
 | FR-14.2 挂载到 worktree（只读 bind mount + content_hash） | PARTIAL | `materialize.Mount` 把 bundle **复制**到 `.pi/skills/<slug>`（不是 `.agents/skills/`、不是只读 bind mount）；`content_hash` 只存 DB，目录里没有；`materialize_test.go` |
 | FR-14.3 Skill 中心（浏览/搜索/详情/SKILL.md 渲染） | PARTIAL | `web/app/settings/skills/page.tsx`：列表/新建/删除/上传（含 `SKILL.md` 文本域）；无搜索框、无详情页（不渲染文件树与脚本预览） |
-| FR-14.4 一键安装（Git URL / zip）+ 可禁用 | PARTIAL | `POST /v1/skills` + `PUT /v1/skills/{id}/bundle`（提交文件数组）+ `skill_bundle_handlers_test.go`；**无 Git URL / zip 导入**，UI 无启停开关（列存在） |
+| FR-14.4 一键安装（Git URL / zip）+ 可禁用 | PARTIAL（Git 有，zip 没有） | `POST /v1/skills/import`：克隆仓库、按含 SKILL.md 的目录逐个导入、只取该目录下文件、4 MB 上限；`skill_import_test.go`、`38-skill-import.spec.ts`；UI 在设置页「从仓库导入」。**zip 上传未实现** |
 | FR-14.5 会话记录所用 skill@version | MISSING | `skills.version` 只在自己表里，`sessions.config` 未记录任何 skill 版本；无相关代码 |
 | FR-14.6 `/skill:name` + `/` 命令面板 | MISSING | `command-palette.tsx` 只有会话/项目命令；无 `/` 斜杠命令、无 skill 调用 |
 | FR-14.7 内置开箱可用 skill | MISSING | `store/seed.go` 只种 admin 用户与共享 provider（`EnsureAdminSeed`），无内置 skill |

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Plus, Sparkles, Trash } from "lucide-react";
+import { Download, Plus, Sparkles, Trash } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -37,6 +37,25 @@ export default function SkillsPage() {
   const queryClient = useQueryClient();
   const skills = useQuery({ queryKey: qk.skills, queryFn: () => api.skills.list() });
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const importMutation = useMutation({
+    mutationFn: (input: { url: string; ref: string }) => api.skills.import(input.url, input.ref),
+    onSuccess: (result) => {
+      const names = result.skills.filter((skill) => !skill.skipped).map((skill) => skill.name);
+      if (names.length === 0) {
+        toast.error("没有导入任何 Skill", { description: "仓库里没有可用的 SKILL.md" });
+      } else {
+        toast.success(`导入了 ${names.length} 个 Skill`, { description: names.join("、") });
+        setImportOpen(false);
+        setImportUrl("");
+        setImportRef("");
+        void queryClient.invalidateQueries({ queryKey: ["skills"] });
+      }
+    },
+    onError: (error: Error) => toast.error("导入失败", { description: error.message }),
+  });
+  const [importUrl, setImportUrl] = useState("");
+  const [importRef, setImportRef] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [body, setBody] = useState("");
@@ -108,6 +127,10 @@ export default function SkillsPage() {
         <Button size="sm" className="ml-auto" data-testid="skill-add" onClick={() => setDialogOpen(true)}>
           <Plus />
           新建 Skill
+        </Button>
+        <Button variant="outline" size="sm" data-testid="skill-import" onClick={() => setImportOpen(true)}>
+          <Download />
+          从仓库导入
         </Button>
       </header>
 
@@ -272,6 +295,66 @@ export default function SkillsPage() {
               </Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={importOpen} onOpenChange={setImportOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>从仓库导入 Skill</DialogTitle>
+            <DialogDescription>
+              克隆一个仓库，把其中每个含 <span className="font-mono">SKILL.md</span> 的目录各存成一个 Skill。
+              只取该目录下的文件，仓库里的其它内容不会进入沙箱。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="skill-import-url" className="text-xs font-medium">
+                仓库地址
+              </label>
+              <Input
+                id="skill-import-url"
+                data-testid="skill-import-url"
+                value={importUrl}
+                onChange={(event) => setImportUrl(event.target.value)}
+                placeholder="https://github.com/org/skills"
+                className="font-mono text-xs"
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="skill-import-ref" className="text-xs font-medium">
+                分支或标签（可选）
+              </label>
+              <Input
+                id="skill-import-ref"
+                data-testid="skill-import-ref"
+                value={importRef}
+                onChange={(event) => setImportRef(event.target.value)}
+                placeholder="main"
+                className="font-mono text-xs"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setImportOpen(false)}
+              disabled={importMutation.isPending}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              data-testid="skill-import-submit"
+              disabled={importMutation.isPending || importUrl.trim() === ""}
+              onClick={() =>
+                importMutation.mutate({ url: importUrl.trim(), ref: importRef.trim() })
+              }
+            >
+              {importMutation.isPending ? "导入中…" : "导入"}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

@@ -398,6 +398,11 @@ export interface SkillFile {
 }
 
 export const skills = {
+  import: (url: string, ref: string) =>
+    request<{
+      source: string;
+      skills: { name: string; path: string; files: number; skipped: boolean; reason?: string }[];
+    }>("/v1/skills/import", { method: "POST", body: { url, ref } }),
   list: () => request<{ skills: Skill[] }>("/v1/skills"),
   create: (input: { name: string; description: string; body?: string }) =>
     request<{ skill: Skill }>("/v1/skills", { method: "POST", body: input }),

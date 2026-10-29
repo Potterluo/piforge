@@ -244,6 +244,7 @@ func (s *server) routes() http.Handler {
 	// Skills (PRD §5.8).
 	mux.Handle("GET /v1/skills", s.authed(s.handleListSkills))
 	mux.Handle("POST /v1/skills", s.mutatingBearer(s.handleCreateSkill))
+	mux.Handle("POST /v1/skills/import", s.mutatingBearer(s.handleImportSkills))
 	mux.Handle("DELETE /v1/skills/{id}", s.mutatingBearer(s.handleDeleteSkill))
 	mux.Handle("PUT /v1/skills/{id}/bundle", s.mutatingBearer(s.handleUploadSkillBundle))
 	// The bundle is content, not configuration: reading it back lets the editor
