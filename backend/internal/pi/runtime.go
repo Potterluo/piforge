@@ -73,12 +73,19 @@ var _ contracts.AgentRuntime = (*Runtime)(nil)
 
 // session is one live agent process plus the per-session translation state.
 type session struct {
-	id     string
-	spec   contracts.SessionSpec
-	file   string
-	bridge *Bridge
-	norm   *Normalizer
-	sub    *Subscription
+	id   string
+	spec contracts.SessionSpec
+	// startedRef is the platform model reference ("volc/deepseek-v4-flash") this
+	// process was launched with. Pi's models.json and the gateway token are
+	// minted per spawn from it, so a different reference cannot be applied to a
+	// live process — it needs a new one. s.spec.ModelRef is *not* a substitute:
+	// ensure() refreshes the spec from the session row even while the process
+	// that was spawned with the old model is still running.
+	startedRef string
+	file       string
+	bridge     *Bridge
+	norm       *Normalizer
+	sub        *Subscription
 	// lastUsed is when this process was last asked to do anything, in unix nanos.
 	// The idle reaper reads it; nothing else should.
 	lastUsed atomic.Int64
@@ -187,6 +194,14 @@ func (r *Runtime) spawn(ctx context.Context, spec contracts.SessionSpec) (*sessi
 		cfg.Dir = spec.Worktree
 	}
 	cfg.SessionFile = file
+	// Pi takes its working directory from the session file, not from the process:
+	// a forked or cloned session inherits the *parent's* cwd in that header and
+	// would run its tools in the parent's checkout. Aligning it here covers every
+	// way a process is created — a fresh start, a fork, a clone, a crash restart
+	// and a resume after the control plane or the sandbox restarted.
+	if _, err := alignSessionCwd(file, spec.Worktree); err != nil {
+		return nil, fmt.Errorf("pi: session %s: %w", spec.SessionID, err)
+	}
 	if r.cfg.ArgsFor != nil {
 		if extra := r.cfg.ArgsFor(spec); len(extra) > 0 {
 			cfg.Args = append(append([]string{}, cfg.Args...), extra...)
@@ -229,12 +244,13 @@ func (r *Runtime) spawn(ctx context.Context, spec contracts.SessionSpec) (*sessi
 		}
 	}
 	s := &session{
-		id:     spec.SessionID,
-		spec:   spec,
-		file:   file,
-		bridge: bridge,
-		norm:   norm,
-		sub:    sub,
+		id:         spec.SessionID,
+		spec:       spec,
+		startedRef: spec.ModelRef,
+		file:       file,
+		bridge:     bridge,
+		norm:       norm,
+		sub:        sub,
 	}
 	if spec.ModelRef != "" {
 		modelRef := spec.ModelRef
@@ -453,8 +469,24 @@ func (r *Runtime) applyModel(ctx context.Context, s *session, ref string) error 
 	if err != nil {
 		return fmt.Errorf("pi: set model %q: %w", ref, err)
 	}
-	s.spec.ModelRef = ref
 	return nil
+}
+
+// StartedModelRef reports the platform model reference ("volc/deepseek-v4-flash")
+// the session's live process was launched with, and whether it is still alive.
+//
+// The control plane needs it to notice that the session row names a different
+// model than the process: the picker writes the row, and a live process keeps the
+// model it spawned with, so the next turn must either restart it or fail instead
+// of silently answering from the old one.
+func (r *Runtime) StartedModelRef(sessionID string) (string, bool) {
+	r.mu.Lock()
+	s, ok := r.sessions[sessionID]
+	r.mu.Unlock()
+	if !ok || s == nil || !s.bridge.Alive() {
+		return "", false
+	}
+	return s.startedRef, true
 }
 
 // Interrupt clears the queue and aborts the running turn.
@@ -468,6 +500,11 @@ func (r *Runtime) Interrupt(ctx context.Context, sessionID string) (contracts.In
 	if err != nil {
 		return contracts.InterruptResult{}, err
 	}
+	// Tell the normalizer a stop is coming *before* Pi unwinds: the abort reaches
+	// Pi as an error on the assistant message, and without this flag the
+	// transcript kept a 模型调用失败 box — with advice about the provider's key —
+	// for a run the user simply stopped.
+	s.norm.NoteInterrupt()
 	var result contracts.InterruptResult
 	if resp, clearErr := s.bridge.Call(ctx, "clear_queue", nil); clearErr == nil {
 		var data struct {
