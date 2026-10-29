@@ -46,6 +46,11 @@ export interface FilePreviewProps {
   sessionId: string;
   path: string | null;
   /**
+   * A line to reveal when the file opens. A test failure's file:line sets it;
+   * it is cleared by the next plain tree click.
+   */
+  line?: number | null;
+  /**
    * Called after a save lands. The tree refetches on it: creating a file from
    * this editor and leaving the tree one row behind is the same lie as a stale
    * tree, just smaller.
@@ -76,7 +81,7 @@ function toImageSrc(content: FileContent): string | null {
  * `preview/`, which is what keeps this file readable at ~200 lines and makes
  * adding pdf/pdfjs later a one-line change.
  */
-export function FilePreview({ sessionId, path, onSaved, onClose }: FilePreviewProps) {
+export function FilePreview({ sessionId, path, line, onSaved, onClose }: FilePreviewProps) {
   // Editing is a plain textarea on purpose: this is a coding tool whose real editor
   // is the agent, and a half-wired Monaco would be a bigger promise than it keeps.
   // What matters is that a one-line fix does not require leaving the page (FR-7.1).
@@ -283,7 +288,12 @@ export function FilePreview({ sessionId, path, onSaved, onClose }: FilePreviewPr
           kind !== "table" &&
           kind !== "pdf" ? (
             <div className="min-h-0 min-w-0 flex-1 overflow-auto">
-              <CodePreview path={content.path} content={content.body} language={language} />
+              <CodePreview
+                path={content.path}
+                content={content.body}
+                language={language}
+                line={line ?? null}
+              />
             </div>
           ) : null}
 

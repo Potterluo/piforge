@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Columns2,
   FileDiffIcon,
+  FlaskConicalIcon,
   GitBranchIcon,
   GlobeIcon,
   PanelRightCloseIcon,
@@ -30,6 +31,8 @@ import { FileTree } from "@/components/workspace/file-tree";
 import { GitHistoryPanel } from "@/components/workspace/git-history";
 import { GitChangesPanel } from "@/components/workspace/git-panel";
 import { BrowserPanel } from "@/components/workspace/browser-panel";
+import { TestResultsPanel, TestTabBadge, type TestResultsPanelProps } from "@/components/workspace/test-panel";
+import { useTestRuns } from "@/lib/session/use-test-runs";
 import { asPTYInput, buildCdCommand } from "@/lib/terminal/cd";
 import { FollowTerminal, TerminalPane, type TerminalPaneHandle } from "@/components/workspace/terminal-pane";
 
@@ -78,6 +81,9 @@ export function WorkspacePanels({
   // screenshot today): the file tree refetches and the preview can open the result.
   const [revision, setRevision] = React.useState(0);
   const [openPath, setOpenPath] = React.useState<string | null>(null);
+  // The line a test failure pointed at. Kept next to the path so the editor can
+  // scroll to it and highlight it; opening a file from the tree clears it.
+  const [openLine, setOpenLine] = React.useState<number | null>(null);
   // A full-width toggle: the panel strip can be folded away entirely, leaving a rail of
   // icons. Closing one tab at a time was the only option before, which is not the same
   // thing as getting the panel out of the way. Controlled by the workbench when it can
@@ -94,12 +100,34 @@ export function WorkspacePanels({
   const [revealTarget, setRevealTarget] = React.useState<string | null>(null);
 
   const handleOpenFile = React.useCallback((path: string) => {
+    setOpenLine(null);
     setOpenPath(path);
     setTab("files");
   }, []);
 
+  // A test failure's file:line is a link into the editor, not a new tab: the
+  // 文件 pane already owns the editor, and this only tells it where to look.
+  const handleOpenLocation = React.useCallback((path: string, line: number) => {
+    setOpenPath(path);
+    setOpenLine(line > 0 ? line : null);
+    setTab("files");
+  }, []);
+
+  // One poll for both the tab badge and the panel, so the two can never show
+  // different runs and an unopened tab still tells the truth.
+  const testRuns = useTestRuns(sessionId);
+  const testPanelProps = {
+    sessionId,
+    runs: testRuns.runs,
+    loading: testRuns.loading,
+    error: testRuns.error,
+    onRetry: testRuns.reload,
+    onOpenLocation: handleOpenLocation,
+  };
+
   const handleCaptured = React.useCallback((path: string) => {
     setRevision((value) => value + 1);
+    setOpenLine(null);
     setOpenPath(path);
     setTab("files");
   }, []);
@@ -227,6 +255,10 @@ export function WorkspacePanels({
             <TabsTrigger value="changes" data-testid="panel-tab-changes" className="text-xs">
               变更
             </TabsTrigger>
+            <TabsTrigger value="tests" data-testid="panel-tab-tests" className="text-xs">
+              测试
+              <TestTabBadge runs={testRuns.runs} />
+            </TabsTrigger>
             <TabsTrigger value="git" data-testid="panel-tab-git" className="text-xs">
               Git
             </TabsTrigger>
@@ -283,6 +315,7 @@ export function WorkspacePanels({
                   key={sessionId}
                   sessionId={sessionId}
                   path={openPath}
+                  line={openLine}
                   onSaved={handleSaved}
                   onClose={() => setOpenPath(null)}
                 />
@@ -292,6 +325,10 @@ export function WorkspacePanels({
 
           <TabsContent value="changes" keepMounted={split !== "changes"} className="min-h-0 min-w-0 flex-1">
             <GitChangesPanel />
+          </TabsContent>
+
+          <TabsContent value="tests" keepMounted={split !== "tests"} className="min-h-0 min-w-0 flex-1">
+            <TestResultsPanel {...testPanelProps} />
           </TabsContent>
 
           <TabsContent value="git" keepMounted={split !== "git"} className="min-h-0 min-w-0 flex-1">
@@ -371,6 +408,7 @@ export function WorkspacePanels({
                 coverageRef={coverageRef}
                 revealTarget={revealTarget}
                 sessionKey={`split-${sessionId}`}
+                testPanelProps={testPanelProps}
               />
             </div>
           </div>
@@ -384,6 +422,7 @@ export function WorkspacePanels({
 /** The panels the second pane can host. Files is excluded: it is itself a split. */
 const PANELS = [
   { id: "changes", label: "变更", icon: <FileDiffIcon className="size-3.5" /> },
+  { id: "tests", label: "测试", icon: <FlaskConicalIcon className="size-3.5" /> },
   { id: "git", label: "Git", icon: <GitBranchIcon className="size-3.5" /> },
   { id: "browser", label: "浏览器", icon: <GlobeIcon className="size-3.5" /> },
   { id: "terminal", label: "终端", icon: <TerminalIcon className="size-3.5" /> },
@@ -412,6 +451,7 @@ function SharedPanel({
   coverageRef,
   revealTarget,
   sessionKey,
+  testPanelProps,
 }: {
   id: string;
   sessionId: string;
@@ -424,10 +464,14 @@ function SharedPanel({
   coverageRef: React.RefObject<TerminalPaneHandle | null>;
   revealTarget: string | null;
   sessionKey: string;
+  /** The same polled runs the primary pane shows, so the second pane cannot disagree. */
+  testPanelProps: TestResultsPanelProps;
 }) {
   switch (id) {
     case "changes":
       return <GitChangesPanel />;
+    case "tests":
+      return <TestResultsPanel {...testPanelProps} />;
     case "git":
       return <GitHistoryPanel />;
     case "browser":

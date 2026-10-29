@@ -75,6 +75,11 @@ vi.mock("@/lib/api/client", () => {
       mode: vi.fn(async () => ({ mode: "observe" })),
       setMode: vi.fn(async () => ({ mode: "takeover" })),
     },
+    sessions: {
+      // The test-results panel polls this on mount; an empty list is the state
+      // this smoke test is about (panels render, tabs switch).
+      testRuns: vi.fn(async () => ({ runs: [], count: 0 })),
+    },
   };
   return { api, default: api };
 });

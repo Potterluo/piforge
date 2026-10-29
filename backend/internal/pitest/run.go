@@ -24,6 +24,13 @@ const HoldMarker = "[[hold-run]]"
 // through, fast enough that a run that is never stopped still settles.
 const HoldChunkDelay = 250 * time.Millisecond
 
+// FailMarker in a prompt asks the peer to emit the failing variant of its
+// scripted test output for that one run, while the process keeps its normal
+// script. The test-results panel (FR-12.5) has to show a failing run and then a
+// passing one in the same session, and a single fake process would otherwise
+// always produce the same outcome.
+const FailMarker = "[[failing-tests]]"
+
 func (s *server) handlePrompt(c command) {
 	s.mu.Lock()
 	if s.running {
@@ -106,6 +113,10 @@ func (s *server) run(text string, delay time.Duration, cancel chan struct{}) {
 		s.runCancel = nil
 		s.mu.Unlock()
 	}()
+
+	// The fail marker overrides the process-wide script for this one run. It is
+	// a test affordance, like HoldMarker, and never changes the wire protocol.
+	fail := s.script == ScriptError || strings.Contains(text, FailMarker)
 
 	ts := time.Now().UnixMilli()
 
@@ -221,8 +232,8 @@ func (s *server) run(text string, delay time.Duration, cancel chan struct{}) {
 		"toolCallId": toolCallID, "toolName": "bash", "args": toolArgs})
 
 	output := "=== RUN   TestCacheEvict\n--- PASS: TestCacheEvict (0.02s)\nPASS\nok  \tinternal/cache\t0.031s\n"
-	if s.script == ScriptError {
-		output = "=== RUN   TestCacheEvict\n--- FAIL: TestCacheEvict (0.02s)\n\tcache_test.go:42: race detected\nFAIL\n"
+	if fail {
+		output = "=== RUN   TestCacheEvict\n--- FAIL: TestCacheEvict (0.02s)\n\tcache_test.go:42: race detected\nFAIL\nFAIL\tinternal/cache\t0.021s\n"
 	}
 	var partial strings.Builder
 	for _, chunk := range chunks(output, 24) {
@@ -241,7 +252,7 @@ func (s *server) run(text string, delay time.Duration, cancel chan struct{}) {
 			return
 		}
 	}
-	isErr := s.script == ScriptError
+	isErr := fail
 	s.emit(map[string]any{"type": "tool_execution_end",
 		"toolCallId": toolCallID, "toolName": "bash",
 		"result": map[string]any{

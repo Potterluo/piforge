@@ -23,6 +23,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/auth"
@@ -128,6 +129,10 @@ type server struct {
 	// sseKeepalive is the comment interval; proxies drop idle connections at
 	// 30-60s, and the PRD asks for 15s.
 	sseKeepalive time.Duration
+	// taps watches the terminal for typed test commands (FR-12.5). One per tab,
+	// kept across socket reconnects that the PTY itself survives.
+	tapsMu sync.Mutex
+	taps   map[string]*testTap
 }
 
 // NewRouter builds the complete HTTP handler, including the recover middleware.
@@ -192,6 +197,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("DELETE /v1/sessions/{id}", s.mutatingBearer(s.handleDeleteSession))
 	mux.Handle("GET /v1/sessions/{id}/export", s.authed(s.handleExportSession))
 	mux.Handle("GET /v1/sessions/{id}/stats", s.authed(s.handleSessionStats))
+	mux.Handle("GET /v1/sessions/{id}/test-runs", s.authed(s.handleTestRuns))
 	mux.Handle("GET /v1/sessions/{id}/logs", s.authed(s.handleSessionLogs))
 	mux.Handle("GET /v1/sessions/{id}/pty", s.authed(s.handleSessionPTY))
 	mux.Handle("GET /v1/sessions/{id}/tooling", s.authed(s.handleSessionTooling))

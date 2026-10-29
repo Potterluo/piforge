@@ -27,6 +27,7 @@ import {
   type Session,
   type SessionStats,
   type Skill,
+  type TestRunsResponse,
   type TreeEntry,
   type APIKey,
   type BrowserTab,
@@ -280,6 +281,9 @@ export const sessions = {
     ),
   stats: (id: string) => request<SessionStats>(`/v1/sessions/${id}/stats`),
   status: (id: string) => request<RuntimeStatus>(`/v1/sessions/${id}/status`),
+  /** Test runs derived from this session's tool events and terminal (FR-12.5). */
+  testRuns: (id: string, limit = 20) =>
+    request<TestRunsResponse>(`/v1/sessions/${id}/test-runs?limit=${limit}`),
 };
 
 /** URL of the SSE stream. `EventSource` handles `Last-Event-ID` reconnects. */

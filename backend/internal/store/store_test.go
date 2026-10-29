@@ -84,7 +84,7 @@ func TestOpenCreatesEveryTable(t *testing.T) {
 	want := []string{
 		"users", "providers", "projects", "sandboxes", "worktrees", "sessions",
 		"runs", "events", "tool_calls", "mcp_servers", "skills", "snapshots",
-		"auth_sessions", "messages",
+		"auth_sessions", "messages", "test_runs",
 	}
 	rows, err := s.r.Query(`SELECT name FROM sqlite_master WHERE type = 'table'`)
 	if err != nil {

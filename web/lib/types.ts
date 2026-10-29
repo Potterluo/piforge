@@ -475,3 +475,41 @@ export interface CompareRow {
   /** Present when the change size could not be measured, instead of a fake zero. */
   diff_error?: string;
 }
+/**
+ * One failing test (PRD FR-12.5). `file`/`line` are the assertion site when the
+ * runner printed one; the panel opens that file in the editor when clicked.
+ */
+export interface TestFailure {
+  name: string;
+  file?: string;
+  line?: number;
+  message?: string;
+}
+/**
+ * One test command's outcome. `unrecognized` is a first-class status: the
+ * command was a recognised runner's, but its output could not be read, so
+ * `output_tail` carries the raw tail and the counts are zero.
+ */
+export interface TestRun {
+  id: string;
+  session_id: string;
+  run_id?: string;
+  /** agent = a tool call; terminal = a command typed in the PTY. */
+  source: "agent" | "terminal";
+  runner: string;
+  command: string;
+  status: "running" | "passed" | "failed" | "unrecognized";
+  total: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  duration_ms: number;
+  failures: TestFailure[];
+  output_tail?: string;
+  started_at: string;
+  ended_at?: string;
+}
+export interface TestRunsResponse {
+  runs: TestRun[];
+  count: number;
+}

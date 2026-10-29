@@ -290,3 +290,36 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 CREATE INDEX IF NOT EXISTS api_keys_user ON api_keys (user_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS api_keys_hash ON api_keys (token_hash);
+
+-- ============ test_runs: the test-results panel (PRD FR-12.5) ============
+-- Derived from a session's own tool events (an agent bash call) or from a
+-- command typed in that session's terminal. Stored as a table rather than a
+-- sidecar so it survives a reload and is deleted with its session by the same
+-- cascade as events and tool_calls. `command` is kept because the panel shows
+-- what was run; `output_tail` is only filled for unrecognised formats, where
+-- the raw tail is the honest answer.
+CREATE TABLE IF NOT EXISTS test_runs (
+    id           TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    run_id       TEXT NOT NULL DEFAULT '',
+    tool_call_id TEXT NOT NULL DEFAULT '',
+    source       TEXT NOT NULL DEFAULT 'agent',
+    runner       TEXT NOT NULL DEFAULT '',
+    command      TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'running',
+    total        INTEGER NOT NULL DEFAULT 0,
+    passed       INTEGER NOT NULL DEFAULT 0,
+    failed       INTEGER NOT NULL DEFAULT 0,
+    skipped      INTEGER NOT NULL DEFAULT 0,
+    duration_ms  INTEGER NOT NULL DEFAULT 0,
+    failures     TEXT NOT NULL DEFAULT '[]',
+    output_tail  TEXT NOT NULL DEFAULT '',
+    started_at   TEXT NOT NULL,
+    ended_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS test_runs_session ON test_runs (session_id, started_at DESC);
+-- One run per tool call. Terminal runs carry an empty tool_call_id, so the
+-- uniqueness is partial: otherwise every terminal run would collide on ''.
+CREATE UNIQUE INDEX IF NOT EXISTS test_runs_tool_call
+    ON test_runs (session_id, tool_call_id) WHERE tool_call_id <> '';

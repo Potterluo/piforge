@@ -119,12 +119,16 @@ func (s *server) handleSessionPTY(w http.ResponseWriter, r *http.Request) {
 		"start": info.Start, "end": info.End,
 	}))
 
-	go s.pumpPTYToWS(ctx, conn, tabID, fromOffset)
-	s.readPTYFromWS(ctx, conn, tabID, root)
+	// The tap is the only reader that turns terminal bytes into a test result;
+	// it does not consume them, so xterm still sees exactly what the shell wrote.
+	tap := s.testTapFor(user.ID, sess.ID, tabID)
+
+	go s.pumpPTYToWS(ctx, conn, tabID, fromOffset, tap)
+	s.readPTYFromWS(ctx, conn, tabID, root, tap)
 }
 
 // pumpPTYToWS copies terminal output to the socket, starting at fromOffset.
-func (s *server) pumpPTYToWS(ctx context.Context, conn *websocket.Conn, tabID string, offset int64) {
+func (s *server) pumpPTYToWS(ctx context.Context, conn *websocket.Conn, tabID string, offset int64, tap *testTap) {
 	ticker := time.NewTicker(12 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -141,6 +145,9 @@ func (s *server) pumpPTYToWS(ctx context.Context, conn *websocket.Conn, tabID st
 
 		data, next, eof := s.deps.Term.Read(tabID, cursor)
 		if len(data) > 0 {
+			if tap != nil {
+				tap.output(cursor, data)
+			}
 			writeCtx, cancel := context.WithTimeout(ctx, ptyWriteWait)
 			err := conn.Write(writeCtx, websocket.MessageBinary, data)
 			cancel()
@@ -150,6 +157,10 @@ func (s *server) pumpPTYToWS(ctx context.Context, conn *websocket.Conn, tabID st
 			cursor = next
 		}
 		if eof && len(data) == 0 {
+			if tap != nil {
+				tap.eof()
+			}
+			s.dropTestTap(tabID)
 			_ = conn.Write(ctx, websocket.MessageText, mustJSON(map[string]string{"type": "exit"}))
 			conn.Close(websocket.StatusNormalClosure, "shell exited")
 			return
@@ -158,7 +169,7 @@ func (s *server) pumpPTYToWS(ctx context.Context, conn *websocket.Conn, tabID st
 }
 
 // readPTYFromWS forwards keystrokes and control messages into the PTY.
-func (s *server) readPTYFromWS(ctx context.Context, conn *websocket.Conn, tabID, root string) {
+func (s *server) readPTYFromWS(ctx context.Context, conn *websocket.Conn, tabID, root string, tap *testTap) {
 	for {
 		kind, payload, err := conn.Read(ctx)
 		if err != nil {
@@ -170,6 +181,9 @@ func (s *server) readPTYFromWS(ctx context.Context, conn *websocket.Conn, tabID,
 
 		switch kind {
 		case websocket.MessageBinary:
+			if tap != nil {
+				tap.input(payload)
+			}
 			if werr := s.deps.Term.Write(tabID, payload); werr != nil {
 				return
 			}
@@ -180,6 +194,9 @@ func (s *server) readPTYFromWS(ctx context.Context, conn *websocket.Conn, tabID,
 			}
 			switch ctl.Type {
 			case "input":
+				if tap != nil {
+					tap.input([]byte(ctl.Data))
+				}
 				if werr := s.deps.Term.Write(tabID, []byte(ctl.Data)); werr != nil {
 					return
 				}
@@ -190,6 +207,9 @@ func (s *server) readPTYFromWS(ctx context.Context, conn *websocket.Conn, tabID,
 			case "ping":
 				_ = wsjson.Write(ctx, conn, map[string]string{"type": "pong"})
 			case "close":
+				if tap != nil {
+					tap.eof()
+				}
 				_ = s.deps.Term.Close(tabID)
 				return
 			}

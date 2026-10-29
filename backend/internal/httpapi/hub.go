@@ -12,6 +12,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/store"
+	"github.com/piforge/piforge/backend/internal/testrun"
 )
 
 // hub starts at most one agent subscription per session and persists the
@@ -208,6 +209,11 @@ func (h *hub) applyDerivedState(userID string, ev contracts.Event) {
 		}); err != nil {
 			h.log.Debug("tool call not recorded", slog.String("error", err.Error()))
 		}
+		// A test command is the one tool call whose output the panel reads as
+		// structured data. The row starts here so the panel can say 运行中.
+		if command, ok := testrun.ToolCommand(p.Name, p.Args); ok {
+			h.startTestRun(ctx, userID, ev, p.ToolCallID, command)
+		}
 
 	case contracts.EvToolEnded:
 		var p struct {
@@ -229,6 +235,9 @@ func (h *hub) applyDerivedState(userID string, ev contracts.Event) {
 			EndedAt:     &ended,
 		}); err != nil {
 			h.log.Debug("tool call not finished", slog.String("error", err.Error()))
+		}
+		if p.Text != "" {
+			h.finishTestRun(ctx, userID, ev, p.ToolCallID, p.Text, p.DurationMS)
 		}
 	}
 }

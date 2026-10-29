@@ -15,6 +15,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { baseName } from "@/lib/fs/file-kind";
 import { highlightCode } from "@/lib/highlighter";
+import { cn } from "@/lib/utils";
 
 /**
  * Read-only code view.
@@ -23,6 +24,11 @@ import { highlightCode } from "@/lib/highlighter";
  * which loads grammars on demand. It is async and may not know a language, so
  * the plain-text path is the baseline and highlighting is an upgrade — the
  * panel never blocks on it.
+ *
+ * `line` is the link a test failure carries: the file opens at that line, with
+ * the line highlighted and scrolled into view. Rendering every line through
+ * `CodeBlockLine` (rather than letting `CodeBlockContent` split a string) is
+ * what makes one line addressable.
  */
 const MAX_RENDERED_LINES = 3000;
 
@@ -30,10 +36,12 @@ export function CodePreview({
   path,
   content,
   language,
+  line,
 }: {
   path: string;
   content: string;
   language: string;
+  line?: number | null;
 }) {
   const [highlighted, setHighlighted] = React.useState<{
     content: string;
@@ -64,12 +72,47 @@ export function CodePreview({
 
   const plain = React.useMemo(() => content.replace(/\n$/, "").split("\n"), [content]);
   const clipped = plain.length > MAX_RENDERED_LINES;
+  const active = typeof line === "number" && line > 0 ? line : null;
+  const hostRef = React.useRef<HTMLDivElement | null>(null);
+
+  React.useEffect(() => {
+    if (!active) return;
+    const host = hostRef.current;
+    if (!host) return;
+    const target = host.querySelector(`[data-line="${active}"]`);
+    // jsdom has no layout, so only call when the method exists.
+    target?.scrollIntoView?.({ block: "center" });
+  }, [active, content, lines]);
+
+  const rendered = (lines ?? plain).slice(0, MAX_RENDERED_LINES).map((entry, index) => {
+    const number = index + 1;
+    return (
+      <CodeBlockLine
+        key={index}
+        data-line={number}
+        variant={active === number ? "highlighted" : "default"}
+        className={cn(active === number && "ring-1 ring-amber-500/50 ring-inset")}
+      >
+        {entry}
+      </CodeBlockLine>
+    );
+  });
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-col overflow-hidden">
+    <div
+      ref={hostRef}
+      data-testid="code-preview"
+      data-active-line={active ?? undefined}
+      className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+    >
       <CodeBlock className="min-h-0 rounded-none border-0">
         <CodeBlockHeader>
           <CodeBlockTitle className="truncate font-mono">{baseName(path)}</CodeBlockTitle>
+          {active ? (
+            <Badge variant="outline" className="font-mono text-[10px]">
+              第 {active} 行
+            </Badge>
+          ) : null}
           <Badge variant="outline" className="font-mono text-[10px]">
             {language}
           </Badge>
@@ -78,17 +121,9 @@ export function CodePreview({
           </CodeBlockActions>
         </CodeBlockHeader>
 
-        {lines ? (
-          <CodeBlockContent lineNumbers className="max-h-none">
-            {lines.slice(0, MAX_RENDERED_LINES).map((line, index) => (
-              <CodeBlockLine key={index}>{line}</CodeBlockLine>
-            ))}
-          </CodeBlockContent>
-        ) : (
-          <CodeBlockContent lineNumbers className="max-h-none">
-            {clipped ? plain.slice(0, MAX_RENDERED_LINES).join("\n") : content}
-          </CodeBlockContent>
-        )}
+        <CodeBlockContent lineNumbers className="max-h-none">
+          {rendered}
+        </CodeBlockContent>
 
         {clipped ? (
           <CodeBlockFooter className="text-[10px]">

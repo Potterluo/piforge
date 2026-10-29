@@ -241,6 +241,15 @@ func run() error {
 		return err
 	}
 
+	// A run left "running" belongs to a command whose output died with the
+	// previous process. This daemon is the only writer, so settling it here is
+	// honest; leaving it running would make the test panel lie forever.
+	if n, err := st.SettleOrphanTestRuns(ctx, time.Now()); err != nil {
+		logger.Warn("orphan test runs not settled", "error", err.Error())
+	} else if n > 0 {
+		logger.Info("settled orphan test runs", "count", n)
+	}
+
 	// 2. Secrets and the model gateway.
 	//
 	// Keys are sealed at rest and only opened here, on the egress path. The
