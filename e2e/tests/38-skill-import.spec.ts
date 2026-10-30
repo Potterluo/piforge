@@ -31,9 +31,10 @@ test("skills can be imported from a repository", async ({ page }) => {
   git("add", "-A");
   git("-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-m", "skills");
 
-  // Its own account: 69-skill-zip imports the same two names and disables one,
-  // and an import replaces content without re-enabling. Sharing an account
-  // between the two specs is what made 38 fail on the second run of a data dir.
+  // Its own account: 69-skill-zip imports the same two names, and an import of
+  // a disabled skill replaces its bundle and re-enables it. Sharing an account
+  // between the specs would make one spec's disable step change the other's
+  // import result; per-account isolation is the rule (isolation.ts).
   await freshAccount(page, "skill-import");
   const imported = await apiWrite(page, "POST", "/v1/skills/import", {
     url: `file://${repo.replace(/\\/g, "/")}`,

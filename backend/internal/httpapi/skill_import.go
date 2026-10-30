@@ -104,6 +104,13 @@ type importedSkill struct {
 	Files   int    `json:"files"`
 	Skipped bool   `json:"skipped"`
 	Reason  string `json:"reason,omitempty"`
+	// Enabled is the skill's state after this call. An import of a disabled
+	// skill re-enables it (see persistCandidates), so this is the field the UI
+	// must read instead of assuming "imported" means "in use".
+	Enabled bool `json:"enabled"`
+	// Reenabled says the skill was disabled before the import and is enabled
+	// now, so the toast can name that instead of reporting a bare success.
+	Reenabled bool `json:"reenabled,omitempty"`
 }
 
 // persistCandidates turns discovered directories into skills.
@@ -111,6 +118,13 @@ type importedSkill struct {
 // A git import and a zip import differ only in where the directories came from, so
 // they share this: the same replace-by-name rule, the same bundle writer, the same
 // per-skill failure that leaves the others alone.
+//
+// Replacing a skill that is disabled re-enables it. The judgement call: importing
+// a collection is an explicit "I want this skill available" — the alternative
+// (replace the bytes, keep the row disabled) is what made the UI report success
+// while the agent still could not see it, because mounting reads `enabled`. So the
+// import turns it back on and says so in the response (and the UI toast), which is
+// the only honest version of "the import succeeded".
 func (s *server) persistCandidates(
 	ctx context.Context,
 	userID, source string,
@@ -120,13 +134,16 @@ func (s *server) persistCandidates(
 	result := make([]importedSkill, 0, len(found))
 	for _, candidate := range found {
 		item := importedSkill{Name: candidate.Name, Path: candidate.Rel, Files: len(candidate.Files)}
-		if dryRun {
-			result = append(result, item)
-			continue
-		}
 		// A skill with the same name is replaced rather than duplicated: importing the
 		// same collection twice should not leave two entries fighting over the name.
 		target := s.findSkillByName(ctx, userID, candidate.Name)
+		if dryRun {
+			// Report the state the import would leave behind, without touching
+			// anything. A name with no row would be created enabled.
+			item.Enabled = target == nil || target.Enabled
+			result = append(result, item)
+			continue
+		}
 		if target == nil {
 			created, cerr := s.deps.Store.CreateSkill(ctx, userID, contracts.Skill{
 				Name:        candidate.Name,
@@ -142,6 +159,24 @@ func (s *server) persistCandidates(
 				continue
 			}
 			target = created
+		} else {
+			// Only a skill the caller may edit can be replaced. A shared skill is
+			// another tenant's row as far as a normal user is concerned: writing its
+			// bundle would edit what everybody sees, and the update would fail after
+			// the files had already been replaced. Refuse before the write.
+			editable, eerr := s.deps.Store.SkillEditable(ctx, userID, target.ID)
+			if eerr != nil {
+				item.Skipped, item.Reason = true, eerr.Error()
+				result = append(result, item)
+				continue
+			}
+			if !editable {
+				item.Skipped = true
+				item.Reason = "同名共享 Skill 由管理员维护，导入不会覆盖它"
+				item.Enabled = target.Enabled
+				result = append(result, item)
+				continue
+			}
 		}
 
 		bundleKey, hash, werr := s.writeSkillBundle(target.ID, candidate.Files)
@@ -155,6 +190,20 @@ func (s *server) persistCandidates(
 			result = append(result, item)
 			continue
 		}
+		// The content is in place; now make sure it can actually be mounted. A
+		// failure here is reported rather than swallowed: a disabled row with new
+		// content is exactly the state that lied before.
+		if !target.Enabled {
+			if _, serr := s.deps.Store.SetSkillEnabled(ctx, userID, target.ID, true); serr != nil {
+				item.Skipped = true
+				item.Reason = "内容已替换，但重新启用失败：" + serr.Error()
+				item.Enabled = false
+				result = append(result, item)
+				continue
+			}
+			item.Reenabled = true
+		}
+		item.Enabled = true
 		result = append(result, item)
 	}
 	return result

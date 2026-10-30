@@ -158,10 +158,8 @@ test("a zip of skills imports through the settings page, and a disabled skill st
 
   // Back to the list: creating the session navigated away from settings.
   // Disable one from the list (the second half of "一键安装 + 可禁用").
-  // It is disabled on this spec's own account and never re-enabled: a leftover
-  // here used to break 38-skill-import on the next run, because both import a
-  // skill called pdf-tools and an import replaces content without re-enabling.
-  // Per-account isolation means there is nothing to restore.
+  // It is disabled on this spec's own account; per-account isolation is what
+  // keeps that from reaching 38-skill-import, which imports the same name.
   await page.goto("/settings/skills");
   await expect(pdf).toBeVisible();
   const toggle = pdf.getByRole("switch", { name: "启用 pdf-tools" });
@@ -180,6 +178,49 @@ test("a zip of skills imports through the settings page, and a disabled skill st
   ).json()) as { mounted: { skills: string[] } };
   expect(toolingAfter.mounted.skills).toContain("review");
   expect(toolingAfter.mounted.skills).not.toContain("pdf-tools");
+
+  // Importing the same collection again is an explicit "I want this skill":
+  // the bundle is replaced *and* the row is re-enabled, and the toast says so.
+  // The alternative was the defect this asserts against — the UI reported a
+  // successful import while the skill stayed unmounted because `enabled` was
+  // still false.
+  await page.goto("/settings/skills");
+  await page.getByTestId("skill-import").click();
+  await page.getByTestId("skill-import-zip").setInputFiles(file);
+  const submitReimport = page.getByTestId("skill-import-zip-submit");
+  await expect(submitReimport).toBeEnabled();
+  const reimportResponse = page.waitForResponse(
+    (response) => response.url().endsWith("/v1/skills/import/zip") && response.request().method() === "POST",
+  );
+  await submitReimport.click();
+  const reimportBody = (await (await reimportResponse).json()) as {
+    skills: { name: string; enabled: boolean; reenabled?: boolean; skipped: boolean; reason?: string }[];
+  };
+  // The response is the contract; the toast is what the user reads. Asserting
+  // the body first makes a copy regression point at the data, not at sonner.
+  const reimported = reimportBody.skills.find((skill) => skill.name === "pdf-tools");
+  expect(reimported?.skipped).toBe(false);
+  expect(reimported?.enabled).toBe(true);
+  expect(reimported?.reenabled).toBe(true);
+
+  const reimportedToast = page
+    .locator("[data-sonner-toast]")
+    .filter({ hasText: "已重新启用" });
+  await expect(reimportedToast).toBeVisible({ timeout: 20_000 });
+  await expect(reimportedToast).toContainText("pdf-tools");
+  await expect(pdf.getByText("已停用")).toHaveCount(0);
+  const afterReimportList = (await (await page.request.get("/v1/skills")).json()) as {
+    skills: { name: string; enabled: boolean }[];
+  };
+  expect(afterReimportList.skills.find((skill) => skill.name === "pdf-tools")?.enabled).toBe(true);
+
+  // And a session created now mounts it again: the row and the agent agree.
+  const reenabledSession = await openNewSession(page);
+  await sendPrompt(page, "hello");
+  const toolingReenabled = (await (
+    await page.request.get(`/v1/sessions/${reenabledSession}/tooling`)
+  ).json()) as { mounted: { skills: string[] } };
+  expect(toolingReenabled.mounted.skills).toContain("pdf-tools");
 });
 
 test("a zip that tries to escape its directory is refused", async ({ page }) => {
