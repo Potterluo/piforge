@@ -1,6 +1,7 @@
-import { expect, test } from "@playwright/test";
+import { request as apiFactory, expect, test } from "@playwright/test";
 
 import { ADMIN, USER, apiWrite, clickWhenSettled, login } from "./helpers";
+import { API, adminSession, apiCall, findUser } from "./isolation";
 
 /**
  * User management is the only way to onboard a tenant: there is no public
@@ -54,6 +55,18 @@ test.describe("admin users", () => {
     await expect(page.getByTestId(`admin-user-${email}`)).toContainText("管理员", {
       timeout: 20_000,
     });
+
+    // Put the role back: a promoted throwaway left behind makes the next run of
+    // this suite start with two admins, and "the last admin" is no longer one.
+    const users = (await (await page.request.get("/v1/admin/users")).json()) as {
+      users: { id: string; email: string }[];
+    };
+    const promoted = users.users.find((user) => user.email === email);
+    expect(promoted).toBeTruthy();
+    const demoted = await apiWrite(page, "PATCH", `/v1/admin/users/${promoted!.id}`, {
+      role: "user",
+    });
+    expect(demoted.status).toBe(200);
   });
 
   test("an account can be disabled and enabled again", async ({ page }) => {
@@ -77,15 +90,138 @@ test.describe("admin users", () => {
     await expect(row).toContainText("正常", { timeout: 20_000 });
   });
 
-  test("the last admin cannot demote or disable themselves", async ({ page }) => {
+  test("the user list disables self-demotion and self-disable controls", async ({ page }) => {
     await login(page, ADMIN);
     await page.goto("/admin/users");
-    // The seeded admin is the only admin in a fresh e2e database. Both controls
-    // are the guards that keep the deployment from locking itself out.
+    // What this actually asserts: the controls are disabled for *the signed-in
+    // row*, whatever the number of admins. It used to be named "the last admin
+    // cannot demote or disable themselves", which this cannot show — the guard
+    // being exercised here is the self guard. The last-admin rule is asserted
+    // against the API in the test below.
     const row = page.getByTestId(`admin-user-${ADMIN.email}`);
     await expect(row).toBeVisible({ timeout: 20_000 });
     await expect(row.getByRole("button", { name: "降为普通" })).toBeDisabled();
     await expect(row.getByRole("button", { name: "停用" })).toBeDisabled();
+  });
+
+  /**
+   * The rule the product promises is about the count, not about the caller: the
+   * last admin cannot be demoted, so the deployment cannot lock itself out. The
+   * old test could not tell the two apart because the seeded admin was both the
+   * caller and the only admin, and the buttons are disabled for *self* even when
+   * ten admins exist.
+   *
+   * The data directory is reused, so the deployment may already hold admins left
+   * by earlier runs. This test builds the count it needs: it demotes every other
+   * admin (restoring them in `finally`), refuses the last one, then promotes a
+   * second admin and shows the very same request succeeding. Nothing about the
+   * caller changes between the two attempts — only the number of admins.
+   */
+  test("the API refuses to demote the last admin and allows the same call with two", async () => {
+    const seededJar = await adminSession();
+    const secondJar = await apiFactory.newContext({ baseURL: API });
+    let seededID = "";
+    let secondID = "";
+    let secondEmail = "";
+    let others: { id: string; email: string }[] = [];
+    try {
+      const seeded = await findUser(seededJar, ADMIN.email);
+      seededID = seeded.id;
+
+      const listed = await seededJar.get("/v1/admin/users");
+      expect(listed.status()).toBe(200);
+      const { users } = (await listed.json()) as {
+        users: { id: string; email: string; role: string }[];
+      };
+      others = users
+        .filter((user) => user.role === "admin" && user.id !== seededID)
+        .map((user) => ({ id: user.id, email: user.email }));
+
+      // Exactly one admin: the seeded account. Leftovers from earlier runs would
+      // otherwise make "the last admin" a different account than the one this
+      // test controls.
+      for (const other of others) {
+        const demoted = await apiCall(seededJar, "PATCH", `/v1/admin/users/${other.id}`, {
+          role: "user",
+        });
+        expect(demoted.status, `could not park ${other.email}: ${JSON.stringify(demoted.body)}`).toBe(
+          200,
+        );
+      }
+
+      // One admin: refuse. This is the last-admin rule, not the self guard — the
+      // API has no self rule for roles (only for status), and the next half
+      // shows the same self-demotion being allowed when a second admin exists.
+      const lastAdmin = await apiCall(seededJar, "PATCH", `/v1/admin/users/${seededID}`, {
+        role: "user",
+      });
+      expect(lastAdmin.status, JSON.stringify(lastAdmin.body)).toBe(409);
+      expect((lastAdmin.body as { error: { message: string } }).error.message).toContain(
+        "last admin",
+      );
+      // Refused, not applied.
+      expect((await findUser(seededJar, ADMIN.email)).role).toBe("admin");
+
+      // Two admins: a new one is promoted, and the seeded admin demotes *itself*
+      // — the same request the API just refused.
+      secondEmail = `last-admin-${Date.now()}@example.test`;
+      const password = "last-admin-123";
+      const created = await apiCall(seededJar, "POST", "/v1/admin/users", {
+        email: secondEmail,
+        password,
+        display_name: "second admin",
+        role: "user",
+      });
+      expect(created.status, JSON.stringify(created.body)).toBe(201);
+      secondID = (created.body as { users: { id: string }[] }).users[0].id;
+      const promoted = await apiCall(seededJar, "PATCH", `/v1/admin/users/${secondID}`, {
+        role: "admin",
+      });
+      expect(promoted.status).toBe(200);
+
+      const signIn = await secondJar.post("/v1/auth/login", {
+        data: { email: secondEmail, password },
+      });
+      expect(signIn.ok(), "the second admin must be able to sign in").toBeTruthy();
+
+      const demoteSelf = await apiCall(seededJar, "PATCH", `/v1/admin/users/${seededID}`, {
+        role: "user",
+      });
+      expect(demoteSelf.status, JSON.stringify(demoteSelf.body)).toBe(200);
+
+      // Disabling yourself is a separate guard and still refuses at the API.
+      const disableSelf = await apiCall(secondJar, "PATCH", `/v1/admin/users/${secondID}`, {
+        status: "disabled",
+      });
+      expect(disableSelf.status).toBe(400);
+      expect((disableSelf.body as { error: { message: string } }).error.message).toContain(
+        "cannot disable your own account",
+      );
+    } finally {
+      // Restore the deployment even on a failed assertion: every other spec signs
+      // in as the seeded admin, and any admin parked above must be an admin again.
+      try {
+        const login = await secondJar.post("/v1/auth/login", {
+          data: { email: secondEmail, password: "last-admin-123" },
+        });
+        if (login.ok()) {
+          await apiCall(secondJar, "PATCH", `/v1/admin/users/${seededID}`, { role: "admin" });
+        }
+      } catch {
+        // No second admin was created; the seeded jar is still the admin.
+      }
+      if (seededID !== "") {
+        await apiCall(seededJar, "PATCH", `/v1/admin/users/${seededID}`, { role: "admin" });
+      }
+      for (const other of others) {
+        await apiCall(seededJar, "PATCH", `/v1/admin/users/${other.id}`, { role: "admin" });
+      }
+      if (secondID !== "") {
+        await apiCall(seededJar, "PATCH", `/v1/admin/users/${secondID}`, { role: "user" });
+      }
+      await secondJar.dispose();
+      await seededJar.dispose();
+    }
   });
 
   test("a normal user is refused the user list", async ({ page }) => {
