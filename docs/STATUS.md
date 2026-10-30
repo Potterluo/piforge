@@ -22,6 +22,8 @@
 
 本批（FR-12.3 行内评论 + 读连接旧快照的触发条件）之后，FR-12.3 从 MISSING 移入 DONE：**126 条 FR 为 DONE 65 / PARTIAL 44 / MISSING 16 / 不做 1**；**整表 130 行 = DONE 69 / PARTIAL 44 / MISSING 16 / 不做 1**。同批的另一半不是 FR：读连接为什么会停在旧快照被量出来了（触发条件是「语句被中断」，即客户端 abort 掉的请求），修法是把被中断过的连接退役、不再发给下一个请求，证据与仍未回答的问题见文末「读连接旧快照：触发条件、直方图与修复」。
 
+本批（FR-12.6 一键开 PR）之后，FR-12.6 从 MISSING 移入 DONE，FR-8.8（fetch/pull/push + 开 PR）也随之从 PARTIAL 移入 DONE：**126 条 FR 为 DONE 67 / PARTIAL 43 / MISSING 15 / 不做 1**；**整表 130 行 = DONE 71 / PARTIAL 43 / MISSING 15 / 不做 1**。这两个数是本批逐行重数表格得到的；上一行记录是 65 / 44 / 16，而旧表头写的是 64 / 44 / 17（早已与表格不一致），本批以实际行为准，并把这个差异写在这里而不是继续抄旧数。
+
 ---
 # PiForge 对照 PRD 的实现审计
 
@@ -29,7 +31,7 @@
 - 审计方法：先读 `docs/STATUS-AUDIT.md`（`06b61a3`）的每条判定，再逐条重读 `backend/internal/httpapi/router.go` 的路由表、各 handler、`web/components/**` 与 `e2e/tests/*.spec.ts`；以「实现 + 断言了用户可见结果的测试名」为准，不采信命名与注释。
 - 状态口径：**DONE** 必须点名一条断言用户可见承诺的测试或 e2e 路径；**PARTIAL** 必须写清缺什么；**MISSING** 是无实现。
 - 本版把 `06b61a3` 之后的修复接进台账：`f766651`（FR-2.5 / FR-2.6）、`bd85ade`（FR-2.7）、`9c4ab0b`（FR-11.8）、`717f7cb`（FR-12.5），以及浏览器启动按沙箱单飞与 profile 僵尸锁恢复（FR-11.1）。本批补上 FR-12.6（一键开 PR）并把 FR-8.8 从 PARTIAL 移到 DONE——开 PR 是那一条里唯一缺的能力。
-- 计数：**126 条 FR，DONE 66 / PARTIAL 43 / MISSING 16 / 不做 1**（`be01575` 时是 52 / 54；FR-1.9 与 FR-9.2 补证据后为 54 / 52 / 19，FR-3.3 从 MISSING 移入 DONE，FR-14.4、FR-6.6、FR-10.2、FR-11.2、FR-12.4、FR-14.1、FR-12.1 与 FR-12.2 从 PARTIAL 移入 DONE，FR-16.3 从 MISSING 移入 DONE，FR-12.6 从 MISSING 移入 DONE，FR-8.8 从 PARTIAL 移入 DONE；旧值 37 / 50 / 39 是 `2e5f206` 时代的，且 FR-12.5 等行早已过期）。另有 4 条非 FR 交付能力（见文末「交付能力」），均 DONE；**整表 130 行 = DONE 70 / PARTIAL 43 / MISSING 16 / 不做 1**。这两个数是从本文件的表格行重新数出来的，不是从旧表头抄的。
+- 计数：**126 条 FR，DONE 67 / PARTIAL 43 / MISSING 15 / 不做 1**（`be01575` 时是 52 / 54；FR-1.9 与 FR-9.2 补证据后为 54 / 52 / 19，FR-3.3 从 MISSING 移入 DONE，FR-14.4、FR-6.6、FR-10.2、FR-11.2、FR-12.4、FR-14.1、FR-12.1 与 FR-12.2 从 PARTIAL 移入 DONE，FR-16.3 从 MISSING 移入 DONE，FR-12.3 从 MISSING 移入 DONE，FR-12.6 从 MISSING 移入 DONE，FR-8.8 从 PARTIAL 移入 DONE；旧值 37 / 50 / 39 是 `2e5f206` 时代的，且 FR-12.5 等行早已过期）。另有 4 条非 FR 交付能力（见文末「交付能力」），均 DONE；**整表 130 行 = DONE 71 / PARTIAL 43 / MISSING 15 / 不做 1**。这两个数是从本文件的表格行重新数出来的，不是从旧表头抄的；上一版表头的 64 / 44 / 17 与上一批自己记的 65 / 44 / 16 已经不一致，本批按实际行重数并改正。
 
 > 说明：PRD 中没有「部署」类 FR（§12 是里程碑，`deploy/` 是 Dockerfile.app / Dockerfile.offline / Dockerfile.runner / k8s.yaml / entrypoint.sh，属交付物而非需求行），因此下面没有部署行。`sandbox-runner`（把 Docker CLI 从控制面移出去）同样是交付物而非 FR：它没有改变任何一条 FR 的状态，证据见 `docs/SANDBOX-DEPLOY.md` §1.4 与 `scripts/verify-runner-sandbox.ps1`。
 >
@@ -197,7 +199,7 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 - **下调**：FR-3.3 DONE → MISSING（上限没有配置入口）；FR-1.9 / FR-11.2 / FR-9.2 DONE → PARTIAL（代码在，但缺一条断言用户可见承诺的测试，具体缺什么写在行内）。
 - **标题按实际行为**：FR-5.2 由「打开会话自动唤醒」改为「发消息时唤醒」——打开一个 PAUSED 会话不会恢复，发消息才会。
 - **去掉不能当证据的引用**：`30-concurrency`、`33-follow-terminal` 这两个永真/不相关断言在对应行里注明了，不再算作 DONE 的依据。
-- **计数**：旧表头写 37 / 50 / 39（`2e5f206` 时代，且 FR-12.5 等行早已过期）；本版按 126 行实际状态重算。
+- **计数**：旧表头写 37 / 50 / 39（`2e5f206` 时代，且 FR-12.5 等行早已过期）；本版按 126 行实际状态重算；本批（FR-12.6 / FR-8.8）后为 67 / 43 / 15 / 1。
 
 ## 无法核实
 
