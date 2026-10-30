@@ -10,7 +10,7 @@
 一张带证据的表比一段自我评价可靠。
 
 基线：HEAD `d0f3f7a`（"fix(fr92,fr19): a live follow view, and a no-op compaction with a reason"）；共 126 条 FR：DONE 54 / PARTIAL 52 / MISSING 19 / 不做 1。此后 FR-3.3 接上真实配置与可解释拒绝、FR-1.9 补上浏览器入口（见文末「本次修复（FR-3.3）」与「本次修复（FR-1.9 浏览器入口）」），现为 **DONE 55 / PARTIAL 52 / MISSING 18 / 不做 1**。
-本轮把 `15b995c`（惰性浏览器面板 + 空闲停止）与 `ba532a2`（首次运行 setup）记入「交付能力（非 FR）」两行，均为 DONE；此后 FR-14.4（zip 导入 + 可禁用）与 FR-6.6（⌘⇧F 内容搜索）从 PARTIAL 移入 DONE，126 条 FR 为 DONE 57 / PARTIAL 50 / MISSING 18 / 不做 1；加上这两行后**整表 128 行：DONE 59 / PARTIAL 50 / MISSING 18 / 不做 1**。
+本轮把 `15b995c`（惰性浏览器面板 + 空闲停止）与 `ba532a2`（首次运行 setup）记入「交付能力（非 FR）」两行，均为 DONE；此后 FR-14.4（zip 导入 + 可禁用）、FR-6.6（⌘⇧F 内容搜索）与 FR-10.2（终端多 tab）从 PARTIAL 移入 DONE，126 条 FR 为 DONE 58 / PARTIAL 49 / MISSING 18 / 不做 1；加上这两行后**整表 128 行：DONE 60 / PARTIAL 49 / MISSING 18 / 不做 1**。
 
 ---
 # PiForge 对照 PRD 的实现审计
@@ -19,7 +19,7 @@
 - 审计方法：先读 `docs/STATUS-AUDIT.md`（`06b61a3`）的每条判定，再逐条重读 `backend/internal/httpapi/router.go` 的路由表、各 handler、`web/components/**` 与 `e2e/tests/*.spec.ts`；以「实现 + 断言了用户可见结果的测试名」为准，不采信命名与注释。
 - 状态口径：**DONE** 必须点名一条断言用户可见承诺的测试或 e2e 路径；**PARTIAL** 必须写清缺什么；**MISSING** 是无实现。
 - 本版把 `06b61a3` 之后的修复接进台账：`f766651`（FR-2.5 / FR-2.6）、`bd85ade`（FR-2.7）、`9c4ab0b`（FR-11.8）、`717f7cb`（FR-12.5），以及浏览器启动按沙箱单飞与 profile 僵尸锁恢复（FR-11.1）。
-- 计数：**126 条 FR，DONE 57 / PARTIAL 50 / MISSING 18 / 不做 1**（`be01575` 时是 52 / 54；FR-1.9 与 FR-9.2 补证据后为 54 / 52 / 19，FR-3.3 从 MISSING 移入 DONE，FR-14.4 与 FR-6.6 从 PARTIAL 移入 DONE；旧值 37 / 50 / 39 是 `2e5f206` 时代的，且 FR-12.5 等行早已过期）。另有 2 条非 FR 交付能力（见文末「交付能力」），均 DONE；**整表 128 行 = DONE 59 / PARTIAL 50 / MISSING 18 / 不做 1**。这两个数是从本文件的表格行重新数出来的，不是从旧表头抄的。
+- 计数：**126 条 FR，DONE 58 / PARTIAL 49 / MISSING 18 / 不做 1**（`be01575` 时是 52 / 54；FR-1.9 与 FR-9.2 补证据后为 54 / 52 / 19，FR-3.3 从 MISSING 移入 DONE，FR-14.4、FR-6.6 与 FR-10.2 从 PARTIAL 移入 DONE；旧值 37 / 50 / 39 是 `2e5f206` 时代的，且 FR-12.5 等行早已过期）。另有 2 条非 FR 交付能力（见文末「交付能力」），均 DONE；**整表 128 行 = DONE 60 / PARTIAL 49 / MISSING 18 / 不做 1**。这两个数是从本文件的表格行重新数出来的，不是从旧表头抄的。
 
 > 说明：PRD 中没有「部署」类 FR（§12 是里程碑，`deploy/` 是 Dockerfile.app / Dockerfile.offline / Dockerfile.runner / k8s.yaml / entrypoint.sh，属交付物而非需求行），因此下面没有部署行。`sandbox-runner`（把 Docker CLI 从控制面移出去）同样是交付物而非 FR：它没有改变任何一条 FR 的状态，证据见 `docs/SANDBOX-DEPLOY.md` §1.4 与 `scripts/verify-runner-sandbox.ps1`。
 >
@@ -98,7 +98,7 @@
 | FR-9.5 长输出 >5000 行折叠 + 完整输出路径 | PARTIAL | `tool-trace.tsx` 可折叠输出；无 5000 行阈值，无 `fullOutputPath` 概念 |
 | FR-9.6 多路跟随（每分支一个跟随 tab） | MISSING | 无跟随 tab 体系 |
 | FR-10.1 完整 PTY + xterm（支持 TUI） | DONE | `term/manager.go`（真 PTY，`pty_unix.go`/`pty_windows.go`）+ `terminal-surface.tsx`（`@xterm/xterm`）；`03-workspace.spec.ts` "the terminal opens a real PTY in the sandbox"、"keystrokes reach the shell and output comes back" |
-| FR-10.2 多 tab（≥5，重命名/关闭） | PARTIAL | 后端按 `?tab=` 支持任意 tab 名（`pty_handlers.go` `sanitizeTab`）；前端 `workspace-panels.tsx` 只挂一个 `TerminalPane`（tab 默认 `main`），无 tab 条、无重命名/关闭 |
+| FR-10.2 多 tab（≥5，重命名/关闭） | DONE | `terminal-tabs.tsx`：可新增/切换/关闭（≥5，上限 8），每个 tab 一个 `TerminalPane`，`tab` id 就是服务端的 PTY key（`data-pty-tab`）；切走的 tab 只隐藏不卸载，shell 与滚动缓冲都留着。关闭时先发 `{type:"close"}` 让服务端 `Term.Close`（掉 socket 只是重连语义，见 FR-10.3），再移除标签；双击标签改名只改 `label`，id 不变，所以改名不会换 shell；关掉最后一个会新开一个。`workspace-panels.tsx` 的「在终端中打开」跟随当前标签（`paneRef` 指向 active）。测试：`e2e/tests/71-terminal-tabs.spec.ts`（加到 5 个 tab、5 个 pane 的 `data-pty-tab` 各不相同且 `data-pty-status` 全为 `open`；在第 5 个 tab 键入 `echo five > tab-five.txt`、第 1 个键入 `echo one > tab-one.txt`，两个文件都能从 Files API 读到；改名「构建」后 `t1` 仍 `open`；关闭 `t1` 后剩 4 个 tab/pane，文件仍在）。**实现坑**：`nextNumber.current++` 被 React Compiler 编译成前置自增，第一个 tab 的编号从 3 开始，改成显式 `const n = ref.current; ref.current = n + 1` |
 | FR-10.3 断线重连（offset + 60s 不丢） | DONE | `pty_handlers.go` `from_offset` + `pumpPTYToWS`；`term/ring.go` 2MB ring；`manager_test.go` `TestReadOffsetsAreStable`、`ring_test.go` 5 例 |
 | FR-10.4 addon-fit + resize 同步 TIOCSWINSZ | DONE | `terminal-surface.tsx`（`AddonFit`）+ `use-pty.ts` 发 `{type:"resize"}` + `pty_handlers.go` `Term.Resize`；`manager_test.go` `TestResize` |
 | FR-10.5 复制粘贴/搜索/清屏/字号 | PARTIAL | `terminal-pane.tsx` `Toolbar`：搜索（`addon-search`）、清屏、字号 ±；无复制/粘贴按钮（仅 xterm 选择） |
@@ -163,7 +163,7 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 | 首次运行 setup：`GET /v1/setup` + 首次运行面板 + `PIFORGE_BOOTSTRAP_PROVIDER` 预填（`ba532a2`） | DONE | `httpapi/setup_handlers.go` 的 `GET /v1/setup` 返回 `needs_provider` / `is_admin` / `shared_provider_available` / 非密 `bootstrap`（name/base_url/model，没有 key 字段）；`web/components/setup/first-run-setup.tsx` 在首页与会话输入框上方显示「先配置一个模型服务」，按角色提供「添加共享服务商」或设置页链接；`bootstrap.Ensure` 只在「没有可用共享服务商」时创建，重启不覆盖；启动环境持有 key，日志不打印。测试：`setup_test.go` `TestSetupReportsFirstRunState`、`TestSetupExposesBootstrapPrefillWithoutSecrets`，`bootstrap_test.go`，e2e `68-first-run.spec.ts`（新用户首页/输入框都看到面板、配好共享服务商后面板消失、管理员可从面板建共享服务商） |
 | 惰性浏览器面板 + 空闲停止（host placement，`15b995c`） | DONE | `workspace-panels.tsx` 只在浏览器面板可见时挂载它；`browser.Manager` 的 idle reaper 在无 viewer 附着 `PIFORGE_BROWSER_IDLE_TIMEOUT` 后 stop 该 sandbox 浏览器；`GET /v1/admin/status` 暴露 `browser_running` / `browser_idle_timeout`。测试：`browser/idle_test.go` 4 例、`67-browser-lazy.spec.ts` 断言「打开会话不启动、选中面板才启动、切走后停止」；部署实测选中前 `docker exec pf-local pgrep chrome` 为空，选中后才出现 |
 
-计数：上面 126 条 FR 是 **DONE 57 / PARTIAL 50 / MISSING 18 / 不做 1**；加上这两条（均 DONE）后整表 128 行 = **DONE 59 / PARTIAL 50 / MISSING 18 / 不做 1**。
+计数：上面 126 条 FR 是 **DONE 58 / PARTIAL 49 / MISSING 18 / 不做 1**；加上这两条（均 DONE）后整表 128 行 = **DONE 60 / PARTIAL 49 / MISSING 18 / 不做 1**。
 
 **明确边界：远端 / AIO 沙箱里的浏览器仍不会在空闲时被停止。** `15b995c` 的 idle 策略只在 host placement 生效：控制面直接持有 Chrome 进程，`browser.Manager` 能 stop 它。远端 / AIO 模式下 Chrome 跑在沙箱里，控制面断开 CDP 只意味着没人看了，进程仍在沙箱里；`PIFORGE_BROWSER_IDLE_TIMEOUT` 不会杀它，也没有 runner 侧的空闲回收。要覆盖这条路径，需要沙箱 provider 按「无 viewer」自行 stop 浏览器（或 runner 提供 idle 端点），目前没有实现，也没有测试。
 
@@ -172,7 +172,7 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 1. **FR-11.2 观察模式的「不可输入」只有代码**——服务端确实丢弃输入，但 `browser_mode_test.go` 与 `43-browser-mode.spec.ts` 都不验证这一点；一旦回归，人和 agent 会互相抢鼠标。
 2. **FR-15.x MCP 只到一半**——没有 OAuth 代办（15.3）、没有连接状态徽章（15.5）、没有一键导入 mcpServers JSON（15.6）、没有内置预设（15.7）、没有工具列表/逐个禁用（15.8）。
 3. **FR-5.8 / 16.4 / 16.6 运维面缺失**——资源护栏只有 docker provider 的启动参数，没有管理入口；镜像管理、护栏配置都没有端点或页面。
-4. **FR-10.2 / 9.6 多终端与多路跟随**——后端支持 `?tab=`，前端只有一个终端面板；跟随终端也没有「每分支一个跟随 tab」（单路跟随已修，见文末）。
+4. **FR-9.6 多路跟随**——跟随终端没有「每分支一个跟随 tab」（单路跟随已修，见文末）；终端本体已有多 tab（FR-10.2 本轮补齐）。
 5. **FR-12.3 / 12.6 / 12.1**——diff 里不能写行内评论转成 steer；没有一键开 PR；diff 作用域缺「某次提交」与「本轮」。
 6. **FR-2.4 / 8.8 / 14.2 / 16.3**——删除分支不清理 worktree（`RemoveWorktree` 无调用者）；没有开 PR；skill 是复制到 `.pi/skills` 而不是只读 bind mount；没有 admin 共享 skill 的写入口。
 7. **FR-5.3 快照只能看不能恢复**——清单索引在，但没有 restore-from-snapshot；docker 的回收未实跑；状态条也没有倒计时（FR-5.1）。
@@ -238,3 +238,11 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 - **一处必须改的行为**：Markdown 命中时 `MarkdownPreview` 的渲染视图无法指向第 N 行，所以带行号打开时改用源码视图（`file-preview.tsx` 的分支）。不这么做，`.md` 里的内容命中会点开文件却停在第 1 行——表面完成，实际没兑现。
 - **测试**：`e2e/tests/70-content-search.spec.ts` 两例。第一例通过真实 Files API 写 `docs/guide.md`，在 token 所在第 3 行，按 Ctrl+Shift+F 后断言模式为 `content`、结果 `docs/guide.md:3` 且文本含 token，点击后 `code-preview[data-active-line="3"]` 且预览头部是 `docs/guide.md`、面板关闭。第二例证明两种模式没有混：同一 token 只存在于文件内容，Ctrl+P（模式 `name`）查不到任何结果。
 - **旧代码确实会失败**：`git stash` 保留新 spec，用 `f015189` 的前端构建跑这两例——两例都失败在 `getByTestId('quick-open-mode')` 的 `element(s) not found`（旧面板没有模式，⌘⇧F 不打开任何东西）。日志：`e2e/.artifacts/partial-batch1/fr-6.6-fail-first.log`。
+
+## 本次修复（FR-10.2）
+
+- **台账原文**：「后端按 `?tab=` 支持任意 tab 名（`pty_handlers.go` `sanitizeTab`）；前端 `workspace-panels.tsx` 只挂一个 `TerminalPane`（tab 默认 `main`），无 tab 条、无重命名/关闭」。传输层早就有多终端，界面只用了其中一个。
+- **补的**：`terminal-tabs.tsx`。tab 条可新增/切换/关闭（上限 8，测试用到 5）；每个 tab 是一个 `TerminalPane`，`tab` id（`t1`…）就是服务端的 PTY key，`data-pty-tab` 可核对；未选中的 tab 只加 `hidden`，不卸载，所以切回去 shell 与滚动缓冲都还在。关闭先发 `{type:"close"}`（`use-pty.ts` 的 `terminate`）让服务端 `Term.Close`，再移除标签——只断 socket 是「断线重连」语义（FR-10.3），不能用来关 tab。重命名只改 `label`，id 不变，所以改名不会换掉 shell；关掉最后一个会开一个新的，而不是留一个空面板。「在终端中打开」的 `cd` 跟随当前标签：`paneRef` 在 active 变化时重新指向对应 pane。
+- **实现坑（真 bug，不是测试问题）**：`nextNumber.current++` 被本仓库启用的 React Compiler 编译成前置自增（编译产物是 `ref.current = ref.current + 1` 后再取值），于是第一个新 tab 编号是 3、标签显示「终端 3」。改成显式的 `const n = ref.current; ref.current = n + 1`，`terminal-tabs.tsx` 里两处都注明了原因。
+- **测试**：`e2e/tests/71-terminal-tabs.spec.ts` 一例。加到 5 个 tab 后断言 5 个 pane 的 `data-pty-tab` 与 tab 的 `data-tab-id` 一一对应、`data-pty-status` 全为 `open`（不是只画了个条）；在第 5 个 tab 里键入 `echo five > tab-five.txt`、在第 1 个里键入 `echo one > tab-one.txt`，两个文件都能从 Files API 读到——这是两个独立 shell 落在同一个 worktree 上的证据，而不是两个空壳；双击改名「构建」后 `t1` 仍 `open`；关闭 `t1` 后剩 4 个 tab/pane，`tab-one.txt` 还在。
+- **旧代码确实会失败**：把新组件挪开、`git stash` 保留新 spec，用 `c26d670` 的前端构建跑——失败在 `getByTestId('terminal-tab')` 的 `expected 1 / received 0`（旧面板只有一个 `TerminalPane`，没有 tab 条）。日志：`e2e/.artifacts/partial-batch1/fr-10.2-fail-first.log`。

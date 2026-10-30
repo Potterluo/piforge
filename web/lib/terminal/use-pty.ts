@@ -26,6 +26,8 @@ export interface PtySession {
   send: (data: string) => void;
   resize: (cols: number, rows: number) => void;
   reconnect: () => void;
+  /** Ends the PTY itself (tab closed), as opposed to dropping the socket. */
+  terminate: () => void;
 }
 
 interface Options {
@@ -176,5 +178,19 @@ export function usePtySession({ sessionId, tab = "main", enabled = true }: Optio
     setGeneration((value) => value + 1);
   }, []);
 
-  return { status, error, onData, send, resize, reconnect };
+  // `close` is the protocol's "this shell is no longer wanted" control frame.
+  // Closing the socket alone is what a dropped connection looks like, and the
+  // server deliberately keeps the PTY alive for that (FR-10.3). Closing a tab
+  // must mean the shell, not the connection.
+  const terminate = React.useCallback(() => {
+    const ws = socket.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "close" }));
+    }
+    ws?.close(1000, "tab closed");
+    socket.current = null;
+    setStatus("closed");
+  }, []);
+
+  return { status, error, onData, send, resize, reconnect, terminate };
 }

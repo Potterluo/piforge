@@ -136,6 +136,8 @@ export interface TerminalPaneHandle {
   clear: () => void;
   fit: () => void;
   focus: () => void;
+  /** Closes the PTY behind this pane (a tab was closed, not disconnected). */
+  close: () => void;
 }
 
 export interface TerminalPaneProps {
@@ -173,8 +175,9 @@ export const TerminalPane = React.forwardRef<TerminalPaneHandle, TerminalPanePro
         clear: () => surfaceRef.current?.clear(),
         fit: () => surfaceRef.current?.fit(),
         focus: () => surfaceRef.current?.focus(),
+        close: () => pty.terminate(),
       }),
-      [],
+      [pty],
     );
 
     // Read through a ref: the caller passes an inline callback, and resubscribing
@@ -199,11 +202,12 @@ export const TerminalPane = React.forwardRef<TerminalPaneHandle, TerminalPanePro
     return (
       <div
         data-testid="terminal-pane"
+        data-pty-tab={tab}
         data-pty-status={pty.status}
         className={cn("flex h-full min-h-0 min-w-0 flex-col", className)}
       >
         <Toolbar
-          title={`bash · ${sessionId.slice(0, 8)}`}
+          title={tab === "main" ? `bash · ${sessionId.slice(0, 8)}` : `${tab} · bash`}
           connected={live}
           fontSize={fontSize}
           onFontSize={setFontSize}

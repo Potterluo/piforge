@@ -35,7 +35,8 @@ import { TestResultsPanel, TestTabBadge, type TestResultsPanelProps } from "@/co
 import { useTestRuns } from "@/lib/session/use-test-runs";
 import { asPTYInput, buildCdCommand } from "@/lib/terminal/cd";
 import { FOLLOW_MAX_LINES } from "@/lib/session/follow";
-import { FollowTerminal, TerminalPane, type TerminalPaneHandle } from "@/components/workspace/terminal-pane";
+import { FollowTerminal, type TerminalPaneHandle } from "@/components/workspace/terminal-pane";
+import { TerminalTabs } from "@/components/workspace/terminal-tabs";
 
 /**
  * The right-hand inspector of the workbench.
@@ -382,11 +383,11 @@ export function WorkspacePanels({
                   </MarkerContent>
                 </Marker>
               ) : null}
-              <TerminalPane
-                ref={coverageRef}
+              <TerminalTabs
                 sessionId={sessionId}
-                className="min-h-0 flex-1"
+                paneRef={coverageRef}
                 onOutput={handleTerminalOutput}
+                className="min-h-0 flex-1"
               />
             </div>
           </TabsContent>
@@ -531,12 +532,12 @@ function SharedPanel({
               </MarkerContent>
             </Marker>
           ) : null}
-          <TerminalPane
+          <TerminalTabs
             key={sessionKey}
-            ref={coverageRef}
             sessionId={sessionId}
-            className="min-h-0 flex-1"
+            paneRef={coverageRef}
             onOutput={onTerminalOutput}
+            className="min-h-0 flex-1"
           />
         </div>
       );
