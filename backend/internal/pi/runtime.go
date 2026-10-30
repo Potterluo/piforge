@@ -570,9 +570,22 @@ func (r *Runtime) Status(ctx context.Context, sessionID string) (contracts.Runti
 		} `json:"model"`
 	}
 	if err := s.bridge.CallInto(ctx, "get_state", nil, &state); err == nil {
-		out.Streaming = state.IsStreaming
-		out.Compacting = state.IsCompacting
-		out.QueueDepth = state.PendingMessageCount
+		// The event stream is authoritative for the run flags. agent_settled is
+		// emitted when the run is over, but the process can still report
+		// isStreaming:true for a moment — it clears its own flag after announcing
+		// the settle, and get_state is answered by a different goroutine. Copying
+		// that reply over the derived state made Status answer
+		// Running:false/Streaming:true immediately after a settle, so the UI
+		// flipped back to "running" and the next run was refused as busy.
+		//
+		// Only fall back to the process when no event has been observed yet: a
+		// runtime that has just attached has nothing else to go on.
+		if st.LastSeq == 0 {
+			out.Running = state.IsStreaming
+			out.Streaming = state.IsStreaming
+			out.Compacting = state.IsCompacting
+			out.QueueDepth = state.PendingMessageCount
+		}
 		if state.SessionFile != "" {
 			out.SessionFile = state.SessionFile
 		}

@@ -17,6 +17,14 @@ import (
 // interrupts, forks) is exercised without building a binary.
 func newFakeRuntime(t *testing.T, script string, delay time.Duration) *Runtime {
 	t.Helper()
+	return newFakeRuntimeWith(t, script, delay, nil)
+}
+
+// newFakeRuntimeWith is newFakeRuntime with a hook over the bridge's end of the
+// peer pipe, so a test can model a peer (or a transport) that answers in a
+// particular order.
+func newFakeRuntimeWith(t *testing.T, script string, delay time.Duration, wrap func(io.ReadWriteCloser) io.ReadWriteCloser) *Runtime {
+	t.Helper()
 	cfg := RuntimeConfig{
 		Config: Config{
 			Dir:              t.TempDir(),
@@ -30,6 +38,9 @@ func newFakeRuntime(t *testing.T, script string, delay time.Duration) *Runtime {
 				defer theirs.Close()
 				_ = pitest.Serve(script, delay, sessionFile, theirs, theirs)
 			}()
+			if wrap != nil {
+				return wrap(ours), nil
+			}
 			return ours, nil
 		},
 	}
