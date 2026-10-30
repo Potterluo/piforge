@@ -36,6 +36,7 @@ import {
   type CompareRow,
   type User,
 } from "@/lib/types";
+import { diffQuery, type DiffRange } from "@/lib/git/diff-scope";
 
 const BASE = "";
 
@@ -383,11 +384,10 @@ export interface DiffResponse {
 
 export const git = {
   status: (sessionId: string) => request<GitStatus>(`/v1/sessions/${sessionId}/git/status`),
-  diff: (sessionId: string, scope: DiffScope = "unstaged", path = "") => {
-    const q = new URLSearchParams({ scope });
-    if (path) q.set("path", path);
-    return request<DiffResponse>(`/v1/sessions/${sessionId}/git/diff?${q.toString()}`);
-  },
+  diff: (sessionId: string, scope: DiffScope = "unstaged", path = "", range?: DiffRange) =>
+    request<DiffResponse>(
+      `/v1/sessions/${sessionId}/git/diff?${diffQuery(scope, path, range).toString()}`,
+    ),
   log: (sessionId: string, limit = 200) =>
     request<GitGraph>(`/v1/sessions/${sessionId}/git/log?limit=${limit}`),
   hunk: (sessionId: string, path: string, index: number, action: "stage" | "unstage" | "discard") =>

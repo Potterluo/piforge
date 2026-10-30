@@ -454,6 +454,11 @@ const (
 	ScopeStaged   DiffScope = "staged"
 	ScopeBranch   DiffScope = "branch"
 	ScopeCommit   DiffScope = "commit"
+	// ScopeRange compares two explicit revisions: everything in To that is not
+	// in From (`git diff From..To`). It is what a review means by "what this
+	// commit or branch added" — HEAD~1..HEAD, main..HEAD — and it is the scope
+	// the changes panel uses for a commit range (FR-12.1).
+	ScopeRange DiffScope = "range"
 )
 
 // DiffRequest is a diff query.
@@ -462,6 +467,8 @@ type DiffRequest struct {
 	Path   string // optional single-file filter
 	Commit string // required for ScopeCommit
 	Base   string // optional base ref for ScopeBranch
+	From   string // ScopeRange: the left side (exclusive), e.g. HEAD~1 or main
+	To     string // ScopeRange: the right side; defaults to HEAD
 }
 
 // CommitRequest creates a commit from staged paths.

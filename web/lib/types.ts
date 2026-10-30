@@ -325,7 +325,7 @@ export interface FileDiff {
   patch: string;
 }
 
-export type DiffScope = "unstaged" | "staged" | "branch" | "commit";
+export type DiffScope = "unstaged" | "staged" | "branch" | "commit" | "range";
 
 export interface SearchResult {
   path: string;

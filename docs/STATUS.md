@@ -18,6 +18,8 @@
 
 本批（命令面板 + 同名覆盖）之后，FR-14.1 从 PARTIAL 移入 DONE（规则、挂载、会话记录、UI 与测试齐了）；非 FR 交付能力新增「⌘K 命令面板默认选中」一条（PRD §10.1-5 / §13 有要求，但没有 FR 行）：**126 条 FR 为 DONE 62 / PARTIAL 46 / MISSING 17 / 不做 1**；**整表 130 行 = DONE 66 / PARTIAL 46 / MISSING 17 / 不做 1**。
 
+本批（diff 作用域与逐 hunk UI + e2e 定向清理）之后，FR-12.1 与 FR-12.2 从 PARTIAL 移入 DONE：**126 条 FR 为 DONE 64 / PARTIAL 44 / MISSING 17 / 不做 1**；**整表 130 行 = DONE 68 / PARTIAL 44 / MISSING 17 / 不做 1**。`FR-12.1` 的 DONE 只覆盖 工作区/已暂存/分支 vs 基准/提交范围 四个作用域——PRD 原文里的「本轮」仍没有入口，行首标题已按实际覆盖改写，不拿 DONE 冒充。另一个不是 FR 的改动在 `e2e/scripts/`：e2e 数据目录不再无限增长（见文末「e2e 数据目录的定向清理」），它不改变任何 FR 状态。
+
 ---
 # PiForge 对照 PRD 的实现审计
 
@@ -25,7 +27,7 @@
 - 审计方法：先读 `docs/STATUS-AUDIT.md`（`06b61a3`）的每条判定，再逐条重读 `backend/internal/httpapi/router.go` 的路由表、各 handler、`web/components/**` 与 `e2e/tests/*.spec.ts`；以「实现 + 断言了用户可见结果的测试名」为准，不采信命名与注释。
 - 状态口径：**DONE** 必须点名一条断言用户可见承诺的测试或 e2e 路径；**PARTIAL** 必须写清缺什么；**MISSING** 是无实现。
 - 本版把 `06b61a3` 之后的修复接进台账：`f766651`（FR-2.5 / FR-2.6）、`bd85ade`（FR-2.7）、`9c4ab0b`（FR-11.8）、`717f7cb`（FR-12.5），以及浏览器启动按沙箱单飞与 profile 僵尸锁恢复（FR-11.1）。
-- 计数：**126 条 FR，DONE 62 / PARTIAL 46 / MISSING 17 / 不做 1**（`be01575` 时是 52 / 54；FR-1.9 与 FR-9.2 补证据后为 54 / 52 / 19，FR-3.3 从 MISSING 移入 DONE，FR-14.4、FR-6.6、FR-10.2、FR-11.2、FR-12.4 与 FR-14.1 从 PARTIAL 移入 DONE，FR-16.3 从 MISSING 移入 DONE；旧值 37 / 50 / 39 是 `2e5f206` 时代的，且 FR-12.5 等行早已过期）。另有 4 条非 FR 交付能力（见文末「交付能力」），均 DONE；**整表 130 行 = DONE 66 / PARTIAL 46 / MISSING 17 / 不做 1**。这两个数是从本文件的表格行重新数出来的，不是从旧表头抄的。
+- 计数：**126 条 FR，DONE 64 / PARTIAL 44 / MISSING 17 / 不做 1**（`be01575` 时是 52 / 54；FR-1.9 与 FR-9.2 补证据后为 54 / 52 / 19，FR-3.3 从 MISSING 移入 DONE，FR-14.4、FR-6.6、FR-10.2、FR-11.2、FR-12.4、FR-14.1、FR-12.1 与 FR-12.2 从 PARTIAL 移入 DONE，FR-16.3 从 MISSING 移入 DONE；旧值 37 / 50 / 39 是 `2e5f206` 时代的，且 FR-12.5 等行早已过期）。另有 4 条非 FR 交付能力（见文末「交付能力」），均 DONE；**整表 130 行 = DONE 68 / PARTIAL 44 / MISSING 17 / 不做 1**。这两个数是从本文件的表格行重新数出来的，不是从旧表头抄的。
 
 > 说明：PRD 中没有「部署」类 FR（§12 是里程碑，`deploy/` 是 Dockerfile.app / Dockerfile.offline / Dockerfile.runner / k8s.yaml / entrypoint.sh，属交付物而非需求行），因此下面没有部署行。`sandbox-runner`（把 Docker CLI 从控制面移出去）同样是交付物而非 FR：它没有改变任何一条 FR 的状态，证据见 `docs/SANDBOX-DEPLOY.md` §1.4 与 `scripts/verify-runner-sandbox.ps1`。
 >
@@ -120,8 +122,8 @@
 | FR-11.7 多 tab（≥3，tab 条 + 缩略图） | DONE | `browser/tabs.go` + `handleListBrowserTabs`/`handleOpenBrowserTab`/`handleCloseBrowserTab` + `browser-panel.tsx` tab 条；`26-browser-tabs.spec.ts`、`tabs_test.go` |
 | FR-11.8 截图入会话附件（不再弄脏 checkout） | DONE | `9c4ab0b`：截图跟随面板当前激活的 tab（`Session.SetActiveTab` / `ScreenshotTab`），空图被拒并给出原因（`capture.go` `ErrBlankCapture`）。**本轮把落点移出仓库**：截图写 `<dataDir>/artifacts/<session>/screenshots/<ts>-<ms>.png`，响应虚拟路径 `artifacts/<session>/screenshots/…`，面板经新路由 `GET /v1/sessions/{id}/artifacts?path=…` 预览/下载；`git status` 不再出现 `screenshots/`，而旧会话里已在 checkout 内的 `screenshots/…` 仍走 `/files` 可预览（不迁移、不删除用户文件）。测试：`screenshot_test.go`（about:blank、纯色图、非 PNG、连续两次）、`real_chrome_test.go` `TestRealChromeScreenshotFollowsTheActiveTab`、`httpapi/artifacts_test.go` `TestScreenshotWritesOutsideTheCheckoutAndIsServable`（POST 后 checkout 零新增文件、artifacts 路由 200、legacy workspace 路径仍 200）；`e2e/tests/20-screenshot.spec.ts` 先导航到真实页面，再解码 PNG 断言 >8 种颜色、两次 API 截图后 `git/status.clean=true`、面板相机按钮预览 `src` 为 `/artifacts?...&inline=1`、空白 tab 返回 422 且不落文件 |
 | FR-11.9 profile 持久化（sandbox 内 .piforge-browser） | DONE | `browser.go` `profile := filepath.Join(profileRoot, ".piforge-browser")` + `--user-data-dir`；`profile_test.go` `TestRealChromeProfileIsStableAcrossSessions`（边界已注明） |
-| FR-12.1 Diff 作用域（未暂存/已暂存/某提交/分支 vs 基准/本轮） | PARTIAL | `parseDiffScope` 支持 unstaged/staged/branch/commit；前端 `git-panel.tsx` 的 `SCOPES` 只有 3 项（**无「某次提交」**），且无「本轮」作用域 |
-| FR-12.2 逐文件 + 逐 hunk stage/unstage/revert | PARTIAL（逐 hunk 只有 API，UI 是逐文件） | `gitx/hunks.go`（客户端只传 index，补丁由服务端重建）；`POST …/git/hunk`、`POST …/git/discard`；变更面板每行「丢弃」（带确认）；`hunks_test.go`、`37-hunks.spec.ts`。**diff 视图里没有逐 hunk 按钮** |
+| FR-12.1 Diff 作用域（工作区/已暂存/分支 vs 基准/提交范围） | DONE | 作用域是真的换 git 命令，不是换标签：`contracts.ScopeRange` + `DiffRequest.From/To`，`gitx.Diff`/`DiffPatch` 走 `git diff <from>..<to>`（两端各自过 `safeRevArg`，`..`、`-` 开头、空白一律拒绝，所以范围不会被拼成一个 revision），`GET /v1/sessions/{id}/git/diff?scope=range&from=HEAD~1&to=HEAD`，缺 `from` 由 handler 返回 400 `invalid_argument`。前端 `git-panel.tsx` 的 `SCOPES` 现在是 工作区/已暂存/分支/范围，`lib/git/diff-scope.ts` 负责拼请求；范围有 `git-range-from`/`git-range-to`/`git-range-apply` 两个输入，当前作用域用 `git-diff-scope` 徽章（带 `data-scope`）写在 diff 头上。历史作用域从自己的 diff 列文件（`git-scope-files`/`git-scope-file`），否则「某个提交改了但工作区干净」的文件根本点不开——而那正是 review 要看的。测试：`gitx/diff_range_test.go`（HEAD~1..HEAD 只有最后一次提交、HEAD~2..HEAD 两条都在、main..HEAD 在 main 上为空、路径过滤、两端校验）；`httpapi/git_diff_scopes_test.go` 走真实路由 + 真实 git 仓库断言同一批内容；`web/lib/git/diff-scope.test.ts` 断言作用域改变请求本身；e2e `76-diff-scopes.spec.ts` 断言 工作区/已暂存/HEAD~1..HEAD/HEAD~2..HEAD 四种内容互不相同。旧代码确实过不了：旧前端没有 `git-diff-scope`（`fr-12.1-fail-first-ui.log`），旧后端对 `scope=range` 返回 400、范围文件列表停在 0（`fr-12.1-fail-first-backend.log`）。剩余：PRD 里的「本轮」作用域仍没有入口（见文末），提交范围靠手输 from/to，没有提交选择器 |
+| FR-12.2 逐文件 + 逐 hunk stage/unstage/revert | DONE | `gitx/hunks.go`（客户端只传 path+index，补丁由服务端重建）；`POST …/git/hunk`（stage/unstage/discard）；diff 视图里每个 hunk 一行（`git-hunk-row`，`data-index` 就是发给服务端的 index），工作区给「暂存」「丢弃」，已暂存给「取消暂存」，历史范围显示 `git-hunk-readonly` 且不画按钮——提交里已有的 hunk 不能暂存，按钮能点却必然失败比没有更糟。逐文件仍是每行「丢弃」（带确认）。测试：`hunks_test.go`；`httpapi/git_diff_scopes_test.go` 从 diff 视图的路径做完整一轮（工作区两 hunk → 暂存 index 1 → 索引里只剩第二条、工作区只剩第一条 → 取消暂存后索引为空、两条都回到工作区）；e2e `76-diff-scopes.spec.ts` 在页面上点 `git-hunk-stage`/`git-hunk-unstage` 断言同样的结果。**顺带修掉的坑**：提交原来把 `stagedPaths` 再交给后端 `git add` 一遍，于是「只暂存一个 hunk 再提交」会把另一个未暂存的 hunk 一起带走；现在 `git-panel.tsx` 用 `paths: []` 提交索引原样内容（`gitx.Commit` 的 paths 语义没动，避免影响其它调用方），76 在第一次提交后断言仍有一行未暂存且内容是另一条改动 |
 | FR-12.3 行内评论 → 作为 steer 发给 agent | MISSING | diff 组件没有评论入口，也无 `streaming_behavior:"steer"` 的调用链 |
 | FR-12.4 变更概览（增删行数 + 风险标记） | DONE | `GitStatus` 新增 `additions`/`deletions`，每个 `GitChange` 新增 `additions`/`deletions`/`risk`（`lockfile` / `ci`）。统计相对 HEAD 合并已暂存与未暂存：`git diff --numstat -z HEAD`（无 HEAD 时分别数 index 与工作区），重命名取新路径，未跟踪文件按行数计入（二进制/超过 4MB 记 0）。风险在 `gitx` 判定：`.github/workflows/`、`.circleci/`、`.buildkite/` 与常见 CI 文件为 `ci`，`go.sum`、`package-lock.json`、`pnpm-lock.yaml` 等为 `lockfile`。`git status` 改用 `--untracked-files=all`：用 `normal` 时新 `.github/workflows/ci.yml` 只显示成 `.github/` 一行，行数与风险都挂不到文件上。UI 每行显示 `+N/−N`（`git-line-counts`）与「锁文件」/「CI」徽章（`git-risk`），表头 `git-change-totals`。测试：`TestStatusCountsLinesAndFlagsRisk`（a.txt +1、b.txt −2、new.txt +2、package-lock +2/锁文件、ci.yml +1/CI，合计 +6 −2）与未跟踪分支计数；e2e `73-git-overview.spec.ts` 先断言 API 的 `+6 −1` 与逐行字段，再断言页面上的同样数字与徽章。旧代码：后端没有这些字段，spec 失败在 `expect(status.additions).toBe(6)`；只换回旧前端则失败在 `getByTestId('git-change-totals')` element not found（`fr-12.4-fail-first.log`、`fr-12.4-fail-first-ui.log`）。部署截图 `fr-12.4-change-overview.png` |
 | FR-12.5 测试结果面板 | DONE | `717f7cb`：`internal/testrun` 解析 go test / vitest / jest / pytest 输出（含 `race detected`、`file:line`），`GET /v1/sessions/{id}/test-runs` 从工具事件与终端两条来源入库，`test-panel.tsx` 有失败/通过徽章与逐条失败展开。测试：`testrun/parse_test.go`、`store/testruns_test.go`、`httpapi/test_run_handlers_test.go`；`e2e/tests/62-test-panel.spec.ts` 断言空态、失败徽章与 `TestCacheEvict` / `cache_test.go:42`、随后同一会话变成通过徽章、刷新后仍有两条且 API 与面板一致 |
@@ -181,7 +183,7 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 2. **FR-15.x MCP 只到一半**——没有 OAuth 代办（15.3）、没有连接状态徽章（15.5）、没有一键导入 mcpServers JSON（15.6）、没有内置预设（15.7）、没有工具列表/逐个禁用（15.8）。
 3. **FR-5.8 / 16.4 / 16.6 运维面缺失**——资源护栏只有 docker provider 的启动参数，没有管理入口；镜像管理、护栏配置都没有端点或页面。
 4. **FR-9.6 多路跟随**——跟随终端没有「每分支一个跟随 tab」（单路跟随已修，见文末）；终端本体已有多 tab（FR-10.2 本轮补齐）。
-5. **FR-12.3 / 12.6 / 12.1**——diff 里不能写行内评论转成 steer；没有一键开 PR；diff 作用域缺「某次提交」与「本轮」。
+5. **FR-12.3 / 12.6**——diff 里不能写行内评论转成 steer；没有一键开 PR。（FR-12.1 的四个作用域与 FR-12.2 的逐 hunk UI 本批补齐；「本轮」仍没有入口，见文末。）
 6. **FR-2.4 / 8.8 / 14.2 / 16.3**——删除分支不清理 worktree（`RemoveWorktree` 无调用者）；没有开 PR；skill 是复制到 `.pi/skills` 而不是只读 bind mount；没有 admin 共享 skill 的写入口。
 7. **FR-5.3 快照只能看不能恢复**——清单索引在，但没有 restore-from-snapshot；docker 的回收未实跑；状态条也没有倒计时（FR-5.1）。
 
@@ -301,7 +303,9 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 ## 仍是 PARTIAL 的相邻项（本批未动）
 
 - **FR-11.3**：输入注入可用，但接管时没有拦下 agent 的 `mcp__playwright__*`，人和 agent 仍可能同抢一页；需要浏览器锁，不是补一条测试。
-- **FR-12.1 / FR-12.2 / FR-12.6**：diff 作用域仍缺「某次提交」与「本轮」，逐 hunk 仍只有 API，开 PR 未实现。FR-12.4 只做概览，没有扩大 diff 的作用域。
+- **FR-12.6**：没有一键开 PR（本批未动）。
+- **FR-12.1 的「本轮」**：工作区 / 已暂存 / 分支 vs 基准 / 提交范围 四个作用域都已可用并有测试；PRD 原文的「本轮」仍没有入口——它要回答「这一轮 agent 改了什么」，得从 run 的 tool events 里反推改动集合，不是加一个 tab，本批没有半做。
+- **FR-12.1 的输入方式**：提交范围靠手输 `from`/`to`（默认 `HEAD~1..HEAD`），没有提交选择器；历史作用域不能逐 hunk 操作（显示 `git-hunk-readonly`），这是刻意的。
 - **FR-12.4 的边界**：风险只覆盖台账点名的 lockfile 与 CI 两类（按已知文件名/目录）；二进制与 >4MB 文件的未跟踪行数记 0。这两点是刻意的，不假装覆盖任意 `*.lock` 或大文件。
 
 
@@ -364,3 +368,42 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 - 镜像与部署：`pwsh scripts/build-app-image.ps1` 重建 `piforge:local`（`sha256:5f6db203eb4e…`，drill 断言的同一 id）；`pf-local` 用**同一个数据卷** `368d6186adb8…` 重建（新容器 `5867a7de9c58…`，端口 7722→7700，环境仍是 `PIFORGE_DEFAULT_PROVIDER=volc` 与四个 seed 账号）。重启后 `/healthz` = ok，`GET /v1/providers` 里 `volc` 仍 `enabled=true`、`has_key=true`（`models=1`）；`GET /v1/skills` 每一行都带 `effective`。
 - 部署探针 `e2e/scripts/fix-palette-shadow-probe.mjs`：**旧构建 8/18 失败**（`selected=0`、Enter 不跳转、无 `effective`、两个同名行无提示、`/` 面板同时列两行且版本对不上、停用后列表不说明回退）；**新构建 18/18 通过**。截图：`palette-before-enter.png`（输入后第一行已高亮）、`palette-opened.png`（无 ArrowDown 直接 Enter 后进入会话）、`shadow-settings.png`（生效中 / 覆盖共享版本 / 已被同名私有 Skill 覆盖 / 解释行）、`shadow-palette.png`（`/` 面板只有生效行并写明覆盖）、`shadow-fallback.png`（停用私有后「已停用 · 使用共享版本 v1.0.0」）。日志与机器可读结果：`probe-run.log`、`probe-log.json`。
 - fail-first：命令面板旧代码在「保留新 spec、删掉 ArrowDown」后必失败——`60-session-search` 的 URL 断言拿到 `http://127.0.0.1:3100/`（失败的页面快照：`old-code-e2e-fail.png`；同一次失败里的可访问性快照显示 listbox 只有会话行、没有任何 selected）。FR-14.1 的新测试无法在旧代码上编译/通过（`internal/skills` 与 `contracts.Skill.Effective` 都不存在），部署探针在旧构建上量到了同样的缺失（8/18）。
+
+## 本批：FR-12.1 / FR-12.2（diff 作用域 + 逐 hunk UI）与 e2e 数据目录清理
+
+### 1. e2e 数据目录：只删自己造成的，不再让它长到把无关 spec 拖垮
+
+- **症状**：`e2e/.data` 只增不减。`freshAccount` 每个 spec 建一个账号，产品故意没有删账号接口；`openNewSession` 每次建一个项目，`53` 一轮建 42 个，`60` 建 2 个项目 40 个会话，`61` 留下改名/删除用的项目。目录大到 ~934 项目 / ~23k 文件后，连不碰项目的 spec（登录、侧栏、项目列表）也开始在复用的目录上超时，唯一能绿的跑法是 `test:fresh` 的 7.5 分钟重建——而“重建才能绿”正是让人学会忽略红色的方式。
+- **删什么**（`e2e/scripts/clean-data.mjs`，`prepare.mjs` 在构建前调用）：除两个种子账号外的**所有账号**（providers / skills / MCP / API keys / feature flags / auth sessions / 会话随 schema 的 `ON DELETE CASCADE` 一起走）；**所有项目**（种子不建项目，所以种子账号上的项目一定是 spec 建的）；以及按 id 对照的磁盘残留：`sandboxes/<user>/<project>`、`sandboxes/_state/<user>/<project>.json`、`pi-agents/<session>`、`artifacts/<session>`、`skills/<id>`。不按名字猜，删哪条由数据库里仍然活着的 id 决定。
+- **不删什么**：`admin@piforge.local` / `dev@piforge.local`、部署级共享 provider、三条种子 skill、`master.key` / `secret.key`。预检（`tests/preflight.setup.ts`）读的就是这些，清理后它的起点只会更干净。数据库里两个种子账号缺失时脚本**报错退出**，不会把别的部署当 e2e 目录清掉。
+- **打印**：每次跑先打印删了多少账号/项目/会话/沙箱行/文件（含 MB）和前 10 个项目名，再打印清理后的账号/项目/会话/文件数与目录大小。
+- **阈值告警**：超过 300 项目或 8000 文件时，启动先打印 WARNING 点名两个计数与 `pnpm --dir e2e test:fresh`；清理后仍超阈值则再告警一次，并说明“剩下的不是这套清理认识的写入者，要把它加进 `clean-data.mjs`”。演示（合成目录，非真实数据）：`e2e/.artifacts/task2/degradation-warning.txt` —— `471 projects (past the 300-project line)`、`8002 files (2.8 MB; past the 8000-file line)`。
+- **同一 `.data` 连续运行**（每次都跑清理，从不 `--fresh`）：
+
+| 运行 | 起跑前（上一次的残留） | 清理后 | 结果 |
+|---|---|---|---|
+| 1（162 条） | 169 项目 / 7,594 文件 | 2 账号 / 0 项目 / 6 文件 | **162 passed (7.4m)** |
+| 2（162 条） | 169 项目 / 7,477 文件 | 删 35 账号 / 169 项目 / 7,588 文件 → 6 文件 | **162 passed (7.5m)** |
+| 3（162 条） | 169 项目 / 7,471 文件 | 删 35 账号 / 169 项目 / 7,471 文件 → 6 文件 | 第 83 条起登录 401，停止（见下） |
+| A（163 条，含 `76`） | 157 项目 / 6,862 文件 | 删 30 账号 / 157 项目 / 6,862 文件 → 6 文件 | 第 152 条起同一症状，停止 |
+| B（163 条，含 `76`） | 170 项目 / 7,638 文件 | 删 30 账号 / 157 项目 / 6,862 文件 → 6 文件 | **163 passed (7.6m)** |
+
+  跑完后的规模：7,594 → 7,477 → 7,477 → 7,638 文件，169 → 169 → 169 → 170 项目。也就是说，第 N 次运行后的目录规模由“一次运行会造多少”决定，不再由“跑过多少次”决定。日志：`e2e/.artifacts/task1/run{1,2,3}.log`、`e2e/.artifacts/task2/full-e2e-{1,2}.log`、`run{1,2}-after.txt`、`after-runB.txt`。
+
+- **诚实的边界（第三次没有全绿）**：第 3 次和第 A 次不是数据增长问题——两次起跑前目录都已被清理回 2 账号 / 0 项目 / 6 文件，症状是 `/v1/auth/me` 对**刚登录**的 cookie 返回 401，直接查库该 token 行存在，重启后端即恢复；调试构建打出的错误是 `store: auth session: not found`，说明是进程内读路径看不到新提交的行（`e2e/.artifacts/task1/debug-wedge.log`），而这份 `.data` 上重启后的 `piforged` 用同一个 cookie 立刻 200。该症状与目录大小无关、与清理无关（调试跑运行中没有任何清理，症状照旧），本批没有修它，也没有用重启掩盖它——门禁里的“完整 e2e”因此记录的是 B 次（163 条全绿），而不是“三次都绿”。
+
+### 2. FR-12.1 / FR-12.2
+
+- **范围是真的换命令**：`contracts.ScopeRange` + `DiffRequest.From/To`；`gitx.Diff`/`DiffPatch` 走 `git diff <from>..<to>`，两端各自 `safeRevArg`（`..`、`-` 开头、空白一律拒绝，范围不会被拼成一个 revision）；`GET …/git/diff?scope=range&from=HEAD~1&to=HEAD`，缺 `from` 由 handler 返回 400 `invalid_argument`（不静默变成默认值）。`分支` 作用域保留原来的 merge-base 语义（`base...HEAD`），两者不是同一个东西。
+- **逐 hunk 在 diff 视图里**：每个 hunk 一行（`git-hunk-row`，`data-index` 就是发给服务端的 index），工作区给「暂存」「丢弃」，已暂存给「取消暂存」；历史范围显示 `git-hunk-readonly` 且不画按钮——往已经存在的提交里暂存 hunk 不是一件事，能点却必然失败比没有更糟。`丢弃` 仍带确认（按 hunk 只还原那一段）。
+- **历史作用域能列文件**：变更列表只认识工作区，所以“某个提交改了、但工作区干净”的文件原本点不开，而那正是 review 的场景。`范围`/`分支` 从自己的 diff 列文件（`git-scope-files`，每项 `git-scope-file` 带路径与 +/−），并默认选中第一个。
+- **顺带修掉的坑**：提交原来把 `stagedPaths` 再交给后端 `git add` 一遍，于是“只暂存一个 hunk 再提交”会把另一个未暂存的 hunk 一起带走。现在 `git-panel.tsx` 用 `paths: []` 提交索引原样内容（`gitx.Commit` 的 paths 语义没动，避免影响其它调用方）；`76` 在第一次提交后断言仍有一行未暂存且内容是另一条改动。
+- **fail-first（分层证明）**：只换回旧前端 → `76` 失败在 `getByTestId('git-diff-scope')` element not found（`e2e/.artifacts/task2/fr-12.1-fail-first-ui.log`）；只换回旧后端 → `76` 的 `git-scope-files` 停在 `data-files=0`（`scope=range` 被 400），即范围内容根本没取到（`fr-12.1-fail-first-backend.log`）。
+
+### 3. 门禁（本批）
+
+- `go build ./...`：0；`go vet ./...`：0；`go test ./... -count=1`：全绿（含新增 `gitx/diff_range_test.go` 与 `httpapi/git_diff_scopes_test.go`）。日志：`e2e/.artifacts/task2/go-test.log`。
+- `pnpm --dir web test -- --run`：**25 个文件 / 201 例通过**（新增 `lib/git/diff-scope.test.ts` 5 例）。`pnpm --dir web exec next build`：通过。日志：`web-test.log`、`next-build.log`。
+- 完整 e2e：**`pnpm --dir e2e test` → 163 passed（7.6m）**（162 + `76-diff-scopes`），且是在**复用**的 `.data` 上（不是 `test:fresh`）。日志：`e2e/.artifacts/task2/full-e2e-2.log`。
+- `pwsh scripts/deliver-check.ps1`（`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入，未打印、未落盘）：run `20261030-140727`，**75 个检查全部 PASS、`failure` 为空**；一次性容器 `pf-drill` 与 volume `pf-drill-data` 已删除，`pf-local` 容器 id 前后一致。日志：`e2e/.artifacts/task2/deliver-check.log`，summary：`e2e/.artifacts/delivery-drill/20261030-140727/summary.json`。
+- 镜像与部署：`pwsh scripts/build-app-image.ps1` 重建 `piforge:local`；`pf-local` 用**同一个数据卷** `368d6186adb8…` 重建（新容器 `d4832bcb9d3d…`，端口 7722→7700，环境仍是 `PIFORGE_DEFAULT_PROVIDER=volc` 与四个 seed 账号）。重启后 `/healthz` = 200，`GET /v1/providers` 里 `volc` 仍 `enabled=true`、`has_key=true`。

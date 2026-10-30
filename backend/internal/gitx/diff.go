@@ -19,6 +19,7 @@ import (
 //	staged   → `git diff --cached`      (index vs HEAD)
 //	commit   → `git show <sha> --format= --patch`
 //	branch   → `git diff <base>...HEAD` (merge-base semantics)
+//	range    → `git diff <from>..<to>`  (two explicit revisions)
 func (r *Runner) Diff(ctx context.Context, root string, req contracts.DiffRequest) ([]contracts.FileDiff, error) {
 	dir, err := repoPath(root)
 	if err != nil {
@@ -50,6 +51,23 @@ func (r *Runner) Diff(ctx context.Context, root string, req contracts.DiffReques
 			return nil, fmt.Errorf("gitx: diff branch: %w", err)
 		}
 		args = append(args, base+"...HEAD")
+	case contracts.ScopeRange:
+		from, to := strings.TrimSpace(req.From), strings.TrimSpace(req.To)
+		if from == "" {
+			return nil, fmt.Errorf("gitx: diff range: from is required")
+		}
+		if to == "" {
+			to = "HEAD"
+		}
+		// Each end is checked on its own: safeRevArg refuses `..`, so a range can
+		// never be smuggled in as one revision string.
+		if err := safeRevArg(from); err != nil {
+			return nil, fmt.Errorf("gitx: diff range from: %w", err)
+		}
+		if err := safeRevArg(to); err != nil {
+			return nil, fmt.Errorf("gitx: diff range to: %w", err)
+		}
+		args = append(args, from+".."+to)
 	default:
 		return nil, fmt.Errorf("gitx: diff: unknown scope %q", req.Scope)
 	}
@@ -150,6 +168,21 @@ func (r *Runner) DiffPatch(ctx context.Context, root string, req contracts.DiffR
 			return "", fmt.Errorf("gitx: diff branch: %w", err)
 		}
 		args = []string{"diff", "--no-color", "--no-ext-diff", "--find-renames", base + "...HEAD"}
+	case contracts.ScopeRange:
+		from, to := strings.TrimSpace(req.From), strings.TrimSpace(req.To)
+		if from == "" {
+			return "", fmt.Errorf("gitx: diff range: from is required")
+		}
+		if to == "" {
+			to = "HEAD"
+		}
+		if err := safeRevArg(from); err != nil {
+			return "", fmt.Errorf("gitx: diff range from: %w", err)
+		}
+		if err := safeRevArg(to); err != nil {
+			return "", fmt.Errorf("gitx: diff range to: %w", err)
+		}
+		args = []string{"diff", "--no-color", "--no-ext-diff", "--find-renames", from + ".." + to}
 	default:
 		return "", fmt.Errorf("gitx: diff: unknown scope %q", req.Scope)
 	}

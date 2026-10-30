@@ -227,11 +227,19 @@ func (s *server) handleGitDiff(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	// A range without a left side has no meaning, and defaulting it here would
+	// hide a client that forgot to send one. The right side defaults to HEAD.
+	if scope == contracts.ScopeRange && strings.TrimSpace(r.URL.Query().Get("from")) == "" {
+		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "from is required for scope=range"))
+		return
+	}
 	diffs, err := s.deps.Workspace.Diff(r.Context(), root, contracts.DiffRequest{
 		Scope:  scope,
 		Path:   r.URL.Query().Get("path"),
 		Commit: r.URL.Query().Get("commit"),
 		Base:   r.URL.Query().Get("base"),
+		From:   r.URL.Query().Get("from"),
+		To:     r.URL.Query().Get("to"),
 	})
 	if err != nil {
 		s.fail(w, r, err)
@@ -399,11 +407,12 @@ func parseDiffScope(raw string) (contracts.DiffScope, error) {
 	switch contracts.DiffScope(raw) {
 	case "":
 		return contracts.ScopeUnstaged, nil
-	case contracts.ScopeUnstaged, contracts.ScopeStaged, contracts.ScopeBranch, contracts.ScopeCommit:
+	case contracts.ScopeUnstaged, contracts.ScopeStaged, contracts.ScopeBranch,
+		contracts.ScopeCommit, contracts.ScopeRange:
 		return contracts.DiffScope(raw), nil
 	}
 	return "", apiErr(contracts.ErrInvalidArgument,
-		"scope must be unstaged, staged, branch or commit")
+		"scope must be unstaged, staged, branch, commit or range")
 }
 
 // pathBase returns the last path element for a Content-Disposition filename.
