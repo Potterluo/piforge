@@ -9,6 +9,12 @@
     user can log in, create a project and a session, and get one real agent turn
     that runs code and commits it.
 
+    Two later main-flow steps are covered as well: opening a pull request
+    (FR-12.6) against a fake forge that runs inside the drill container, and a
+    comment on one line of a file turning into the next message the agent
+    receives (FR-12.3). A final guard asserts the drill did not dirty the source
+    checkout and left no container or volume behind.
+
     The provider key is read from PIFORGE_DRILL_KEY and is never printed, never
     written to an artifact and never committed. The script refuses to operate on
     a container named pf-local and only removes the container and volume it
@@ -49,6 +55,10 @@
     How long to wait for the sandbox browser to be collected after the last
     viewer detaches. The product's default idle timeout is 60s. Default: 75.
 
+.PARAMETER FakeForgePort
+    Port the fake GitHub-dialect forge listens on inside the drill container.
+    It is never published to the host. Default: 7799.
+
 .PARAMETER SkipUi
     Skip the Playwright check that the file tree refreshes without a reload.
 
@@ -73,6 +83,7 @@ param(
     [int]$StartupTimeoutSeconds = 120,
     [int]$SettleTimeoutSeconds = 600,
     [int]$BrowserIdleWaitSeconds = 75,
+    [int]$FakeForgePort = 7799,
     [switch]$SkipUi
 )
 
@@ -110,6 +121,17 @@ $SeedUserPassword = "Seed-" + [guid]::NewGuid().ToString("N").Substring(0, 12) +
 $NewUserEmail = "drill-$RunID@piforge.local"
 $NewUserPassword = "Drill-" + [guid]::NewGuid().ToString("N").Substring(0, 12) + "!9"
 $ProjectName = "drill-$RunID"
+# The fake forge token is generated per run and belongs to the same protected
+# set as the provider key: it goes into a header, is sealed in the database and
+# must never reach the console, an artifact or the container log.
+$ForgeToken = "ghp_drill_" + [guid]::NewGuid().ToString("N")
+$ForgeFailMarker = "drill forge refused: base branch is protected (drill-422)"
+$PRBranch = "drill/pull-request"
+$PRRejectBranch = "drill/rejected-base"
+$ReviewPath = "notes.txt"
+$ReviewLine = 2
+$ReviewQuote = "theme: dark"
+$ReviewBody = "这一行是演练用的行内评论：请只回复你看到了它，不要修改任何文件。"
 $PromptText = @'
 Create a small Node script named primes.js that prints the first 10 primes, one per line. Run it with node and show the output. Add a simple test: a package.json whose test script is "node --test" and a node:test file that checks the primes, then run `npm test`. Finally commit everything with git.
 '@
@@ -164,7 +186,9 @@ function Invoke-Api {
         $params.Body = ($Body | ConvertTo-Json -Depth 12 -Compress)
     }
     if ($Raw) {
-        $resp = Invoke-WebRequest @params
+        # -SkipHttpErrorCheck lets a 4xx/5xx be an assertion input instead of an
+        # exception: the PR drill has to read the forge's own refusal verbatim.
+        $resp = Invoke-WebRequest @params -SkipHttpErrorCheck
         $parsed = $null
         if ($resp.Content) {
             try { $parsed = $resp.Content | ConvertFrom-Json } catch { $parsed = $resp.Content }
@@ -184,7 +208,7 @@ function Login-Drill {
 
 function Redact-Secrets {
     param([string]$Text)
-    foreach ($secret in @($Key, $SeedAdminPassword, $SeedUserPassword, $NewUserPassword)) {
+    foreach ($secret in @($Key, $SeedAdminPassword, $SeedUserPassword, $NewUserPassword, $ForgeToken)) {
         if ($secret) { $Text = $Text.Replace($secret, "<redacted>") }
     }
     return $Text
@@ -244,6 +268,61 @@ function Wait-Until {
         Start-Sleep -Milliseconds 400
     }
     throw "timed out after ${TimeoutSeconds}s waiting for $What"
+}
+
+# Write-SessionFile is the raw-body PUT the editor uses. The body goes out as
+# UTF-8 bytes so a non-ASCII line is the same bytes the API reads back.
+function Write-SessionFile {
+    param([string]$SessionID, $Session, [string]$CSRF, [string]$Path, [string]$Text)
+    $uri = "$BaseUrl/v1/sessions/$SessionID/files?path=$([uri]::EscapeDataString($Path))"
+    $resp = Invoke-WebRequest -Method Put -Uri $uri -WebSession $Session `
+        -Headers @{ "X-PF-CSRF" = $CSRF } -ContentType "text/plain; charset=utf-8" `
+        -Body ([System.Text.Encoding]::UTF8.GetBytes($Text)) -UseBasicParsing
+    return [int]$resp.StatusCode
+}
+
+# Wait-SessionSettled polls the same status route a client uses until a run has
+# been seen running and then stays idle with a stable sequence number. It
+# returns the observation instead of throwing so the caller decides what to
+# assert.
+function Wait-SessionSettled {
+    param([string]$SessionID, $Session, [int]$TimeoutSeconds)
+    $sawRunning = $false
+    $firstIdleAt = $null
+    $lastSeq = -1
+    $stableTicks = 0
+    $lastStatus = $null
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $st = Invoke-Api -Method GET -Path "/v1/sessions/$SessionID/status" -Session $Session
+        $lastStatus = $st
+        if ($st.running) {
+            $sawRunning = $true
+            $firstIdleAt = $null
+            $stableTicks = 0
+        }
+        elseif ($sawRunning) {
+            if ($null -eq $firstIdleAt) {
+                $firstIdleAt = [DateTime]::UtcNow
+                $lastSeq = $st.last_seq
+                $stableTicks = 0
+            }
+            elseif ($st.last_seq -eq $lastSeq) {
+                $stableTicks++
+                if ($stableTicks -ge 4) { break }
+            }
+            else {
+                $lastSeq = $st.last_seq
+                $stableTicks = 0
+            }
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    return [pscustomobject]@{
+        SawRunning = $sawRunning
+        Settled    = ($sawRunning -and $null -ne $firstIdleAt)
+        Status     = $lastStatus
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -638,7 +717,311 @@ try {
     $script:Metrics["test_run_command"] = $firstRun.command
 
     # -----------------------------------------------------------------------
-    # 8. Browser panel screenshot (a real page, decoded non-blank)
+    # 8. Open a pull request through the API against a fake forge (FR-12.6)
+    #
+    # The forge is a tiny Node HTTP server started inside the drill container:
+    # 127.0.0.1 there is the control plane's own loopback, so no host
+    # networking, no firewall rule and no second host process are involved.
+    # It records every request, so the drill can assert what actually crossed
+    # the wire instead of trusting the product's own success response.
+    # -----------------------------------------------------------------------
+
+    Write-Step "Open a pull request through the API against a fake forge"
+
+    $ForgeRepo = "acme/widgets"
+    $ForgeBaseBranch = "main"
+    $ForgeTitle = "Drill: open a pull request"
+    $ForgeBody = "Opened by the from-zero delivery drill."
+    $ForgeRoot = "/tmp/drill-forge"
+    $ForgeLogPath = "$ForgeRoot/requests.jsonl"
+    $ForgeControlPath = "$ForgeRoot/control.json"
+    $ForgeReadyPath = "$ForgeRoot/ready"
+
+    $fakeForgeSource = Join-Path $ArtifactDir "fake-forge.js"
+    Set-Content -Path $fakeForgeSource -Encoding UTF8 -Value @'
+// The fake forge of the delivery drill (FR-12.6). It speaks only the two
+// GitHub-dialect calls the product makes and appends every request to a JSONL
+// log. A control file lets the drill force a refusal (422) and see how the
+// product reports it.
+const http = require("node:http");
+const fs = require("node:fs");
+
+const port = Number(process.env.DRILL_FORGE_PORT || 7799);
+const logPath = process.env.DRILL_FORGE_LOG || "/tmp/drill-forge/requests.jsonl";
+const controlPath = process.env.DRILL_FORGE_CONTROL || "/tmp/drill-forge/control.json";
+const readyPath = process.env.DRILL_FORGE_READY || "/tmp/drill-forge/ready";
+const repo = process.env.DRILL_FORGE_REPO || "acme/widgets";
+const pullsPath = "/repos/" + repo + "/pulls";
+
+const open = [];
+fs.writeFileSync(logPath, "");
+
+function control() {
+  try {
+    return JSON.parse(fs.readFileSync(controlPath, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function record(entry) {
+  fs.appendFileSync(logPath, JSON.stringify(entry) + "\n");
+}
+
+const server = http.createServer((req, res) => {
+  let raw = "";
+  req.on("data", (chunk) => {
+    raw += chunk;
+  });
+  req.on("end", () => {
+    const url = new URL(req.url, "http://127.0.0.1");
+    const entry = {
+      at: new Date().toISOString(),
+      method: req.method,
+      path: url.pathname,
+      query: url.search,
+      authorization: req.headers.authorization || "",
+      api_version: req.headers["x-github-api-version"] || "",
+      body: null,
+    };
+    if (raw) {
+      try {
+        entry.body = JSON.parse(raw);
+      } catch {
+        entry.body = raw;
+      }
+    }
+    const send = (status, payload) => {
+      entry.status = status;
+      record(entry);
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(payload === undefined ? "" : JSON.stringify(payload));
+    };
+    if (url.pathname !== pullsPath) {
+      return send(404, { message: "drill forge: no route for " + url.pathname });
+    }
+    if (req.method === "GET") {
+      const head = url.searchParams.get("head") || "";
+      const base = url.searchParams.get("base") || "";
+      const owner = repo.split("/")[0];
+      const list = open.filter((pr) => {
+        const headOk = !head || head === pr.head.ref || head === owner + ":" + pr.head.ref;
+        const baseOk = !base || base === pr.base.ref;
+        return headOk && baseOk;
+      });
+      return send(200, list);
+    }
+    if (req.method === "POST") {
+      const ctl = control();
+      if (ctl.failStatus) {
+        return send(Number(ctl.failStatus), ctl.failBody || { message: "Validation Failed" });
+      }
+      const body = entry.body || {};
+      const number = open.length + 7;
+      const pr = {
+        number: number,
+        html_url: "http://127.0.0.1:" + port + "/" + repo + "/pull/" + number,
+        title: body.title || "",
+        head: { ref: String(body.head || "").replace(/^[^:]*:/, "") },
+        base: { ref: body.base || "" },
+      };
+      open.push(pr);
+      return send(201, pr);
+    }
+    return send(405, { message: "method not allowed" });
+  });
+});
+
+server.on("error", (err) => {
+  fs.writeFileSync(readyPath + ".error", String(err));
+  process.exit(1);
+});
+server.listen(port, "127.0.0.1", () => {
+  fs.writeFileSync(readyPath, "ready");
+});
+'@
+
+    $forgeSetup = Invoke-Docker @("exec", $ContainerName, "mkdir", "-p", $ForgeRoot)
+    $controlFile = Join-Path $ArtifactDir "forge-control-initial.json"
+    Save-Json $controlFile ([ordered]@{})
+    $copyServer = Invoke-Docker @("cp", $fakeForgeSource, "${ContainerName}:$ForgeRoot/server.js")
+    $copyControl = Invoke-Docker @("cp", $controlFile, "${ContainerName}:$ForgeRoot/control.json")
+    Assert-Check "the fake forge is installed inside the drill container" `
+        ($forgeSetup.Code -eq 0 -and $copyServer.Code -eq 0 -and $copyControl.Code -eq 0) `
+        "mkdir=$($forgeSetup.Code) server=$($copyServer.Code) control=$($copyControl.Code)"
+
+    $forgeStart = Invoke-Docker @(
+        "exec", "-d",
+        "-e", "DRILL_FORGE_PORT=$FakeForgePort",
+        "-e", "DRILL_FORGE_LOG=$ForgeLogPath",
+        "-e", "DRILL_FORGE_CONTROL=$ForgeControlPath",
+        "-e", "DRILL_FORGE_READY=$ForgeReadyPath",
+        "-e", "DRILL_FORGE_REPO=$ForgeRepo",
+        $ContainerName, "node", "$ForgeRoot/server.js"
+    )
+    $forgeReady = $false
+    $deadline = [DateTime]::UtcNow.AddSeconds(20)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        & docker exec $ContainerName test -f $ForgeReadyPath 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) { $forgeReady = $true; break }
+        Start-Sleep -Milliseconds 200
+    }
+    Assert-Check "the fake forge is listening inside the drill container" $forgeReady `
+        "http://127.0.0.1:$FakeForgePort/repos/$ForgeRepo/pulls (docker exec -d exit=$($forgeStart.Code))"
+
+    # A local bare repository is the drill's "remote": the product pushes the
+    # branch there before it creates a PR, exactly as it would to a real origin.
+    $originPath = "/data/drill-forge-origin.git"
+    $remoteOut = (& docker exec $ContainerName sh -c "rm -rf '$originPath' && git init -q --bare -b '$ForgeBaseBranch' '$originPath' && cd '$worktree' && (git remote remove origin >/dev/null 2>&1 || true) && git remote add origin '$originPath' && git remote get-url origin" 2>&1 | Out-String).Trim()
+    Assert-Check "the drill checkout has a git remote that can receive the push" ($remoteOut -eq $originPath) $remoteOut
+
+    $branchResp = Invoke-Api -Method POST -Path "/v1/sessions/$sessionID/git/branch" -Session $user.Session -CSRF $user.CSRF -Raw -Body @{ name = $PRBranch }
+    Assert-Check "POST /git/branch created $PRBranch" ($branchResp.Status -eq 200) "status=$($branchResp.Status)"
+    $checkoutResp = Invoke-Api -Method POST -Path "/v1/sessions/$sessionID/git/checkout" -Session $user.Session -CSRF $user.CSRF -Raw -Body @{ name = $PRBranch }
+    Assert-Check "POST /git/checkout switched the session to $PRBranch" ($checkoutResp.Status -eq 200) "status=$($checkoutResp.Status)"
+
+    $prFileStatus = Write-SessionFile -SessionID $sessionID -Session $user.Session -CSRF $user.CSRF `
+        -Path "pr-drill.txt" -Text "added for the delivery drill`n"
+    Assert-Check "PUT /files wrote pr-drill.txt on the PR branch" ($prFileStatus -eq 200) "status=$prFileStatus"
+    $prCommitResp = Invoke-Api -Method POST -Path "/v1/sessions/$sessionID/git/commit" -Session $user.Session -CSRF $user.CSRF `
+        -Body @{ message = "drill: a file for the pull request"; paths = @("pr-drill.txt") }
+    $prCommit = $prCommitResp.commit
+    Assert-Check "POST /git/commit made a commit on $PRBranch" ($prCommit -match "^[0-9a-f]{40}$") "commit=$prCommit"
+    $prStatus = Invoke-Api -Method GET -Path "/v1/sessions/$sessionID/git/status" -Session $user.Session
+    Assert-Check "the PR branch is checked out and clean" ($prStatus.branch -eq $PRBranch -and $prStatus.clean) `
+        "branch=$($prStatus.branch) clean=$($prStatus.clean)"
+    $script:Metrics["pr_branch"] = $PRBranch
+    $script:Metrics["pr_commit"] = $prCommit
+
+    # Point the project at the fake forge through the product's own API.
+    $forgeConfig = Invoke-Api -Method PUT -Path "/v1/projects/$projectID/forge" -Session $user.Session -CSRF $user.CSRF -Raw -Body @{
+        kind = "github"; api_base = "http://127.0.0.1:$FakeForgePort"; repo = $ForgeRepo
+        base_branch = $ForgeBaseBranch; token = $ForgeToken
+    }
+    Save-Json (Join-Path $ArtifactDir "forge-config.json") $forgeConfig.Body
+    $forgeConfigJSON = $forgeConfig.Body | ConvertTo-Json -Depth 25
+    Assert-Check "PUT /projects/{id}/forge saved the forge configuration" `
+        ($forgeConfig.Status -eq 200 -and $forgeConfig.Body.project.forge.kind -eq "github" -and
+         $forgeConfig.Body.project.forge.repo -eq $ForgeRepo) `
+        "status=$($forgeConfig.Status) kind=$($forgeConfig.Body.project.forge.kind) repo=$($forgeConfig.Body.project.forge.repo)"
+    Assert-Check "the saved forge reports has_token but never echoes the token" `
+        ($forgeConfig.Body.project.forge.has_token -and -not $forgeConfigJSON.Contains($ForgeToken)) `
+        "has_token=$($forgeConfig.Body.project.forge.has_token)"
+
+    $prPreview = Invoke-Api -Method GET -Path "/v1/sessions/$sessionID/git/pr" -Session $user.Session
+    Save-Json (Join-Path $ArtifactDir "pr-preview.json") $prPreview
+    Assert-Check "GET /git/pr previews $PRBranch -> $ForgeBaseBranch with a remote" `
+        ($prPreview.branch -eq $PRBranch -and $prPreview.base_branch -eq $ForgeBaseBranch -and [bool]$prPreview.remote) `
+        "branch=$($prPreview.branch) base=$($prPreview.base_branch) remote=$($prPreview.remote)"
+    $previewFiles = @($prPreview.files | ForEach-Object { $_.path })
+    Assert-Check "the preview carries the new commit and its file" `
+        ($prPreview.commit_count -ge 1 -and ($previewFiles -contains "pr-drill.txt")) `
+        "commits=$($prPreview.commit_count) files=$($previewFiles -join ', ')"
+    Assert-Check "the preview reports a saved forge token without showing it" `
+        ([bool]$prPreview.forge.has_token) "has_token=$($prPreview.forge.has_token)"
+
+    $prCreateBody = @{ title = $ForgeTitle; body = $ForgeBody }
+    $prCreated = Invoke-Api -Method POST -Path "/v1/sessions/$sessionID/git/pr" -Session $user.Session -CSRF $user.CSRF -Raw -Body $prCreateBody
+    Save-Json (Join-Path $ArtifactDir "pr-create.json") $prCreated.Body
+    Assert-Check "POST /git/pr created the pull request (201, created=true)" `
+        ($prCreated.Status -eq 201 -and [bool]$prCreated.Body.created) `
+        "status=$($prCreated.Status) created=$($prCreated.Body.created)"
+    $prURL = $prCreated.Body.pull_request.url
+    Assert-Check "the response carries a PR URL" `
+        ($prURL -match "^http://127\.0\.0\.1:$FakeForgePort/$([regex]::Escape($ForgeRepo))/pull/\d+$") $prURL
+    Assert-Check "the pushed branch is the session's branch" `
+        ($prCreated.Body.pushed.branch -eq $PRBranch -and $prCreated.Body.pushed.commit -match "^[0-9a-f]{40}$") `
+        "branch=$($prCreated.Body.pushed.branch) commit=$($prCreated.Body.pushed.commit)"
+
+    $prAgain = Invoke-Api -Method POST -Path "/v1/sessions/$sessionID/git/pr" -Session $user.Session -CSRF $user.CSRF -Raw -Body $prCreateBody
+    Save-Json (Join-Path $ArtifactDir "pr-create-again.json") $prAgain.Body
+    Assert-Check "opening the same PR again returns created=false and the same URL" `
+        ($prAgain.Status -eq 200 -and -not $prAgain.Body.created -and $prAgain.Body.pull_request.url -eq $prURL) `
+        "status=$($prAgain.Status) created=$($prAgain.Body.created) url=$($prAgain.Body.pull_request.url)"
+    Assert-Check "the second response marks the pull request as existing" `
+        ([bool]$prAgain.Body.pull_request.existing) "existing=$($prAgain.Body.pull_request.existing)"
+    $script:Metrics["pr_url"] = $prURL
+
+    # What the forge actually saw. The log is copied redacted; the token is
+    # asserted from the in-memory copy and never written anywhere.
+    $forgeRaw = (& docker exec $ContainerName cat $ForgeLogPath 2>$null | Out-String)
+    $forgeLines = @($forgeRaw -split "\r?\n" | Where-Object { $_.Trim() })
+    $forgeRequests = @($forgeLines | ForEach-Object { $_ | ConvertFrom-Json })
+    ($forgeLines | ForEach-Object { $_.Replace($ForgeToken, "<redacted>") }) |
+        Set-Content -Path (Join-Path $ArtifactDir "forge-requests.jsonl") -Encoding UTF8
+    $createPosts = @($forgeRequests | Where-Object { $_.method -eq "POST" -and $_.path -eq "/repos/$ForgeRepo/pulls" })
+    Assert-Check "the forge received exactly one create call" ($createPosts.Count -eq 1) "creates=$($createPosts.Count)"
+    $wire = $createPosts[0]
+    Assert-Check "the create call carried 'Bearer <token>' in the Authorization header" `
+        ($wire.authorization -eq "Bearer $ForgeToken") "authorization=Bearer <redacted>"
+    Assert-Check "the create call carried the exact title, head and base" `
+        ($wire.body.title -eq $ForgeTitle -and $wire.body.head -eq "acme:$PRBranch" -and $wire.body.base -eq $ForgeBaseBranch) `
+        "title=$($wire.body.title) head=$($wire.body.head) base=$($wire.body.base)"
+    $tokenInQuery = @($forgeRequests | Where-Object { $_.query -and $_.query.Contains($ForgeToken) }).Count
+    Assert-Check "the token never travels in a URL or query string" ($tokenInQuery -eq 0) "occurrences=$tokenInQuery"
+    $script:Metrics["forge_requests"] = $forgeRequests.Count
+
+    # A forge refusal has to surface as itself: the create step and the forge's
+    # own words, not a generic "failed".
+    $rejectBranchResp = Invoke-Api -Method POST -Path "/v1/sessions/$sessionID/git/branch" -Session $user.Session -CSRF $user.CSRF -Raw -Body @{ name = $PRRejectBranch }
+    $rejectCheckoutResp = Invoke-Api -Method POST -Path "/v1/sessions/$sessionID/git/checkout" -Session $user.Session -CSRF $user.CSRF -Raw -Body @{ name = $PRRejectBranch }
+    $rejectFileStatus = Write-SessionFile -SessionID $sessionID -Session $user.Session -CSRF $user.CSRF `
+        -Path "reject.txt" -Text "a branch the forge will refuse`n"
+    $rejectCommitResp = Invoke-Api -Method POST -Path "/v1/sessions/$sessionID/git/commit" -Session $user.Session -CSRF $user.CSRF `
+        -Body @{ message = "drill: a branch for the forced refusal"; paths = @("reject.txt") }
+    Assert-Check "a second branch was prepared for the forced 422" `
+        ($rejectBranchResp.Status -eq 200 -and $rejectCheckoutResp.Status -eq 200 -and
+         $rejectFileStatus -eq 200 -and $rejectCommitResp.commit -match "^[0-9a-f]{40}$") `
+        "branch=$($rejectBranchResp.Status) checkout=$($rejectCheckoutResp.Status) file=$rejectFileStatus commit=$($rejectCommitResp.commit)"
+
+    $rejectControl = Join-Path $ArtifactDir "forge-control-422.json"
+    Save-Json $rejectControl ([ordered]@{
+        failStatus = 422
+        failBody   = [ordered]@{ message = $ForgeFailMarker }
+    })
+    $armCopy = Invoke-Docker @("cp", $rejectControl, "${ContainerName}:$ForgeRoot/control.json.new")
+    # Rename inside the container so the server never reads a half-written file.
+    $armMove = Invoke-Docker @("exec", $ContainerName, "sh", "-c", "mv '$ForgeRoot/control.json.new' '$ForgeControlPath'")
+    Assert-Check "the fake forge is armed to refuse the next create with 422" ($armCopy.Code -eq 0 -and $armMove.Code -eq 0) $armMove.Output
+
+    $prRejected = Invoke-Api -Method POST -Path "/v1/sessions/$sessionID/git/pr" -Session $user.Session -CSRF $user.CSRF -Raw -Body @{
+        title = "Drill: rejected by the forge"; body = "This one must not be reported as created."
+    }
+    Save-Json (Join-Path $ArtifactDir "pr-rejected.json") $prRejected.Body
+    Assert-Check "a forge 422 is mirrored as 422 instead of a success" ($prRejected.Status -eq 422) "status=$($prRejected.Status)"
+    $rejectedErr = $prRejected.Body.error
+    Assert-Check "the refusal is typed as a forge error and names the create step" `
+        ($rejectedErr.code -eq "forge_error" -and $rejectedErr.details.step -eq "create" -and
+         $rejectedErr.details.forge_status -eq 422) `
+        "code=$($rejectedErr.code) step=$($rejectedErr.details.step) forge_status=$($rejectedErr.details.forge_status)"
+    Assert-Check "the forge's own refusal text is preserved verbatim" `
+        ($rejectedErr.message.Contains($ForgeFailMarker)) "marker_present=$($rejectedErr.message.Contains($ForgeFailMarker))"
+    Assert-Check "the refusal is labelled as step 3 (create)" `
+        ($rejectedErr.message.Contains("第 3 步（创建 PR）")) $rejectedErr.message
+
+    $forgeRaw2 = (& docker exec $ContainerName cat $ForgeLogPath 2>$null | Out-String)
+    $forgeLines2 = @($forgeRaw2 -split "\r?\n" | Where-Object { $_.Trim() })
+    $forgeRequests2 = @($forgeLines2 | ForEach-Object { $_ | ConvertFrom-Json })
+    ($forgeLines2 | ForEach-Object { $_.Replace($ForgeToken, "<redacted>") }) |
+        Set-Content -Path (Join-Path $ArtifactDir "forge-requests.jsonl") -Encoding UTF8
+    $failedCreates = @($forgeRequests2 | Where-Object { $_.method -eq "POST" -and $_.status -eq 422 })
+    Assert-Check "the forge received exactly one refused create, for the rejected branch" `
+        ($failedCreates.Count -eq 1 -and $failedCreates[0].body.head -eq "acme:$PRRejectBranch") `
+        "refused=$($failedCreates.Count) head=$(if ($failedCreates.Count -eq 1) { $failedCreates[0].body.head } else { '' })"
+    $successfulCreates = @($forgeRequests2 | Where-Object { $_.method -eq "POST" -and $_.status -eq 201 })
+    Assert-Check "the idempotent second run did not create a second pull request" `
+        ($successfulCreates.Count -eq 1) "successfulCreates=$($successfulCreates.Count)"
+    $script:Metrics["forge_requests"] = $forgeRequests2.Count
+
+    # The token crossed the network in a header; it must not have reached the
+    # product's log, which is the artifact an operator pastes into a ticket.
+    $rawLogAfterForge = (& docker logs $ContainerName 2>&1 | Out-String)
+    $forgeTokenHits = ([regex]::Matches($rawLogAfterForge, [regex]::Escape($ForgeToken))).Count
+    (Redact-Secrets $rawLogAfterForge) | Set-Content -Path (Join-Path $ArtifactDir "container-after-forge.log") -Encoding UTF8
+    Assert-Check "the forge token appears zero times in the container log" ($forgeTokenHits -eq 0) "occurrences=$forgeTokenHits"
+
+    # -----------------------------------------------------------------------
+    # 9. Browser panel screenshot (a real page, decoded non-blank)
     # -----------------------------------------------------------------------
 
     Write-Step "Navigate the sandbox browser to a real page and capture it"
@@ -868,7 +1251,81 @@ try {
     $script:Metrics["pids"] = $statsParts[3]
 
     # -----------------------------------------------------------------------
-    # 11. Teardown happens in finally; the pf-local assertion is there too.
+    # 11. Inline comment -> the agent's next message (FR-12.3)
+    #
+    # The comment goes through the same POST /messages the composer uses, with
+    # the anchor the diff stores (path, line, side, hunk, quote, body). The
+    # product composes the prompt server-side; the transcript entry fetched
+    # here is the agent's own record of what it was asked, so it proves the
+    # quote reached the agent rather than the browser.
+    # -----------------------------------------------------------------------
+
+    Write-Step "Comment on a line and prove the agent receives the quote"
+
+    $commentFileStatus = Write-SessionFile -SessionID $sessionID -Session $user.Session -CSRF $user.CSRF `
+        -Path $ReviewPath -Text "# delivery drill notes`n$ReviewQuote`nkeep: untouched`n"
+    Assert-Check "PUT /files created $ReviewPath to comment on" ($commentFileStatus -eq 200) "status=$commentFileStatus"
+
+    $commentSentAt = [DateTime]::UtcNow
+    $commentResp = Invoke-Api -Method POST -Path "/v1/sessions/$sessionID/messages" -Session $user.Session -CSRF $user.CSRF -Raw -Body @{
+        client_msg_id  = "drill-comment-$RunID"
+        review_comment = @{
+            path  = $ReviewPath
+            line  = $ReviewLine
+            side  = "new"
+            hunk  = "@@ -1,3 +1,3 @@"
+            quote = @($ReviewQuote)
+            body  = $ReviewBody
+        }
+    }
+    Assert-Check "POST /messages accepted the inline comment as the next turn" `
+        ($commentResp.Status -eq 200 -and [bool]$commentResp.Body.accepted) `
+        "status=$($commentResp.Status) disposition=$($commentResp.Body.disposition)"
+
+    $commentRun = Wait-SessionSettled -SessionID $sessionID -Session $user.Session -TimeoutSeconds $SettleTimeoutSeconds
+    $commentTurnSeconds = ([DateTime]::UtcNow - $commentSentAt).TotalSeconds
+    Assert-Check "the inline-comment turn started and settled" ([bool]$commentRun.Settled) `
+        "settled=$([Math]::Round($commentTurnSeconds,2))s last_seq=$($commentRun.Status.last_seq)"
+    $script:Metrics["review_comment_turn_seconds"] = [Math]::Round($commentTurnSeconds, 2)
+
+    $commentEntries = Invoke-Api -Method GET -Path "/v1/sessions/$sessionID/entries" -Session $user.Session
+    Save-Json (Join-Path $ArtifactDir "entries-comment.json") $commentEntries
+    $commentEntryList = @($commentEntries.entries)
+    $anchor = "行内评论 · $ReviewPath`:$ReviewLine"
+    $commentTurn = @($commentEntryList | Where-Object {
+        $_.role -eq "user" -and $_.preview -like "*行内评论*" -and $_.preview -like "*$ReviewPath`:$ReviewLine*"
+    })
+    Assert-Check "the transcript has one user turn anchored at $ReviewPath`:$ReviewLine" `
+        ($commentTurn.Count -ge 1) "turns=$($commentTurn.Count) entries=$($commentEntryList.Count)"
+    $commentPreview = $commentTurn[0].preview
+    Assert-Check "the agent's message starts with the inline-comment anchor" `
+        ($commentPreview.StartsWith($anchor)) $commentPreview
+    Assert-Check "the agent's message quotes the commented line" `
+        ($commentPreview.Contains("$ReviewLine | $ReviewQuote")) $commentPreview
+    Assert-Check "the agent's message carries the comment body" `
+        ($commentPreview.Contains($ReviewBody)) $commentPreview
+    Assert-Check "the message says where the quoted code is now" `
+        ($commentPreview.Contains("这段代码现在仍在第 $ReviewLine 行")) $commentPreview
+    $commentPreview | Set-Content -Path (Join-Path $ArtifactDir "review-comment-message.txt") -Encoding UTF8
+    $script:Metrics["review_comment_anchor"] = $anchor
+
+    # The turn was asked not to touch files; if it did, restore the drill
+    # checkout through the product's own discard so the sandbox is not left
+    # dirty (the container is thrown away either way, but a clean end state is
+    # the honest one and proves the guard below is about the *source* tree).
+    $postCommentStatus = Invoke-Api -Method GET -Path "/v1/sessions/$sessionID/git/status" -Session $user.Session
+    $discarded = 0
+    foreach ($change in @($postCommentStatus.changes)) {
+        $discardResp = Invoke-Api -Method POST -Path "/v1/sessions/$sessionID/git/discard" -Session $user.Session -CSRF $user.CSRF -Raw -Body @{ path = $change.path }
+        if ($discardResp.Status -eq 200) { $discarded++ }
+    }
+    $postCommentStatus = Invoke-Api -Method GET -Path "/v1/sessions/$sessionID/git/status" -Session $user.Session
+    Save-Json (Join-Path $ArtifactDir "git-status-after-comment.json") $postCommentStatus
+    Record-Check "the inline-comment turn left the drill checkout clean" ([bool]$postCommentStatus.clean) `
+        "discarded=$discarded clean=$($postCommentStatus.clean)"
+
+    # -----------------------------------------------------------------------
+    # 12. Teardown happens in finally; the pf-local assertion is there too.
     # -----------------------------------------------------------------------
 }
 catch {
@@ -898,17 +1355,42 @@ finally {
         Record-Check "$ExistingContainer /healthz is still 200" ([bool]$existingAfter.Healthz) "http://127.0.0.1:$ExistingPort/healthz"
     }
 
-    # Never leave a provider key in an artifact. Scan text artifacts only; the
-    # PNGs are binary and are checked by their own assertions above.
+    # -----------------------------------------------------------------------
+    # Regression guard (the last thing the drill does): the run must not dirty
+    # the checkout it was started from, and it must not leave a container or a
+    # volume in the Docker data behind. Artifacts live under e2e/.artifacts,
+    # which is ignored; screenshots live in the data volume, which is deleted.
+    # -----------------------------------------------------------------------
+    $sourceStatus = (& git -C $RepoRoot status --porcelain 2>&1 | Out-String).Trim()
+    $sourceStatus | Set-Content -Path (Join-Path $ArtifactDir "source-git-status.txt") -Encoding UTF8
+    Record-Check "the source checkout is clean after the drill" (-not $sourceStatus) `
+        $(if ($sourceStatus) { $sourceStatus -replace "`r?`n", "; " } else { "<clean>" })
+
+    $remainingContainers = @(& docker ps -a --format "{{.Names}}" | Where-Object { $_ -like "$ContainerName*" })
+    $remainingContainers | Set-Content -Path (Join-Path $ArtifactDir "leftover-containers.txt") -Encoding UTF8
+    Record-Check "no '$ContainerName*' container is left behind" ($remainingContainers.Count -eq 0) `
+        $(if ($remainingContainers.Count) { $remainingContainers -join ", " } else { "<none>" })
+
+    $remainingVolumes = @(& docker volume ls --format "{{.Name}}" | Where-Object { $_ -like "$VolumeName*" -or $_ -like "$ContainerName*" })
+    $remainingVolumes | Set-Content -Path (Join-Path $ArtifactDir "leftover-volumes.txt") -Encoding UTF8
+    Record-Check "no drill volume is left behind" ($remainingVolumes.Count -eq 0) `
+        $(if ($remainingVolumes.Count) { $remainingVolumes -join ", " } else { "<none>" })
+
+    # Never leave a secret in an artifact. Scan text artifacts only; the PNGs
+    # are binary and are checked by their own assertions above.
     $leaks = 0
+    $tokenLeaks = 0
     foreach ($file in Get-ChildItem -Path $ArtifactDir -File) {
         if ($file.Extension -in @(".png", ".jpg", ".jpeg", ".webp")) { continue }
         $text = Get-Content -Path $file.FullName -Raw -ErrorAction SilentlyContinue
         if ($text -and $text.Contains($Key)) { $leaks++ }
+        if ($text -and $text.Contains($ForgeToken)) { $tokenLeaks++ }
     }
     Record-Check "the provider key appears in zero text artifacts" ($leaks -eq 0) "files=$leaks"
+    Record-Check "the forge token appears in zero text artifacts" ($tokenLeaks -eq 0) "files=$tokenLeaks"
 
     $script:FinishedAt = [DateTime]::UtcNow
+    $script:Metrics["total_seconds"] = [Math]::Round(($script:FinishedAt - $script:StartedAt).TotalSeconds, 1)
     $summary = [pscustomobject]@{
         run_id      = $RunID
         started_at  = $script:StartedAt.ToString("o")
