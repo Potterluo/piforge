@@ -20,7 +20,7 @@
 
 本批（diff 作用域与逐 hunk UI + e2e 定向清理）之后，FR-12.1 与 FR-12.2 从 PARTIAL 移入 DONE：**126 条 FR 为 DONE 64 / PARTIAL 44 / MISSING 17 / 不做 1**；**整表 130 行 = DONE 68 / PARTIAL 44 / MISSING 17 / 不做 1**。`FR-12.1` 的 DONE 只覆盖 工作区/已暂存/分支 vs 基准/提交范围 四个作用域——PRD 原文里的「本轮」仍没有入口，行首标题已按实际覆盖改写，不拿 DONE 冒充。另一个不是 FR 的改动在 `e2e/scripts/`：e2e 数据目录不再无限增长（见文末「e2e 数据目录的定向清理」），它不改变任何 FR 状态。
 
-本批（diff 作用域与逐 hunk UI + e2e 定向清理）之后，FR-12.1 与 FR-12.2 从 PARTIAL 移入 DONE：**126 条 FR 为 DONE 64 / PARTIAL 44 / MISSING 17 / 不做 1**；**整表 130 行 = DONE 68 / PARTIAL 44 / MISSING 17 / 不做 1**。`FR-12.1` 的 DONE 只覆盖 工作区/已暂存/分支 vs 基准/提交范围 四个作用域——PRD 原文里的「本轮」仍没有入口，行首标题已按实际覆盖改写，不拿 DONE 冒充。另一个不是 FR 的改动在 `e2e/scripts/`：e2e 数据目录不再无限增长（见文末「e2e 数据目录的定向清理」），它不改变任何 FR 状态。
+本批（FR-12.3 行内评论 + 读连接旧快照的触发条件）之后，FR-12.3 从 MISSING 移入 DONE：**126 条 FR 为 DONE 65 / PARTIAL 44 / MISSING 16 / 不做 1**；**整表 130 行 = DONE 69 / PARTIAL 44 / MISSING 16 / 不做 1**。同批的另一半不是 FR：读连接为什么会停在旧快照被量出来了（触发条件是「语句被中断」，即客户端 abort 掉的请求），修法是把被中断过的连接退役、不再发给下一个请求，证据与仍未回答的问题见文末「读连接旧快照：触发条件、直方图与修复」。
 
 ---
 # PiForge 对照 PRD 的实现审计
@@ -126,7 +126,7 @@
 | FR-11.9 profile 持久化（sandbox 内 .piforge-browser） | DONE | `browser.go` `profile := filepath.Join(profileRoot, ".piforge-browser")` + `--user-data-dir`；`profile_test.go` `TestRealChromeProfileIsStableAcrossSessions`（边界已注明） |
 | FR-12.1 Diff 作用域（工作区/已暂存/分支 vs 基准/提交范围） | DONE | 作用域是真的换 git 命令，不是换标签：`contracts.ScopeRange` + `DiffRequest.From/To`，`gitx.Diff`/`DiffPatch` 走 `git diff <from>..<to>`（两端各自过 `safeRevArg`，`..`、`-` 开头、空白一律拒绝，所以范围不会被拼成一个 revision），`GET /v1/sessions/{id}/git/diff?scope=range&from=HEAD~1&to=HEAD`，缺 `from` 由 handler 返回 400 `invalid_argument`。前端 `git-panel.tsx` 的 `SCOPES` 现在是 工作区/已暂存/分支/范围，`lib/git/diff-scope.ts` 负责拼请求；范围有 `git-range-from`/`git-range-to`/`git-range-apply` 两个输入，当前作用域用 `git-diff-scope` 徽章（带 `data-scope`）写在 diff 头上。历史作用域从自己的 diff 列文件（`git-scope-files`/`git-scope-file`），否则「某个提交改了但工作区干净」的文件根本点不开——而那正是 review 要看的。测试：`gitx/diff_range_test.go`（HEAD~1..HEAD 只有最后一次提交、HEAD~2..HEAD 两条都在、main..HEAD 在 main 上为空、路径过滤、两端校验）；`httpapi/git_diff_scopes_test.go` 走真实路由 + 真实 git 仓库断言同一批内容；`web/lib/git/diff-scope.test.ts` 断言作用域改变请求本身；e2e `76-diff-scopes.spec.ts` 断言 工作区/已暂存/HEAD~1..HEAD/HEAD~2..HEAD 四种内容互不相同。旧代码确实过不了：旧前端没有 `git-diff-scope`（`fr-12.1-fail-first-ui.log`），旧后端对 `scope=range` 返回 400、范围文件列表停在 0（`fr-12.1-fail-first-backend.log`）。剩余：PRD 里的「本轮」作用域仍没有入口（见文末），提交范围靠手输 from/to，没有提交选择器 |
 | FR-12.2 逐文件 + 逐 hunk stage/unstage/revert | DONE | `gitx/hunks.go`（客户端只传 path+index，补丁由服务端重建）；`POST …/git/hunk`（stage/unstage/discard）；diff 视图里每个 hunk 一行（`git-hunk-row`，`data-index` 就是发给服务端的 index），工作区给「暂存」「丢弃」，已暂存给「取消暂存」，历史范围显示 `git-hunk-readonly` 且不画按钮——提交里已有的 hunk 不能暂存，按钮能点却必然失败比没有更糟。逐文件仍是每行「丢弃」（带确认）。测试：`hunks_test.go`；`httpapi/git_diff_scopes_test.go` 从 diff 视图的路径做完整一轮（工作区两 hunk → 暂存 index 1 → 索引里只剩第二条、工作区只剩第一条 → 取消暂存后索引为空、两条都回到工作区）；e2e `76-diff-scopes.spec.ts` 在页面上点 `git-hunk-stage`/`git-hunk-unstage` 断言同样的结果。**顺带修掉的坑**：提交原来把 `stagedPaths` 再交给后端 `git add` 一遍，于是「只暂存一个 hunk 再提交」会把另一个未暂存的 hunk 一起带走；现在 `git-panel.tsx` 用 `paths: []` 提交索引原样内容（`gitx.Commit` 的 paths 语义没动，避免影响其它调用方），76 在第一次提交后断言仍有一行未暂存且内容是另一条改动 |
-| FR-12.3 行内评论 → 作为 steer 发给 agent | MISSING | diff 组件没有评论入口，也无 `streaming_behavior:"steer"` 的调用链 |
+| FR-12.3 行内评论 → 作为 steer 发给 agent | DONE | 在 diff 的某一行（以及文件预览的某一行）上写评论：`patch-view.tsx` 每行一个 `diff-line-comment`（行号来自 `@@` 头，见 `lib/git/patch-lines.ts`），`code-preview.tsx` 每行一个 `file-line-comment`。评论先存成草稿（`lib/review/comments.ts`：localStorage、按会话分区、键 `piforge.review.drafts.v1`，重载后仍在），diff 里有标记与计数（`review-comment-row` / `diff-line-marker` / `diff-comment-count`）；发送走**同一个** `POST /v1/sessions/{id}/messages`，带 `review_comment{path,line,side,hunk,quote,body}`，run 进行中时 `streaming_behavior:"steer"`。**消息正文由服务端拼**（`internal/httpapi/review_comment.go`）：`行内评论 · <path>:<line>` + diff 片段 + 逐行引用（` 42 \| 代码`）+ `评论：…` + 位置说明；服务端拿工作区里**当前**的文件核对引用，所以「行挪了」有明确语义（见文末「FR-12.3 的设计与证据」）。测试：`review_comment_test.go`（引用/路径行号/挪行/删除行/读不到文件/校验，以及两条走真实路由断言 agent 收到的 prompt 含 path:line 与引用）、`lib/review/comments.test.ts` 9 例、`lib/git/patch-lines.test.ts` 8 例、e2e `77-inline-comment.spec.ts`（行上评论 → 保存 → 标记/计数 → 重载草稿仍在 → 发送 → 草稿清除 → transcript 的 `turn-user` 含 `行内评论 · f.txt:3`、被引用的代码与评论正文）。**渲染器换了**：`@git-diff-view/react` 在这个构建里 `DiffUnifiedView` 抛错、错误边界一直回落到原始 patch 文本（一行都点不了），所以 diff 现在是自己的逐行渲染器，保留原 testid（`git-diff-view`/`git-diff-patch`）与 `+`/`-` 标记；split 用同 hunk 内顺序配对 |
 | FR-12.4 变更概览（增删行数 + 风险标记） | DONE | `GitStatus` 新增 `additions`/`deletions`，每个 `GitChange` 新增 `additions`/`deletions`/`risk`（`lockfile` / `ci`）。统计相对 HEAD 合并已暂存与未暂存：`git diff --numstat -z HEAD`（无 HEAD 时分别数 index 与工作区），重命名取新路径，未跟踪文件按行数计入（二进制/超过 4MB 记 0）。风险在 `gitx` 判定：`.github/workflows/`、`.circleci/`、`.buildkite/` 与常见 CI 文件为 `ci`，`go.sum`、`package-lock.json`、`pnpm-lock.yaml` 等为 `lockfile`。`git status` 改用 `--untracked-files=all`：用 `normal` 时新 `.github/workflows/ci.yml` 只显示成 `.github/` 一行，行数与风险都挂不到文件上。UI 每行显示 `+N/−N`（`git-line-counts`）与「锁文件」/「CI」徽章（`git-risk`），表头 `git-change-totals`。测试：`TestStatusCountsLinesAndFlagsRisk`（a.txt +1、b.txt −2、new.txt +2、package-lock +2/锁文件、ci.yml +1/CI，合计 +6 −2）与未跟踪分支计数；e2e `73-git-overview.spec.ts` 先断言 API 的 `+6 −1` 与逐行字段，再断言页面上的同样数字与徽章。旧代码：后端没有这些字段，spec 失败在 `expect(status.additions).toBe(6)`；只换回旧前端则失败在 `getByTestId('git-change-totals')` element not found（`fr-12.4-fail-first.log`、`fr-12.4-fail-first-ui.log`）。部署截图 `fr-12.4-change-overview.png` |
 | FR-12.5 测试结果面板 | DONE | `717f7cb`：`internal/testrun` 解析 go test / vitest / jest / pytest 输出（含 `race detected`、`file:line`），`GET /v1/sessions/{id}/test-runs` 从工具事件与终端两条来源入库，`test-panel.tsx` 有失败/通过徽章与逐条失败展开。测试：`testrun/parse_test.go`、`store/testruns_test.go`、`httpapi/test_run_handlers_test.go`；`e2e/tests/62-test-panel.spec.ts` 断言空态、失败徽章与 `TestCacheEvict` / `cache_test.go:42`、随后同一会话变成通过徽章、刷新后仍有两条且 API 与面板一致 |
 | FR-12.6 一键开 PR | MISSING | 无 `…/pr` 路由与 UI |
@@ -410,6 +410,44 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 - `pwsh scripts/deliver-check.ps1`（`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入，未打印、未落盘）：鉴权修复前的镜像 run `20261030-140727`，修复后的镜像 run `20261030-144953`，**两次都是 75 个检查全部 PASS、`failure` 为空**；每次的一次性容器 `pf-drill` 与 volume `pf-drill-data` 都已删除，`pf-local` 容器 id 前后一致。日志：`e2e/.artifacts/task2/deliver-check.log`、`deliver-check-2.log`，summary：`e2e/.artifacts/delivery-drill/20261030-140727|20261030-144953/summary.json`。
 - 镜像与部署：`pwsh scripts/build-app-image.ps1` 重建 `piforge:local`（鉴权修复前后各一次，最终镜像即 drill 断言的同一个）；`pf-local` 用**同一个数据卷** `368d6186adb8…` 重建（最终容器 `3ffec11e5253…`，端口 7722→7700，环境仍是 `PIFORGE_DEFAULT_PROVIDER=volc` 与四个 seed 账号）。重启后 `/healthz` = 200，`GET /v1/providers` 里 `volc` 仍 `enabled=true`、`has_key=true`。
 
+## 本次修复（FR-12.3：行内评论 → steer）
+
+### 1. 三个设计选择，以及为什么是这三个
+
+- **消息正文由服务端拼。** 客户端只发锚点（`path/line/side/hunk/quote/body`），服务端（`internal/httpapi/review_comment.go`）拼成 agent 收到的那一段文本。两个理由：① agent 读到的、transcript 显示的、库里存下的必须是**同一个字符串**，否则「用户以为他说了」和「agent 收到的」会分叉；② 只有服务端能拿工作区里**当前**的文件来核对行号。
+- **行号会跑，所以给了明确语义**（任务要求「决定并记录」的那条）。服务端把引用行与当前文件逐行比对：
+
+  | 情况 | 消息末尾的说明 |
+  |---|---|
+  | 引用代码仍在第 N 行 | `位置：这段代码现在仍在第 N 行。` |
+  | 引用代码挪到第 M 行 | `位置：这段代码现在在第 M 行（写评论后文件改过，行号有偏移），以当前文件为准。` |
+  | 找不到 | `位置：当前文件里找不到这段代码（可能已被修改或删除），请以 diff 和评论为准。` |
+  | 这行是 diff 的删除行 | `位置：这一行在 diff 里是删除行，当前文件里没有它。` |
+  | 文件读不到（无 worktree/沙箱不可用） | `位置：读取当前文件失败，引用来自 diff。` |
+
+  锚点（`行内评论 · path:line`）**永远保持用户点击时的行号**，不静默改写：行号是用户指的东西，改掉它就等于换了一个问题。说明里写的是「现在的事实」。
+- **发送走同一个消息端点。** `POST /v1/sessions/{id}/messages` + `review_comment`；只有在有 run 时才带 `streaming_behavior:"steer"`（idle 的 steer 服务端会拒绝）。没有第二条队列、没有第二套投递路径。
+
+草稿是**会话级、落 localStorage**（`lib/review/comments.ts`，键 `piforge.review.drafts.v1`，按 sessionId 分区），所以重载还在；发送成功后删掉对应草稿（否则会重复发送），正文清空也等于删除（diff 里不留空标记）。
+
+### 2. diff 渲染器换了，因为旧的那个一行都没有
+
+`@git-diff-view/react@0.1.8` 在这个构建里不渲染行：`DiffUnifiedView` 抛错、`DiffBoundary` 回落到「原始 patch」分支，而这个分支是**一整段** `CodeBlockContent` 字符串——点不到任何一行，也拿不到行号。证据：组件测试里渲染 `GitDiffView` 之后 `{"view":false,"raw":true,"rows":0}`，而 `git-diff.tsx` 的注释本来就写着「renders an empty table for every patch」。所以换成本批自己的逐行渲染器（`patch-view.tsx` + `lib/git/patch-lines.ts`）：保留 `git-diff-view` / `git-diff-patch` 两个 testid 与 `+`/`-` 标记（`48-change-list` 断言的 `/\+fresh/` 仍然成立），old/new 行号来自 `@@` 头；并排视图是「同 hunk 内按顺序配对、多的一侧留空」，不做相似度对齐——那会是猜测。
+
+### 3. 证据
+
+- Go：`httpapi/review_comment_test.go` 7 组（引用与锚点、挪行、代码消失、删除行、读不到文件、6 种非法锚点），其中两条走真实路由：agent 收到的 prompt 必须含 `src/cache.ts:42`、`  42 |   return cache.get(key);`、`评论：这里没有处理未命中。`；非法锚点返回 400 且**不触达** agent。
+- **fail-first（后端，跑出来的）**：把 `in.Text = composed` 去掉后同一条测试红在 `POST messages: 400 {"error":{"code":"invalid_argument","message":"text or images are required"}}`（`e2e/.artifacts/inline-comment/fail-first-backend.log`），恢复后绿。
+- **旧代码里没有入口（命令输出，不是印象）**：`git show HEAD:web/components/workspace/git-diff.tsx` 只有 `git-diff-patch` 与 `git-diff-view` 两个 testid，`diff-line-comment|review-comment|onCommentLine` 命中 0；旧 `code-preview.tsx` 的 `file-line-comment|onCommentLine` 命中 0；旧 `message_handlers.go` 的 `review_comment|ReviewComment` 命中 0。所以 77 在旧构建上第一步就是 element not found（文件行入口同理），旧后端会忽略该字段、只把正文当普通消息发出去（transcript 里不会出现 `行内评论 · f.txt:3`）。
+- Vitest：`lib/review/comments.test.ts` 9 例（持久化后「重载」仍在、会话分区、就地更新、清空即删除、损坏 JSON 不炸、坏行被丢弃、路径/行过滤、订阅）；`lib/git/patch-lines.test.ts` 8 例（old/new 行号、hunk 归属、无 hunk、hunk 内空行、锚点（含删除行）、配对）。
+- e2e：`77-inline-comment.spec.ts` 一条走完：行上 `diff-line-comment` → 编辑器显示 `f.txt:3` 与引用 → 保存 → `review-comment-row` + `diff-comment-count`「1 条行内评论」+ `diff-line-marker[data-line="3"][data-count="1"]` → **reload 后草稿还在** → 发送 → `POST …/messages` 200 → 草稿与计数消失 → `turn-user` 里出现 `行内评论 · f.txt:3`、`line 2 EDITED-FOR-COMMENT`、评论正文与 `评论：`。transcript 是**agent 事件流**喂的，所以这一条就是「agent 收到了带引用的 prompt」的外部证据。
+
+### 4. 还差的（不夸大 DONE）
+
+- 多行选择（拖选一个范围）没有；一次评论只能锚在一行上，消息格式已经支持 `end_line`。
+- 文件预览里的行评论没有独立的「标记」视图：草稿存在同一个 store 里，diff 里能看到同一个 `path:line` 的标记，但预览页自己不再重复列一遍。
+- 没有「发给 agent 前先看一眼拼好的正文」的预览；正文由服务端拼，用户看到的是 transcript 里的事实。
+
 ## 读连接旧快照：触发条件、直方图与修复
 
 ### 1. 检测器现在记什么，以及为什么只能这么做
@@ -425,11 +463,11 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 
 探针用**脱离请求 ctx** 的 3s 超时执行。用请求 ctx 的话，客户端在 `BEGIN` 与 `ROLLBACK` 之间断开就会留下一个开着的写事务——那等于用探针制造它要测的东西（第一版就是这么写的，这里记下来）。
 
-### 2. 十分钟探测（`e2e/scripts/repro-auth-wedge.mjs`，部署实例 127.0.0.1:7722，卷 `368d6186…`）
+### 2. 十分钟探测（`e2e/scripts/repro-auth-wedge.mjs`，部署实例 127.0.0.1:7722）
 
-- **`--seconds 600 --abort-pause 4`：600.2s / 2330 次探测 / `0` 次 401 / 项目列表漏 0 次 / **stale read 检测 0 次**（`e2e/.artifacts/task1-probe/probe-10min-deployed.log`，服务端日志 `server-10min-deployed.log`）。同一形状在另一份数据目录上也跑过一次：600.1s / 2354 次探测 / 0 次检测（`probe-10min-4.log`、`server-10min.log`）。两次都**没有任何一次检测**，所以十分钟窗口没有 tag 直方图可画——原因见 §3 与下面这次对照。
-- 为了证明「条件还在、只是被处理掉了」，在同一镜像上用**和修复前完全相同的强度**跑 120s（`--abort-pause 0`，即 harness 原来的形状）：**418 次探测 / 0 次 401 / 0 次项目漏 / 0 次 stale read / 514 条连接因「语句被中断」退役**（`e2e/.artifacts/task1-probe/server-120s-pause0.log`）。退役日志是**限流采样**的（每秒最多一行，共记了 13 行），里面 `last_err="context canceled"`，`last_err_on` 的分布是 `(*Store).Session` 7、`(*Store).authSessionUserOn` 5、`(*Store).ListEvents` 1。十分钟窗口（pause 4）里只有 18 条退役：abort 落点时查询多半已经跑完，中断本身更少，所以那次对退役策略的考验比 120s 的弱——真正说明问题的是 120s 那次。
-- **修复前**（同一个 harness、同一个镜像只差退役这一处）：两次窗口各约 107s，分别 **6 次**和 **5 次** stale read；每一次的 `last_err` 都是 `context canceled`，`last_err_on` 是 `(*Store).ListProjects` / `(*Store).Session` / `(*Store).authSessionUserOn`，`txn_state=autocommit` 6/6，`open_rows=0` 6/6，`abandoned=0` 6/6，`same_conn_sees_row=false` 6/6，`write_sees_row=true` 6/6，`same_conn_sees_token=false`。这两次窗口的容器日志随重建丢了（只剩当时的输出），所以**结论不建立在这两个数字上**，而建立在 §3 的机制与 §4 的对照上。
+- **`--seconds 600 --abort-pause 4`：600.1s / 2354 次探测 / `0` 次 401 / 项目列表漏 0 次 / **stale read 检测 0 次**（`e2e/.artifacts/task1-probe/probe-10min-4.log`，服务端日志 `server-10min.log`）。**没有任何一次检测**，所以这一次没有 tag 直方图可画——原因见 §3。
+- 为了证明「条件还在、只是被处理掉了」，又在同一镜像上用**和修复前完全相同的强度**跑 120s（`--abort-pause 0`，即 harness 原来的形状）：**418 次探测 / 0 次 401 / 0 次项目漏 / 0 次 stale read / 514 条连接因「语句被中断」退役**（`e2e/.artifacts/task1-probe/server-120s-pause0.log`）。退役日志是**限流采样**的（每秒最多一行，共记了 13 行），里面 `last_err="context canceled"`，`last_err_on` 的分布是 `(*Store).Session` 7、`(*Store).authSessionUserOn` 5、`(*Store).ListEvents` 1。
+- **修复前**（同一个 harness、同一个镜像只差退役这一处）：两次窗口各约 107s，分别 **6 次**和 **5 次** stale read；每一次的 `last_err` 都是 `context canceled`，`last_err_on` 是 `(*Store).ListProjects` / `(*Store).Session` / `(*Store).authSessionUserOn`，`txn_state=autocommit` 6/6，`open_rows=0` 6/6，`abandoned=0` 6/6，`same_conn_sees_row=false` 6/6，`write_sees_row=true` 6/6。这两次窗口的容器日志随重建丢了（只剩当时的输出），所以**结论不建立在这两个数字上**，而建立在 §3 的机制与 §4 的对照上。
 
 顺带一个与本次改动无关的观察：harness 用 `--abort-pause 0` 时会把部署实例压到 ~470% CPU，随后 loopback 端口开始 connect timeout（`PIFORGE_SQL_PROBE=0` 的对照跑同样如此，所以不是诊断代码造成的）。这也是为什么十分钟那次用了 `--abort-pause 4`。
 
@@ -455,3 +493,11 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 - `PRAGMA data_version` 在两个连接之间不可比（它是每条连接自己的变化计数），日志里只当辅助信号，不据此下结论。
 - 退役策略是在**部署实例（Linux 容器）**上验证的；单测在 Windows 上证明的是策略本身（连接被换掉、健康连接被复用），不是驱动的那个缺陷。
 
+## 本轮门禁（FR-12.3 / 读连接旧快照）
+
+- `go build ./...`：0；`go vet ./...`：0；`go test ./... -count=1`：全绿（新增 `httpapi/review_comment_test.go` 7 组、`store/stale_read_probe_test.go` 2 例、`store/connection_retirement_test.go` 2 例、`store/stale_snapshot_repro_test.go` 1 例哨兵）。
+- `pnpm --dir web test -- --run`：**27 个文件 / 218 例通过**（新增 `lib/review/comments.test.ts` 9 例、`lib/git/patch-lines.test.ts` 8 例）。`pnpm --dir web exec next build`：通过。
+- 完整 e2e（同一份被复用的 `.data`，未 `test:fresh`）：**164 passed / 7.9m**（GATE_RUNS）。新增的 `77-inline-comment.spec.ts` 让总数从 163 变 164。
+- 部署：`pwsh scripts/build-app-image.ps1` 重建 `piforge:local`；`pf-local` 在同一个卷 `pf-local-data` 上重建（端口 7722→7700，`PIFORGE_DEFAULT_PROVIDER=volc`），`/healthz` 200、`dev@piforge.local` 能登录、`GET /v1/providers` 里 `volc` 仍 `enabled=true` / `has_key=true`。
+- 十分钟探测：见上（600.1s / 2354 次探测 / 0 次 401 / 0 次 stale read；另有一次同强度的 120s 对照，514 条连接因中断退役）。
+- `pwsh scripts/deliver-check.ps1`：DRILL_RESULT

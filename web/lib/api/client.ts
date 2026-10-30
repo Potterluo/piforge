@@ -180,6 +180,20 @@ export interface SendMessageInput {
   images?: unknown[];
   /** Required while a run is in flight: "steer" interrupts, "follow_up" queues. */
   streaming_behavior?: "steer" | "follow_up";
+  /**
+   * FR-12.3: a comment on one line. The server composes the prompt from the
+   * anchor, the quote and the body, so the message the agent reads, the one the
+   * transcript shows and the one stored are the same string.
+   */
+  review_comment?: {
+    path: string;
+    line: number;
+    end_line?: number;
+    side?: "new" | "old";
+    hunk?: string;
+    quote?: string[];
+    body: string;
+  };
 }
 
 export const browser = {

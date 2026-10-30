@@ -28,6 +28,8 @@ import type { FileContent } from "@/lib/types";
 import {
   PanelError, PanelSkeleton } from "@/components/workspace/panel-state";
 import {
+  ReviewCommentEditor } from "@/components/workspace/review-comment";
+import {
   useAsync } from "@/components/workspace/use-async";
 import {
   BinaryCard } from "@/components/workspace/preview/binary-card";
@@ -89,13 +91,23 @@ export function FilePreview({ sessionId, path, line, onSaved, onClose }: FilePre
   const [draft, setDraft] = React.useState("");
   const [saving, setSaving] = React.useState(false);
   const [saveError, setSaveError] = React.useState<string | null>(null);
+  // FR-12.3: the line the user asked to comment on, with its text as the quote.
+  // A file line has no hunk, so the anchor's `hunk` stays empty and the server's
+  // message says the quote came from the file, not from a diff.
+  const [commentAt, setCommentAt] = React.useState<{ line: number; text: string } | null>(null);
 
   React.useEffect(() => {
     // Changing file while editing would silently throw the draft away.
     setEditing(false);
     setDraft("");
     setSaveError(null);
+    setCommentAt(null);
   }, [path]);
+
+  const commentOnLine = React.useCallback(
+    (line: number, text: string) => setCommentAt({ line, text }),
+    [],
+  );
 
 
   const file = useAsync(path ? `file:${sessionId}:${path}` : "file:none", async () => {
@@ -237,6 +249,21 @@ export function FilePreview({ sessionId, path, line, onSaved, onClose }: FilePre
           data-testid="file-preview-body"
           className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
         >
+          {commentAt ? (
+            <ReviewCommentEditor
+              sessionId={sessionId}
+              origin="file"
+              anchor={{
+                path,
+                line: commentAt.line,
+                endLine: commentAt.line,
+                side: "new",
+                hunk: "",
+                quote: [commentAt.text],
+              }}
+              onClose={() => setCommentAt(null)}
+            />
+          ) : null}
           {content.truncated ? (
             <div className="shrink-0 border-b bg-muted/40 px-2 py-1 text-[10px] text-muted-foreground">
               文件过大，仅显示首尾片段 · 共 {formatBytes(content.size)}
@@ -275,6 +302,7 @@ export function FilePreview({ sessionId, path, line, onSaved, onClose }: FilePre
                   content={content.body}
                   language="markdown"
                   line={line}
+                  onCommentLine={commentOnLine}
                 />
               </div>
             ) : (
@@ -308,6 +336,7 @@ export function FilePreview({ sessionId, path, line, onSaved, onClose }: FilePre
                 content={content.body}
                 language={language}
                 line={line ?? null}
+                onCommentLine={commentOnLine}
               />
             </div>
           ) : null}

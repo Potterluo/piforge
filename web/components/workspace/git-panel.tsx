@@ -232,7 +232,7 @@ function DiffSection({
           file.binary ? (
             <p className="p-3 text-[11px] text-muted-foreground">二进制文件，暂无文本 diff。</p>
           ) : (
-            <GitDiffView path={file.path} patch={file.patch} split={split} />
+            <GitDiffView sessionId={git.sessionId} path={file.path} patch={file.patch} split={split} />
           )
         ) : (
           <p className="p-3 text-[11px] text-muted-foreground">这个文件在当前范围内没有差异。</p>

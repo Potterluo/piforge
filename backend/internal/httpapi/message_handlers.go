@@ -26,6 +26,11 @@ type messageRequest struct {
 	// ModelRef switches the model for this session before prompting
 	// (PRD FR-13.6) and persists, so a reconnect keeps the choice.
 	ModelRef string `json:"model_ref"`
+	// ReviewComment turns this message into "a comment on one line" (FR-12.3).
+	// The text is composed server-side from path:line, the quoted code and the
+	// comment, so the transcript, the agent's prompt and the stored message are
+	// one string instead of three that can disagree.
+	ReviewComment *ReviewComment `json:"review_comment,omitempty"`
 }
 
 // handlePostMessage submits a user message.
@@ -59,6 +64,17 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	if len(clientID) > 200 {
 		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "client_msg_id is too long"))
 		return
+	}
+	// FR-12.3: a comment on a line is sent through this same endpoint. Its text is
+	// composed here, before the empty-text check, because the client sends the
+	// anchor (path, line, quote) rather than a prompt.
+	if in.ReviewComment != nil {
+		composed, cerr := s.reviewPrompt(r.Context(), user.ID, sess, *in.ReviewComment)
+		if cerr != nil {
+			s.fail(w, r, cerr)
+			return
+		}
+		in.Text = composed
 	}
 	if strings.TrimSpace(in.Text) == "" && len(in.Images) == 0 {
 		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "text or images are required"))

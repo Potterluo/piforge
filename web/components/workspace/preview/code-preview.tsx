@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { MessageSquarePlusIcon } from "lucide-react";
 
 import {
   CodeBlock,
@@ -37,11 +38,19 @@ export function CodePreview({
   content,
   language,
   line,
+  onCommentLine,
 }: {
   path: string;
   content: string;
   language: string;
   line?: number | null;
+  /**
+   * FR-12.3: called with the line number and its text when the user asks to
+   * comment on that line. The preview does not own the comment editor; it only
+   * reports which line was picked, so the same draft store is used here and in
+   * the diff.
+   */
+  onCommentLine?: (line: number, text: string) => void;
 }) {
   const [highlighted, setHighlighted] = React.useState<{
     content: string;
@@ -91,9 +100,26 @@ export function CodePreview({
         key={index}
         data-line={number}
         variant={active === number ? "highlighted" : "default"}
-        className={cn(active === number && "ring-1 ring-amber-500/50 ring-inset")}
+        className={cn("group relative", active === number && "ring-1 ring-amber-500/50 ring-inset")}
       >
         {entry}
+        {onCommentLine ? (
+          <button
+            type="button"
+            data-testid="file-line-comment"
+            data-line={number}
+            aria-label={`评论 ${path}:${number}`}
+            title={`评论 ${path}:${number}`}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onCommentLine(number, plain[index] ?? "");
+            }}
+            className="invisible absolute end-1 top-0 rounded p-0.5 text-muted-foreground opacity-0 transition group-hover:visible group-hover:opacity-100 hover:bg-accent hover:text-foreground focus:visible focus:opacity-100"
+          >
+            <MessageSquarePlusIcon className="size-3" />
+          </button>
+        ) : null}
       </CodeBlockLine>
     );
   });
