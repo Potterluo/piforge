@@ -45,6 +45,63 @@ const STATE_CLASS: Record<ChangeState, string> = {
   untracked: "text-muted-foreground",
 };
 
+const RISK_LABEL: Record<string, string> = {
+  lockfile: "锁文件",
+  ci: "CI",
+};
+
+const RISK_HINT: Record<string, string> = {
+  lockfile: "锁文件：依赖解析会随之改变，提交前先确认这不是一次意外的升级",
+  ci: "CI 配置：会影响之后每一次构建与发布",
+};
+
+/**
+ * The marker the review list must not let the user skim (PRD FR-12.4). The
+ * backend decides which paths are risky; the UI only draws the answer.
+ */
+function RiskBadge({ risk }: { risk?: string }) {
+  const label = risk ? RISK_LABEL[risk] : undefined;
+  if (!risk || !label) return null;
+  return (
+    <Badge
+      variant="outline"
+      data-testid="git-risk"
+      data-risk={risk}
+      title={RISK_HINT[risk]}
+      className="shrink-0 border-amber-600/50 px-1 py-0 text-[10px] font-normal text-amber-700 dark:text-amber-400"
+    >
+      {label}
+    </Badge>
+  );
+}
+
+/**
+ * +N/-N for one path. A deleted file has only removals, an untracked one only
+ * additions, so each half is rendered only when it is non-zero.
+ */
+function LineCounts({ change }: { change: GitChange }) {
+  const additions = change.additions ?? 0;
+  const deletions = change.deletions ?? 0;
+  if (additions === 0 && deletions === 0) return null;
+  return (
+    <span
+      data-testid="git-line-counts"
+      data-additions={additions}
+      data-deletions={deletions}
+      className="shrink-0 font-mono text-[10px] tabular-nums"
+      title={`相对 HEAD：+${additions} −${deletions} 行`}
+    >
+      {additions > 0 ? (
+        <span className="text-emerald-600 dark:text-emerald-400">+{additions}</span>
+      ) : null}
+      {additions > 0 && deletions > 0 ? " " : null}
+      {deletions > 0 ? (
+        <span className="text-red-600 dark:text-red-400">−{deletions}</span>
+      ) : null}
+    </span>
+  );
+}
+
 function StateBadge({ state }: { state: ChangeState }) {
   return (
     <Badge
@@ -103,6 +160,8 @@ function ChangeRow({
           {row.path}
         </ItemTitle>
       </ItemContent>
+      <LineCounts change={change} />
+      <RiskBadge risk={change.risk} />
       <StateBadge state={row.state} />
       <ItemActions className="shrink-0">
         {row.canStage ? (

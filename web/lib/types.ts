@@ -277,12 +277,20 @@ export interface GitStatus {
   clean: boolean;
   changes: GitChange[];
   conflicts?: string[];
+  /** Totals over the change list, measured against HEAD. */
+  additions?: number;
+  deletions?: number;
 }
 
 export interface GitChange {
   path: string;
   index: string;
   worktree: string;
+  /** Lines this path adds/removes against HEAD (untracked = additions only). */
+  additions?: number;
+  deletions?: number;
+  /** "lockfile" or "ci" when the review must not skim this row. */
+  risk?: string;
 }
 
 export interface GitCommit {

@@ -1,8 +1,12 @@
 package gitx
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -19,7 +23,10 @@ func (r *Runner) Status(ctx context.Context, root string) (*contracts.GitStatus,
 	if err != nil {
 		return nil, err
 	}
-	res, err := r.Run(ctx, dir, "status", "--porcelain=v2", "--branch", "--untracked-files=normal", "--ignore-submodules=dirty")
+	// `all`, not `normal`: the change list is per file (it draws one row per
+	// path, with its own counts and risk marker), so an untracked directory must
+	// not collapse its contents into a single `.github/` row.
+	res, err := r.Run(ctx, dir, "status", "--porcelain=v2", "--branch", "--untracked-files=all", "--ignore-submodules=dirty")
 	if err != nil {
 		return nil, fmt.Errorf("gitx: status %s: %w", dir, err)
 	}
@@ -27,7 +34,147 @@ func (r *Runner) Status(ctx context.Context, root string) (*contracts.GitStatus,
 	if perr != nil {
 		return nil, fmt.Errorf("gitx: status %s: %w", dir, perr)
 	}
+	if err := r.annotateChanges(ctx, dir, st); err != nil {
+		return nil, fmt.Errorf("gitx: status %s: %w", dir, err)
+	}
 	return st, nil
+}
+
+// annotateChanges adds the per-path line counts and the risk marker to a parsed
+// status. It is part of Status, not a second endpoint: the 变更 panel draws the
+// change list and the counts together, and two snapshots taken at different
+// instants would let the totals disagree with the rows.
+func (r *Runner) annotateChanges(ctx context.Context, dir string, st *contracts.GitStatus) error {
+	counts := map[string][2]int{}
+
+	// One diff against HEAD covers staged and unstaged work. An unborn branch
+	// has no HEAD to diff against, so the index and the worktree are counted
+	// separately.
+	hasHead, err := r.HasCommits(ctx, dir)
+	if err != nil {
+		return err
+	}
+	commands := [][]string{
+		{"diff", "--numstat", "-z", "--"},
+		{"diff", "--cached", "--numstat", "-z", "--"},
+	}
+	if hasHead {
+		commands = [][]string{{"diff", "--numstat", "-z", "HEAD", "--"}}
+	}
+	for _, args := range commands {
+		res, err := r.Run(ctx, dir, args...)
+		if err != nil {
+			return err
+		}
+		mergeNumstat(counts, res.Stdout)
+	}
+
+	for i := range st.Changes {
+		change := &st.Changes[i]
+		change.Risk = riskOf(change.Path)
+		if isUntracked(*change) {
+			additions, err := countLines(filepath.Join(dir, filepath.FromSlash(change.Path)))
+			if err == nil {
+				counts[change.Path] = [2]int{additions, 0}
+			}
+		}
+		if n, ok := counts[change.Path]; ok {
+			change.Additions, change.Deletions = n[0], n[1]
+		}
+		st.Additions += change.Additions
+		st.Deletions += change.Deletions
+	}
+	return nil
+}
+
+func isUntracked(change contracts.GitChange) bool {
+	return change.Index == "?" || change.Worktree == "?"
+}
+
+// mergeNumstat folds `git diff --numstat -z` output into counts.
+//
+// With -z the fields are NUL-terminated and a rename is followed by the old and
+// new paths as separate records, so a path containing a tab or a non-ASCII
+// character cannot be mis-split.
+func mergeNumstat(counts map[string][2]int, out string) {
+	records := strings.Split(out, "\x00")
+	for i := 0; i < len(records); i++ {
+		record := records[i]
+		if record == "" {
+			continue
+		}
+		fields := strings.SplitN(record, "\t", 3)
+		if len(fields) < 3 {
+			continue
+		}
+		path := fields[2]
+		if path == "" {
+			// Rename: old path then new path in the following records.
+			if i+2 >= len(records) {
+				continue
+			}
+			path = records[i+2]
+			i += 2
+		}
+		additions, deletions := 0, 0
+		if fields[0] != "-" {
+			additions, _ = strconv.Atoi(fields[0])
+		}
+		if fields[1] != "-" {
+			deletions, _ = strconv.Atoi(fields[1])
+		}
+		current := counts[path]
+		counts[path] = [2]int{current[0] + additions, current[1] + deletions}
+	}
+}
+
+// countLines counts the lines of an untracked file. A binary file has no lines
+// to count, and a file too large to be worth scanning is reported as zero rather
+// than blocking the status call.
+func countLines(file string) (int, error) {
+	const maxScannedFile = 4 << 20
+	info, err := os.Stat(file)
+	if err != nil {
+		return 0, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxScannedFile {
+		return 0, nil
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return 0, err
+	}
+	if bytes.IndexByte(data, 0) >= 0 {
+		return 0, nil
+	}
+	lines := bytes.Count(data, []byte{'\n'})
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		lines++
+	}
+	return lines, nil
+}
+
+// riskOf classifies a path the reviewer should look at twice. Both classes are
+// spelled here rather than in the UI so every client agrees.
+func riskOf(p string) string {
+	clean := strings.ToLower(strings.ReplaceAll(p, "\\", "/"))
+	base := path.Base(clean)
+	if strings.HasPrefix(clean, ".github/workflows/") ||
+		strings.HasPrefix(clean, ".circleci/") ||
+		strings.HasPrefix(clean, ".buildkite/") {
+		return contracts.RiskCI
+	}
+	switch base {
+	case ".gitlab-ci.yml", "jenkinsfile", "azure-pipelines.yml",
+		"bitbucket-pipelines.yml", "appveyor.yml", ".travis.yml":
+		return contracts.RiskCI
+	case "go.sum", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml",
+		"yarn.lock", "bun.lockb", "cargo.lock", "poetry.lock", "pipfile.lock",
+		"composer.lock", "gemfile.lock", "uv.lock", "gradle.lockfile",
+		"packages.lock.json":
+		return contracts.RiskLockfile
+	}
+	return ""
 }
 
 // parsePorcelainV2 turns `--porcelain=v2 --branch` output into a GitStatus.

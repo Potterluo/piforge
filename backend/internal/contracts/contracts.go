@@ -371,6 +371,14 @@ type FileContent struct {
 	Modified  time.Time `json:"modified"`
 }
 
+// Risk markers attached to a git change (PRD FR-12.4). A lockfile or a CI
+// definition changes more than the file it names — it changes what everyone
+// else builds and runs — so the review list must make it evident.
+const (
+	RiskLockfile = "lockfile"
+	RiskCI       = "ci"
+)
+
 // GitStatus is the workspace's git state.
 type GitStatus struct {
 	Branch    string      `json:"branch"`
@@ -379,6 +387,11 @@ type GitStatus struct {
 	Clean     bool        `json:"clean"`
 	Changes   []GitChange `json:"changes"`
 	Conflicts []string    `json:"conflicts,omitempty"`
+	// Additions/Deletions are the totals over the whole change list, measured
+	// against HEAD (staged and unstaged together). They are what the 变更 header
+	// shows: "how big is this diff" should not need a second request.
+	Additions int `json:"additions"`
+	Deletions int `json:"deletions"`
 }
 
 // GitChange is one path in the change list.
@@ -386,6 +399,14 @@ type GitChange struct {
 	Path     string `json:"path"`
 	Index    string `json:"index"`    // staged status letter
 	Worktree string `json:"worktree"` // unstaged status letter
+	// Line counts for this path against HEAD. An untracked file counts as pure
+	// additions (or zero for a binary one, which has no lines to count).
+	Additions int `json:"additions"`
+	Deletions int `json:"deletions"`
+	// Risk marks a change the review should not skim: "lockfile" or "ci".
+	// Computed here, not in the browser, so the API and every client agree on
+	// what counts as risky.
+	Risk string `json:"risk,omitempty"`
 }
 
 // GitCommit is a node of the commit DAG. Lane is assigned by the frontend; the

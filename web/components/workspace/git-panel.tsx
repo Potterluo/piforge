@@ -197,6 +197,11 @@ export function GitChangesPanel() {
   // `?.` on the array too: a null `changes` from an older server must not
   // crash the whole panel.
   const dirty = rows.length > 0;
+  // The server totals are authoritative; summing the rows is the fallback for a
+  // server built before FR-12.4. A change list that says "+7 −1" but whose rows
+  // add up to something else is worse than no totals at all.
+  const additions = status?.additions ?? rows.reduce((n, row) => n + (row.change.additions ?? 0), 0);
+  const deletions = status?.deletions ?? rows.reduce((n, row) => n + (row.change.deletions ?? 0), 0);
 
   return (
     <div data-testid="git-panel" className="flex h-full min-h-0 min-w-0 flex-col">
@@ -224,6 +229,16 @@ export function GitChangesPanel() {
         >
           {dirty ? `${rows.length} 个改动` : "干净"}
         </span>
+        {dirty ? (
+          <span
+            data-testid="git-change-totals"
+            className="font-mono text-[10px] tabular-nums text-muted-foreground"
+            title="相对 HEAD 的增删行数（含已暂存与未暂存）"
+          >
+            <span className="text-emerald-600 dark:text-emerald-400">+{additions}</span>{" "}
+            <span className="text-red-600 dark:text-red-400">−{deletions}</span>
+          </span>
+        ) : null}
 
         <div className="ms-auto flex items-center gap-1">
           <Button

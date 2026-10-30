@@ -139,6 +139,10 @@ func TestStatusUnbornBranch(t *testing.T) {
 	if len(st.Changes) != 1 {
 		t.Errorf("changes = %+v, want one untracked file", st.Changes)
 	}
+	// No HEAD to diff against, but the untracked line still has a count.
+	if len(st.Changes) == 1 && (st.Changes[0].Additions != 1 || st.Additions != 1) {
+		t.Errorf("unborn counts = %+v total +%d, want +1", st.Changes[0], st.Additions)
+	}
 
 	graph, err := cl.Log(ctx, dir, 10, "")
 	if err != nil {
@@ -146,6 +150,69 @@ func TestStatusUnbornBranch(t *testing.T) {
 	}
 	if len(graph.Commits) != 0 {
 		t.Errorf("expected no commits, got %d", len(graph.Commits))
+	}
+}
+
+// TestStatusCountsLinesAndFlagsRisk is FR-12.4 at the data layer: every change
+// carries its +/-, the totals add up, and a lockfile or a CI definition is
+// marked so the review cannot skim past it.
+func TestStatusCountsLinesAndFlagsRisk(t *testing.T) {
+	cl, dir := newRepo(t)
+	ctx := context.Background()
+
+	// A second committed file, so a deletion has something to delete.
+	write(t, dir, "b.txt", "x\ny\n")
+	if err := cl.Stage(ctx, dir, []string{"b.txt"}); err != nil {
+		t.Fatalf("stage b: %v", err)
+	}
+	if _, err := cl.Commit(ctx, dir, contracts.CommitRequest{Message: "add b"}); err != nil {
+		t.Fatalf("commit b: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "b.txt")); err != nil {
+		t.Fatalf("remove b: %v", err)
+	}
+
+	write(t, dir, "a.txt", "hello\nworld\n")                // +1
+	write(t, dir, "new.txt", "one\ntwo\n")                  // +2, untracked
+	write(t, dir, "package-lock.json", "{\n}\n")            // +2, lockfile
+	write(t, dir, ".github/workflows/ci.yml", "on: push\n") // +1, CI
+
+	st, err := cl.Status(ctx, dir)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	byPath := map[string]contracts.GitChange{}
+	for _, c := range st.Changes {
+		byPath[c.Path] = c
+	}
+	want := map[string][2]int{
+		"a.txt":                    {1, 0},
+		"b.txt":                    {0, 2},
+		"new.txt":                  {2, 0},
+		"package-lock.json":        {2, 0},
+		".github/workflows/ci.yml": {1, 0},
+	}
+	for path, counts := range want {
+		c, ok := byPath[path]
+		if !ok {
+			t.Errorf("%s missing from changes: %+v", path, st.Changes)
+			continue
+		}
+		if c.Additions != counts[0] || c.Deletions != counts[1] {
+			t.Errorf("%s = +%d -%d, want +%d -%d", path, c.Additions, c.Deletions, counts[0], counts[1])
+		}
+	}
+	if c := byPath["package-lock.json"]; c.Risk != contracts.RiskLockfile {
+		t.Errorf("package-lock risk = %q, want lockfile", c.Risk)
+	}
+	if c := byPath[".github/workflows/ci.yml"]; c.Risk != contracts.RiskCI {
+		t.Errorf("ci.yml risk = %q, want ci", c.Risk)
+	}
+	if c := byPath["a.txt"]; c.Risk != "" {
+		t.Errorf("a.txt risk = %q, want none", c.Risk)
+	}
+	if st.Additions != 6 || st.Deletions != 2 {
+		t.Errorf("totals = +%d -%d, want +6 -2", st.Additions, st.Deletions)
 	}
 }
 
