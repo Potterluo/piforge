@@ -304,10 +304,20 @@ func (s *server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 
 // handleDeleteProject removes a project and everything that hangs off it.
 //
-// The sandbox container is torn down first on a best-effort basis: deleting the
-// row without it would leave a running container nobody can reach from the UI,
-// and failing the whole delete because Docker is unhappy would trap the user in
-// exactly the broken state they are trying to leave.
+// The sandbox directory is destroyed before the row, and stopping whatever runs
+// inside it comes before that. On Windows `os.RemoveAll` fails with "the process
+// cannot access the file because it is being used by another process" while the
+// agent, a terminal or the sandbox browser still holds a file in the checkout,
+// and the old order (destroy best effort, then delete the row regardless) left
+// `sandboxes/<user>/<project>` orphaned on every such delete.
+//
+// So: stop the processes, retry the destroy briefly, and if it still fails,
+// refuse the delete and keep the project. That is the honest outcome — the user
+// is told the directory is still held, the row they can still see matches the
+// directory that still exists, and a retry after closing the holder finishes the
+// job. The alternative (delete the row and sweep later) was rejected because a
+// project that vanished while its files stayed is exactly the lie this fix is
+// about; janitor.RunOnce still exists to clean what older builds left.
 func (s *server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	user := auth.MustUser(r.Context())
 	projectID := pathID(r)
@@ -329,12 +339,26 @@ func (s *server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.deps.Sandbox != nil {
 		if sandbox, err := s.deps.Store.SandboxForProject(r.Context(), user.ID, projectID); err == nil {
-			ctx, cancel := detach(r.Context(), 30*time.Second)
-			if derr := s.deps.Sandbox.Destroy(ctx, sandbox.ID); derr != nil {
-				s.log.WarnContext(r.Context(), "delete project: sandbox destroy failed",
-					"project", projectID, "sandbox", sandbox.ID, "error", derr.Error())
-			}
+			// The teardown must survive the client hanging up: stopping an
+			// agent can take a moment and a half-stopped project must not be
+			// left behind because the browser closed the tab.
+			ctx, cancel := detach(r.Context(), 45*time.Second)
+			s.stopProjectProcesses(ctx, user.ID, projectID, sandbox)
+			derr := s.destroySandbox(ctx, sandbox)
 			cancel()
+			if derr != nil {
+				s.log.WarnContext(r.Context(), "delete project: sandbox destroy failed; project kept",
+					"project", projectID, "sandbox", sandbox.ID, "error", derr.Error())
+				s.fail(w, r, withStatus(http.StatusConflict, contracts.ErrConflict,
+					fmt.Sprintf("项目「%s」的沙箱目录删不掉，项目已保留：%v。请关闭占用该目录的终端、浏览器或 agent 进程后重试。",
+						project.Name, derr)))
+				return
+			}
+		} else if !errors.Is(err, store.ErrNotFound) {
+			// A lookup failure is not "there is no sandbox": deleting the row
+			// now could strand a directory we never looked for.
+			s.fail(w, r, err)
+			return
 		}
 	}
 	if err := s.deps.Store.DeleteProject(r.Context(), user.ID, projectID); err != nil {
@@ -342,6 +366,81 @@ func (s *server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, okBody{OK: true})
+}
+
+// stopProjectProcesses ends everything that can hold a file inside the project's
+// sandbox, before the directory is removed.
+//
+// The three holders are the agent runtime (a child process whose cwd is the
+// checkout), the terminal manager (a shell per tab, also with that cwd) and the
+// sandbox browser (a Chrome profile under the sandbox). All three outlive the
+// requests that created them, which is exactly why a delete used to fail on
+// Windows while the project looked idle in the UI.
+//
+// Failures are logged, not fatal: a process that is already gone is the normal
+// case, and the destroy below is what decides whether the delete can proceed.
+func (s *server) stopProjectProcesses(ctx context.Context, userID, projectID string, sandbox *contracts.Sandbox) {
+	if s.deps.Browser != nil && sandbox != nil {
+		if s.deps.Browser.Close(sandbox.ID) {
+			s.log.InfoContext(ctx, "delete project: stopped the sandbox browser", "sandbox", sandbox.ID)
+		}
+	}
+	sessions, err := s.deps.Store.ListSessions(ctx, userID, store.SessionFilter{
+		ProjectID: projectID,
+		Limit:     200,
+	})
+	if err != nil {
+		s.log.WarnContext(ctx, "delete project: could not list sessions to stop",
+			"project", projectID, "error", err.Error())
+		return
+	}
+	for _, sess := range sessions {
+		if s.deps.Runtime != nil {
+			if err := s.deps.Runtime.Stop(ctx, sess.ID); err != nil {
+				s.log.WarnContext(ctx, "delete project: agent stop failed",
+					"session", sess.ID, "error", err.Error())
+			}
+		}
+		// The terminal manager keys a tab by the worktree it was opened on
+		// (pty_handlers.go passes sess.WorktreeID), not by the sandbox row id.
+		if s.deps.Term != nil && sess.WorktreeID != "" {
+			if closed := s.deps.Term.CloseSandbox(sess.WorktreeID); closed > 0 {
+				s.log.InfoContext(ctx, "delete project: closed terminals",
+					"session", sess.ID, "tabs", closed)
+			}
+		}
+	}
+}
+
+// sandboxDestroyAttempts bounds the retry around a destroy that is expected to
+// fail while a just-killed process is still releasing its handles.
+const (
+	sandboxDestroyAttempts = 6
+	sandboxDestroyBackoff  = 150 * time.Millisecond
+)
+
+// destroySandbox retries the destroy a few times with a growing pause.
+//
+// The first attempt runs immediately, so a delete with nothing holding it pays
+// nothing; a Windows process that was just killed typically lets go within a few
+// hundred milliseconds, which is the whole point of the retry. The last error is
+// returned so the caller can tell the user what is still holding the directory.
+func (s *server) destroySandbox(ctx context.Context, sandbox *contracts.Sandbox) error {
+	var err error
+	for attempt := 1; attempt <= sandboxDestroyAttempts; attempt++ {
+		if err = s.deps.Sandbox.Destroy(ctx, sandbox.ID); err == nil {
+			return nil
+		}
+		if attempt == sandboxDestroyAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(sandboxDestroyBackoff * time.Duration(attempt)):
+		}
+	}
+	return err
 }
 
 // handleGetProject loads one project. A project owned by another user reads as

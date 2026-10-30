@@ -41,6 +41,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/gitx"
 	"github.com/piforge/piforge/backend/internal/httpapi"
 	"github.com/piforge/piforge/backend/internal/isolate"
+	"github.com/piforge/piforge/backend/internal/janitor"
 	"github.com/piforge/piforge/backend/internal/llmgw"
 	"github.com/piforge/piforge/backend/internal/pi"
 	"github.com/piforge/piforge/backend/internal/pimodel"
@@ -96,6 +97,10 @@ type options struct {
 	sandboxReclaimAfter time.Duration
 	// sandboxReapInterval is how often the sandbox reaper looks for candidates.
 	sandboxReapInterval time.Duration
+	// sandboxSweep is how often orphaned sandbox directories are swept. Zero
+	// disables the sweep; the local provider always runs one at startup unless
+	// this is zero.
+	sandboxSweep time.Duration
 	// sandboxBrowser is "auto" (the flag's default), "host" or "remote". It holds
 	// the resolved placement by the time anything reads it: auto follows the
 	// provider, which is remote under docker and host under local.
@@ -176,6 +181,8 @@ func run() error {
 		"reclaim a PAUSED sandbox after it has been idle this long, snapshotting first (0 disables)")
 	flag.DurationVar(&opt.sandboxReapInterval, "sandbox-reap-interval", envDuration("PIFORGE_SANDBOX_REAP_INTERVAL", time.Minute),
 		"how often the sandbox idle reaper checks for candidates")
+	flag.DurationVar(&opt.sandboxSweep, "sandbox-sweep", envDuration("PIFORGE_SANDBOX_SWEEP", 10*time.Minute),
+		"how often sandbox directories with no project row are removed, at startup and then on this interval (0 disables, local provider only)")
 	flag.StringVar(&opt.sandboxKind, "sandbox", envOr("PIFORGE_SANDBOX", "local"),
 		"sandbox provider: local (directories), docker (one container per project, CLI here) or runner (a sandbox-runner service runs the CLI)")
 	flag.StringVar(&opt.sandboxBrowser, "sandbox-browser", envOr("PIFORGE_SANDBOX_BROWSER", "auto"),
@@ -341,6 +348,10 @@ func run() error {
 	// the Docker CLI here; the runner provider asks a service that owns the CLI.
 	// Swapping between them is a flag and one branch here, nowhere else.
 	var sb contracts.SandboxProvider
+	// localSandboxRoot is set only by the local provider. It is the directory
+	// layout the orphan sweep understands (sandboxes/<user>/<project>); a
+	// container provider keeps its state somewhere else, so no sweep runs.
+	localSandboxRoot := ""
 	// remoteSB is the lifecycle-independent half the panels use (the sandbox's API
 	// endpoint and the host→container path map). It is nil under -sandbox local,
 	// which is how the checks below know there is no container.
@@ -395,14 +406,16 @@ func run() error {
 			"url", opt.sandboxRunnerURL,
 			"detail", "no docker CLI and no daemon are needed in this process")
 	default:
+		localRoot := filepath.Join(opt.dataDir, "sandboxes")
 		local, lerr := sandbox.NewLocal(sandbox.LocalConfig{
-			Root:          filepath.Join(opt.dataDir, "sandboxes"),
+			Root:          localRoot,
 			InitialBranch: "main",
 		})
 		if lerr != nil {
 			return fmt.Errorf("init sandbox provider: %w", lerr)
 		}
 		sb = local
+		localSandboxRoot = localRoot
 	}
 
 	// 3. Git and the filesystem. fsx takes gitx as its git backend so file
@@ -822,6 +835,26 @@ func run() error {
 		logger.Info("sandbox idle policy disabled (both thresholds are 0)")
 	}
 
+	// Orphaned sandbox directories are swept at startup and then periodically.
+	// A project delete now refuses to remove the row when the directory cannot
+	// be destroyed, so new orphans should not appear; this pass is what cleans
+	// the ones older builds left behind (and any a crash between the two
+	// filesystem steps could produce). The layout is the local provider's, so a
+	// container provider gets no sweep.
+	if localSandboxRoot != "" && opt.sandboxSweep > 0 {
+		orphans := janitor.New(janitor.Config{
+			Root:     localSandboxRoot,
+			Projects: st,
+			Logger:   logger,
+			Interval: opt.sandboxSweep,
+		})
+		logger.Info("orphaned sandbox directories are swept",
+			"root", abs(localSandboxRoot), "interval", opt.sandboxSweep.String())
+		go orphans.Start(ctx)
+	} else if localSandboxRoot != "" {
+		logger.Info("orphaned sandbox sweep disabled", "flag", "-sandbox-sweep=0")
+	}
+
 	// Scratch sessions (PRD FR-1.10) expire on their own: a quick question should
 	// not need a cleanup step from the user.
 	go func() {
@@ -893,6 +926,12 @@ func (a termAdapter) Close(tabID string) error { return a.m.Close(tabID) }
 func (a termAdapter) Read(tabID string, from int64) ([]byte, int64, bool) {
 	return a.m.Read(tabID, from)
 }
+
+// CloseSandbox closes every terminal tab opened against one worktree. A project
+// delete calls it for each of its sessions before removing the sandbox: a shell
+// is a process whose cwd is the checkout, so it is one of the things that makes
+// `os.RemoveAll` fail on Windows.
+func (a termAdapter) CloseSandbox(worktreeID string) int { return a.m.CloseSandbox(worktreeID) }
 
 // stopAgentsOnSandbox stops every agent process whose worktree belongs to one
 // sandbox. It mirrors the manual pause handler: "paused" should describe the

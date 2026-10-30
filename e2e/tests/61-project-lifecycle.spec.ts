@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
-import { mkdirSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -13,9 +15,14 @@ import { USER, apiWrite, ensureProject, login, openSession } from "./helpers";
  *  - deleting a project is destructive but the remote repository is not part of
  *    it, so the dialog must say so rather than let the user guess;
  *  - a project with a turn in flight is refused, not silently killed.
+ *  - and a delete that reports success must take the sandbox directory with it:
+ *    that directory is on this machine, so the test looks at the real path.
  */
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+// playwright.config.ts starts piforged with `-data <e2e>/.data`; the local
+// sandbox provider puts a project's checkout at sandboxes/<user>/<project>.
+const DATA_DIR = path.resolve(HERE, "../.data");
 const ARTIFACTS = path.resolve(HERE, "../.artifacts/ux-fix3");
 mkdirSync(ARTIFACTS, { recursive: true });
 const QA16_ARTIFACTS = path.resolve(HERE, "../.artifacts/fix-qa16");
@@ -107,6 +114,16 @@ test("deleting a project confirms what goes, returns home and removes it", async
   const projectId = await ensureProject(page, name);
   await openSession(page, projectId, "session that should disappear");
 
+  // Creating the session materialised the project's sandbox on this disk. This
+  // is the directory the old delete left behind.
+  const me = (await (await page.request.get("/v1/auth/me")).json()) as {
+    user: { id: string };
+  };
+  const sandbox = path.join(DATA_DIR, "sandboxes", me.user.id, projectId);
+  await expect
+    .poll(() => existsSync(path.join(sandbox, "repo")), { timeout: 20_000 })
+    .toBe(true);
+
   await page.goto(`/p/${projectId}`);
   await expect(page.getByTestId("project-title")).toHaveText(name);
   await page.getByTestId("project-actions").click();
@@ -127,7 +144,98 @@ test("deleting a project confirms what goes, returns home and removes it", async
     page.locator("[data-testid=project-card]", { hasText: name }),
   ).toHaveCount(0);
   expect((await page.request.get(`/v1/projects/${projectId}`)).status()).toBe(404);
+
+  // The row and the directory go together. When the directory cannot be
+  // destroyed (a held file, a live agent), the API refuses the delete and keeps
+  // the project instead — project_delete_test.go and
+  // e2e/scripts/fix-orphans-repro.ps1 prove that half; here the honest-success
+  // half is asserted on the real path rather than on a toast.
+  await expect.poll(() => existsSync(sandbox), { timeout: 15_000 }).toBe(false);
   await page.screenshot({ path: path.join(ARTIFACTS, "61-deleted-home.png") });
+});
+
+/**
+ * The defect this guards: on Windows `RemoveAll` fails while any process holds a
+ * file inside the checkout, and the old handler logged that and deleted the row
+ * anyway — `sandboxes/<user>/<project>` stayed on disk with nothing pointing at
+ * it. The suite runs on the same OS as the report, so a real open handle is the
+ * trigger.
+ *
+ * Node's own `openSync` is not enough: libuv opens with FILE_SHARE_DELETE, so
+ * RemoveAll still succeeds and the test would pass on the old code too. A small
+ * PowerShell holder opens the file with FileShare.None and keeps it until this
+ * test kills it — which is what a running agent, a terminal or Chrome looks like
+ * to the filesystem.
+ */
+test("a sandbox that cannot be removed keeps the project instead of orphaning it", async ({
+  page,
+}) => {
+  test.skip(process.platform !== "win32", "the held-handle failure mode is Windows-only");
+
+  await login(page, USER);
+  const stamp = Date.now();
+  const name = `ux61-held-${stamp}`;
+  const projectId = await ensureProject(page, name);
+  await openSession(page, projectId, "held session");
+
+  const me = (await (await page.request.get("/v1/auth/me")).json()) as {
+    user: { id: string };
+  };
+  const sandbox = path.join(DATA_DIR, "sandboxes", me.user.id, projectId);
+  const repo = path.join(sandbox, "repo");
+  await expect.poll(() => existsSync(repo), { timeout: 20_000 }).toBe(true);
+
+  const work = mkdtempSync(path.join(os.tmpdir(), "pf-hold-"));
+  const held = path.join(repo, "held-by-the-test.txt");
+  const ready = path.join(work, "ready");
+  const script = path.join(work, "hold.ps1");
+  writeFileSync(
+    script,
+    [
+      "param([string]$Path, [string]$Ready)",
+      "$f = [System.IO.File]::Open($Path, 'OpenOrCreate', 'ReadWrite', 'None')",
+      "try {",
+      "  Set-Content -Path $Ready -Value 'held' -NoNewline",
+      "  Start-Sleep -Seconds 120",
+      "} finally { $f.Dispose() }",
+    ].join("\n"),
+  );
+  const holder = spawn(
+    "powershell",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-Path", held, "-Ready", ready],
+    { stdio: "ignore" },
+  );
+  try {
+    // The marker is written only after the file is open with no sharing, so the
+    // delete below is guaranteed to meet the lock rather than race it.
+    await expect.poll(() => existsSync(ready), { timeout: 20_000 }).toBe(true);
+
+    await page.goto(`/p/${projectId}`);
+    await page.getByTestId("project-actions").click();
+    await page.getByTestId("project-delete").click();
+    await page.getByTestId("project-delete-confirm").click();
+
+    const toast = page.locator("[data-sonner-toast]").filter({ hasText: "删除失败" });
+    await expect(toast).toBeVisible({ timeout: 30_000 });
+    await expect(toast).toContainText("沙箱目录删不掉");
+    await expect(toast).toContainText("项目已保留");
+
+    // Nothing half-deleted: the project is still there and so is its directory.
+    // That pair is the whole promise — the row and the disk agree.
+    expect((await page.request.get(`/v1/projects/${projectId}`)).status()).toBe(200);
+    expect(existsSync(sandbox)).toBe(true);
+    await expect(page).toHaveURL(new RegExp(`/p/${projectId}`));
+    await page.screenshot({ path: path.join(ARTIFACTS, "61-delete-refused-held.png") });
+  } finally {
+    holder.kill();
+  }
+
+  // With the holder gone the same action finishes the job, and the directory
+  // goes with the row instead of becoming the orphan this test is named after.
+  const gone = await apiWrite(page, "DELETE", `/v1/projects/${projectId}`);
+  expect(gone.status).toBe(200);
+  expect((await page.request.get(`/v1/projects/${projectId}`)).status()).toBe(404);
+  await expect.poll(() => existsSync(sandbox), { timeout: 15_000 }).toBe(false);
 });
 
 test("a project with a running turn refuses to be deleted", async ({ page }) => {

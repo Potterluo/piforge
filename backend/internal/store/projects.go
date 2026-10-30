@@ -128,6 +128,31 @@ func (s *Store) ListProjects(ctx context.Context, userID string) ([]*contracts.P
 	return out, nil
 }
 
+// ProjectIndex maps every project id to its owner. It exists for the janitor,
+// which decides whether a sandbox directory on disk still has a project: one
+// query for a whole sweep instead of one per directory, and no way to forget the
+// ownership half (a directory under the wrong user is stale too).
+func (s *Store) ProjectIndex(ctx context.Context) (map[string]string, error) {
+	rows, err := s.r.QueryContext(ctx, `SELECT id, user_id FROM projects`)
+	if err != nil {
+		return nil, fmt.Errorf("store: project index: %w", err)
+	}
+	defer rows.Close()
+
+	index := make(map[string]string, 64)
+	for rows.Next() {
+		var id, userID string
+		if err := rows.Scan(&id, &userID); err != nil {
+			return nil, fmt.Errorf("store: project index: %w", err)
+		}
+		index[id] = userID
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: project index: %w", err)
+	}
+	return index, nil
+}
+
 // Project loads one project, scoped to its owner. A project owned by somebody
 // else is reported as ErrNotFound on purpose: the HTTP layer turns that into
 // 404 so a caller cannot probe which ids exist (PRD §9.7).

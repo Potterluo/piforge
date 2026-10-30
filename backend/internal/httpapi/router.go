@@ -54,6 +54,10 @@ type TermManager interface {
 	Resize(tabID string, cols, rows int) error
 	Close(tabID string) error
 	Read(tabID string, fromOffset int64) ([]byte, int64, bool)
+	// CloseSandbox closes every tab opened against one sandbox key and reports
+	// how many were closed. The PTY handler opens with the session's worktree
+	// id as that key (pty_handlers.go), so callers pass a worktree id.
+	CloseSandbox(sandboxID string) int
 }
 
 // TermSession is the subset of a terminal session the socket needs. The
