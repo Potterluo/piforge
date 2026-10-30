@@ -264,7 +264,22 @@ export function FilePreview({ sessionId, path, line, onSaved, onClose }: FilePre
           ) : null}
 
           {!content.binary && kind === "markdown" ? (
-            <MarkdownPreview content={content.body} />
+            // A content-search hit (FR-6.6) carries a line, and the rendered
+            // view cannot point at line N. When there is one, the source is the
+            // surface that can keep the promise; otherwise this is the normal
+            // rendered/source toggle.
+            typeof line === "number" && line > 0 ? (
+              <div className="min-h-0 min-w-0 flex-1 overflow-auto">
+                <CodePreview
+                  path={content.path}
+                  content={content.body}
+                  language="markdown"
+                  line={line}
+                />
+              </div>
+            ) : (
+              <MarkdownPreview content={content.body} />
+            )
           ) : null}
 
           {!content.binary && kind === "table" ? (

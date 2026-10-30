@@ -10,7 +10,7 @@
 一张带证据的表比一段自我评价可靠。
 
 基线：HEAD `d0f3f7a`（"fix(fr92,fr19): a live follow view, and a no-op compaction with a reason"）；共 126 条 FR：DONE 54 / PARTIAL 52 / MISSING 19 / 不做 1。此后 FR-3.3 接上真实配置与可解释拒绝、FR-1.9 补上浏览器入口（见文末「本次修复（FR-3.3）」与「本次修复（FR-1.9 浏览器入口）」），现为 **DONE 55 / PARTIAL 52 / MISSING 18 / 不做 1**。
-本轮把 `15b995c`（惰性浏览器面板 + 空闲停止）与 `ba532a2`（首次运行 setup）记入「交付能力（非 FR）」两行，均为 DONE；此后 FR-14.4（zip 导入 + 可禁用）从 PARTIAL 移入 DONE，126 条 FR 为 DONE 56 / PARTIAL 51 / MISSING 18 / 不做 1；加上这两行后**整表 128 行：DONE 58 / PARTIAL 51 / MISSING 18 / 不做 1**。
+本轮把 `15b995c`（惰性浏览器面板 + 空闲停止）与 `ba532a2`（首次运行 setup）记入「交付能力（非 FR）」两行，均为 DONE；此后 FR-14.4（zip 导入 + 可禁用）与 FR-6.6（⌘⇧F 内容搜索）从 PARTIAL 移入 DONE，126 条 FR 为 DONE 57 / PARTIAL 50 / MISSING 18 / 不做 1；加上这两行后**整表 128 行：DONE 59 / PARTIAL 50 / MISSING 18 / 不做 1**。
 
 ---
 # PiForge 对照 PRD 的实现审计
@@ -19,7 +19,7 @@
 - 审计方法：先读 `docs/STATUS-AUDIT.md`（`06b61a3`）的每条判定，再逐条重读 `backend/internal/httpapi/router.go` 的路由表、各 handler、`web/components/**` 与 `e2e/tests/*.spec.ts`；以「实现 + 断言了用户可见结果的测试名」为准，不采信命名与注释。
 - 状态口径：**DONE** 必须点名一条断言用户可见承诺的测试或 e2e 路径；**PARTIAL** 必须写清缺什么；**MISSING** 是无实现。
 - 本版把 `06b61a3` 之后的修复接进台账：`f766651`（FR-2.5 / FR-2.6）、`bd85ade`（FR-2.7）、`9c4ab0b`（FR-11.8）、`717f7cb`（FR-12.5），以及浏览器启动按沙箱单飞与 profile 僵尸锁恢复（FR-11.1）。
-- 计数：**126 条 FR，DONE 56 / PARTIAL 51 / MISSING 18 / 不做 1**（`be01575` 时是 52 / 54；FR-1.9 与 FR-9.2 补证据后为 54 / 52 / 19，FR-3.3 从 MISSING 移入 DONE，FR-14.4 从 PARTIAL 移入 DONE；旧值 37 / 50 / 39 是 `2e5f206` 时代的，且 FR-12.5 等行早已过期）。另有 2 条非 FR 交付能力（见文末「交付能力」），均 DONE；**整表 128 行 = DONE 58 / PARTIAL 51 / MISSING 18 / 不做 1**。这两个数是从本文件的表格行重新数出来的，不是从旧表头抄的。
+- 计数：**126 条 FR，DONE 57 / PARTIAL 50 / MISSING 18 / 不做 1**（`be01575` 时是 52 / 54；FR-1.9 与 FR-9.2 补证据后为 54 / 52 / 19，FR-3.3 从 MISSING 移入 DONE，FR-14.4 与 FR-6.6 从 PARTIAL 移入 DONE；旧值 37 / 50 / 39 是 `2e5f206` 时代的，且 FR-12.5 等行早已过期）。另有 2 条非 FR 交付能力（见文末「交付能力」），均 DONE；**整表 128 行 = DONE 59 / PARTIAL 50 / MISSING 18 / 不做 1**。这两个数是从本文件的表格行重新数出来的，不是从旧表头抄的。
 
 > 说明：PRD 中没有「部署」类 FR（§12 是里程碑，`deploy/` 是 Dockerfile.app / Dockerfile.offline / Dockerfile.runner / k8s.yaml / entrypoint.sh，属交付物而非需求行），因此下面没有部署行。`sandbox-runner`（把 Docker CLI 从控制面移出去）同样是交付物而非 FR：它没有改变任何一条 FR 的状态，证据见 `docs/SANDBOX-DEPLOY.md` §1.4 与 `scripts/verify-runner-sandbox.ps1`。
 >
@@ -72,7 +72,7 @@
 | FR-6.3 尊重 .gitignore + 显示忽略开关 | DONE | `fsx/ignore.go`、`handleFileTree` 的 `include_ignored=1`、`file-tree.tsx` 开关；`11-files.spec.ts` "an ignored file appears only when the switch is on"、`handlers_test.go` `TestFileTreeSwitchReachesTheServer` |
 | FR-6.4 ⌘P 快速打开 | DONE | `quick-open.tsx`（`Ctrl/Meta+P`，debounce，`api.files.search(byContent=false)`）；`15-quick-open-status.spec.ts` 2 例 |
 | FR-6.5 右键菜单（终端/复制路径/下载/对比 HEAD/删除） | PARTIAL | `file-tree-canvas.tsx` 的 `DropdownMenu`：在终端打开（`onRevealInTerminal`）、下载、删除；**缺复制路径、缺与 HEAD 对比** |
-| FR-6.6 内容搜索 ⌘⇧F | PARTIAL | 后端 `handleSearch`（`?type=content` + `fsx.Search`）完整；前端无 ⌘⇧F 入口，`quick-open.tsx` 只做文件名搜索 |
+| FR-6.6 内容搜索 ⌘⇧F | DONE | 后端 `handleSearch`（`?type=content` + `fsx.Search`）本来就有；缺的是入口。`quick-open.tsx` 现在一个面板两种模式：⌘P 文件名、⌘⇧F 内容（`quick-open-mode` 的 `data-mode` 标明当前模式），内容模式走 `api.files.search(..., true)`，结果行显示 `path:line` 与匹配文本并带 `data-path`/`data-line`；点击经 `handleOpenLocation` 把行号交给 `FilePreview` → `CodePreview`（`data-active-line`、`第 N 行` 徽章、`scrollIntoView`）。Markdown 命中时改渲染源码视图——渲染视图无法指向第 N 行。测试：`e2e/tests/70-content-search.spec.ts` 两例（写 `docs/guide.md` 后按 Ctrl+Shift+F，模式为 content，结果 `docs/guide.md:3` 且含 token，点击后 `code-preview[data-active-line="3"]` 且屏幕上是该行；Ctrl+P 仍是文件名搜索，同一 token 查不到）。旧代码：面板里没有 `quick-open-mode`，⌘⇧F 不打开任何东西 |
 | FR-7.1 文件预览与编辑 | PARTIAL（可编辑，无 CodeMirror） | `file-preview.tsx` 的 textarea 编辑模式（`preview-edit` / `file-editor-save`）；`31-file-edit.spec.ts`。没有语法高亮编辑器与大文件折叠 |
 | FR-7.2 Markdown 渲染 + 源码切换 | PARTIAL | `preview/markdown-preview.tsx`（`Tabs` 渲染/源码 + `markdown-lite.tsx`）；无该组件的测试 |
 | FR-7.3 图片预览（缩放/平移） | PARTIAL | `preview/image-preview.tsx`（按钮缩放、Ctrl/⌘+滚轮、拖拽平移）；无测试，AC-7.3 未验 |
@@ -163,7 +163,7 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 | 首次运行 setup：`GET /v1/setup` + 首次运行面板 + `PIFORGE_BOOTSTRAP_PROVIDER` 预填（`ba532a2`） | DONE | `httpapi/setup_handlers.go` 的 `GET /v1/setup` 返回 `needs_provider` / `is_admin` / `shared_provider_available` / 非密 `bootstrap`（name/base_url/model，没有 key 字段）；`web/components/setup/first-run-setup.tsx` 在首页与会话输入框上方显示「先配置一个模型服务」，按角色提供「添加共享服务商」或设置页链接；`bootstrap.Ensure` 只在「没有可用共享服务商」时创建，重启不覆盖；启动环境持有 key，日志不打印。测试：`setup_test.go` `TestSetupReportsFirstRunState`、`TestSetupExposesBootstrapPrefillWithoutSecrets`，`bootstrap_test.go`，e2e `68-first-run.spec.ts`（新用户首页/输入框都看到面板、配好共享服务商后面板消失、管理员可从面板建共享服务商） |
 | 惰性浏览器面板 + 空闲停止（host placement，`15b995c`） | DONE | `workspace-panels.tsx` 只在浏览器面板可见时挂载它；`browser.Manager` 的 idle reaper 在无 viewer 附着 `PIFORGE_BROWSER_IDLE_TIMEOUT` 后 stop 该 sandbox 浏览器；`GET /v1/admin/status` 暴露 `browser_running` / `browser_idle_timeout`。测试：`browser/idle_test.go` 4 例、`67-browser-lazy.spec.ts` 断言「打开会话不启动、选中面板才启动、切走后停止」；部署实测选中前 `docker exec pf-local pgrep chrome` 为空，选中后才出现 |
 
-计数：上面 126 条 FR 是 **DONE 56 / PARTIAL 51 / MISSING 18 / 不做 1**；加上这两条（均 DONE）后整表 128 行 = **DONE 58 / PARTIAL 51 / MISSING 18 / 不做 1**。
+计数：上面 126 条 FR 是 **DONE 57 / PARTIAL 50 / MISSING 18 / 不做 1**；加上这两条（均 DONE）后整表 128 行 = **DONE 59 / PARTIAL 50 / MISSING 18 / 不做 1**。
 
 **明确边界：远端 / AIO 沙箱里的浏览器仍不会在空闲时被停止。** `15b995c` 的 idle 策略只在 host placement 生效：控制面直接持有 Chrome 进程，`browser.Manager` 能 stop 它。远端 / AIO 模式下 Chrome 跑在沙箱里，控制面断开 CDP 只意味着没人看了，进程仍在沙箱里；`PIFORGE_BROWSER_IDLE_TIMEOUT` 不会杀它，也没有 runner 侧的空闲回收。要覆盖这条路径，需要沙箱 provider 按「无 viewer」自行 stop 浏览器（或 runner 提供 idle 端点），目前没有实现，也没有测试。
 
@@ -230,3 +230,11 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 - **补的可禁用**：`PATCH /v1/skills/{id}` 改 `enabled`（共享 Skill 与删除同一条权限规则：仅管理员）；`store.SetSkillEnabled` 在写连接上回读；`provision.mountTooling` 只把 `Enabled` 的 Skill 交给 `materialize.Mount`，所以停用后**新建**会话不再有它的目录与 `session_skills` 记录，已挂载的副本不动。Skill 行上有开关和「已停用」徽章。
 - **测试（断言用户可见结果）**：`e2e/tests/69-skill-zip.spec.ts` 三例——在设置页真的选 zip 并点上传后，列表出现 `pdf-tools`（描述来自 SKILL.md 正文）与 `review`，bundle 只有 `SKILL.md` 和 `scripts/split.py`（README 没混进来）；启用时新会话的 `tooling.mounted.skills` 含两者，点开关后徽章变「已停用」、`GET /v1/skills` 的 `enabled=false`，再建一个会话只剩 `review`；`../escape/SKILL.md` 的包返回 400 且库里既没有 `escape` 也没有同包的 `fine`；没有 SKILL.md 的包返回 404。Go 侧 `skill_zip_test.go` 5 例覆盖解压+findSkills、穿越、绝对路径/符号链接、超大条目、非 zip。
 - **旧代码确实会失败**：`0722790` 的前后端（本轮改动前）跑同一条 spec——UI 用例失败在 `waiting for getByTestId('skill-import-zip')`（设置页没有这个输入），API 用例收到 `{"error":{"code":"not_found","message":"no route for POST /v1/skills/import/zip"}}`；停用开关同理不存在。日志：`e2e/.artifacts/partial-batch1/fr-14.4-fail-first.log`。
+
+## 本次修复（FR-6.6）
+
+- **台账原文**：「后端 `handleSearch`（`?type=content` + `fsx.Search`）完整；前端无 ⌘⇧F 入口，`quick-open.tsx` 只做文件名搜索」。也就是说这条缺的不是搜索能力，是用户按不到它。
+- **补的**：`quick-open.tsx` 的一个面板里加第二种模式。⌘P 打开/关闭文件名搜索（Shift 被排除，⌘⇧P 不会误触发），⌘⇧F 打开内容搜索；模式用一个 `quick-open-mode` 徽章明示（`data-mode="name|content"`），不靠用户猜。内容结果每条显示 `path:line` 和匹配到的整行文本，`data-path` / `data-line` 供点击使用；点击走既有的 `handleOpenLocation`，把行号传给 `FilePreview`，最终由 `CodePreview` 高亮并滚动到 `data-active-line`（这条管线是 FR-12.5 测试失败跳转时就有的，本轮只是让内容搜索接上它）。
+- **一处必须改的行为**：Markdown 命中时 `MarkdownPreview` 的渲染视图无法指向第 N 行，所以带行号打开时改用源码视图（`file-preview.tsx` 的分支）。不这么做，`.md` 里的内容命中会点开文件却停在第 1 行——表面完成，实际没兑现。
+- **测试**：`e2e/tests/70-content-search.spec.ts` 两例。第一例通过真实 Files API 写 `docs/guide.md`，在 token 所在第 3 行，按 Ctrl+Shift+F 后断言模式为 `content`、结果 `docs/guide.md:3` 且文本含 token，点击后 `code-preview[data-active-line="3"]` 且预览头部是 `docs/guide.md`、面板关闭。第二例证明两种模式没有混：同一 token 只存在于文件内容，Ctrl+P（模式 `name`）查不到任何结果。
+- **旧代码确实会失败**：`git stash` 保留新 spec，用 `f015189` 的前端构建跑这两例——两例都失败在 `getByTestId('quick-open-mode')` 的 `element(s) not found`（旧面板没有模式，⌘⇧F 不打开任何东西）。日志：`e2e/.artifacts/partial-batch1/fr-6.6-fail-first.log`。

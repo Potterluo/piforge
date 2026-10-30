@@ -251,7 +251,15 @@ export function WorkspacePanels({
       data-project={projectId}
       className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden border-s bg-background"
     >
-      <QuickOpen sessionId={sessionId} onOpenFile={handleOpenFile} />
+      <QuickOpen
+        sessionId={sessionId}
+        onOpenFile={(path, line) => {
+          // A content hit carries the line it matched on; a name hit does not.
+          // Both end in the same editor, which is the point of one palette.
+          if (typeof line === "number" && line > 0) handleOpenLocation(path, line);
+          else handleOpenFile(path);
+        }}
+      />
       <GitProvider sessionId={sessionId}>
         <div className="flex h-full min-h-0 min-w-0">
         <Tabs
