@@ -280,6 +280,13 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /v1/sessions/{id}/git/remote", s.authed(s.handleGitRemote))
 	mux.Handle("POST /v1/sessions/{id}/git/push", s.mutatingBearer(s.handleGitPush))
 	mux.Handle("POST /v1/sessions/{id}/git/pull", s.mutatingBearer(s.handleGitPull))
+	// Opening a pull request: preview what would be sent, then push + create
+	// (FR-12.6).
+	mux.Handle("GET /v1/sessions/{id}/git/pr", s.authed(s.handlePRPreview))
+	mux.Handle("POST /v1/sessions/{id}/git/pr", s.mutatingBearer(s.handleCreatePR))
+
+	// Where this project opens pull requests. The token is write-only.
+	mux.Handle("PUT /v1/projects/{id}/forge", s.mutatingBearer(s.handleSetProjectForge))
 
 	// Providers.
 	mux.Handle("GET /v1/api-keys", s.authed(s.handleListAPIKeys))

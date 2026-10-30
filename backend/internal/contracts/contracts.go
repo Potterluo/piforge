@@ -97,10 +97,52 @@ type Project struct {
 	RepoURL       string    `json:"repo_url"`
 	DefaultBranch string    `json:"default_branch"`
 	CreatedAt     time.Time `json:"created_at"`
+	// Forge is where pull requests for this project are opened (FR-12.6). Nil
+	// means "not configured yet"; the token is never part of this value.
+	Forge *ForgeConfig `json:"forge,omitempty"`
 	// Runtime state, not persisted directly:
 	SandboxState SandboxState `json:"sandbox_state"`
 	SessionCount int          `json:"session_count"`
 	LastActive   *time.Time   `json:"last_active_at,omitempty"`
+}
+
+// ForgeConfig says where to open a pull request for one project (FR-12.6).
+//
+// This is deliberately per project rather than one deployment-wide token: a
+// token identifies both a person and the repositories they may write to, and an
+// operator who configures one global token would silently turn every project's
+// PR into "opened as that account", including projects the token's owner never
+// intended to touch. The cost is one more field to fill in per project; the
+// alternative is a credential whose blast radius is the whole deployment.
+//
+// Kind selects the REST dialect. "github" also covers Gitea/Forgejo and GitHub
+// Enterprise, which speak the same create-pull API; "gitlab" is the GitLab
+// merge-request dialect. Any other value is refused when the config is saved.
+type ForgeConfig struct {
+	Kind string `json:"kind"`
+	// APIBase is the API root, not the web page: https://api.github.com,
+	// https://gitea.example.com/api/v1, https://gitlab.example.com/api/v4.
+	APIBase string `json:"api_base"`
+	// Repo is "owner/name" for GitHub-compatible forges and "group/project" (or
+	// a numeric project id) for GitLab.
+	Repo string `json:"repo"`
+	// BaseBranch is the target branch. Empty means the project's default branch.
+	BaseBranch string `json:"base_branch,omitempty"`
+	// HasToken reports whether a token is sealed at rest. The token itself is
+	// write-only: nothing reads it back over HTTP.
+	HasToken bool `json:"has_token"`
+}
+
+// PullRequest is one pull request a session created (FR-12.6).
+type PullRequest struct {
+	Number int    `json:"number"`
+	URL    string `json:"url"`
+	Title  string `json:"title"`
+	Head   string `json:"head"`
+	Base   string `json:"base"`
+	// Existing is true when the forge already had an open PR for this branch;
+	// the response then reports it instead of creating a second one.
+	Existing bool `json:"existing,omitempty"`
 }
 
 // Worktree is a git worktree inside a sandbox. One worktree backs one branch
@@ -485,6 +527,31 @@ type SearchResult struct {
 	Text string `json:"text,omitempty"`
 }
 
+// PRFile is one file a pull request would change, with its own line counts.
+type PRFile struct {
+	Path      string `json:"path"`
+	Status    string `json:"status"` // added | modified | deleted | renamed
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
+}
+
+// PRRange is what a pull request from base to HEAD would carry (FR-12.6).
+//
+// It is computed with `git log base..HEAD` and a three-dot diff, so a branch
+// that is behind its base does not "un-change" the commits the base already
+// has: the preview has to describe the review, not the raw delta of two tips.
+type PRRange struct {
+	Base    string `json:"base"`
+	Head    string `json:"head"`
+	HeadSHA string `json:"head_sha"`
+	// CommitCount is exact; Commits is a capped list for display.
+	CommitCount int         `json:"commit_count"`
+	Commits     []GitCommit `json:"commits"`
+	Files       []PRFile    `json:"files"`
+	Additions   int         `json:"additions"`
+	Deletions   int         `json:"deletions"`
+}
+
 // Workspace exposes the file and git operations the UI needs. Every method is
 // scoped to one worktree directory; path traversal protection is the
 // implementation's responsibility (PRD §6.3-坑6).
@@ -528,6 +595,8 @@ type Workspace interface {
 	Pull(ctx context.Context, root string) (RemoteResult, error)
 	Fetch(ctx context.Context, root string) error
 	AheadBehind(ctx context.Context, root string) (ahead, behind int, err error)
+	// PRRange describes what a PR from base to HEAD would carry (FR-12.6).
+	PRRange(ctx context.Context, root, base string) (PRRange, error)
 }
 
 // RemoteResult is what a push or a pull reports.
@@ -687,9 +756,9 @@ type Skill struct {
 	// BundleKey names the directory under the host's skills root that holds
 	// this skill's SKILL.md and assets. Empty means the content was never
 	// uploaded, which is why the platform skips it instead of mounting a stub.
-	BundleKey string    `json:"bundle_key,omitempty"`
-	SourceURL string    `json:"source_url,omitempty"`
-	Enabled   bool      `json:"enabled"`
+	BundleKey string `json:"bundle_key,omitempty"`
+	SourceURL string `json:"source_url,omitempty"`
+	Enabled   bool   `json:"enabled"`
 	// Effective is computed per caller, never stored: true when this row is the
 	// one the caller's new sessions mount under its name. A private row shadows
 	// an enabled shared row with the same name; disabling the private row makes
@@ -786,6 +855,10 @@ const (
 	ErrUpstreamOverload = "upstream_overloaded"
 	ErrConflict         = "conflict"
 	ErrInternal         = "internal"
+	// ErrForge is a failure in the push → pull-request flow whose cause is the
+	// remote or the code-hosting platform rather than the local checkout
+	// (FR-12.6). The message names the step and keeps the forge's own text.
+	ErrForge = "forge_error"
 	// ErrClientClosed means the caller disconnected before the work finished.
 	// It is never a server fault and must not be logged as one.
 	ErrClientClosed = "client_closed"

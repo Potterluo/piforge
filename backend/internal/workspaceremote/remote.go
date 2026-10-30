@@ -312,3 +312,13 @@ func (w *Workspace) AheadBehind(ctx context.Context, root string) (int, int, err
 	}
 	return g.AheadBehind(ctx, root)
 }
+
+// PRRange delegates to the container's git: the preview has to describe the
+// same checkout the push will send.
+func (w *Workspace) PRRange(ctx context.Context, root, base string) (contracts.PRRange, error) {
+	g, err := w.git()
+	if err != nil {
+		return contracts.PRRange{}, err
+	}
+	return g.PRRange(ctx, root, base)
+}

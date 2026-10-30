@@ -40,7 +40,10 @@ var statusByCode = map[string]int{
 	contracts.ErrSandboxPaused:    423,
 	contracts.ErrRateLimited:      429,
 	contracts.ErrUpstreamOverload: 503,
-	contracts.ErrInternal:         500,
+	// A forge that answered 5xx or could not be reached is a bad gateway from
+	// the product's point of view; its 4xx answers are mirrored by the handler.
+	contracts.ErrForge:    502,
+	contracts.ErrInternal: 500,
 }
 
 // statusFor returns the HTTP status for a contracts error code. Unknown codes

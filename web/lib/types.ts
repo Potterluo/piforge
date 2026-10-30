@@ -62,6 +62,21 @@ export interface Project {
   sandbox_state: SandboxState;
   session_count: number;
   last_active_at?: string | null;
+  /**
+   * Where this project opens pull requests (FR-12.6). Absent means "not
+   * configured yet"; `has_token` says whether a token is sealed at rest. The
+   * token itself is write-only and never appears in any response.
+   */
+  forge?: ForgeConfig | null;
+}
+
+/** One project's forge wiring, minus the token. */
+export interface ForgeConfig {
+  kind: "github" | "gitlab" | string;
+  api_base: string;
+  repo: string;
+  base_branch?: string;
+  has_token: boolean;
 }
 
 export interface Worktree {
@@ -313,6 +328,56 @@ export interface GitGraph {
   commits: GitCommit[];
   head: string;
   next_cursor?: string;
+}
+
+/** One pull request this session opened (FR-12.6). */
+export interface PullRequestInfo {
+  number: number;
+  url: string;
+  title: string;
+  head: string;
+  base: string;
+  /** True when the flow found an open PR instead of creating a second one. */
+  existing?: boolean;
+}
+
+/** A file a PR would change, with the line counts git measured. */
+export interface PRFile {
+  path: string;
+  status: "added" | "modified" | "deleted" | "renamed" | string;
+  additions: number;
+  deletions: number;
+}
+
+/**
+ * What the dialog shows before pushing anything: the branch, its commits, the
+ * files, and the title/body the server pre-filled from the session.
+ */
+export interface PRPreview {
+  project_id: string;
+  branch: string;
+  base_branch: string;
+  remote: boolean;
+  ahead: number;
+  behind: number;
+  commit_count: number;
+  commits: GitCommit[];
+  files: PRFile[];
+  additions: number;
+  deletions: number;
+  dirty: boolean;
+  title: string;
+  body: string;
+  forge?: ForgeConfig | null;
+  pull_request?: PullRequestInfo;
+  warnings?: string[];
+}
+
+export interface CreatePRResult {
+  pull_request: PullRequestInfo;
+  created: boolean;
+  pushed: { branch: string; commit: string; changed: boolean };
+  warnings?: string[];
 }
 
 export interface FileDiff {

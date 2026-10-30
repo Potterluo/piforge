@@ -28,6 +28,7 @@ import { toast } from "sonner";
 import type { DiffScope, FileDiff } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { ChangeList } from "@/components/workspace/git-changes";
+import { CreatePullRequest } from "@/components/workspace/create-pr";
 import { changeRows, useGitData } from "@/components/workspace/git-data";
 import { GitDiffView } from "@/components/workspace/git-diff";
 import { PanelError, PanelSkeleton } from "@/components/workspace/panel-state";
@@ -487,6 +488,10 @@ export function GitChangesPanel() {
             提交
           </Button>
           <RemoteActions />
+          {/* The last step of "change → test → share" (FR-12.6). It is always
+              visible: a branch that cannot be PR'd (same as base, no commits)
+              says why inside the dialog instead of hiding the feature. */}
+          <CreatePullRequest sessionId={git.sessionId} />
         </div>
       </header>
 

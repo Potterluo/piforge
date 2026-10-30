@@ -515,6 +515,7 @@ type fakeWorkspace struct {
 	status    *contracts.GitStatus
 	diffs     []contracts.FileDiff
 	graph     *contracts.GitGraph
+	prRange   contracts.PRRange
 	results   []contracts.SearchResult
 	err       error
 
@@ -784,6 +785,17 @@ func (f *fakeWorkspace) Fetch(context.Context, string) error { return f.remoteEr
 
 func (f *fakeWorkspace) AheadBehind(context.Context, string) (int, int, error) {
 	return f.ahead, f.behind, f.remoteErr
+}
+
+// PRRange is the canned range the PR preview reads when the fake workspace is
+// in use. Tests that need real commit content swap in the gitx-backed fsx.
+func (f *fakeWorkspace) PRRange(_ context.Context, root, base string) (contracts.PRRange, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.roots = append(f.roots, "pr-range:"+root+":"+base)
+	out := f.prRange
+	out.Base = base
+	return out, f.err
 }
 func (f *fakeWorkspace) StageHunk(_ context.Context, root, path string, index int) error {
 	f.mu.Lock()

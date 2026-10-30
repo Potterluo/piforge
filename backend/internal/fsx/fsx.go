@@ -82,6 +82,7 @@ type GitOps interface {
 	Pull(ctx context.Context, root string) (contracts.RemoteResult, error)
 	Fetch(ctx context.Context, root string) error
 	AheadBehind(ctx context.Context, root string) (ahead, behind int, err error)
+	PRRange(ctx context.Context, root, base string) (contracts.PRRange, error)
 }
 
 // Config configures a Service. The zero value is usable: defaults apply and
@@ -788,6 +789,14 @@ func (s *Service) AheadBehind(ctx context.Context, root string) (int, int, error
 		return 0, 0, ErrNoGitBackend
 	}
 	return s.cfg.Git.AheadBehind(ctx, root)
+}
+
+// PRRange describes what a pull request from base to HEAD would carry (FR-12.6).
+func (s *Service) PRRange(ctx context.Context, root, base string) (contracts.PRRange, error) {
+	if s.cfg.Git == nil {
+		return contracts.PRRange{}, ErrNoGitBackend
+	}
+	return s.cfg.Git.PRRange(ctx, root, base)
 }
 
 // Hunk-level operations delegate to the git backend (FR-12.2).

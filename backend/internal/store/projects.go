@@ -14,8 +14,11 @@ import (
 )
 
 // projectCols is the base projection: id, user_id, name, repo_url,
-// default_branch, created_at.
-const projectCols = `p.id, p.user_id, p.name, p.repo_url, p.default_branch, p.created_at`
+// default_branch, created_at, plus the non-secret forge wiring and whether a
+// token is sealed (FR-12.6). The cipher itself is never part of a projection.
+const projectCols = `p.id, p.user_id, p.name, p.repo_url, p.default_branch, p.created_at,
+	p.forge_kind, p.forge_api_base, p.forge_repo, p.forge_base_branch,
+	(p.forge_token_cipher IS NOT NULL AND length(p.forge_token_cipher) > 0)`
 
 // NewProject is the input for CreateProject.
 type NewProject struct {
@@ -258,14 +261,26 @@ func scanProject(sc interface{ Scan(dest ...any) error }) (*contracts.Project, e
 		state      string
 		created    string
 		lastActive sql.NullString
+		forgeKind  string
+		forgeAPI   string
+		forgeRepo  string
+		forgeBase  string
+		hasToken   bool
 	)
 	if err := sc.Scan(&p.ID, &p.UserID, &p.Name, &p.RepoURL, &p.DefaultBranch,
-		&created, &state, &p.SessionCount, &lastActive); err != nil {
+		&created, &forgeKind, &forgeAPI, &forgeRepo, &forgeBase, &hasToken,
+		&state, &p.SessionCount, &lastActive); err != nil {
 		return nil, err
 	}
 	p.CreatedAt = parseTime(created)
 	p.SandboxState = contracts.SandboxState(state)
 	p.LastActive = parseTimePtr(lastActive)
+	if forgeKind != "" || forgeAPI != "" || forgeRepo != "" || hasToken {
+		p.Forge = &contracts.ForgeConfig{
+			Kind: forgeKind, APIBase: forgeAPI, Repo: forgeRepo,
+			BaseBranch: forgeBase, HasToken: hasToken,
+		}
+	}
 	return &p, nil
 }
 

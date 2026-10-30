@@ -52,6 +52,15 @@ CREATE TABLE IF NOT EXISTS projects (
     name           TEXT NOT NULL,
     repo_url       TEXT NOT NULL DEFAULT '',
     default_branch TEXT NOT NULL DEFAULT 'main',
+    -- Where a pull request for this project is opened (FR-12.6). The token is
+    -- sealed by the control plane's secret box; the columns are added to old
+    -- databases by store.addColumn, because CREATE TABLE IF NOT EXISTS never
+    -- alters an existing table.
+    forge_kind        TEXT NOT NULL DEFAULT '',
+    forge_api_base    TEXT NOT NULL DEFAULT '',
+    forge_repo        TEXT NOT NULL DEFAULT '',
+    forge_base_branch TEXT NOT NULL DEFAULT '',
+    forge_token_cipher BLOB,
     created_at     TEXT NOT NULL,
     UNIQUE (user_id, name)
 );
@@ -307,6 +316,27 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 CREATE INDEX IF NOT EXISTS api_keys_user ON api_keys (user_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS api_keys_hash ON api_keys (token_hash);
+
+-- ============ pull_requests: what a session opened (PRD FR-12.6) ============
+-- The forge is the source of truth; this row is the receipt. It is what lets a
+-- reloaded session still show the link, and it is keyed by (session, branch) so
+-- opening the same branch twice reuses the row instead of growing a history.
+CREATE TABLE IF NOT EXISTS pull_requests (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    branch      TEXT NOT NULL,
+    base_branch TEXT NOT NULL DEFAULT '',
+    number      INTEGER NOT NULL DEFAULT 0,
+    url         TEXT NOT NULL DEFAULT '',
+    title       TEXT NOT NULL DEFAULT '',
+    forge_kind  TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    UNIQUE (session_id, branch)
+);
+CREATE INDEX IF NOT EXISTS pull_requests_project ON pull_requests (project_id, branch);
 
 -- ============ test_runs: the test-results panel (PRD FR-12.5) ============
 -- Derived from a session's own tool events (an agent bash call) or from a

@@ -15,6 +15,9 @@ import {
   type ForkPoint,
   type GitGraph,
   type GitStatus,
+  type ForgeConfig,
+  type PRPreview,
+  type CreatePRResult,
   type InterruptResult,
   type MCPServer,
   type Project,
@@ -151,6 +154,20 @@ export interface UpdateProjectInput {
   default_branch?: string;
 }
 
+/**
+ * Where this project opens pull requests (FR-12.6).
+ *
+ * `token` is write-only: omit it to keep the saved one (the form cannot read it
+ * back), send "" to clear it. It is never returned by any endpoint.
+ */
+export interface ForgeConfigInput {
+  kind: "github" | "gitlab";
+  api_base: string;
+  repo: string;
+  base_branch?: string;
+  token?: string;
+}
+
 export const projects = {
   list: () => request<{ projects: Project[] }>("/v1/projects"),
   get: (id: string) => request<{ project: Project }>(`/v1/projects/${id}`),
@@ -159,6 +176,8 @@ export const projects = {
   update: (id: string, input: UpdateProjectInput) =>
     request<{ project: Project }>(`/v1/projects/${id}`, { method: "PATCH", body: input }),
   remove: (id: string) => request<{ ok: boolean }>(`/v1/projects/${id}`, { method: "DELETE" }),
+  setForge: (id: string, input: ForgeConfigInput) =>
+    request<{ project: Project }>(`/v1/projects/${id}/forge`, { method: "PUT", body: input }),
 };
 
 // ---------------------------------------------------------------------------
@@ -433,6 +452,19 @@ export const git = {
       `/v1/sessions/${sessionId}/git/pull`,
       { method: "POST" },
     ),
+  /**
+   * What a pull request would contain (FR-12.6). Read-only: nothing is pushed
+   * and no PR is opened. The response also says whether the forge already has
+   * one for this branch.
+   */
+  prPreview: (sessionId: string) =>
+    request<PRPreview>(`/v1/sessions/${sessionId}/git/pr`),
+  /** Push the branch, then open (or find) the pull request. */
+  createPR: (sessionId: string, input: { title: string; body: string; base_branch?: string }) =>
+    request<CreatePRResult>(`/v1/sessions/${sessionId}/git/pr`, {
+      method: "POST",
+      body: input,
+    }),
   stage: (sessionId: string, paths: string[]) =>
     request<{ ok: boolean }>(`/v1/sessions/${sessionId}/git/stage`, {
       method: "POST",

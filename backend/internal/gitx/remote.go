@@ -25,6 +25,72 @@ var ErrNoRemote = errors.New("gitx: the checkout has no remote")
 // ErrDiverged means a pull would need a merge or rebase this UI cannot do.
 var ErrDiverged = errors.New("gitx: the branch has diverged from its remote")
 
+// ErrPushRejected means the remote refused the push because it is not a
+// fast-forward (the remote has commits this branch does not).
+var ErrPushRejected = errors.New("gitx: the remote rejected the push (non-fast-forward)")
+
+// ErrNoCredentials means the remote answered but refused the identity: missing
+// SSH key, expired token, a private repository the caller cannot see.
+var ErrNoCredentials = errors.New("gitx: the remote refused the credentials")
+
+// PushError carries the git stderr that made a push fail, so the caller can say
+// what happened instead of "push failed". Unwrap reports the typed kind, which
+// is what the HTTP layer switches on.
+type PushError struct {
+	Kind   error
+	Stderr string
+}
+
+func (e *PushError) Error() string {
+	detail := lastLine(e.Stderr)
+	if detail == "" {
+		return e.Kind.Error()
+	}
+	return e.Kind.Error() + ": " + detail
+}
+
+func (e *PushError) Unwrap() error { return e.Kind }
+
+// lastLine keeps the actionable half of git's multi-line refusal: the first
+// lines usually explain, the last one names the cause ("fetch first", "terminal
+// prompts disabled").
+func lastLine(stderr string) string {
+	lines := strings.Split(strings.TrimSpace(stderr), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			return line
+		}
+	}
+	return ""
+}
+
+// classifyPushFailure maps git's wording onto the two refusals a person can act
+// on. Everything else stays a plain failure, because inventing a cause is worse
+// than saying "it failed" with git's own text.
+func classifyPushFailure(stderr string) error {
+	lower := strings.ToLower(stderr)
+	switch {
+	case strings.Contains(lower, "non-fast-forward"),
+		strings.Contains(lower, "fetch first"),
+		strings.Contains(lower, "rejected"),
+		strings.Contains(lower, "remote has commits"):
+		return ErrPushRejected
+	case strings.Contains(lower, "authentication failed"),
+		strings.Contains(lower, "could not read username"),
+		strings.Contains(lower, "could not read password"),
+		strings.Contains(lower, "terminal prompts disabled"),
+		strings.Contains(lower, "permission denied"),
+		strings.Contains(lower, "invalid username or password"),
+		strings.Contains(lower, "access denied"),
+		// GitHub answers a private repository without credentials this way:
+		// "fatal: repository 'https://…' not found". It is an identity problem
+		// disguised as a missing repo.
+		(strings.Contains(lower, "repository") && strings.Contains(lower, "not found")):
+		return ErrNoCredentials
+	}
+	return nil
+}
+
 // Push sends the current branch to its remote.
 //
 // `-u` is set on the first push so later ones need no arguments, and the branch name is
@@ -42,8 +108,9 @@ func (r *Runner) Push(ctx context.Context, root string) (contracts.RemoteResult,
 		return contracts.RemoteResult{}, fmt.Errorf("gitx: push: the checkout is not on a branch")
 	}
 	if _, err := r.Run(ctx, root, "push", "-u", "origin", branch); err != nil {
-		if stderr := StderrOf(err); strings.Contains(stderr, "rejected") {
-			return contracts.RemoteResult{}, fmt.Errorf("gitx: push: the remote has commits this branch does not; pull first: %w", err)
+		stderr := StderrOf(err)
+		if kind := classifyPushFailure(stderr); kind != nil {
+			return contracts.RemoteResult{}, &PushError{Kind: kind, Stderr: stderr}
 		}
 		return contracts.RemoteResult{}, fmt.Errorf("gitx: push: %w", err)
 	}

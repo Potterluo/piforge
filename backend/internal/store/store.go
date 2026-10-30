@@ -217,6 +217,20 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if err := addColumn(ctx, db, "sandboxes", "api_key_cipher", "BLOB"); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
+	// Where this project opens pull requests, and the sealed token for it
+	// (FR-12.6). Old projects read back empty, which the UI describes as "not
+	// configured yet" instead of guessing a forge from the repository URL.
+	for _, column := range []struct{ name, ddl string }{
+		{"forge_kind", "TEXT NOT NULL DEFAULT ''"},
+		{"forge_api_base", "TEXT NOT NULL DEFAULT ''"},
+		{"forge_repo", "TEXT NOT NULL DEFAULT ''"},
+		{"forge_base_branch", "TEXT NOT NULL DEFAULT ''"},
+		{"forge_token_cipher", "BLOB"},
+	} {
+		if err := addColumn(ctx, db, "projects", column.name, column.ddl); err != nil {
+			return fmt.Errorf("store: migrate: %w", err)
+		}
+	}
 	return nil
 }
 
