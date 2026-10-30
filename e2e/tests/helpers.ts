@@ -10,12 +10,35 @@ export const USER = {
   password: process.env.PIFORGE_E2E_USER_PASSWORD ?? "piforge-dev-123",
 };
 
-/** Signs in through the real form and waits for the shell to render. */
+/**
+ * Signs in through the real form and waits for the shell to render.
+ *
+ * The submit button is disabled until the page has hydrated (`mounted`), so that
+ * is what this waits for *before* typing: filling a field React has not taken
+ * over yet lets the hydration re-render wipe the value, which reads as "wrong
+ * password". Waiting also turns a page that never hydrated into a fast, clear
+ * failure instead of a click that sits there until the test timeout.
+ *
+ * A production Next build hydrates immediately. Under a full-suite load Chrome
+ * can still drop one chunk with `net::ERR_NO_BUFFER_SPACE` (observed once in a
+ * 157-test run; the button stayed disabled and the click waited out 60s). One
+ * reload recovers that, and a genuine hydration bug still fails on the reload.
+ */
 export async function login(page: Page, who = USER): Promise<void> {
+  const submit = page.getByTestId("login-submit");
   await page.goto("/login");
+
+  try {
+    await expect(submit).toBeEnabled({ timeout: 20_000 });
+  } catch {
+    console.log("[e2e] the login page did not become interactive; reloading once");
+    await page.reload();
+    await expect(submit).toBeEnabled({ timeout: 20_000 });
+  }
+
   await page.getByTestId("login-email").fill(who.email);
   await page.getByTestId("login-password").fill(who.password);
-  await page.getByTestId("login-submit").click();
+  await submit.click();
   await expect(page.getByTestId("app-sidebar")).toBeVisible({ timeout: 20_000 });
 }
 

@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
-import { USER, apiWrite, login, openNewSession } from "./helpers";
+import { USER, apiWrite, openNewSession } from "./helpers";
+import { freshAccount } from "./isolation";
 
 /**
  * QA-13 finding B: English errors in a Chinese UI.
@@ -24,7 +25,7 @@ test("a wrong password is reported in Chinese", async ({ page }) => {
 test("a send with no usable provider names the real settings page, in Chinese", async ({
   page,
 }) => {
-  await login(page, USER);
+  await freshAccount(page, "error-localization");
   await openNewSession(page);
 
   // The e2e deployment's fake agent does not call the model gateway, so it
@@ -57,7 +58,7 @@ test("a send with no usable provider names the real settings page, in Chinese", 
 });
 
 test("a provider without a key reports that in Chinese", async ({ page }) => {
-  await login(page, USER);
+  await freshAccount(page, "error-localization");
   const name = `loc-nokey-${Date.now()}`;
   const created = await apiWrite(page, "POST", "/v1/providers", {
     name,

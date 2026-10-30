@@ -5,7 +5,8 @@ import path from "node:path";
 
 import { expect, test } from "@playwright/test";
 
-import { USER, apiWrite, login, openNewSession, sendPrompt } from "./helpers";
+import { apiWrite, openNewSession, sendPrompt } from "./helpers";
+import { freshAccount } from "./isolation";
 
 /**
  * FR-14.x: a skill collection arrives from a repository, not from retyping SKILL.md.
@@ -30,7 +31,10 @@ test("skills can be imported from a repository", async ({ page }) => {
   git("add", "-A");
   git("-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-m", "skills");
 
-  await login(page, USER);
+  // Its own account: 69-skill-zip imports the same two names and disables one,
+  // and an import replaces content without re-enabling. Sharing an account
+  // between the two specs is what made 38 fail on the second run of a data dir.
+  await freshAccount(page, "skill-import");
   const imported = await apiWrite(page, "POST", "/v1/skills/import", {
     url: `file://${repo.replace(/\\/g, "/")}`,
   });

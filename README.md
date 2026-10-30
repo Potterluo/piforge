@@ -209,7 +209,11 @@ cd backend && go test ./... -race
 cd web && pnpm test
 
 # end-to-end (starts the backend with the fake peer, drives a real browser)
+# It reuses e2e/.data on purpose: a pass must not depend on a fresh volume, and
+# a reused one is what catches state leaking from one spec to the next.
 cd e2e && pnpm install && pnpm test
+# rebuild e2e/.data from empty when that is what you want
+cd e2e && pnpm test:fresh
 ```
 
 ## Security model in one paragraph

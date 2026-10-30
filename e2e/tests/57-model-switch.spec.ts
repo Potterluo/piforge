@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
-import { USER, apiWrite, login, openNewSession, sendPrompt } from "./helpers";
+import { apiWrite, openNewSession, sendPrompt } from "./helpers";
+import { freshAccount } from "./isolation";
 
 /**
  * The model picker has to change the model (QA-14, MAJOR).
@@ -12,7 +13,7 @@ import { USER, apiWrite, login, openNewSession, sendPrompt } from "./helpers";
  */
 test.describe("the composer model picker", () => {
   test("picking a provider with no key fails clearly instead of answering", async ({ page }) => {
-    await login(page, USER);
+    await freshAccount(page, "model-switch");
     await openNewSession(page);
     await sendPrompt(page, "hello there");
     const answeredBefore = await page.getByTestId("turn-assistant").count();
@@ -58,7 +59,7 @@ test.describe("the composer model picker", () => {
   });
 
   test("switching back to the default model works again", async ({ page }) => {
-    await login(page, USER);
+    await freshAccount(page, "model-switch");
     const sessionId = await openNewSession(page);
     await sendPrompt(page, "hello there");
 

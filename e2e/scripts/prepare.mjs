@@ -1,7 +1,15 @@
-// Prepares a clean, deterministic environment for an e2e run:
-//   1. wipe the previous data directory (sandboxes + SQLite + session files)
+// Prepares the environment for an e2e run:
+//   1. (only with --fresh) wipe the previous data directory
 //   2. build the backend binary
 //   3. build the fake Pi peer next to it (piforged prefers a sibling binary)
+//   4. build the web app the suite drives
+//
+// The data directory is KEPT by default. The suite has to be runnable twice in a
+// row on the same `.data` — that is how state leaks between specs show up before
+// a developer does. Wiping on every `pnpm test` hid exactly that, so a run that
+// only passes on an empty volume looked green. Pass `--fresh` (or set
+// PIFORGE_E2E_RESET=1) when a clean baseline is what you want; `pnpm test:fresh`
+// does that in one command.
 //
 // Building instead of `go run` matters on Windows: `go run` leaves the child
 // alive when the parent is killed, so the port stays bound and the next run
@@ -18,9 +26,17 @@ const outDir = path.resolve(here, "../.bin");
 const dataDir = path.resolve(here, "../.data");
 
 const exe = (name) => (process.platform === "win32" ? `${name}.exe` : name);
+const fresh = process.argv.includes("--fresh") || process.env.PIFORGE_E2E_RESET === "1";
 
-console.log("[e2e] cleaning runtime data");
-rmSync(dataDir, { recursive: true, force: true });
+if (fresh) {
+  console.log("[e2e] --fresh: removing the runtime data (sandboxes, SQLite, skills)");
+  rmSync(dataDir, { recursive: true, force: true });
+} else {
+  console.log(
+    `[e2e] keeping the runtime data at ${dataDir} ` +
+      "(the suite must pass on a reused directory; --fresh starts from empty)",
+  );
+}
 mkdirSync(outDir, { recursive: true });
 
 const build = (pkg, out) => {

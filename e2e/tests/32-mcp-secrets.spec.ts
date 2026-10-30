@@ -1,13 +1,14 @@
 import { expect, test } from "@playwright/test";
 
-import { USER, apiWrite, login } from "./helpers";
+import { apiWrite } from "./helpers";
+import { freshAccount } from "./isolation";
 
 /**
  * FR-15.2: a credential can be stored, is never readable back, and the UI stops
  * claiming it cannot be stored.
  */
 test("an MCP credential is stored but never returned", async ({ page }) => {
-  await login(page, USER);
+  await freshAccount(page, "mcp-secrets");
 
   const created = await apiWrite(page, "POST", "/v1/mcp/servers", {
     name: `e2e-mcp-${Date.now()}`,

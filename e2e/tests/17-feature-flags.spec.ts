@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { ADMIN, USER, login, openNewSession } from "./helpers";
+import { adminSession, findUser, withFeatureRestore } from "./isolation";
 
 /**
  * Per-user feature flags (PRD FR-16.7) are only worth having if the server
@@ -15,57 +16,70 @@ test.setTimeout(120_000);
 
 test.describe("feature flags", () => {
   test("an admin turns export off and the server refuses it", async ({ page }) => {
-    const csrf = async () =>
-      (await page.context().cookies()).find((cookie) => cookie.name === "pf_csrf")?.value ?? "";
+    // Export is a per-account switch whose default is ON. The demo account is
+    // shared by the read-only specs, so this test restores the default in a
+    // finally (and refuses to start from a leaked OFF, which is what a previous
+    // half-finished run used to leave behind).
+    const probe = await adminSession();
+    let target: string;
+    try {
+      target = (await findUser(probe, USER.email)).id;
+    } finally {
+      await probe.dispose();
+    }
 
-    await login(page, USER);
-    const sessionId = await openNewSession(page);
-    const projectId = /\/p\/([^/]+)\//.exec(page.url())?.[1] ?? "";
+    await withFeatureRestore(target, "export", true, async () => {
+      const csrf = async () =>
+        (await page.context().cookies()).find((cookie) => cookie.name === "pf_csrf")?.value ?? "";
 
-    expect((await page.request.get(`/v1/sessions/${sessionId}/export?format=md`)).status()).toBe(200);
-    const me = (await (await page.request.get("/v1/auth/me")).json()) as { user: { id: string } };
+      await login(page, USER);
+      const sessionId = await openNewSession(page);
+      const projectId = /\/p\/([^/]+)\//.exec(page.url())?.[1] ?? "";
 
-    await page.request.post("/v1/auth/logout", { headers: { "X-PF-CSRF": await csrf() } });
-    await login(page, ADMIN);
+      expect((await page.request.get(`/v1/sessions/${sessionId}/export?format=md`)).status()).toBe(200);
+      const me = (await (await page.request.get("/v1/auth/me")).json()) as { user: { id: string } };
 
-    await page.goto("/admin/users");
-    const row = page.locator("tr").filter({ hasText: USER.email });
-    await row.getByTestId("user-features").click();
+      await page.request.post("/v1/auth/logout", { headers: { "X-PF-CSRF": await csrf() } });
+      await login(page, ADMIN);
 
-    const toggle = page.getByTestId("feature-export");
-    await expect(toggle).toBeVisible({ timeout: 20_000 });
-    await toggle.click();
-    await expect(toggle).toHaveAttribute("aria-checked", "false", { timeout: 20_000 });
+      await page.goto("/admin/users");
+      const row = page.locator("tr").filter({ hasText: USER.email });
+      await row.getByTestId("user-features").click();
 
-    // The API refuses now, and names the switch — checked as the owner, because
-    // the admin still cannot reach that session at all (which is the point).
-    await page.request.post("/v1/auth/logout", { headers: { "X-PF-CSRF": await csrf() } });
-    await login(page, USER);
-    const denied = await page.request.get(`/v1/sessions/${sessionId}/export?format=md`);
-    expect(denied.status()).toBe(403);
-    expect(await denied.text()).toContain("export");
+      const toggle = page.getByTestId("feature-export");
+      await expect(toggle).toBeVisible({ timeout: 20_000 });
+      await toggle.click();
+      await expect(toggle).toHaveAttribute("aria-checked", "false", { timeout: 20_000 });
 
-    // For the user the menu item is absent rather than failing on click.
-    await page.goto(`/p/${projectId}/s/${sessionId}`);
-    await page.getByTestId("composer-input").waitFor({ timeout: 40_000 });
-    await page.getByTestId("session-link").first().hover();
-    await page.getByTestId("session-actions").first().click();
-    await expect(page.getByTestId("session-export")).toHaveCount(0);
+      // The API refuses now, and names the switch — checked as the owner, because
+      // the admin still cannot reach that session at all (which is the point).
+      await page.request.post("/v1/auth/logout", { headers: { "X-PF-CSRF": await csrf() } });
+      await login(page, USER);
+      const denied = await page.request.get(`/v1/sessions/${sessionId}/export?format=md`);
+      expect(denied.status()).toBe(403);
+      expect(await denied.text()).toContain("export");
 
-    // A user cannot flip their own switch, and the flag goes back on for the
-    // specs that follow (they assume the documented default).
-    const refused = await page.request.post(`/v1/admin/users/${me.user.id}/features`, {
-      data: { flag: "export", enabled: true },
-      headers: { "X-PF-CSRF": await csrf() },
+      // For the user the menu item is absent rather than failing on click.
+      await page.goto(`/p/${projectId}/s/${sessionId}`);
+      await page.getByTestId("composer-input").waitFor({ timeout: 40_000 });
+      await page.getByTestId("session-link").first().hover();
+      await page.getByTestId("session-actions").first().click();
+      await expect(page.getByTestId("session-export")).toHaveCount(0);
+
+      // A user cannot flip their own switch, and the admin can put it back on.
+      const refused = await page.request.post(`/v1/admin/users/${me.user.id}/features`, {
+        data: { flag: "export", enabled: true },
+        headers: { "X-PF-CSRF": await csrf() },
+      });
+      expect(refused.status()).toBe(403);
+
+      await page.request.post("/v1/auth/logout", { headers: { "X-PF-CSRF": await csrf() } });
+      await login(page, ADMIN);
+      const restored = await page.request.post(`/v1/admin/users/${me.user.id}/features`, {
+        data: { flag: "export", enabled: true },
+        headers: { "X-PF-CSRF": await csrf() },
+      });
+      expect(restored.status()).toBe(200);
     });
-    expect(refused.status()).toBe(403);
-
-    await page.request.post("/v1/auth/logout", { headers: { "X-PF-CSRF": await csrf() } });
-    await login(page, ADMIN);
-    const restored = await page.request.post(`/v1/admin/users/${me.user.id}/features`, {
-      data: { flag: "export", enabled: true },
-      headers: { "X-PF-CSRF": await csrf() },
-    });
-    expect(restored.status()).toBe(200);
   });
 });

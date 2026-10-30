@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
-import { ADMIN, USER, apiWrite, login, openNewSession, sendPrompt } from "./helpers";
+import { ADMIN, apiWrite, login, openNewSession, sendPrompt } from "./helpers";
+import { freshAccount } from "./isolation";
 
 /**
  * Support mode (PRD FR-16.8) is the one way an admin can read somebody else's
@@ -14,8 +15,9 @@ test.setTimeout(120_000);
 
 test.describe("support mode", () => {
   test("an admin reads on the record and the owner is told", async ({ page }) => {
-    // The owner has a conversation worth reading.
-    await login(page, USER);
+    // The owner has a conversation worth reading. Its own account, so the
+    // receipt this test creates cannot be counted by anything else.
+    const owner = await freshAccount(page, "support");
     const sessionId = await openNewSession(page);
     await sendPrompt(page, "the run is stuck at 99%");
 
@@ -44,7 +46,7 @@ test.describe("support mode", () => {
     await page.request.post("/v1/auth/logout", {
       headers: { "X-PF-CSRF": (await page.context().cookies()).find((c) => c.name === "pf_csrf")?.value ?? "" },
     });
-    await login(page, USER);
+    await login(page, owner);
     const notices = page.getByTestId("support-notices");
     await expect(notices).toContainText("1", { timeout: 20_000 });
     await notices.click();
@@ -55,7 +57,7 @@ test.describe("support mode", () => {
   });
 
   test("a normal user cannot open support access", async ({ page }) => {
-    await login(page, USER);
+    await freshAccount(page, "support");
     const res = await page.request.post("/v1/admin/support-access", {
       data: { session_id: "ses_whatever", reason: "because" },
       headers: {

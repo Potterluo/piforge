@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { USER, apiWrite, login, openNewSession } from "./helpers";
+import { apiWrite, openNewSession } from "./helpers";
+import { freshAccount } from "./isolation";
 
 /**
  * FR-14.5: a session records the skill version it was materialised with, and
@@ -52,7 +53,7 @@ async function mountedBody(page: Page, sessionId: string, path: string): Promise
 test("a session keeps the skill version it mounted, while a new session picks up the edit", async ({
   page,
 }) => {
-  await login(page, USER);
+  await freshAccount(page, "skill-version");
 
   const name = `e2e-skill-version-${Date.now()}`;
   const v1 = `---\nname: ${name}\ndescription: version one\n---\n\n# Version one\nAnswer with VERSION-ONE.\n`;

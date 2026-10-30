@@ -1,13 +1,17 @@
 import { expect, test } from "@playwright/test";
 
-import { USER, login, openNewSession } from "./helpers";
+import { openNewSession } from "./helpers";
+import { freshAccount } from "./isolation";
 
 /**
  * FR-13.9: a token for scripts. The token is shown once, works as a bearer
  * credential (no cookie, no CSRF header), and stops working when revoked.
  */
 test("an API key drives the API like a signed-in browser", async ({ page }) => {
-  await login(page, USER);
+  // Its own account: a run's tokens are audit rows that stay in the data dir,
+  // and a second run must not find two rows named "e2e-script" and revoke the
+  // wrong one.
+  await freshAccount(page, "api-keys");
   await openNewSession(page);
   const projectId = /\/p\/([^/]+)\//.exec(page.url())?.[1] ?? "";
 

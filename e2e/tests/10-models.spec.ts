@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
-import { USER, apiWrite, clickWhenSettled, login, openNewSession } from "./helpers";
+import { apiWrite, clickWhenSettled, openNewSession } from "./helpers";
+import { freshAccount } from "./isolation";
 
 /**
  * The product's promise is "bring any OpenAI- or Anthropic-shaped endpoint", so
@@ -10,7 +11,7 @@ import { USER, apiWrite, clickWhenSettled, login, openNewSession } from "./helpe
  */
 test.describe("model management", () => {
   test("a provider's model list can be edited after creation", async ({ page }) => {
-    await login(page, USER);
+    await freshAccount(page, "models");
     const name = `edit-${Date.now()}`;
 
     const created = await apiWrite(page, "POST", "/v1/providers", {
@@ -39,7 +40,7 @@ test.describe("model management", () => {
   });
 
   test("a custom model id typed in the composer is what the session uses", async ({ page }) => {
-    await login(page, USER);
+    await freshAccount(page, "models");
     const provider = `custom-${Date.now()}`;
     const modelId = `${provider}/whatever-the-endpoint-calls-it`;
 

@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
-import { ADMIN, USER, apiWrite, login } from "./helpers";
+import { ADMIN, apiWrite, login } from "./helpers";
+import { freshAccount } from "./isolation";
 
 /**
  * A shared skill belongs to the deployment. QA found the UI saying 共享 Skill 由管理员维护
@@ -8,7 +9,9 @@ import { ADMIN, USER, apiWrite, login } from "./helpers";
  * than a plain "no".
  */
 test("only an admin can delete a shared skill", async ({ page }) => {
-  await login(page, USER);
+  // A throwaway normal account: the point is the refusal, not this account's
+  // skill list, so it must not be able to see skills another spec created.
+  await freshAccount(page, "shared-skill");
   const skills = (await (await page.request.get("/v1/skills")).json()) as {
     skills: { id: string; name: string; scope: string }[];
   };

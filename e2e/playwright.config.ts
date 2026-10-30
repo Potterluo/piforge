@@ -76,8 +76,21 @@ export default defineConfig({
   // downloadable browser can switch this to the bundled `chromium` project.
   projects: [
     {
+      // Runs before every spec and asserts the shared state is at its defaults
+      // (`tests/preflight.setup.ts`). It depends on nothing but the API, and it
+      // must not retry: a leaked setting fails the same way twice, and a retry
+      // would only delay the message that says which spec left it.
+      name: "preflight",
+      testMatch: /preflight\.setup\.ts/,
+      retries: 0,
+      use: { baseURL: "http://127.0.0.1:8080" },
+    },
+    {
       name: "chrome",
       use: { ...devices["Desktop Chrome"], channel: "chrome" },
+      // A dependency project runs first and its failure blocks this one, so a
+      // leaked setting is the run's first failure instead of a random later red.
+      dependencies: ["preflight"],
     },
   ],
 

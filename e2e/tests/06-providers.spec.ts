@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
-import { apiWrite, apiHeaders, clickWhenSettled, login, USER } from "./helpers";
+import { apiWrite, apiHeaders, clickWhenSettled } from "./helpers";
+import { freshAccount } from "./isolation";
 
 /**
  * Bring-your-own-model is the product's core promise (PRD §5.7), and the one
@@ -8,7 +9,7 @@ import { apiWrite, apiHeaders, clickWhenSettled, login, USER } from "./helpers";
  */
 test.describe("providers", () => {
   test("a key is stored sealed and never returned", async ({ page }) => {
-    await login(page, USER);
+    await freshAccount(page, "providers");
     const name = `prov-${Date.now()}`;
     const secret = "sk-ant-api03-e2e-secret-value-123";
 
@@ -28,7 +29,7 @@ test.describe("providers", () => {
   });
 
   test("the settings page creates a provider through the form", async ({ page }) => {
-    await login(page, USER);
+    await freshAccount(page, "providers");
     const name = `ui-prov-${Date.now()}`;
 
     await page.goto("/settings/providers");
@@ -49,7 +50,7 @@ test.describe("providers", () => {
   });
 
   test("a provider without a key is flagged as missing one", async ({ page }) => {
-    await login(page, USER);
+    await freshAccount(page, "providers");
     const name = `nokey-${Date.now()}`;
 
     const created = await apiWrite(page, "POST", "/v1/providers", {
@@ -66,7 +67,7 @@ test.describe("providers", () => {
   });
 
   test("a cross-site provider write is refused without the CSRF token", async ({ page }) => {
-    await login(page, USER);
+    await freshAccount(page, "providers");
     const headers = await apiHeaders(page);
     // Same request, minus the double-submit token: this is what a cross-site
     // form post looks like, and it must not create anything.
@@ -86,7 +87,7 @@ test.describe("providers", () => {
  * pretend success when there is nothing to test.
  */
 test("testing a provider without a key says so", async ({ page }) => {
-  await login(page, USER);
+  await freshAccount(page, "providers");
   const name = `probe-${Date.now()}`;
 
   const created = await apiWrite(page, "POST", "/v1/providers", {

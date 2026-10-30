@@ -5,7 +5,8 @@ import { crc32 } from "node:zlib";
 
 import { expect, test, type Page } from "@playwright/test";
 
-import { USER, apiHeaders, apiWrite, login, openNewSession, sendPrompt } from "./helpers";
+import { apiHeaders, openNewSession, sendPrompt } from "./helpers";
+import { freshAccount } from "./isolation";
 
 /**
  * FR-14.4: installing a skill is "one click" from a git URL *or a zip*.
@@ -116,7 +117,7 @@ test("a zip of skills imports through the settings page, and a disabled skill st
   const directory = mkdtempSync(path.join(tmpdir(), "pf-skills-zip-"));
   const file = skillZip(directory);
 
-  await login(page, USER);
+  await freshAccount(page, "skill-zip");
   await page.goto("/settings/skills");
 
   await page.getByTestId("skill-import").click();
@@ -157,6 +158,10 @@ test("a zip of skills imports through the settings page, and a disabled skill st
 
   // Back to the list: creating the session navigated away from settings.
   // Disable one from the list (the second half of "一键安装 + 可禁用").
+  // It is disabled on this spec's own account and never re-enabled: a leftover
+  // here used to break 38-skill-import on the next run, because both import a
+  // skill called pdf-tools and an import replaces content without re-enabling.
+  // Per-account isolation means there is nothing to restore.
   await page.goto("/settings/skills");
   await expect(pdf).toBeVisible();
   const toggle = pdf.getByRole("switch", { name: "启用 pdf-tools" });
@@ -188,7 +193,7 @@ test("a zip that tries to escape its directory is refused", async ({ page }) => 
     ]),
   );
 
-  await login(page, USER);
+  await freshAccount(page, "skill-zip");
   const result = await uploadZip(page, file);
   expect(result.status).toBe(400);
   expect(result.text).toContain("not allowed");
@@ -206,7 +211,7 @@ test("the zip import refuses an archive with no SKILL.md", async ({ page }) => {
   const file = path.join(directory, "empty.zip");
   writeFileSync(file, zip([{ path: "docs/README.md", body: "nothing here\n" }]));
 
-  await login(page, USER);
+  await freshAccount(page, "skill-zip");
   const result = await uploadZip(page, file);
   expect(result.status).toBe(404);
   expect(result.text).toContain("SKILL.md");

@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
-import { apiWrite, login, openNewSession, sendPrompt, USER } from "./helpers";
+import { apiWrite, openNewSession, sendPrompt } from "./helpers";
+import { freshAccount } from "./isolation";
 
 /**
  * Skills and MCP are filesystem facts for the agent, so "configured" is not the
@@ -8,7 +9,7 @@ import { apiWrite, login, openNewSession, sendPrompt, USER } from "./helpers";
  */
 test.describe("tooling", () => {
   test("an MCP server is materialised into the session checkout", async ({ page }) => {
-    await login(page, USER);
+    await freshAccount(page, "tooling");
 
     const name = `mcp-${Date.now()}`;
     const created = await apiWrite(page, "POST", "/v1/mcp/servers", {
@@ -41,7 +42,7 @@ test.describe("tooling", () => {
   });
 
   test("removing a server clears it from the next session", async ({ page }) => {
-    await login(page, USER);
+    await freshAccount(page, "tooling");
     const name = `tmp-${Date.now()}`;
 
     const created = await apiWrite(page, "POST", "/v1/mcp/servers", {
@@ -70,7 +71,7 @@ test.describe("tooling", () => {
   });
 
   test("a skill with no content is reported as configured but not mounted", async ({ page }) => {
-    await login(page, USER);
+    await freshAccount(page, "tooling");
     const name = `ghost-${Date.now()}`;
 
     const created = await apiWrite(page, "POST", "/v1/skills", {
@@ -101,7 +102,7 @@ test.describe("tooling", () => {
  * until this round.
  */
 test("a skill written in the UI reaches the next session's checkout", async ({ page }) => {
-  await login(page, USER);
+  await freshAccount(page, "tooling");
   const name = `ui-skill-${Date.now()}`;
 
   await page.goto("/settings/skills");
@@ -134,7 +135,7 @@ test("a skill written in the UI reaches the next session's checkout", async ({ p
  * SKILL.md are what make one useful, so the upload has to carry them.
  */
 test("assets picked alongside SKILL.md land in the bundle", async ({ page }) => {
-  await login(page, USER);
+  await freshAccount(page, "tooling");
   const name = `asset-skill-${Date.now()}`;
 
   await page.goto("/settings/skills");

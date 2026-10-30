@@ -30,13 +30,6 @@ test("a new account sees the missing model before and after sending", async ({ p
 
   const context = await browser.newContext();
   const fresh = await context.newPage();
-  // Shared providers are deployment-wide, so a later spec may inherit one into
-  // every account. This test is about the state where there is nothing to
-  // inherit; pin the provider list to that shape instead of depending on which
-  // specs ran before it.
-  await fresh.route("**/v1/providers", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: '{"providers":[]}' }),
-  );
   try {
     await login(fresh, { email, password });
 
