@@ -30,10 +30,42 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { api, type SkillFile } from "@/lib/api/client";
+import { api, type SkillFile, type SkillImportResult } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
 import { formatRelative } from "@/lib/session/format";
 import { qk, useCurrentUser } from "@/lib/session/queries";
+
+/**
+ * What an import actually did, as one toast.
+ *
+ * The old toast said "导入了 N 个 Skill" whenever the bundle had been replaced,
+ * even when the row stayed disabled — so the skill never reached the agent while
+ * the UI claimed success. The server now re-enables a replaced skill and reports
+ * that in `reenabled`; this function is where the promise is kept in words.
+ */
+function importToast(result: SkillImportResult, fallbackReason: string) {
+  const imported = result.skills.filter((skill) => !skill.skipped);
+  const names = imported.map((skill) => skill.name);
+  const reenabled = imported.filter((skill) => skill.reenabled).map((skill) => skill.name);
+  const skipped = result.skills.filter((skill) => skill.skipped);
+
+  if (names.length === 0) {
+    toast.error("没有导入任何 Skill", {
+      description: skipped[0]?.reason ?? fallbackReason,
+    });
+    return;
+  }
+  const description =
+    reenabled.length > 0
+      ? `${names.join("、")}（${reenabled.join("、")} 之前是停用状态，已重新启用）`
+      : names.join("、");
+  toast.success(`导入了 ${names.length} 个 Skill`, { description });
+  if (skipped.length > 0) {
+    toast.warning(`${skipped.length} 个 Skill 没有导入`, {
+      description: skipped.map((skill) => `${skill.name}：${skill.reason ?? "被跳过"}`).join("；"),
+    });
+  }
+}
 
 export default function SkillsPage() {
   const queryClient = useQueryClient();
@@ -47,15 +79,13 @@ export default function SkillsPage() {
   const importMutation = useMutation({
     mutationFn: (input: { url: string; ref: string }) => api.skills.import(input.url, input.ref),
     onSuccess: (result) => {
-      const names = result.skills.filter((skill) => !skill.skipped).map((skill) => skill.name);
-      if (names.length === 0) {
-        toast.error("没有导入任何 Skill", { description: "仓库里没有可用的 SKILL.md" });
-      } else {
-        toast.success(`导入了 ${names.length} 个 Skill`, { description: names.join("、") });
+      const imported = result.skills.some((skill) => !skill.skipped);
+      importToast(result, "仓库里没有可用的 SKILL.md");
+      if (imported) {
         setImportOpen(false);
         setImportUrl("");
         setImportRef("");
-        void queryClient.invalidateQueries({ queryKey: ["skills"] });
+        void queryClient.invalidateQueries({ queryKey: qk.skills });
       }
     },
     onError: (error: Error) => toast.error("导入失败", { description: humanizeError(error) }),
@@ -69,11 +99,9 @@ export default function SkillsPage() {
   const zipMutation = useMutation({
     mutationFn: (file: File) => api.skills.importZip(file),
     onSuccess: (result) => {
-      const names = result.skills.filter((skill) => !skill.skipped).map((skill) => skill.name);
-      if (names.length === 0) {
-        toast.error("没有导入任何 Skill", { description: "zip 里没有可用的 SKILL.md" });
-      } else {
-        toast.success(`导入了 ${names.length} 个 Skill`, { description: names.join("、") });
+      const imported = result.skills.some((skill) => !skill.skipped);
+      importToast(result, "zip 里没有可用的 SKILL.md");
+      if (imported) {
         setImportOpen(false);
         setImportZip(null);
         void queryClient.invalidateQueries({ queryKey: qk.skills });
@@ -100,6 +128,10 @@ export default function SkillsPage() {
   const [description, setDescription] = useState("");
   const [body, setBody] = useState("");
   const [assets, setAssets] = useState<SkillFile[]>([]);
+  // Only an admin sees the switch. Creating a shared skill is the missing half
+  // of "共享 Skill 由管理员维护": before this, an admin could delete a shared
+  // skill but had no way to create one (FR-14.1 / FR-16.3).
+  const [shared, setShared] = useState(false);
 
   const create = useMutation({
     // Two steps on purpose: the row is created first (its id names the bundle
@@ -111,6 +143,7 @@ export default function SkillsPage() {
         name: name.trim(),
         description: description.trim(),
         body: body.trim() || undefined,
+        scope: shared && isAdmin ? "admin" : undefined,
       });
       if (assets.length > 0) {
         // The bundle is replaced wholesale, so SKILL.md from the textarea has to
@@ -131,6 +164,7 @@ export default function SkillsPage() {
       setDescription("");
       setBody("");
       setAssets([]);
+      setShared(false);
       toast.success("Skill 已创建");
     },
     onError: (error) => {
@@ -318,6 +352,22 @@ export default function SkillsPage() {
                   required
                 />
               </Field>
+              {isAdmin ? (
+                <Field>
+                  <div className="flex items-center justify-between gap-3">
+                    <FieldLabel htmlFor="skill-shared">共享给所有用户</FieldLabel>
+                    <Switch
+                      id="skill-shared"
+                      data-testid="skill-shared"
+                      checked={shared}
+                      onCheckedChange={(checked) => setShared(Boolean(checked))}
+                    />
+                  </div>
+                  <FieldDescription>
+                    共享 Skill 会出现在每个人的 Skill 列表里，只有管理员能修改或删除。关闭时只创建你自己的私有 Skill。
+                  </FieldDescription>
+                </Field>
+              ) : null}
               <Field>
                 <FieldLabel htmlFor="skill-body">正文（SKILL.md）</FieldLabel>
                 <Textarea

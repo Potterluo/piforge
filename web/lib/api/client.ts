@@ -490,7 +490,17 @@ export interface SkillFile {
 
 export interface SkillImportResult {
   source: string;
-  skills: { name: string; path: string; files: number; skipped: boolean; reason?: string }[];
+  skills: {
+    name: string;
+    path: string;
+    files: number;
+    skipped: boolean;
+    reason?: string;
+    /** The skill's state after the call: an import re-enables a disabled skill. */
+    enabled: boolean;
+    /** True when the skill was disabled before this import and is enabled now. */
+    reenabled?: boolean;
+  }[];
 }
 
 export const skills = {
@@ -511,8 +521,17 @@ export const skills = {
   setEnabled: (id: string, enabled: boolean) =>
     request<{ skill: Skill }>(`/v1/skills/${id}`, { method: "PATCH", body: { enabled } }),
   list: () => request<{ skills: Skill[] }>("/v1/skills"),
-  create: (input: { name: string; description: string; body?: string }) =>
-    request<{ skill: Skill }>("/v1/skills", { method: "POST", body: input }),
+  /**
+   * Creates a skill. `scope: "admin"` makes it shared with every user, which
+   * only an admin may ask for (FR-14.1 / FR-16.3); the server refuses anyone
+   * else rather than quietly creating a private skill.
+   */
+  create: (input: {
+    name: string;
+    description: string;
+    body?: string;
+    scope?: "user" | "admin";
+  }) => request<{ skill: Skill }>("/v1/skills", { method: "POST", body: input }),
   remove: (id: string) => request<{ ok: boolean }>(`/v1/skills/${id}`, { method: "DELETE" }),
   /** Replaces a skill's content wholesale; the server requires SKILL.md. */
   uploadBundle: (id: string, files: SkillFile[]) =>

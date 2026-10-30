@@ -42,12 +42,19 @@ func (s *server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 
 // handleCreateSkill registers a skill bundle the caller already uploaded; the
 // content itself lives in the skill store, this row is the index entry.
+//
+// scope is accepted here because a shared skill has to come from somewhere: only
+// the delete half of "admin 共享 skill 管理" existed, so an admin could remove a
+// shared skill but never create one (FR-14.1 / FR-16.3). A shared skill is
+// deployment-wide, so creating one is an admin act; a normal user asking for
+// scope=admin is refused rather than silently downgraded to a private skill.
 func (s *server) handleCreateSkill(w http.ResponseWriter, r *http.Request) {
 	user := auth.MustUser(r.Context())
 	// web/lib/api/client.ts posts {name, description, body} and expects the
 	// index row back. content_hash is derived from body when the caller does
 	// not supply one, so the content-addressed store stays the source of truth.
 	var in struct {
+		Scope       string `json:"scope"`
 		Name        string `json:"name"`
 		Version     string `json:"version"`
 		Description string `json:"description"`
@@ -61,6 +68,21 @@ func (s *server) handleCreateSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	scope := contracts.SkillScope(strings.TrimSpace(in.Scope))
+	switch scope {
+	case "":
+		scope = contracts.SkillUser
+	case contracts.SkillUser:
+	case contracts.SkillAdmin:
+		if user.Role != contracts.RoleAdmin {
+			s.fail(w, r, apiErr(contracts.ErrForbidden, "共享 Skill 只能由管理员创建"))
+			return
+		}
+	default:
+		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "scope must be user or admin"))
+		return
+	}
+
 	enabled := true
 	if in.Enabled != nil {
 		enabled = *in.Enabled
@@ -71,7 +93,7 @@ func (s *server) handleCreateSkill(w http.ResponseWriter, r *http.Request) {
 		contentHash = hex.EncodeToString(sum[:])
 	}
 	skill, err := s.deps.Store.CreateSkill(r.Context(), user.ID, contracts.Skill{
-		Scope:       contracts.SkillUser,
+		Scope:       scope,
 		Name:        in.Name,
 		Version:     in.Version,
 		Description: in.Description,
@@ -137,7 +159,14 @@ func (s *server) handlePatchSkill(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "enabled is required"))
 		return
 	}
-	updated, err := s.deps.Store.SetSkillEnabled(r.Context(), user.ID, skill.ID, *in.Enabled)
+	var updated *contracts.Skill
+	if skill.Scope == contracts.SkillAdmin {
+		// Any admin may manage a shared skill, not only the one who created it;
+		// the role was checked above, so this is the same rule as delete.
+		updated, err = s.deps.Store.SetSharedSkillEnabled(r.Context(), skill.ID, *in.Enabled)
+	} else {
+		updated, err = s.deps.Store.SetSkillEnabled(r.Context(), user.ID, skill.ID, *in.Enabled)
+	}
 	if err != nil {
 		s.fail(w, r, err)
 		return

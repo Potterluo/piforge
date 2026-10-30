@@ -303,13 +303,23 @@ func scanMCPServer(sc interface{ Scan(dest ...any) error }) (*contracts.MCPServe
 // Skills
 // ---------------------------------------------------------------------------
 
-// CreateSkill records a user-scoped skill bundle.
+// CreateSkill records a skill bundle. The scope decides who can see it (PRD
+// FR-14.1): "user" is the caller's own, "admin" is shared with every user. The
+// owner is always the caller — an admin creating a shared skill owns it, and a
+// second admin can still manage it through the shared-skill paths.
 func (s *Store) CreateSkill(ctx context.Context, userID string, in contracts.Skill) (*contracts.Skill, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("store: create skill: empty user: %w", ErrInvalid)
 	}
 	if in.Name == "" || in.ContentHash == "" {
 		return nil, fmt.Errorf("store: create skill: name and content_hash are required: %w", ErrInvalid)
+	}
+	scope := in.Scope
+	if scope == "" {
+		scope = contracts.SkillUser
+	}
+	if scope != contracts.SkillUser && scope != contracts.SkillAdmin {
+		return nil, fmt.Errorf("store: create skill: unknown scope %q: %w", scope, ErrInvalid)
 	}
 	version := in.Version
 	if version == "" {
@@ -319,8 +329,8 @@ func (s *Store) CreateSkill(ctx context.Context, userID string, in contracts.Ski
 	_, err := s.w.ExecContext(ctx,
 		`INSERT INTO skills (id, scope, owner_id, name, version, description, content_hash,
 		                     bundle_key, source_url, enabled, created_at)
-		 VALUES (?, 'user', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, userID, in.Name, version, in.Description, in.ContentHash, in.BundleKey, in.SourceURL,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, string(scope), userID, in.Name, version, in.Description, in.ContentHash, in.BundleKey, in.SourceURL,
 		boolInt(in.Enabled), formatTime(s.now()))
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -379,6 +389,26 @@ func (s *Store) Skill(ctx context.Context, userID, skillID string) (*contracts.S
 	return sk, nil
 }
 
+// SkillEditable reports whether the caller may replace this skill's bundle or
+// switch it on and off: their own user-scope skill, or a shared skill they own
+// (the admin who created it). It is the same predicate UpdateSkillBundle and
+// SetSkillEnabled apply, exposed so an import can refuse *before* it writes
+// files into somebody else's bundle.
+func (s *Store) SkillEditable(ctx context.Context, userID, skillID string) (bool, error) {
+	var one int
+	err := s.r.QueryRowContext(ctx,
+		`SELECT 1 FROM skills
+		  WHERE id = ? AND ((scope = 'user' AND owner_id = ?) OR (scope = 'admin' AND owner_id = ?))`,
+		skillID, userID, userID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: skill %q ownership: %w", skillID, err)
+	}
+	return true, nil
+}
+
 // SetSkillEnabled turns a skill on or off without touching its content (FR-14.4).
 //
 // A shared skill is owned by the admin who seeded it; only that owner (the admin)
@@ -401,6 +431,31 @@ func (s *Store) SetSkillEnabled(ctx context.Context, userID, skillID string, ena
 	}
 	// Read back on the write connection: the read pool can still be one snapshot
 	// behind, and returning a stale `enabled` is exactly what a toggle must not do.
+	return scanSkill(s.w.QueryRowContext(ctx,
+		`SELECT id, scope, name, version, description, content_hash, bundle_key, source_url, enabled, created_at
+		   FROM skills WHERE id = ?`, skillID))
+}
+
+// SetSharedSkillEnabled switches an admin-owned skill on or off.
+//
+// It is separate from SetSkillEnabled on purpose: a shared skill belongs to the
+// deployment, so any admin may manage it, while SetSkillEnabled's predicate is
+// "your own row" (which would make a second admin unable to switch off what a
+// colleague created). The role check stays in the handler.
+func (s *Store) SetSharedSkillEnabled(ctx context.Context, skillID string, enabled bool) (*contracts.Skill, error) {
+	res, err := s.w.ExecContext(ctx,
+		`UPDATE skills SET enabled = ? WHERE id = ? AND scope = 'admin'`,
+		boolInt(enabled), skillID)
+	if err != nil {
+		return nil, fmt.Errorf("store: set shared skill enabled: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("store: set shared skill enabled: %w", err)
+	}
+	if affected == 0 {
+		return nil, fmt.Errorf("store: skill %q: %w", skillID, ErrNotFound)
+	}
 	return scanSkill(s.w.QueryRowContext(ctx,
 		`SELECT id, scope, name, version, description, content_hash, bundle_key, source_url, enabled, created_at
 		   FROM skills WHERE id = ?`, skillID))
