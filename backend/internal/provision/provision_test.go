@@ -885,3 +885,97 @@ func dockerAsGem(t *testing.T, sandboxID string, argv ...string) (string, error)
 	out, err := exec.Command("docker", args...).CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
+
+func writeSkillBundle(t *testing.T, root, key, body string) {
+	t.Helper()
+	dir := filepath.Join(root, key)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir bundle: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+}
+
+// TestMountUsesThePrivateSkillAndFallsBackWhenDisabled is the provisioning half
+// of FR-14.1: the private row is the one physically copied into `.pi/skills`
+// (and the one `session_skills` records), and turning it off makes the shared
+// row take over instead of making the skill disappear.
+func TestMountUsesThePrivateSkillAndFallsBackWhenDisabled(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	p := e.project()
+
+	bundles := e.svc.cfg.SkillsDir
+	writeSkillBundle(t, bundles, "shared-review", "---\nname: review\ndescription: shared\n---\n\n# shared\n")
+	writeSkillBundle(t, bundles, "private-review", "---\nname: review\ndescription: private\n---\n\n# private\n")
+
+	shared, err := e.store.CreateSkillRow(ctx, e.user.ID, "skl_shared_review", contracts.Skill{
+		Name: "review", Version: "1.0.0", Scope: contracts.SkillAdmin,
+		BundleKey: "shared-review", ContentHash: "shared-hash", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create shared skill: %v", err)
+	}
+	private, err := e.store.CreateSkillRow(ctx, e.user.ID, "skl_private_review", contracts.Skill{
+		Name: "review", Version: "2.0.0", Scope: contracts.SkillUser,
+		BundleKey: "private-review", ContentHash: "private-hash", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create private skill: %v", err)
+	}
+
+	readMounted := func(root string) string {
+		t.Helper()
+		body, err := os.ReadFile(filepath.Join(root, ".pi", "skills", "review", "SKILL.md"))
+		if err != nil {
+			t.Fatalf("read mounted SKILL.md: %v", err)
+		}
+		return string(body)
+	}
+	recorded := func(sessionID string) *contracts.SessionSkill {
+		t.Helper()
+		records, err := e.store.SessionSkills(ctx, e.user.ID, sessionID)
+		if err != nil {
+			t.Fatalf("session skills: %v", err)
+		}
+		for _, record := range records {
+			if record.Name == "review" {
+				return record
+			}
+		}
+		return nil
+	}
+
+	first := e.session(p, contracts.KindMain, "private-wins", "")
+	firstWT, err := e.svc.EnsureWorktree(ctx, e.user.ID, p, first)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	if body := readMounted(firstWT.Path); !strings.Contains(body, "# private") {
+		t.Fatalf("mounted SKILL.md = %q, want the private bundle", body)
+	}
+	if record := recorded(first.ID); record == nil || record.SkillID != private.ID {
+		t.Fatalf("session skill record = %+v, want the private row %s (shared is %s)", record, private.ID, shared.ID)
+	}
+
+	// Disabling the private row must fall back to the shared one, not remove it.
+	if _, err := e.store.SetSkillEnabled(ctx, e.user.ID, private.ID, false); err != nil {
+		t.Fatalf("disable private skill: %v", err)
+	}
+
+	second := e.session(p, contracts.KindMain, "shared-fallback", "")
+	secondWT, err := e.svc.EnsureWorktree(ctx, e.user.ID, p, second)
+	if err != nil {
+		t.Fatalf("second EnsureWorktree: %v", err)
+	}
+	// Main sessions share the primary checkout, so the fallback rewrites the same
+	// directory the first session used; what matters is that "review" still
+	// exists and now carries the shared body.
+	if body := readMounted(secondWT.Path); !strings.Contains(body, "# shared") {
+		t.Fatalf("mounted SKILL.md after disabling the private row = %q, want the shared fallback", body)
+	}
+	if record := recorded(second.ID); record == nil || record.SkillID != shared.ID {
+		t.Fatalf("session skill record after fallback = %+v, want the shared row %s", record, shared.ID)
+	}
+}

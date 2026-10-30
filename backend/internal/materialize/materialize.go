@@ -48,6 +48,13 @@ type Bundle struct {
 type wantedSkill struct {
 	name   string
 	source string
+	// scope is carried so a same-name collision between a private and a shared
+	// row is resolved by the two-scope rule instead of by slice order. Callers
+	// are expected to pass an already-resolved list (provision.mountTooling uses
+	// internal/skills), but the mount point is `.pi/skills/<slug>` — one
+	// directory per name — so this is the last place the collision could become
+	// silent.
+	scope contracts.SkillScope
 }
 
 // Manifest is the record of what this package last wrote, so a later mount can
@@ -149,7 +156,15 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 			result.Skipped[skill.Name] = "no content bundle on disk"
 			continue
 		}
-		wanted[slug] = wantedSkill{name: skill.Name, source: source}
+		// One directory per name. If two rows still reach here (a caller that did
+		// not resolve scopes), the private row wins regardless of order, matching
+		// the rule documented in internal/skills; equal scopes keep the first.
+		if existing, ok := wanted[slug]; ok {
+			if !(skill.Scope == contracts.SkillUser && existing.scope != contracts.SkillUser) {
+				continue
+			}
+		}
+		wanted[slug] = wantedSkill{name: skill.Name, source: source, scope: skill.Scope}
 	}
 
 	skillsRoot, err := safeJoin(root, SkillsRoot)

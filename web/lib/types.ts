@@ -385,6 +385,14 @@ export interface Skill {
   content_hash: string;
   source_url?: string;
   enabled: boolean;
+  /**
+   * Server-resolved: this row is the one the caller's new sessions mount under
+   * its name. A private row shadows an enabled shared row with the same name;
+   * a disabled private row makes the shared row effective again. Optional so
+   * component fixtures (and an older server) do not have to invent it; absent
+   * means "no shadowing information", which the UI treats as effective.
+   */
+  effective?: boolean;
   created_at: string;
 }
 

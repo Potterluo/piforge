@@ -683,6 +683,11 @@ type Skill struct {
 	BundleKey string    `json:"bundle_key,omitempty"`
 	SourceURL string    `json:"source_url,omitempty"`
 	Enabled   bool      `json:"enabled"`
+	// Effective is computed per caller, never stored: true when this row is the
+	// one the caller's new sessions mount under its name. A private row shadows
+	// an enabled shared row with the same name; disabling the private row makes
+	// the shared row effective again. See backend/internal/skills.
+	Effective bool      `json:"effective"`
 	CreatedAt time.Time `json:"created_at"`
 }
 

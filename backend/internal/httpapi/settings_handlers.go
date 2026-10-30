@@ -10,6 +10,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
+	skillset "github.com/piforge/piforge/backend/internal/skills"
 )
 
 // This file covers the settings surfaces the frontend already renders (skills,
@@ -27,6 +28,12 @@ type skillResponse struct {
 }
 
 // handleListSkills lists shared and private skills.
+//
+// Every row carries `effective`: the same-name rows are all still listed (the
+// private row and the shared one it shadows), because deleting or disabling
+// either has to stay possible, but only one of them is what a new session gets.
+// The UI uses that flag to label which one is in effect instead of showing two
+// indistinguishable rows (FR-14.1).
 func (s *server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 	user := auth.MustUser(r.Context())
 	skills, err := s.deps.Store.ListSkills(r.Context(), user.ID)
@@ -37,7 +44,7 @@ func (s *server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 	if skills == nil {
 		skills = []*contracts.Skill{}
 	}
-	writeJSON(w, http.StatusOK, skillsResponse{Skills: skills})
+	writeJSON(w, http.StatusOK, skillsResponse{Skills: skillset.Annotate(skills)})
 }
 
 // handleCreateSkill registers a skill bundle the caller already uploaded; the

@@ -402,3 +402,41 @@ func TestDigestMatchesTheUploadHash(t *testing.T) {
 		t.Fatalf("Digest = %s, upload hash = %s", got, want)
 	}
 }
+
+// TestMountPrefersThePrivateBundleWhenTwoScopesShareAName pins the last line of
+// defence for "同名覆盖": `.pi/skills/<slug>` is one directory, so if a caller
+// ever passes both the shared and the private row, the private content must win
+// no matter which order the slice is in. provision.mountTooling resolves the
+// scopes first (internal/skills); this test keeps the materializer from silently
+// reintroducing order dependence.
+func TestMountPrefersThePrivateBundleWhenTwoScopesShareAName(t *testing.T) {
+	bundles := t.TempDir()
+	writeBundle(t, bundles, "shared-review", "---\nname: review\ndescription: shared\n---\n\n# shared\n")
+	writeBundle(t, bundles, "private-review", "---\nname: review\ndescription: private\n---\n\n# private\n")
+
+	shared := &contracts.Skill{ID: "skl_shared", Name: "review", Version: "1.0.0", BundleKey: "shared-review", Scope: contracts.SkillAdmin, Enabled: true}
+	private := &contracts.Skill{ID: "skl_private", Name: "review", Version: "9.0.0", BundleKey: "private-review", Scope: contracts.SkillUser, Enabled: true}
+
+	for name, rows := range map[string][]*contracts.Skill{
+		"shared first":  {shared, private},
+		"private first": {private, shared},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "repo")
+			result, err := Mount(root, rows, nil, Options{SkillsDir: bundles})
+			if err != nil {
+				t.Fatalf("Mount: %v", err)
+			}
+			if len(result.Mounted) != 1 || result.Mounted[0].Name != "review" {
+				t.Fatalf("mounted = %+v, want exactly the review bundle", result.Mounted)
+			}
+			body, err := os.ReadFile(filepath.Join(root, SkillsRoot, "review", "SKILL.md"))
+			if err != nil {
+				t.Fatalf("read mounted SKILL.md: %v", err)
+			}
+			if !strings.Contains(string(body), "# private") {
+				t.Fatalf("mounted SKILL.md = %q, want the private bundle", body)
+			}
+		})
+	}
+}

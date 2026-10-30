@@ -20,8 +20,14 @@ export interface SkillPaletteProps {
   id: string;
   /** Skills matching the typed filter, in display order. */
   items: Skill[];
-  /** Every skill the account has, before filtering. */
+  /** Every mountable skill the account has, before filtering. */
   total: number;
+  /**
+   * Names whose effective row is a private one shadowing a shared row of the
+   * same name. The row is already the only one listed for that name; the badge
+   * explains why the shared version is not in the list.
+   */
+  overridingShared?: Set<string>;
   activeIndex: number;
   query: string;
   loading?: boolean;
@@ -50,6 +56,7 @@ export function SkillPalette({
   id,
   items,
   total,
+  overridingShared,
   activeIndex,
   query,
   loading = false,
@@ -102,6 +109,7 @@ export function SkillPalette({
                 data-name={skill.name}
                 data-version={skill.version}
                 data-hash={skill.content_hash}
+                data-overrides={overridingShared?.has(skill.name) ? "shared" : undefined}
                 // Mouse hover moves the same cursor the arrow keys use, so
                 // clicking and pressing Enter always agree about the target.
                 onMouseEnter={() => onHover?.(index)}
@@ -126,6 +134,14 @@ export function SkillPalette({
                 <span className="line-clamp-1 pl-[18px] text-[11px] text-muted-foreground">
                   {skill.description ? truncate(skill.description, 90) : "没有描述"}
                 </span>
+                {overridingShared?.has(skill.name) ? (
+                  <span
+                    data-testid="skill-palette-overrides"
+                    className="pl-[18px] text-[10px] text-muted-foreground"
+                  >
+                    你的私有版本 · 覆盖同名共享 Skill
+                  </span>
+                ) : null}
               </button>
             );
           })

@@ -99,6 +99,37 @@ describe("skill palette (FR-14.6)", () => {
     expect(textarea).toHaveAttribute("aria-activedescendant", items[0].id);
   });
 
+  it("lists one row per name: the private copy, with the shadowed shared one explained", () => {
+    const shared: Skill = {
+      ...review,
+      id: "skl_shared_review",
+      name: "review",
+      scope: "admin",
+      version: "1.0.0",
+      effective: false,
+    };
+    const mine: Skill = {
+      ...review,
+      id: "skl_private_review",
+      name: "review",
+      scope: "user",
+      version: "2.0.0",
+      description: "我的审查口径",
+      effective: true,
+    };
+    const textarea = renderComposer({ skills: [shared, mine] });
+
+    fireEvent.change(textarea, { target: { value: "/review" } });
+
+    // Two identical "/skill:review" rows would be a guess about which one runs;
+    // only the effective row is offered.
+    const items = screen.getAllByTestId("skill-palette-item");
+    expect(items).toHaveLength(1);
+    expect(items[0]).toHaveAttribute("data-name", "review");
+    expect(items[0]).toHaveAttribute("data-version", "2.0.0");
+    expect(items[0]).toHaveAttribute("data-overrides", "shared");
+    expect(items[0]).toHaveTextContent("覆盖同名共享 Skill");
+  });
   it("filters as the user types and marks a no-match state", () => {
     const textarea = renderComposer();
 

@@ -34,6 +34,7 @@ import { api, type SkillFile, type SkillImportResult } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
 import { formatRelative } from "@/lib/session/format";
 import { qk, useCurrentUser } from "@/lib/session/queries";
+import { fallsBackTo, isEffective, overridesShared, shadowedBy } from "@/lib/skills";
 
 /**
  * What an import actually did, as one toast.
@@ -119,7 +120,9 @@ export default function SkillsPage() {
       toast.success(result.skill.enabled ? "Skill 已启用" : "Skill 已停用", {
         description: result.skill.enabled
           ? "新建的会话会重新挂载它。"
-          : "新建的会话不再挂载它；已挂载的副本不受影响。",
+          // A same-name shared row takes over when this one is private; saying
+          // "不再挂载" would be false whenever there is a fallback.
+          : "新建的会话不再挂载这个版本；如果有同名共享 Skill，会回退到它。已挂载的副本不受影响。",
       });
     },
     onError: (error) => toast.error("更新失败", { description: humanizeError(error) }),
@@ -188,6 +191,14 @@ export default function SkillsPage() {
   });
 
   const list = skills.data?.skills ?? [];
+  // Effective first within a name, then the rest: with two same-name rows the
+  // one that actually mounts should not be the second one the eye reaches.
+  const ordered = [...list].sort((a, b) => {
+    const byName = a.name.trim().toLowerCase().localeCompare(b.name.trim().toLowerCase());
+    if (byName !== 0) return byName;
+    if (isEffective(a) !== isEffective(b)) return isEffective(a) ? -1 : 1;
+    return a.version.localeCompare(b.version);
+  });
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
@@ -240,8 +251,21 @@ export default function SkillsPage() {
             </EmptyContent>
           </Empty>
         ) : (
-          list.map((skill) => (
-            <Item key={skill.id} variant="outline" data-testid="skill-item" data-name={skill.name}>
+          ordered.map((skill) => {
+            const effective = isEffective(skill);
+            const shadowed = shadowedBy(skill, list);
+            const fallback = fallsBackTo(skill, list);
+            const overrides = overridesShared(skill, list);
+            return (
+            <Item
+              key={skill.id}
+              variant="outline"
+              data-testid="skill-item"
+              data-name={skill.name}
+              data-scope={skill.scope}
+              data-effective={effective ? "true" : "false"}
+              data-shadowed={shadowed ? "true" : "false"}
+            >
               <ItemMedia variant="icon">
                 <Sparkles />
               </ItemMedia>
@@ -252,9 +276,42 @@ export default function SkillsPage() {
                   <Badge variant={skill.scope === "admin" ? "secondary" : "outline"}>
                     {skill.scope === "admin" ? "共享" : "私有"}
                   </Badge>
-                  {skill.enabled ? null : <Badge variant="destructive">已停用</Badge>}
+                  {/* Two same-name rows used to look identical. The effective one
+                      says so, and the hidden one says who hid it. */}
+                  {effective ? (
+                    <Badge variant="secondary" data-testid="skill-effective">
+                      生效中
+                    </Badge>
+                  ) : null}
+                  {shadowed ? (
+                    <Badge variant="outline" data-testid="skill-shadowed">
+                      已被同名私有 Skill 覆盖
+                    </Badge>
+                  ) : null}
+                  {overrides ? (
+                    <Badge variant="outline" data-testid="skill-overrides">
+                      覆盖共享版本
+                    </Badge>
+                  ) : null}
+                  {!skill.enabled ? <Badge variant="destructive">已停用</Badge> : null}
+                  {fallback ? (
+                    <Badge variant="outline" data-testid="skill-fallback">
+                      使用{fallback.scope === "admin" ? "共享" : "私有"}版本 v{fallback.version}
+                    </Badge>
+                  ) : null}
                 </div>
                 <ItemDescription className="text-xs">{skill.description}</ItemDescription>
+                {shadowed ? (
+                  <ItemDescription className="text-xs" data-testid="skill-shadow-explain">
+                    你的同名私有 Skill 优先生效；停用它会回退到这个共享版本。
+                  </ItemDescription>
+                ) : null}
+                {fallback ? (
+                  <ItemDescription className="text-xs" data-testid="skill-fallback-explain">
+                    你的同名私有 Skill 已停用，新建会话会回退到这个
+                    {fallback.scope === "admin" ? "共享" : "私有"}版本。
+                  </ItemDescription>
+                ) : null}
                 <ItemDescription className="font-mono text-[11px]">
                   {skill.content_hash.slice(0, 12)} · {formatRelative(skill.created_at)}
                 </ItemDescription>
@@ -304,7 +361,8 @@ export default function SkillsPage() {
                 </Button>
               </ItemActions>
             </Item>
-          ))
+            );
+          })
         )}
       </div>
 

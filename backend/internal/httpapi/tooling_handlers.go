@@ -6,6 +6,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/materialize"
+	skillset "github.com/piforge/piforge/backend/internal/skills"
 )
 
 // toolingResponse tells the UI what the session's sandbox actually has on disk.
@@ -44,7 +45,7 @@ func (s *server) handleSessionTooling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := toolingResponse{Skills: skills, MCPServers: servers}
+	resp := toolingResponse{Skills: skillset.Annotate(skills), MCPServers: servers}
 	if sess.WorktreeID == "" {
 		// Nothing has been provisioned yet; the configuration is still valid.
 		writeJSON(w, http.StatusOK, resp)

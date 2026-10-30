@@ -30,6 +30,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/gitx"
 	"github.com/piforge/piforge/backend/internal/materialize"
+	skillset "github.com/piforge/piforge/backend/internal/skills"
 	"github.com/piforge/piforge/backend/internal/store"
 )
 
@@ -309,15 +310,16 @@ func (s *Service) mountTooling(ctx context.Context, userID, sessionID, root stri
 	if err != nil {
 		return fmt.Errorf("provision: list skills: %w", err)
 	}
-	// A disabled skill is still listed (its row is the record), but it must not be
-	// projected into a sandbox: that is what "可禁用" means, and before this filter
-	// the switch changed a badge and nothing else.
-	skills := make([]*contracts.Skill, 0, len(all))
-	for _, skill := range all {
-		if skill != nil && skill.Enabled {
-			skills = append(skills, skill)
-		}
-	}
+	// Resolve the two scopes *before* mounting. A private skill shadows an
+	// enabled shared skill with the same name (FR-14.1); a disabled private row
+	// does not, so the shared one takes over again. Passing both rows to the
+	// materializer would leave the winner to map/iteration order, which is how
+	// "same name" used to be an accident rather than a rule.
+	//
+	// The same list is what the session record is built from, so `session_skills`
+	// names the row that was actually mounted — not whichever row happened to be
+	// last in a SQL result (FR-14.5).
+	skills := skillset.Effective(all)
 	servers, err := s.cfg.Store.ListMCPServers(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("provision: list mcp servers: %w", err)

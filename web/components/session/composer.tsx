@@ -55,6 +55,7 @@ import { api } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
 import { shortModel, truncate } from "@/lib/session/format";
 import type { QueuedPrompt } from "@/lib/session/reduce";
+import { mountableSkills, overridesShared } from "@/lib/skills";
 import { ApiError, type SessionSkill, type Skill } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -234,10 +235,21 @@ export function Composer({
   const paletteId = useId();
 
   const query = slashQuery(text);
-  const enabledSkills = useMemo(() => skills.filter((skill) => skill.enabled), [skills]);
+  // The palette lists what provisioning would actually mount: enabled rows that
+  // are effective for this user. Listing a shadowed shared row and the private
+  // row that hides it as two identical "/skill:review" entries was how "same
+  // name" became a guess (FR-14.1).
+  const enabledSkills = useMemo(() => mountableSkills(skills), [skills]);
+  const overridingShared = useMemo(
+    () =>
+      new Set(
+        enabledSkills.filter((skill) => overridesShared(skill, skills)).map((skill) => skill.name),
+      ),
+    [enabledSkills, skills],
+  );
   const paletteItems = useMemo(
-    () => (query === null ? [] : filterSkills(skills, query)),
-    [skills, query],
+    () => (query === null ? [] : filterSkills(enabledSkills, query)),
+    [enabledSkills, query],
   );
   const paletteOpen = !disabled && query !== null && !paletteDismissed;
   const activeIndex =
@@ -531,6 +543,7 @@ export function Composer({
           id={paletteId}
           items={paletteItems}
           total={enabledSkills.length}
+          overridingShared={overridingShared}
           activeIndex={activeIndex}
           query={query ?? ""}
           loading={skillsLoading}
