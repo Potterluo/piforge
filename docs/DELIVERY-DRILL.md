@@ -498,6 +498,32 @@ status after settle = {... Running:false Streaming:true ...}
 之间的时序竞争，属于测试/实现的 flake，不是本次演练改动引入的（本次没有改产品代码）。
 它不影响演练结论，但说明这套 Go 测试对并发负载敏感，CI 上不宜与重负载任务并行跑。
 
+### 6.10 修复后（本轮）
+
+§6.2–§6.5 已作为三个易碎点修掉，原观察保留在上面作为演练记录。注意：§7 的
+「产品代码：未改动」只属于发起这次演练的那一轮，本轮为修这三个点动了产品代码。
+
+- **Node TAP（§6.2/§6.3）**：`internal/testrun` 新增 `RunnerNode`（`node --test`）/ `RunnerTSX`
+  （`tsx --test`）识别与 `parse_tap.go`。它读 `# pass` / `# fail` / `# skipped` / `# tests`
+  / `# duration_ms`，也读 TAP v13 的 `1..N` plan 与顶层 `ok` / `not ok`；失败名后接
+  `location: '…:line:col'` 时给出可点击的 `file:line`。只有 `# pass`/`# fail` 时，
+  total/skipped 保持未知（0），不会用 pass+fail 编一个总数；完全不成形则仍是
+  `unrecognized` 且不发明计数。测试：`parse_test.go` 的表驱动 fixture（full / failing+location
+  / plan-only / counts-only / malformed / tsx）与 `TestParseRealNodeTestRun`（真的跑
+  `node --test`）；部署实测见 `e2e/.artifacts/fix-drill/`。
+- **种子密码（§6.4）**：`cmd/piforged` 的 `logSeededAccounts` 只写
+  `created the first admin account email=…` / `created the demo account email=…`，
+  不再打印 `admin: email / password`。密码由 `PIFORGE_SEED_PASSWORD` /
+  `PIFORGE_SEED_USER_PASSWORD` 决定（见 `docs/SANDBOX-DEPLOY.md`「种子密码从哪里来」）。
+  测试：`cmd/piforged/seed_log_test.go` 断言日志含邮箱、不含两个密码。
+- **截图（§6.5）**：截图改写到 `<dataDir>/artifacts/<session>/screenshots/`，客户端拿到虚拟路径
+  `artifacts/<session>/screenshots/…`，经新路由 `GET /v1/sessions/{id}/artifacts?path=…`
+  预览/下载；checkout 里不再出现 `screenshots/`。旧会话里已经在 checkout 内的截图仍走
+  `/files` 预览。测试：`httpapi/artifacts_test.go`、`e2e/tests/20-screenshot.spec.ts`
+  （两次抓图后 `git/status.clean=true`，相机按钮的预览用 artifacts 路由）。
+- **仍未覆盖**：远端 / AIO 沙箱浏览器的空闲停止（idle 策略只在 host placement 生效），
+  见 `docs/STATUS.md`「交付能力」的边界说明。
+
 ---
 
 ## 7. 门禁与变更声明

@@ -98,10 +98,18 @@ docs/research/         the research briefings the spec was derived from
 ## Run it locally
 
 ```bash
-# 1. backend (creates ./data, seeds an admin + demo user, prints the passwords once)
+# 1. backend (creates ./data and seeds an admin + demo user; the log names the
+#    accounts but never prints their passwords, so choose them here)
 cd backend
+PIFORGE_SEED_PASSWORD='piforge-admin-123' \
+PIFORGE_SEED_USER_PASSWORD='piforge-dev-123' \
 go run ./cmd/piforged -data ../data -addr 127.0.0.1:8080 -fake-pi \
   -chrome "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+# On Windows PowerShell:
+#   $env:PIFORGE_SEED_PASSWORD='piforge-admin-123'; $env:PIFORGE_SEED_USER_PASSWORD='piforge-dev-123'
+# If you leave them unset, each account gets a generated password that is
+# deliberately NOT logged. With no other admin, the only recovery is a fresh
+# -data directory plus these variables; set them before the first boot.
 
 # 2. frontend
 cd web

@@ -329,6 +329,16 @@ piforge-sandbox-runner   piforge/sandbox-runner:dev   sandbox-runner    Up
 `PIFORGE_SEED_*` 用 base compose 的默认值（`admin@piforge.local` / `piforge-admin-123`）。
 脚本化的一遍在 `.real/verify.ps1`（不进仓库），核心步骤与结果：
 
+> **种子密码从哪里来。** 首次启动只创建账号，日志会写
+> `created the first admin account email=…` / `created the demo account email=…`，
+> **不会打印密码**（容器的 `docker logs` 经常被贴进工单/CI，打印一次就是泄露一次）。
+> 密码由 `PIFORGE_SEED_PASSWORD` / `PIFORGE_SEED_USER_PASSWORD` 决定；base compose 给了
+> 默认值，所以本地栈仍是 `admin@piforge.local` / `piforge-admin-123` 与
+> `dev@piforge.local` / `piforge-dev-123`。如果部署时把这两个变量留空，store 会**生成**
+> 随机密码且不写日志。若部署里还有另一个管理员，可从「用户管理 → 重置密码」拿回访问权；
+> 若这是唯一的管理员，恢复方式只有删掉数据卷、设好变量后重新首次启动（会话与项目会一起丢失）。
+> 生产不要依赖默认值，也不要在首次启动后才补变量。
+
 ```powershell
 # 登录 → 建项目 → 建会话 → 发一条消息（provisioning 在这一步发生）
 $r = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:7700/v1/auth/login -SessionVariable s `
