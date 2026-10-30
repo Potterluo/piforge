@@ -305,9 +305,18 @@ func (s *Service) mountTooling(ctx context.Context, userID, sessionID, root stri
 		slog.Warn("tooling not mounted: the checkout is not on this filesystem", "root", root)
 		return nil
 	}
-	skills, err := s.cfg.Store.ListSkills(ctx, userID)
+	all, err := s.cfg.Store.ListSkills(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("provision: list skills: %w", err)
+	}
+	// A disabled skill is still listed (its row is the record), but it must not be
+	// projected into a sandbox: that is what "可禁用" means, and before this filter
+	// the switch changed a badge and nothing else.
+	skills := make([]*contracts.Skill, 0, len(all))
+	for _, skill := range all {
+		if skill != nil && skill.Enabled {
+			skills = append(skills, skill)
+		}
 	}
 	servers, err := s.cfg.Store.ListMCPServers(ctx, userID)
 	if err != nil {

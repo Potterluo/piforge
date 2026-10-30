@@ -379,6 +379,33 @@ func (s *Store) Skill(ctx context.Context, userID, skillID string) (*contracts.S
 	return sk, nil
 }
 
+// SetSkillEnabled turns a skill on or off without touching its content (FR-14.4).
+//
+// A shared skill is owned by the admin who seeded it; only that owner (the admin)
+// can change it, which the handler enforces on the role. This query only decides
+// whether the row exists for this caller.
+func (s *Store) SetSkillEnabled(ctx context.Context, userID, skillID string, enabled bool) (*contracts.Skill, error) {
+	res, err := s.w.ExecContext(ctx,
+		`UPDATE skills SET enabled = ?
+		  WHERE id = ? AND ((scope = 'user' AND owner_id = ?) OR (scope = 'admin' AND owner_id = ?))`,
+		boolInt(enabled), skillID, userID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("store: set skill enabled: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("store: set skill enabled: %w", err)
+	}
+	if affected == 0 {
+		return nil, fmt.Errorf("store: skill %q: %w", skillID, ErrNotFound)
+	}
+	// Read back on the write connection: the read pool can still be one snapshot
+	// behind, and returning a stale `enabled` is exactly what a toggle must not do.
+	return scanSkill(s.w.QueryRowContext(ctx,
+		`SELECT id, scope, name, version, description, content_hash, bundle_key, source_url, enabled, created_at
+		   FROM skills WHERE id = ?`, skillID))
+}
+
 // DeleteSkill removes one of the caller's own skills. Shared skills are not
 // deletable through this path, and another user's skill reports ErrNotFound.
 func (s *Store) DeleteSkill(ctx context.Context, userID, skillID string) error {

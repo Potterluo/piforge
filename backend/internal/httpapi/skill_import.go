@@ -1,10 +1,15 @@
 package httpapi
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -88,34 +93,47 @@ func (s *server) handleImportSkills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type imported struct {
-		Name    string `json:"name"`
-		Path    string `json:"path"`
-		Files   int    `json:"files"`
-		Skipped bool   `json:"skipped"`
-		Reason  string `json:"reason,omitempty"`
-	}
-	result := make([]imported, 0, len(found))
+	result := s.persistCandidates(ctx, user.ID, url, found, in.DryRun)
+	writeJSON(w, http.StatusOK, map[string]any{"source": url, "dry_run": in.DryRun, "skills": result})
+}
 
+// importedSkill is one row of an import response.
+type importedSkill struct {
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	Files   int    `json:"files"`
+	Skipped bool   `json:"skipped"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// persistCandidates turns discovered directories into skills.
+//
+// A git import and a zip import differ only in where the directories came from, so
+// they share this: the same replace-by-name rule, the same bundle writer, the same
+// per-skill failure that leaves the others alone.
+func (s *server) persistCandidates(
+	ctx context.Context,
+	userID, source string,
+	found []skillCandidate,
+	dryRun bool,
+) []importedSkill {
+	result := make([]importedSkill, 0, len(found))
 	for _, candidate := range found {
-		item := imported{Name: candidate.Name, Path: candidate.Rel, Files: len(candidate.Files)}
-		if in.DryRun {
+		item := importedSkill{Name: candidate.Name, Path: candidate.Rel, Files: len(candidate.Files)}
+		if dryRun {
 			result = append(result, item)
 			continue
 		}
 		// A skill with the same name is replaced rather than duplicated: importing the
-		// same repository twice should not leave two entries fighting over the name.
-		existing := s.findSkillByName(ctx, user.ID, candidate.Name)
-		var target *contracts.Skill
-		if existing != nil {
-			target = existing
-		} else {
-			created, cerr := s.deps.Store.CreateSkill(ctx, user.ID, contracts.Skill{
+		// same collection twice should not leave two entries fighting over the name.
+		target := s.findSkillByName(ctx, userID, candidate.Name)
+		if target == nil {
+			created, cerr := s.deps.Store.CreateSkill(ctx, userID, contracts.Skill{
 				Name:        candidate.Name,
 				Version:     "imported",
 				Description: candidate.Description,
 				ContentHash: "pending",
-				SourceURL:   url,
+				SourceURL:   source,
 				Enabled:     true,
 			})
 			if cerr != nil {
@@ -132,15 +150,167 @@ func (s *server) handleImportSkills(w http.ResponseWriter, r *http.Request) {
 			result = append(result, item)
 			continue
 		}
-		if _, uerr := s.deps.Store.UpdateSkillBundle(ctx, user.ID, target.ID, bundleKey, hash); uerr != nil {
+		if _, uerr := s.deps.Store.UpdateSkillBundle(ctx, userID, target.ID, bundleKey, hash); uerr != nil {
 			item.Skipped, item.Reason = true, uerr.Error()
 			result = append(result, item)
 			continue
 		}
 		result = append(result, item)
 	}
+	return result
+}
 
-	writeJSON(w, http.StatusOK, map[string]any{"source": url, "dry_run": in.DryRun, "skills": result})
+// Limits on a zip upload. A skill collection is text; these caps are the same
+// 4 MB the repository walk enforces, plus a request bound so an oversized body is
+// rejected before it is buffered.
+const (
+	skillZipMaxBytes   = 8 << 20 // the upload itself
+	skillZipMaxEntries = 256     // a zip is a bookkeeping format, not a filesystem
+)
+
+// handleImportSkillsZip installs skills from an uploaded zip (FR-14.4).
+//
+// A curated collection usually arrives as an archive, not a repository: requiring
+// a git remote to ship three Markdown files is the friction the PRD calls out. The
+// archive is unpacked into a temporary directory and then treated exactly like a
+// checkout — the same walk finds every directory with a SKILL.md, and only that
+// directory's files are taken.
+func (s *server) handleImportSkillsZip(w http.ResponseWriter, r *http.Request) {
+	user := auth.MustUser(r.Context())
+
+	r.Body = http.MaxBytesReader(w, r.Body, skillZipMaxBytes)
+	if err := r.ParseMultipartForm(skillZipMaxBytes); err != nil {
+		s.fail(w, r, apiErr(contracts.ErrInvalidArgument,
+			"需要一个 zip 文件（multipart/form-data 的 file 字段）"))
+		return
+	}
+	if r.MultipartForm != nil {
+		defer func() { _ = r.MultipartForm.RemoveAll() }()
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		s.fail(w, r, apiErr(contracts.ErrInvalidArgument,
+			"需要一个 zip 文件（multipart/form-data 的 file 字段）"))
+		return
+	}
+	defer func() { _ = file.Close() }()
+
+	data, err := io.ReadAll(io.LimitReader(file, skillZipMaxBytes+1))
+	if err != nil {
+		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "读取上传文件失败：%v", err))
+		return
+	}
+	if len(data) > skillZipMaxBytes {
+		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "zip 不能超过 8 MB"))
+		return
+	}
+
+	dir, err := os.MkdirTemp("", "piforge-skills-zip-")
+	if err != nil {
+		s.fail(w, r, apiErr(contracts.ErrInternal, "无法创建临时目录：%v", err))
+		return
+	}
+	defer os.RemoveAll(dir)
+
+	if err := extractSkillZip(data, dir); err != nil {
+		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "%s", err.Error()))
+		return
+	}
+
+	found, err := findSkills(dir, skillImportMaxBytes)
+	if err != nil {
+		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "%v", err))
+		return
+	}
+	if len(found) == 0 {
+		s.fail(w, r, apiErr(contracts.ErrNotFound, "这个 zip 里没有 SKILL.md"))
+		return
+	}
+
+	source := "zip:" + strings.TrimSpace(header.Filename)
+	result := s.persistCandidates(r.Context(), user.ID, source, found, false)
+	writeJSON(w, http.StatusOK, map[string]any{"source": source, "dry_run": false, "skills": result})
+}
+
+// extractSkillZip unpacks an archive under dst, refusing anything that could write
+// outside it.
+//
+// This is the same class of boundary as bundleFiles: entry names are attacker
+// input, and `../` in a zip has been a real vulnerability in real products. The
+// archive is rejected as a whole rather than skipping the bad entry, because a
+// half-imported collection is harder to reason about than a refusal.
+func extractSkillZip(data []byte, dst string) error {
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return fmt.Errorf("不是有效的 zip：%v", err)
+	}
+	if len(reader.File) > skillZipMaxEntries {
+		return fmt.Errorf("zip 里的文件过多（上限 %d）", skillZipMaxEntries)
+	}
+
+	total := 0
+	for _, entry := range reader.File {
+		name := strings.ReplaceAll(entry.Name, "\\", "/")
+		if entry.FileInfo().IsDir() || strings.HasSuffix(name, "/") {
+			continue
+		}
+		if !entry.Mode().IsRegular() {
+			return fmt.Errorf("zip 里的 %q 不是普通文件", name)
+		}
+		if strings.HasPrefix(name, "/") {
+			return fmt.Errorf("path %q is not allowed", name)
+		}
+		for _, segment := range strings.Split(name, "/") {
+			if segment == ".." {
+				return fmt.Errorf("path %q is not allowed", name)
+			}
+		}
+		rel := strings.TrimPrefix(path.Clean("/"+name), "/")
+		if rel == "" || rel == "." {
+			return fmt.Errorf("path %q is not allowed", name)
+		}
+		if len(rel) > maxSkillPathLen {
+			return fmt.Errorf("path %q is too long", rel)
+		}
+		if entry.UncompressedSize64 > maxSkillFileBytes {
+			return fmt.Errorf("%s is larger than %d bytes", rel, maxSkillFileBytes)
+		}
+		total += int(entry.UncompressedSize64)
+		if total > skillImportMaxBytes {
+			return fmt.Errorf("这个 zip 超过了单次导入上限（4 MB）")
+		}
+
+		opened, oerr := entry.Open()
+		if oerr != nil {
+			return fmt.Errorf("读取 %s 失败：%v", rel, oerr)
+		}
+		body, rerr := io.ReadAll(io.LimitReader(opened, maxSkillFileBytes+1))
+		closeErr := opened.Close()
+		if rerr != nil {
+			return fmt.Errorf("读取 %s 失败：%v", rel, rerr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("读取 %s 失败：%v", rel, closeErr)
+		}
+		if len(body) > maxSkillFileBytes {
+			return fmt.Errorf("%s is larger than %d bytes", rel, maxSkillFileBytes)
+		}
+
+		target := filepath.Join(dst, filepath.FromSlash(rel))
+		// Belt and braces after the segment check: the final path must still be
+		// inside the directory this function owns.
+		if inside, ierr := filepath.Rel(dst, target); ierr != nil || inside == ".." ||
+			strings.HasPrefix(inside, ".."+string(os.PathSeparator)) {
+			return fmt.Errorf("path %q is not allowed", name)
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return fmt.Errorf("解压 %s 失败：%v", rel, err)
+		}
+		if err := os.WriteFile(target, body, 0o644); err != nil {
+			return fmt.Errorf("解压 %s 失败：%v", rel, err)
+		}
+	}
+	return nil
 }
 
 // skillCandidate is one directory that holds a SKILL.md.

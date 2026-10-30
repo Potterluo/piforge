@@ -28,6 +28,7 @@ import { Input } from "@/components/ui/input";
 import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "@/components/ui/item";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { api, type SkillFile } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
@@ -61,6 +62,40 @@ export default function SkillsPage() {
   });
   const [importUrl, setImportUrl] = useState("");
   const [importRef, setImportRef] = useState("");
+  const [importZip, setImportZip] = useState<File | null>(null);
+  // The zip half of FR-14.4. It shares the import dialog with the git form: both
+  // answer "install a collection in one action", and two dialogs would make the
+  // second one look like a different feature.
+  const zipMutation = useMutation({
+    mutationFn: (file: File) => api.skills.importZip(file),
+    onSuccess: (result) => {
+      const names = result.skills.filter((skill) => !skill.skipped).map((skill) => skill.name);
+      if (names.length === 0) {
+        toast.error("没有导入任何 Skill", { description: "zip 里没有可用的 SKILL.md" });
+      } else {
+        toast.success(`导入了 ${names.length} 个 Skill`, { description: names.join("、") });
+        setImportOpen(false);
+        setImportZip(null);
+        void queryClient.invalidateQueries({ queryKey: qk.skills });
+      }
+    },
+    onError: (error: Error) => toast.error("导入失败", { description: humanizeError(error) }),
+  });
+  // Enabling/disabling is a mutation per row; the row's own pending state is
+  // enough, and a global spinner would freeze every other switch.
+  const toggleEnabled = useMutation({
+    mutationFn: (input: { id: string; enabled: boolean }) =>
+      api.skills.setEnabled(input.id, input.enabled),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: qk.skills });
+      toast.success(result.skill.enabled ? "Skill 已启用" : "Skill 已停用", {
+        description: result.skill.enabled
+          ? "新建的会话会重新挂载它。"
+          : "新建的会话不再挂载它；已挂载的副本不受影响。",
+      });
+    },
+    onError: (error) => toast.error("更新失败", { description: humanizeError(error) }),
+  });
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [body, setBody] = useState("");
@@ -135,7 +170,7 @@ export default function SkillsPage() {
         </Button>
         <Button variant="outline" size="sm" data-testid="skill-import" onClick={() => setImportOpen(true)}>
           <Download />
-          从仓库导入
+          导入 Skill
         </Button>
       </header>
 
@@ -191,6 +226,24 @@ export default function SkillsPage() {
                 </ItemDescription>
               </ItemContent>
               <ItemActions>
+                <Switch
+                  size="sm"
+                  data-testid="skill-enabled"
+                  data-skill={skill.name}
+                  aria-label={`启用 ${skill.name}`}
+                  title={
+                    skill.scope === "admin" && !isAdmin
+                      ? "共享 Skill 由管理员维护"
+                      : skill.enabled
+                        ? "停用：新建会话不再挂载它"
+                        : "启用：新建会话会挂载它"
+                  }
+                  checked={skill.enabled}
+                  disabled={(skill.scope === "admin" && !isAdmin) || toggleEnabled.isPending}
+                  onCheckedChange={(checked) =>
+                    toggleEnabled.mutate({ id: skill.id, enabled: Boolean(checked) })
+                  }
+                />
                 <Button
                   size="icon-xs"
                   variant="ghost"
@@ -320,10 +373,10 @@ export default function SkillsPage() {
       <Dialog open={importOpen} onOpenChange={setImportOpen}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>从仓库导入 Skill</DialogTitle>
+            <DialogTitle>导入 Skill</DialogTitle>
             <DialogDescription>
-              克隆一个仓库，把其中每个含 <span className="font-mono">SKILL.md</span> 的目录各存成一个 Skill。
-              只取该目录下的文件，仓库里的其它内容不会进入沙箱。
+              从仓库克隆，或上传一个 zip。两种方式都把其中每个含{" "}
+              <span className="font-mono">SKILL.md</span> 的目录各存成一个 Skill，只取该目录下的文件。
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-3">
@@ -353,15 +406,42 @@ export default function SkillsPage() {
                 className="font-mono text-xs"
               />
             </div>
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="skill-import-zip" className="text-xs font-medium">
+                或上传 zip
+              </label>
+              <Input
+                id="skill-import-zip"
+                data-testid="skill-import-zip"
+                type="file"
+                accept=".zip,application/zip"
+                className="h-8 py-1 text-xs"
+                onChange={(event) => setImportZip(event.target.files?.[0] ?? null)}
+              />
+              <p className="text-[11px] text-muted-foreground">
+                最大 8 MB。zip 里每个含 SKILL.md 的目录各存成一个 Skill；路径穿越的条目会被整体拒绝。
+              </p>
+            </div>
           </div>
           <DialogFooter>
             <Button
               type="button"
               variant="ghost"
               onClick={() => setImportOpen(false)}
-              disabled={importMutation.isPending}
+              disabled={importMutation.isPending || zipMutation.isPending}
             >
               取消
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              data-testid="skill-import-zip-submit"
+              disabled={importZip === null || zipMutation.isPending}
+              onClick={() => {
+                if (importZip) zipMutation.mutate(importZip);
+              }}
+            >
+              {zipMutation.isPending ? "上传中…" : "上传 zip"}
             </Button>
             <Button
               type="button"
@@ -371,7 +451,7 @@ export default function SkillsPage() {
                 importMutation.mutate({ url: importUrl.trim(), ref: importRef.trim() })
               }
             >
-              {importMutation.isPending ? "导入中…" : "导入"}
+              {importMutation.isPending ? "导入中…" : "从仓库导入"}
             </Button>
           </DialogFooter>
         </DialogContent>

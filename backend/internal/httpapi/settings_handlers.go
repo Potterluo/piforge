@@ -108,6 +108,43 @@ func (s *server) handleCreateSkill(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, skillResponse{Skill: skill})
 }
 
+// handlePatchSkill edits what can be edited without replacing the content: today
+// that is only `enabled` (FR-14.4's 可禁用).
+//
+// Disabling is ownership-checked like deletion: a shared skill is a deployment
+// asset, so a normal user may not switch it off for everybody. The UI already
+// explains that rule on the delete button; this is the same rule on the switch.
+func (s *server) handlePatchSkill(w http.ResponseWriter, r *http.Request) {
+	user := auth.MustUser(r.Context())
+	skill, err := s.deps.Store.Skill(r.Context(), user.ID, pathID(r))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if skill.Scope == contracts.SkillAdmin && user.Role != contracts.RoleAdmin {
+		s.fail(w, r, apiErr(contracts.ErrForbidden, "共享 Skill 由管理员维护"))
+		return
+	}
+
+	var in struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := decodeJSON(r, &in); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if in.Enabled == nil {
+		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "enabled is required"))
+		return
+	}
+	updated, err := s.deps.Store.SetSkillEnabled(r.Context(), user.ID, skill.ID, *in.Enabled)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, skillResponse{Skill: updated})
+}
+
 // handleDeleteSkill removes one of the caller's skills.
 func (s *server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
 	user := auth.MustUser(r.Context())

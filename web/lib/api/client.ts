@@ -488,12 +488,28 @@ export interface SkillFile {
   content: string;
 }
 
+export interface SkillImportResult {
+  source: string;
+  skills: { name: string; path: string; files: number; skipped: boolean; reason?: string }[];
+}
+
 export const skills = {
   import: (url: string, ref: string) =>
-    request<{
-      source: string;
-      skills: { name: string; path: string; files: number; skipped: boolean; reason?: string }[];
-    }>("/v1/skills/import", { method: "POST", body: { url, ref } }),
+    request<SkillImportResult>("/v1/skills/import", { method: "POST", body: { url, ref } }),
+  /**
+   * Installs a zip of SKILL.md directories (FR-14.4).
+   *
+   * Multipart rather than base64-in-JSON: the browser already knows how to send a
+   * `File`, and a 4 MB archive does not need to grow by a third in transit.
+   */
+  importZip: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return request<SkillImportResult>("/v1/skills/import/zip", { method: "POST", raw: form });
+  },
+  /** Turns a skill off without deleting it; a disabled skill is not mounted. */
+  setEnabled: (id: string, enabled: boolean) =>
+    request<{ skill: Skill }>(`/v1/skills/${id}`, { method: "PATCH", body: { enabled } }),
   list: () => request<{ skills: Skill[] }>("/v1/skills"),
   create: (input: { name: string; description: string; body?: string }) =>
     request<{ skill: Skill }>("/v1/skills", { method: "POST", body: input }),

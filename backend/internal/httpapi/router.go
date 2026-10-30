@@ -291,6 +291,10 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /v1/skills", s.authed(s.handleListSkills))
 	mux.Handle("POST /v1/skills", s.mutatingBearer(s.handleCreateSkill))
 	mux.Handle("POST /v1/skills/import", s.mutatingBearer(s.handleImportSkills))
+	// A zip upload is the other half of FR-14.4: a collection that is not a git
+	// repository still has to be installable in one action.
+	mux.Handle("POST /v1/skills/import/zip", s.mutatingBearer(s.handleImportSkillsZip))
+	mux.Handle("PATCH /v1/skills/{id}", s.mutatingBearer(s.handlePatchSkill))
 	mux.Handle("DELETE /v1/skills/{id}", s.mutatingBearer(s.handleDeleteSkill))
 	mux.Handle("PUT /v1/skills/{id}/bundle", s.mutatingBearer(s.handleUploadSkillBundle))
 	// The bundle is content, not configuration: reading it back lets the editor
