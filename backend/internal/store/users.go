@@ -226,26 +226,47 @@ func (s *Store) CreateAuthSession(ctx context.Context, userID, tokenHash string,
 // then serves that frozen snapshot to every later query on it. For a list
 // endpoint that is a stale row; here it would be "you are signed out" for a
 // session the writer created a moment ago, which is the one answer that must
-// never be wrong. So a miss asks the writer -- the connection that committed
-// the session -- and a hit there is treated as proof that the read pool is
-// stale: the idle readers are dropped and every later query sees fresh data.
+// never be wrong. So the lookup pins one read connection, and a miss asks the
+// writer -- the connection that committed the session. A hit there is treated as
+// proof that the read pool is stale: the idle readers are dropped and every
+// later query sees fresh data. Before that happens the pinned connection is
+// interrogated and the answers are logged (stale_read_probe.go), because "the
+// read pool was stale" without naming the connection is a symptom, not a cause.
 func (s *Store) AuthSessionUser(ctx context.Context, tokenHash string, now time.Time) (*contracts.User, error) {
 	if tokenHash == "" {
 		return nil, fmt.Errorf("store: auth session: empty token: %w", ErrNotFound)
 	}
-	u, err := s.authSessionUserOn(s.r, ctx, tokenHash, now)
+	u, rep, err := s.authSessionUserOnPinnedRead(ctx, tokenHash, now)
 	if errors.Is(err, sql.ErrNoRows) {
-		fallback, ferr := s.authSessionUserOn(s.w, ctx, tokenHash, now)
-		switch {
-		case ferr == nil:
+		// The writer is the authority. It is asked only after the pinned read
+		// connection is released: with an in-memory database both pools are the
+		// same single connection, and holding it while querying through it would
+		// deadlock.
+		version, tables, seesRow := s.writerFacts(ctx, tokenHash, now)
+		if rep != nil {
+			rep.WriteDataVersion = version
+			rep.WriteTables = tables
+			rep.WriteSeesRow = seesRow
+			rep.WriterAvailable = true
+		}
+		if seesRow {
+			fallback, ferr := s.authSessionUserOn(s.w, ctx, tokenHash, now)
+			if ferr != nil {
+				if errors.Is(ferr, sql.ErrNoRows) {
+					// The writer saw the row a moment ago and no longer does: the
+					// session really is gone (expired or revoked in between). That is
+					// a signed-out user, not an outage.
+					return nil, fmt.Errorf("store: auth session: %w", ErrNotFound)
+				}
+				// The writer said the row is there; a read that now fails is an
+				// error, not a signed-out user.
+				return nil, fmt.Errorf("store: auth session: %w", ferr)
+			}
+			s.noteStaleRead(rep)
 			s.discardStaleReaders()
 			return fallback, nil
-		case errors.Is(ferr, sql.ErrNoRows):
-			return nil, fmt.Errorf("store: auth session: %w", ErrNotFound)
-		default:
-			// A writer that cannot answer is an outage, not a signed-out user.
-			return nil, fmt.Errorf("store: auth session: %w", ferr)
 		}
+		return nil, fmt.Errorf("store: auth session: %w", ErrNotFound)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: auth session: %w", err)
@@ -253,10 +274,31 @@ func (s *Store) AuthSessionUser(ctx context.Context, tokenHash string, now time.
 	return u, nil
 }
 
-// authSessionUserOn runs the session lookup on one pool. The writer is the
+// authSessionUserOnPinnedRead runs the fast-path lookup on one pinned read
+// connection and, when the row is missing, describes that connection while it is
+// still held. The report is nil when nothing could be measured.
+func (s *Store) authSessionUserOnPinnedRead(ctx context.Context, tokenHash string, now time.Time) (*contracts.User, *staleReadReport, error) {
+	conn, err := s.r.Conn(ctx)
+	if err != nil {
+		// No connection to pin (shutting down, or the context is done). Fall back
+		// to the pool: correctness does not depend on the diagnostic.
+		u, qerr := s.authSessionUserOn(s.r, ctx, tokenHash, now)
+		return u, nil, qerr
+	}
+	defer conn.Close()
+	u, qerr := s.authSessionUserOn(conn, ctx, tokenHash, now)
+	if !errors.Is(qerr, sql.ErrNoRows) {
+		return u, nil, qerr
+	}
+	return nil, s.probeStaleConn(ctx, conn, tokenHash, now), qerr
+}
+
+// authSessionUserOn runs the session lookup on one handle. The writer is the
 // authority; the reader is the fast path.
-func (s *Store) authSessionUserOn(db *sql.DB, ctx context.Context, tokenHash string, now time.Time) (*contracts.User, error) {
-	row := db.QueryRowContext(ctx,
+func (s *Store) authSessionUserOn(q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, ctx context.Context, tokenHash string, now time.Time) (*contracts.User, error) {
+	row := q.QueryRowContext(ctx,
 		`SELECT `+prefixed(userCols, "u")+`
 		   FROM auth_sessions a
 		   JOIN users u ON u.id = a.user_id

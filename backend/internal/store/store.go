@@ -36,7 +36,6 @@ import (
 	"embed"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,6 +85,13 @@ type Store struct {
 	// the pool when it happens (see AuthSessionUser) and this counter is what a
 	// regression test asserts on.
 	staleReads atomic.Int64
+	// lastStale is the diagnostic for the most recent detection: which connection
+	// served the stale read, what it had been doing, and what it answered when it
+	// was asked directly (see stale_read_probe.go).
+	lastStale atomic.Pointer[staleReadReport]
+	// lastProbeAt is the unix-nano time of the last full probe; a token nobody
+	// ever issued must not be able to drive the diagnosis in a loop.
+	lastProbeAt atomic.Int64
 }
 
 // readPoolSize is how many connections the read pool keeps. Four is enough for
@@ -101,10 +107,9 @@ const readPoolSize = 4
 // later query on that connection -- which is how a long-lived server starts
 // answering 401 (or "project not found") for rows that are committed. Closing
 // the idle connections is the supported way to get rid of it without touching
-// queries that are in flight.
+// queries that are in flight. What the guilty connection had been doing is
+// logged by noteStaleRead before this runs.
 func (s *Store) discardStaleReaders() {
-	s.staleReads.Add(1)
-	log.Printf("store: a read connection served a stale snapshot; dropping the idle read pool")
 	s.r.SetMaxIdleConns(0)
 	s.r.SetMaxIdleConns(readPoolSize)
 }
@@ -128,10 +133,9 @@ func OpenWithNow(ctx context.Context, path string, now func() time.Time) (*Store
 		return nil, err
 	}
 
-	w, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("store: open %q: %w", path, err)
-	}
+	// Every pool is opened through the probe connector (sqlprobe.go) so a stale
+	// read can name the connection it came from. sql.OpenDB does not dial.
+	w := openProbePool(dsn, "write")
 	// One writer. SQLite serialises writes anyway; doing it in the pool means
 	// every statement either gets the write lock immediately or waits in Go
 	// instead of failing with SQLITE_BUSY, and it makes the
@@ -156,11 +160,7 @@ func OpenWithNow(ctx context.Context, path string, now func() time.Time) (*Store
 		// Separate read pool: WAL lets readers run concurrently with the single
 		// writer, so SSE replay and list endpoints never wait on an in-flight
 		// write.
-		r, err := sql.Open("sqlite", dsn)
-		if err != nil {
-			_ = w.Close()
-			return nil, fmt.Errorf("store: open read pool %q: %w", path, err)
-		}
+		r := openProbePool(dsn, "read")
 		r.SetMaxOpenConns(readPoolSize)
 		r.SetMaxIdleConns(readPoolSize)
 		r.SetConnMaxLifetime(0)

@@ -80,6 +80,12 @@ async function main() {
   log("session", session.id);
 
   let stopped = false;
+  // A short pause between batches keeps the loop at a rate the loopback port
+  // proxy survives. At 0 the harness can saturate a Docker Desktop port forward
+  // on this machine (measured: ~470% CPU in the container, then connect
+  // timeouts), which ends the probe long before its deadline -- that is a
+  // property of the harness, not a finding about the server.
+  const abortPause = Number(args.get("--abort-pause") ?? 0);
   const abortLoop = (async () => {
     while (!stopped) {
       await Promise.all([
@@ -89,27 +95,80 @@ async function main() {
         aborted(`/v1/sessions/${session.id}/git/log?limit=200`, cookie, 5),
         aborted(`/v1/projects`, cookie, 5),
       ]);
+      if (abortPause > 0) await sleep(abortPause);
     }
   })();
 
   let probes = 0;
+  // Beyond auth: the project created above is committed, so every list read
+  // that is served by a frozen snapshot would hide it. Counting that turns "is
+  // more than the auth lookup affected?" into a measurement instead of a guess.
+  let projectReads = 0;
+  let projectMisses = 0;
+  async function projectVisible(cookie) {
+    projectReads += 1;
+    try {
+      const res = await fetch(`${base}/v1/projects`, { headers: { cookie } });
+      if (!res.ok) return true; // an error is not this question's business
+      const body = await res.json();
+      return (body.projects ?? []).some((row) => row.id === project.id);
+    } catch {
+      return true;
+    }
+  }
+
+  let netErrors = 0;
+  let consecutive = 0;
   while (!stopped) {
-    const fresh = await login();
+    // The load above is deliberately abusive: thousands of sockets a second on a
+    // loopback port proxy. A connect timeout is therefore a property of the
+    // harness, not a finding about the server, so it is counted and retried
+    // instead of ending the run (an unhandled rejection here used to stop the
+    // probe after ~2 minutes).
+    let fresh;
+    try {
+      fresh = await login();
+    } catch (error) {
+      netErrors += 1;
+      consecutive += 1;
+      if (consecutive <= 5 || consecutive % 25 === 0) {
+        log(`probe #${probes}: login failed (${error?.cause?.code ?? error?.message}); retrying`);
+      }
+      if (consecutive > 400) {
+        stopped = true;
+        log(`giving up after ${netErrors} network errors`);
+        console.log(JSON.stringify({ wedged: false, seconds: Number(elapsed()), probes, netErrors }, null, 2));
+        break;
+      }
+      await sleep(500);
+      continue;
+    }
+    consecutive = 0;
     probes += 1;
     const me = await fetch(`${base}/v1/auth/me`, { headers: { cookie: fresh.cookie } });
     if (me.status === 401) {
       stopped = true;
       const body = await me.text();
       log(`WEDGE at probe #${probes}: /v1/auth/me -> 401 ${body}`);
-      console.log(JSON.stringify({ wedged: true, seconds: Number(elapsed()), probes }, null, 2));
+      console.log(
+        JSON.stringify({ wedged: true, seconds: Number(elapsed()), probes, projectReads, projectMisses, netErrors }, null, 2),
+      );
       process.exitCode = 2;
       break;
     }
-    if (probes % 25 === 0) log(`probe #${probes}: /v1/auth/me 200`);
+    if (!(await projectVisible(fresh.cookie))) {
+      projectMisses += 1;
+      if (projectMisses <= 5) log(`probe #${probes}: /v1/projects does not list project ${project.id}`);
+    }
+    if (probes % 25 === 0) {
+      log(`probe #${probes}: /v1/auth/me 200 · projects listed ${projectReads - projectMisses}/${projectReads}`);
+    }
     if (elapsed() > seconds) {
       stopped = true;
-      log(`no wedge after ${seconds}s / ${probes} probes`);
-      console.log(JSON.stringify({ wedged: false, seconds: Number(elapsed()), probes }, null, 2));
+      log(`no wedge after ${seconds}s / ${probes} probes (project list missed ${projectMisses}/${projectReads})`);
+      console.log(
+        JSON.stringify({ wedged: false, seconds: Number(elapsed()), probes, projectReads, projectMisses }, null, 2),
+      );
       break;
     }
     await sleep(200);

@@ -20,6 +20,8 @@
 
 本批（diff 作用域与逐 hunk UI + e2e 定向清理）之后，FR-12.1 与 FR-12.2 从 PARTIAL 移入 DONE：**126 条 FR 为 DONE 64 / PARTIAL 44 / MISSING 17 / 不做 1**；**整表 130 行 = DONE 68 / PARTIAL 44 / MISSING 17 / 不做 1**。`FR-12.1` 的 DONE 只覆盖 工作区/已暂存/分支 vs 基准/提交范围 四个作用域——PRD 原文里的「本轮」仍没有入口，行首标题已按实际覆盖改写，不拿 DONE 冒充。另一个不是 FR 的改动在 `e2e/scripts/`：e2e 数据目录不再无限增长（见文末「e2e 数据目录的定向清理」），它不改变任何 FR 状态。
 
+本批（diff 作用域与逐 hunk UI + e2e 定向清理）之后，FR-12.1 与 FR-12.2 从 PARTIAL 移入 DONE：**126 条 FR 为 DONE 64 / PARTIAL 44 / MISSING 17 / 不做 1**；**整表 130 行 = DONE 68 / PARTIAL 44 / MISSING 17 / 不做 1**。`FR-12.1` 的 DONE 只覆盖 工作区/已暂存/分支 vs 基准/提交范围 四个作用域——PRD 原文里的「本轮」仍没有入口，行首标题已按实际覆盖改写，不拿 DONE 冒充。另一个不是 FR 的改动在 `e2e/scripts/`：e2e 数据目录不再无限增长（见文末「e2e 数据目录的定向清理」），它不改变任何 FR 状态。
+
 ---
 # PiForge 对照 PRD 的实现审计
 
@@ -407,3 +409,49 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 - 完整 e2e（同一份被反复复用的 `.data`，没有一次 `test:fresh`）：**163 passed / 7.6m、163 passed / 7.9m、163 passed / 8.5m**——最后三次连续全绿，中间那次就是修复后的验证跑。日志：`e2e/.artifacts/task2/full-e2e-{2,3,4-authfix}.log`。修复前的两次楔死（第 3 次 162 条在 83 条处、A 次 163 条在 152 条处）见上。
 - `pwsh scripts/deliver-check.ps1`（`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入，未打印、未落盘）：鉴权修复前的镜像 run `20261030-140727`，修复后的镜像 run `20261030-144953`，**两次都是 75 个检查全部 PASS、`failure` 为空**；每次的一次性容器 `pf-drill` 与 volume `pf-drill-data` 都已删除，`pf-local` 容器 id 前后一致。日志：`e2e/.artifacts/task2/deliver-check.log`、`deliver-check-2.log`，summary：`e2e/.artifacts/delivery-drill/20261030-140727|20261030-144953/summary.json`。
 - 镜像与部署：`pwsh scripts/build-app-image.ps1` 重建 `piforge:local`（鉴权修复前后各一次，最终镜像即 drill 断言的同一个）；`pf-local` 用**同一个数据卷** `368d6186adb8…` 重建（最终容器 `3ffec11e5253…`，端口 7722→7700，环境仍是 `PIFORGE_DEFAULT_PROVIDER=volc` 与四个 seed 账号）。重启后 `/healthz` = 200，`GET /v1/providers` 里 `volc` 仍 `enabled=true`、`has_key=true`。
+
+## 读连接旧快照：触发条件、直方图与修复
+
+### 1. 检测器现在记什么，以及为什么只能这么做
+
+`*sql.Conn` 没有 id，`database/sql` 也不会告诉驱动「这条语句跑在哪条连接上」。唯一能给连接一个身份和历史的地方是驱动边界，所以 `store/sqlprobe.go` 用 `driver.Connector` 把 modernc 的驱动包了一层：每条连接有 id、pool（read/write）、谁打开的，以及最近 8 次操作的环形记录——**store 方法名**（`runtime.Callers` 取栈里第一个本包帧，所以是 `(*Store).ListEvents` 这种名字，不是数据库层的 `Query`）、SQL 前缀、开始时间与耗时、错误、读了几行、是否**一行都没读就被关掉**；另有 `in_flight` / `tx_depth` / `open_rows` / `resets` / `abandoned` / 最后一次错误的 tag 与时间。成本：每条语句一次 `runtime.Callers` + 少量帧解析（几微秒），每条连接一次 map 登记（池里一共 5 条）；`PIFORGE_SQL_PROBE=0` 可关。
+
+检测点仍在 `AuthSessionUser`：它把读连接**钉住**（`s.r.Conn`）再查，未命中时先在这条连接上问四个问题，然后才问写连接：
+
+- 同一条连接再查一次（`same_conn_sees_row`，以及不带过期条件的 `same_conn_sees_token`，用来把「行不存在」和「被时间条件挡掉」分开）；
+- `PRAGMA data_version`；
+- 另外两张表（`auth_sessions` / `session_events` / `projects` 的行数与最新时间）；
+- **`BEGIN` 探针**：能成功 = autocommit（不在事务里）；报 `cannot start a transaction within a transaction` = 在事务里。这是对「是不是卡在事务里」的直接测量，不是推断。
+
+探针用**脱离请求 ctx** 的 3s 超时执行。用请求 ctx 的话，客户端在 `BEGIN` 与 `ROLLBACK` 之间断开就会留下一个开着的写事务——那等于用探针制造它要测的东西（第一版就是这么写的，这里记下来）。
+
+### 2. 十分钟探测（`e2e/scripts/repro-auth-wedge.mjs`，部署实例 127.0.0.1:7722，卷 `368d6186…`）
+
+- **`--seconds 600 --abort-pause 4`：600.2s / 2330 次探测 / `0` 次 401 / 项目列表漏 0 次 / **stale read 检测 0 次**（`e2e/.artifacts/task1-probe/probe-10min-deployed.log`，服务端日志 `server-10min-deployed.log`）。同一形状在另一份数据目录上也跑过一次：600.1s / 2354 次探测 / 0 次检测（`probe-10min-4.log`、`server-10min.log`）。两次都**没有任何一次检测**，所以十分钟窗口没有 tag 直方图可画——原因见 §3 与下面这次对照。
+- 为了证明「条件还在、只是被处理掉了」，在同一镜像上用**和修复前完全相同的强度**跑 120s（`--abort-pause 0`，即 harness 原来的形状）：**418 次探测 / 0 次 401 / 0 次项目漏 / 0 次 stale read / 514 条连接因「语句被中断」退役**（`e2e/.artifacts/task1-probe/server-120s-pause0.log`）。退役日志是**限流采样**的（每秒最多一行，共记了 13 行），里面 `last_err="context canceled"`，`last_err_on` 的分布是 `(*Store).Session` 7、`(*Store).authSessionUserOn` 5、`(*Store).ListEvents` 1。十分钟窗口（pause 4）里只有 18 条退役：abort 落点时查询多半已经跑完，中断本身更少，所以那次对退役策略的考验比 120s 的弱——真正说明问题的是 120s 那次。
+- **修复前**（同一个 harness、同一个镜像只差退役这一处）：两次窗口各约 107s，分别 **6 次**和 **5 次** stale read；每一次的 `last_err` 都是 `context canceled`，`last_err_on` 是 `(*Store).ListProjects` / `(*Store).Session` / `(*Store).authSessionUserOn`，`txn_state=autocommit` 6/6，`open_rows=0` 6/6，`abandoned=0` 6/6，`same_conn_sees_row=false` 6/6，`write_sees_row=true` 6/6，`same_conn_sees_token=false`。这两次窗口的容器日志随重建丢了（只剩当时的输出），所以**结论不建立在这两个数字上**，而建立在 §3 的机制与 §4 的对照上。
+
+顺带一个与本次改动无关的观察：harness 用 `--abort-pause 0` 时会把部署实例压到 ~470% CPU，随后 loopback 端口开始 connect timeout（`PIFORGE_SQL_PROBE=0` 的对照跑同样如此，所以不是诊断代码造成的）。这也是为什么十分钟那次用了 `--abort-pause 4`。
+
+### 3. 结论：触发条件是什么，不是什么
+
+- **不是** BEGIN/COMMIT 或应用层事务：被检测到的连接 `tx_depth=0`，`BEGIN` 在同一连接上全部成功（`txn_state=autocommit`）。
+- **不是** 打开着没关的结果集：`open_rows=0`、`abandoned=0`（被 abort 的查询根本没返回 rows）。
+- **不是** 写连接或隔离级别：写连接读得到那一行，读连接连**不带过期条件**的 token 行都看不到。
+- **不是** store 层的用法（全表扫描、提前 Close 之类）：失败的操作 tag 各不相同，历史里也没有全扫。
+- **是**：**语句被中断**。每条出问题的连接，最后一次错误都是 `context canceled`（客户端 abort 掉的请求，主要是事件流与列表读），之后它就从「中断那一刻」的快照作答——autocommit、没有打开的结果集、没有事务，却看不到中断之后提交的行。驱动层留下的 pager 读事务状态停在旧快照上，这是 modernc 的连接状态，不是我们 SQL 的形状。
+- **仍未回答**：驱动里究竟哪一步把状态留下。我们没能在 Windows 上复现：`store/stale_snapshot_repro_test.go` 用同样形状（6 万行、reader 在 goroutine 里、2ms 后 cancel、再并发 Close）在本机 40 次里一次也没冻住，所以这条测试现在是「一旦某些平台/版本上复现就报错」的哨兵，不是修复证明。
+
+### 4. 修法：被中断过的连接退役，不再发给下一个请求
+
+`store/sqlprobe.go`：语句以 `context.Canceled` / `DeadlineExceeded`（或错误文本含 interrupt）结束时给该连接打 poison；`ResetSession` 见到 poison 返回 `driver.ErrBadConn`，database/sql 会关掉它并换一条新连接。于是「冻结的连接」不会被下一个请求继承。这不是修好了驱动，是**不把已知坏掉的连接发出去**；`PIFORGE_SQL_PROBE=0` 也不会关掉它（它是正确性，不是诊断）。原有的「检测 → 丢空闲读连接 → 鉴权以写连接为准」保留为第二道保险。
+
+测试：`store/connection_retirement_test.go` 两例——被中断的连接在下次签出时确实被换掉、且新连接看得到中断之后提交的行；健康的连接**不会**被换掉（避免变成「每条查询一条新连接」）。
+
+### 5. 风险（写清楚，不藏）
+
+- 每次客户端 abort 都会退役一条连接，abort 风暴下有可观的建连开销（本地文件库上是 µs 级；远端/加密盘上更贵）。这是用「多开一条连接」换「不返回旧数据」。
+- 只覆盖**经过 store 的、同进程内的**中断。驱动里其它可能造成旧快照的路径没有覆盖；如果还有，检测器仍会记录并修复连接池（第二道保险还在）。
+- `PRAGMA data_version` 在两个连接之间不可比（它是每条连接自己的变化计数），日志里只当辅助信号，不据此下结论。
+- 退役策略是在**部署实例（Linux 容器）**上验证的；单测在 Windows 上证明的是策略本身（连接被换掉、健康连接被复用），不是驱动的那个缺陷。
+
