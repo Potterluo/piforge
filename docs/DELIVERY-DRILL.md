@@ -2,9 +2,9 @@
 
 > 演练日期：2026-10-30（Asia/Shanghai）
 > 演练脚本：[`scripts/deliver-check.ps1`](../scripts/deliver-check.ps1)
-> 本次成功运行的证据目录：[`e2e/.artifacts/delivery-drill/20261030-073152/`](../e2e/.artifacts/delivery-drill/20261030-073152/)
-> 演练镜像：`piforge:local`（`sha256:6a6f1fdedd5e8ebec659bcc419ec8d8340d079560883a48184454cea9eeb5312`）
-> 结论：**新操作员可以从零走到一次可用的 agent 回合；无需手工配置服务商。** 本次 74 项断言全部通过，产品代码未改动。
+> 本次成功运行的证据目录：[`e2e/.artifacts/delivery-drill/20261030-172337/`](../e2e/.artifacts/delivery-drill/20261030-172337/)
+> 演练镜像：`piforge:local`（`sha256:2cdba2cd65859dff62fc0c514e4a589d99be3c65e44e449dae0e2ec2cc63ecac`）
+> 结论：**新操作员可以从零走到一次可用的 agent 回合，开出第一个 PR，并把一行评论变成 agent 的输入；无需手工配置服务商。** 本次 119 项断言全部通过，脚本 exit 0，总耗时 102.1 s，产品代码未改动。
 
 ---
 
@@ -13,43 +13,52 @@
 在一个**全新的空 volume** 上，只给端口、种子账号和 bootstrap 服务商环境变量启动
 `piforge:local`，`/v1/setup` 即返回 `needs_provider:false`、`shared_provider_available:true`；
 一个通过 API **新建的普通用户**可以登录、建项目（无 repo）、建会话，并让 agent
-真实地写脚本、运行脚本、跑 `npm test`、用容器身份提交 commit。浏览器面板截图、文件树
-自动刷新、空闲 Chromium 回收也都成立。唯一的产品层瑕疵是 **Node 内置测试器（TAP）的
-结果显示为 `unrecognized`**，属于展示精度问题，不阻塞交付。
+真实地写脚本、运行脚本、跑 `npm test`、用容器身份提交 commit。此后同一会话还能：
+在一条新分支上提交、把项目指向一个**容器内的假 forge**、先推送再 `POST /git/pr`
+开出 PR（重复调用返回 `created=false` 与同一个 URL，forge 的 422 原样上浮），
+以及把 `notes.txt:2` 的行内评论变成 agent 的下一轮输入（`行内评论 · notes.txt:2`
++ 被引用的代码 + 评论正文 + 当前位置说明）。浏览器面板截图、文件树自动刷新、空闲
+Chromium 回收也都成立。演练最后断言**源 checkout 仍是干净的**、Docker 里没有留下
+任何 `pf-drill*` 容器或 volume。
 
 ---
 
 ## 1. 本次实测数字
 
 下表全部来自本次成功运行，不是估算。原始值见
-[`summary.json`](../e2e/.artifacts/delivery-drill/20261030-073152/summary.json) 的
+[`summary.json`](../e2e/.artifacts/delivery-drill/20261030-172337/summary.json) 的
 `metrics` 与 `checks`，以及各命令输出文件。
 
 | 指标 | 实测值 | 证据 |
 |---|---:|---|
 | `docker run` → `GET /healthz` 200 | **0.55 s** | `summary.json` → `healthz_seconds` |
-| 发送 prompt → `run.settled` 事件时间戳 | **11.54 s** | `events.sse` 的 `run.settled.ts`；`summary.json` → `prompt_to_settle_seconds` |
-| 发送 prompt → 轮询首次看到 `running:false` | **12.02 s** | `summary.json` → `prompt_to_first_idle_seconds` |
-| 本次回合 token | 输入 **5,419**，输出 **991** | `events.sse` → `run.settled.payload` |
+| 发送 prompt → `run.settled` 事件时间戳 | **12.48 s** | `events.sse` 的 `run.settled.ts`；`summary.json` → `prompt_to_settle_seconds` |
+| 发送 prompt → 轮询首次看到 `running:false` | **12.57 s** | `summary.json` → `prompt_to_first_idle_seconds` |
+| 本次回合 token | 输入 **9,826**，输出 **1,032** | `events.sse` → `run.settled.payload` |
 | 截图后 Chromium 进程数 | **10** | `summary.json` → `chromium_processes_active` |
 | 空闲超时（60 s）后 Chromium 进程数 | **0**（wait 61.00 s） | `summary.json` → `chromium_processes_after_idle` / `chromium_idle_seconds` |
-| 演练结束前容器内存 | **170.5 MiB / 15.43 GiB** | `docker-stats.txt` |
-| 演练结束前容器 CPU / PIDs | **0.00 % / 45** | `docker-stats.txt` |
+| 演练结束前容器内存 | **173.8 MiB / 15.43 GiB** | `docker-stats.txt` |
+| 演练结束前容器 CPU / PIDs | **0.05 % / 51** | `docker-stats.txt` |
 | 浏览器面板截图 | **35,042 bytes，1280×713，132 个采样颜色** | `browser-panel.png`、`browser-panel.json` |
-| 测试面板记录 | **1 条**，命令 `npm test`，状态 `unrecognized` | `test-runs.json` |
-| commit | `fca98a551280b81d969b148bfd2474b8f5af8a61` | `commit.txt` |
-| commit 身份 | `PiForge\|piforge@localhost\|Add script to print first 10 primes with tests` | `commit.txt` |
-| 工作区文件 vs 沙箱文件 SHA-256 | 两边均为 `94a64d08f744a9e54f7c13eb1614a2c8367b979204580075cf82514526277c21` | `summary.json` |
-| 会话 transcript | 16 条 entry；4 条 assistant 回复；7 条 toolResult；7 个 toolCall | `entries.json`、`summary.json` |
-| 断言 | **74 PASS / 0 FAIL**，脚本 exit 0，总耗时 96 s | `summary.json`、`official-console-2.log` |
+| 测试面板记录 | **1 条**，命令 `npm test`，状态 `passed`，2/2 | `test-runs.json` |
+| commit | `a2833c35d4e8530db6ecc116408c484837046fd0` | `commit.txt` |
+| commit 身份 | `PiForge\|piforge@localhost\|Add primes script with tests` | `commit.txt` |
+| 工作区文件 vs 沙箱文件 SHA-256 | 两边均为 `226a2684df2bf7cc71c0384bb0c1f2e3dd78bebf64988c62f629e7ae20bf6a42` | `summary.json` |
+| 会话 transcript | 16 条 entry；5 条 assistant 回复；7 条 toolResult；7 个 toolCall | `entries.json`、`summary.json` |
+| PR 分支 / 提交 | `drill/pull-request` / `3357b72aa6157fa4ba35dd982f117fc2eac71d8d` | `pr-create.json`、`pr-preview.json` |
+| PR URL | `http://127.0.0.1:7799/acme/widgets/pull/7` | `pr-create.json` |
+| 假 forge 收到的请求 | **9 条**；1 次成功创建；1 次被强制的 422 | `forge-requests.jsonl` |
+| 行内评论这一轮 | **4.09 s** 内 started → settled | `summary.json` → `review_comment_turn_seconds` |
+| 行内评论锚点 | `行内评论 · notes.txt:2` + `2 \| theme: dark` + 评论正文 + `位置：…第 2 行。` | `entries-comment.json`、`review-comment-message.txt` |
+| 断言 | **119 PASS / 0 FAIL**，脚本 exit 0，总耗时 **102.1 s** | `summary.json`、`console.log` |
 
 本次运行的标识：
 
-- 新用户：`drill-20261030-073152@piforge.local`
-- 项目：`prj_01M6502XJRSE36M1EQQP2ZMHMJ`
-- 会话：`ses_01M6502XJTWH0K33M9HKN2BB9R`
+- 新用户：`drill-20261030-172337@piforge.local`
+- 项目：`prj_01M661YEEBYNMZP59722ND070N`
+- 会话：`ses_01M661YEEFZMHKFSXPYCRMTKKX`
 - 容器 / volume：`pf-drill` / `pf-drill-data`（已在 `finally` 中删除）
-- 既有部署 `pf-local`：演练前后容器 ID 相同，`/healthz` 始终 200
+- 既有部署 `pf-local`：演练前后容器 ID 相同（`9f0de87b...`），`/healthz` 始终 200
 
 ---
 
@@ -145,18 +154,18 @@ time=2026-10-29T23:31:53.695Z level=INFO msg="bootstrap: created the shared mode
 ```powershell
 # 管理员创建普通用户（X-PF-CSRF 来自登录响应或 pf_csrf cookie）
 curl.exe -sS -b cookies.txt -H "X-PF-CSRF: $csrf" -H 'Content-Type: application/json' `
-  -d '{"email":"drill-20261030-073152@piforge.local","display_name":"Delivery Drill","password":"<drill-user-password>","role":"user"}' `
+  -d '{"email":"drill-20261030-172337@piforge.local","display_name":"Delivery Drill","password":"<drill-user-password>","role":"user"}' `
   http://127.0.0.1:7731/v1/admin/users
 
 # 新用户登录后：项目不关联 repo
 curl.exe -sS -b new-cookies.txt -H "X-PF-CSRF: $newCsrf" -H 'Content-Type: application/json' `
-  -d '{"name":"drill-20261030-073152","repo_url":"","default_branch":"main"}' `
+  -d '{"name":"drill-20261030-172337","repo_url":"","default_branch":"main"}' `
   http://127.0.0.1:7731/v1/projects
 
 # 在项目下建会话
 curl.exe -sS -b new-cookies.txt -H "X-PF-CSRF: $newCsrf" -H 'Content-Type: application/json' `
   -d '{"title":"delivery drill"}' `
-  http://127.0.0.1:7731/v1/projects/prj_01M6502XJRSE36M1EQQP2ZMHMJ/sessions
+  http://127.0.0.1:7731/v1/projects/prj_01M661YEEBYNMZP59722ND070N/sessions
 ```
 
 脚本确认新用户的 `/v1/setup` 也是 `needs_provider:false, shared_provider_available:true,
@@ -175,8 +184,8 @@ Finally commit everything with git.
 
 ```powershell
 curl.exe -sS -b new-cookies.txt -H "X-PF-CSRF: $newCsrf" -H 'Content-Type: application/json' `
-  -d '{"client_msg_id":"drill-20261030-073152","text":"...上面那段..."}' `
-  http://127.0.0.1:7731/v1/sessions/ses_01M6502XJTWH0K33M9HKN2BB9R/messages
+  -d '{"client_msg_id":"drill-20261030-172337","text":"...上面那段..."}' `
+  http://127.0.0.1:7731/v1/sessions/ses_01M661YEEFZMHKFSXPYCRMTKKX/messages
 ```
 
 返回 `accepted:true, disposition:"started"`，随后脚本轮询
@@ -185,20 +194,20 @@ curl.exe -sS -b new-cookies.txt -H "X-PF-CSRF: $newCsrf" -H 'Content-Type: appli
 
 ```powershell
 curl.exe -sN --max-time 10 -b "pf_session=<cookie>" `
-  "http://127.0.0.1:7731/v1/sessions/ses_01M6502XJTWH0K33M9HKN2BB9R/events?after_seq=0" `
+  "http://127.0.0.1:7731/v1/sessions/ses_01M661YEEFZMHKFSXPYCRMTKKX/events?after_seq=0" `
   -o events.sse
 ```
 
 `events.sse` 中同时存在 `event: run.started` 和 `event: run.settled`；本次
-`run.started.ts=2026-10-29T23:31:54.35817348Z`、
-`run.settled.ts=2026-10-29T23:32:05.643808848Z`，相对发送 prompt 的时间为
-**11.54 s**。用产品自己的完成信号（`run.settled`，即 `agent_settled` 的规范化事件）
+`run.started.ts=2026-10-30T09:23:39.358061056Z`、
+`run.settled.ts=2026-10-30T09:23:51.586786328Z`，相对发送 prompt 的时间为
+**12.48 s**。用产品自己的完成信号（`run.settled`，即 `agent_settled` 的规范化事件）
 计时，而不是用轮询到的第一个 `running:false` 估算。
 
 ### 2.6 验 transcript、文件、commit、测试面板
 
 ```powershell
-# transcript（16 条：user 1、assistant 4、toolResult 7、system/model_change 等）
+# transcript（16 条：user 1、assistant 5、toolResult 7、toolCall 7）
 curl.exe -sS -b new-cookies.txt http://127.0.0.1:7731/v1/sessions/<id>/entries
 
 # 文件树
@@ -212,13 +221,13 @@ curl.exe -sS -b new-cookies.txt "http://127.0.0.1:7731/v1/sessions/<id>/test-run
 
 ```powershell
 docker exec pf-drill sh -c "cd /data/sandboxes/<user>/<project>/repo && git log -1 --format='%an|%ae|%s'"
-# PiForge|piforge@localhost|Add script to print first 10 primes with tests
+# PiForge|piforge@localhost|Add primes script with tests
 
 docker exec pf-drill sh -c "cd /data/sandboxes/<user>/<project>/repo && git status --porcelain"
 # 空输出（clean）
 
 docker exec pf-drill sh -c "cd /data/sandboxes/<user>/<project>/repo && sha256sum primes.js"
-# 94a64d08f744a9e54f7c13eb1614a2c8367b979204580075cf82514526277c21  primes.js
+# 226a2684df2bf7cc71c0384bb0c1f2e3dd78bebf64988c62f629e7ae20bf6a42  primes.js
 ```
 
 同一文件通过 API 下载（`/files?path=primes.js&download=1`）后算出的 SHA-256
@@ -227,24 +236,19 @@ docker exec pf-drill sh -c "cd /data/sandboxes/<user>/<project>/repo && sha256su
 ```text
 package.json
 primes.js
-test/primes.test.js
+primes.test.js
 ```
 
-`npm test` 的输出（`test-runs.json` 的 `output_tail`）显示 TAP：
+这次 agent 把测试文件放在仓库根目录，而不是 `test/` 子目录——脚本按扩展名
+（`*.test.js`）断言，不假定目录，所以两种布局都算通过。
 
-```text
-TAP version 13
-# Subtest: first 10 primes are correct
-ok 1 - first 10 primes are correct
-# Subtest: isPrime rejects composites and non-primes
-ok 2 - isPrime rejects composites and non-primes
-1..2
-# tests 2
-# pass 2
-# fail 0
+测试面板这次把同一份 TAP 解析成了通过（`test-runs.json`）：
+
+```json
+{"runner":"npm test","status":"passed","total":2,"passed":2,"failed":0,"skipped":0,"duration_ms":35}
 ```
 
-但面板状态是 `unrecognized`、`total/passed/failed` 都是 0——见 §6。
+早期演练里同一份输出是 `unrecognized`，见 §6.2 与 §6.10 的修复记录。
 
 ### 2.7 浏览器面板截图
 
@@ -254,20 +258,24 @@ curl.exe -sS -b new-cookies.txt -H "X-PF-CSRF: $newCsrf" -H 'Content-Type: appli
   -d '{"url":"http://127.0.0.1:3100/login"}' `
   http://127.0.0.1:7731/v1/sessions/<id>/browser/tabs
 
-# 截图（写入 checkout 的 screenshots/ 目录）
+# 截图（写入数据目录的 artifacts/<session>/screenshots/，不是 checkout）
 curl.exe -sS -b new-cookies.txt -X POST -H "X-PF-CSRF: $newCsrf" `
   http://127.0.0.1:7731/v1/sessions/<id>/browser/screenshot
-# {"path":"screenshots/20261029-233222-110.png","bytes":35042}
+# {"path":"artifacts/ses_.../screenshots/20261030-092408-559.png","bytes":35042}
 ```
 
-脚本把 PNG 通过文件 API 下载回来，解码后统计采样颜色：**1280×713，132 种颜色**，
-不是空白页。截图内容为 PiForge 登录页（带种子账号的预置提示），见
-`browser-panel.png`。
+脚本用 `GET /v1/sessions/{id}/artifacts?path=screenshots/...` 把 PNG 下载回来，
+解码后统计采样颜色：**1280×713，132 种颜色**，不是空白页。截图内容为 PiForge
+登录页（带种子账号的预置提示），见 `browser-panel.png`。
+
+截图落在数据目录而不是工作区，所以截完图后容器内的 `git status` 仍是 clean——
+脚本专门断言了这一点（`the checkout is still clean after the capture`），
+早期版本会把 `screenshots/` 留在 checkout 里，见 §6.5/§6.10。
 
 说明：这里调用的是浏览器面板“相机”按钮背后的同一个
 `POST /v1/sessions/{id}/browser/screenshot` 接口；本次没有用 Playwright 去点那个按钮。
-按钮本身的 UI 路径由 `e2e/tests/20-screenshot.spec.ts` 覆盖，但那个 spec 不在本次
-演练的执行范围内（本次没有改产品代码，未跑完整 e2e）。
+按钮本身的 UI 路径由 `e2e/tests/20-screenshot.spec.ts` 覆盖，该 spec 在本轮完整
+e2e 套件中执行（见 §7）。
 
 ### 2.8 文件树“无需手动刷新”
 
@@ -294,10 +302,10 @@ docker exec pf-drill sh -c "pgrep -c chromium || true"
 # 等待 61 s（产品默认 idle timeout 60 s）后：0
 
 docker stats --no-stream --format "{{.Name}}|{{.MemUsage}}|{{.CPUPerc}}|{{.PIDs}}" pf-drill
-# pf-drill|170.5MiB / 15.43GiB|0.00%|45
+# pf-drill|173.8MiB / 15.43GiB|0.05%|51
 ```
 
-### 2.10 拆除与不干扰确认
+### 2.10 拆除、不干扰与回归守卫
 
 ```powershell
 docker rm -f pf-drill
@@ -310,39 +318,164 @@ docker inspect pf-local --format '{{.Id}}|{{.State.Running}}'
 curl.exe -fsS http://127.0.0.1:7722/healthz   # 200
 ```
 
-`pf-local` 在演练前后容器 ID 相同（`7eaa287f...`），`/healthz` 始终 200。
+`pf-local` 在演练前后容器 ID 相同（`9f0de87b...`），`/healthz` 始终 200。
 它本身没有 Docker healthcheck（`docker inspect` 没有 `.State.Health`），所以脚本用
 **容器 running + 端口 `/healthz` 200** 作为“仍然健康”的证据。
 
+拆除之后，`finally` 里还会做三件守卫（§2.13）：源 checkout `git status` 为空、
+Docker 里没有 `pf-drill*` 容器、没有 `pf-drill*` volume。这三项和演练本身的断言
+一样是 PASS/FAIL，不是提示。
+
+### 2.11 开 PR：先推送，再创建（FR-12.6）
+
+这一段用一个**跑在演练容器内部**的假 forge（`/tmp/drill-forge/server.js`，Node 标准库，
+无依赖）来证明「开 PR」这条链路。放在容器内有两个好处：`127.0.0.1` 就是控制面的
+loopback（不需要 host.docker.internal、防火墙规则或额外宿主进程），容器删除时它
+和服务端日志一起消失。假 forge 只实现产品会打的两个调用：
+
+- `GET /repos/{owner}/{repo}/pulls`（按 `head`/`base` 过滤已存在的 PR）；
+- `POST /repos/{owner}/{repo}/pulls`（创建，或按控制文件强制返回 422）。
+
+每个请求（方法、路径、query、`Authorization`、请求体、响应码）都追加到
+`/tmp/drill-forge/requests.jsonl`；脚本把它复制成 `forge-requests.jsonl`
+（复制前把 token 替换成 `<redacted>`）。提示：token 只在 `Authorization: Bearer`
+头里出现，不在 URL/query 里。
+
+演练按 UI 的路径准备内容，不直接改 git 配置：
+
+```powershell
+# 1) 一条新分支 + 一个提交，全部走产品 API（分支选择器 / 编辑器 / 提交框背后的接口）
+POST /v1/sessions/<id>/git/branch     {"name":"drill/pull-request"}
+POST /v1/sessions/<id>/git/checkout   {"name":"drill/pull-request"}
+PUT  /v1/sessions/<id>/files?path=pr-drill.txt     # 原始 text/plain body
+POST /v1/sessions/<id>/git/commit     {"message":"drill: a file for the pull request","paths":["pr-drill.txt"]}
+
+# 2) 项目的 forge 配置（token 只写不回显）
+PUT /v1/projects/<id>/forge
+  {"kind":"github","api_base":"http://127.0.0.1:7799","repo":"acme/widgets",
+   "base_branch":"main","token":"<per-run fake token>"}
+
+# 3) 预览（不写任何东西）→ 创建（先 push 再 POST）
+GET  /v1/sessions/<id>/git/pr
+POST /v1/sessions/<id>/git/pr  {"title":"Drill: open a pull request","body":"..."}
+```
+
+`git push` 的远端是容器内的一个空 bare 仓库（`/data/drill-forge-origin.git`），
+脚本用 `docker exec` 把它加成 `origin`——项目是通过 API 建的无 repo 项目，
+`repo_url` 只接受 https/git@，所以这是唯一不改产品代码又能真实推送的办法。
+推送本身仍是产品做的 `git push -u origin <branch>`。
+
+断言（全部来自 `pr-create.json` / `forge-requests.jsonl`，不是产品自说自话）：
+
+| 断言 | 本次值 |
+|---|---|
+| 状态码 201、`created=true` | `status=201 created=True` |
+| 响应带 PR URL | `http://127.0.0.1:7799/acme/widgets/pull/7` |
+| `pushed.branch` 是会话分支、`pushed.commit` 是 40 位 SHA | `drill/pull-request` / `3357b72…` |
+| 第二次调用：200、`created=false`、同一 URL、`existing=true` | 见 `pr-create-again.json` |
+| forge 只收到 **1 次**成功 create | `creates=1` |
+| create 的 `Authorization` 是 `Bearer <token>` | `Bearer <redacted>` |
+| create 的 title/head/base 精确匹配 | `Drill: open a pull request` / `acme:drill/pull-request` / `main` |
+| token 不在 URL/query | `occurrences=0` |
+| 强制 422：HTTP 422、`code=forge_error`、`details.step=create`、`forge_status=422` | 见 `pr-rejected.json` |
+| 422 的正文**原样**包含 forge 的话 | `…HTTP 422：drill forge refused: base branch is protected (drill-422)` |
+| 被拒分支只被 create 一次，且第二次成功调用没有变成第二个 PR | `refused=1 successfulCreates=1` |
+| forge token 在容器日志里 0 次 | `occurrences=0` |
+
+422 的分支不能复用已成功的分支：产品的幂等逻辑会先 `FindOpen` 找到已有 PR，
+直接返回 `created=false`，不会把 422 暴露出来。因此强制 422 用的是第二条分支
+（`drill/rejected-base`），并让假 forge 的 `GET` 对它返回空列表。
+
+### 2.12 行内评论 → agent 的下一轮输入（FR-12.3）
+
+```powershell
+# 1) 用编辑器的同一个接口写一个文件（内容三行，评论锚在第 2 行）
+PUT /v1/sessions/<id>/files?path=notes.txt
+# 2) 用 composer 的同一个 POST 发评论（服务端拼消息，浏览器只发锚点）
+POST /v1/sessions/<id>/messages
+{
+  "client_msg_id": "drill-comment-<run>",
+  "review_comment": {
+    "path": "notes.txt", "line": 2, "side": "new", "hunk": "@@ -1,3 +1,3 @@",
+    "quote": ["theme: dark"], "body": "这一行是演练用的行内评论：请只回复你看到了它，不要修改任何文件。"
+  }
+}
+```
+
+脚本等这一轮 `run.settled`（本次 4.09 s），再从 `GET /v1/sessions/{id}/entries`
+（**agent 自己的 transcript**，不是浏览器以为发了什么）里断言：
+
+```text
+行内评论 · notes.txt:2
+diff 片段：@@ -1,3 +1,3 @@
+引用的代码：
+   2 | theme: dark
+评论：这一行是演练用的行内评论：请只回复你看到了它，不要修改任何文件。
+位置：这段代码现在仍在第 2 行。
+```
+
+`entries-comment.json` 是原始 transcript；`review-comment-message.txt` 是那条
+user turn 的完整 preview。最后脚本用产品的 `POST /git/discard` 撤销这一轮可能
+留下的改动（本次删掉了未跟踪的 `notes.txt`），并断言 checkout 回到 clean。
+
+### 2.13 回归守卫：checkout 与 Docker 数据
+
+演练最后（`finally`，拆除之后）记录三项，任何一项失败都会让脚本 exit 1：
+
+1. `git -C <repo> status --porcelain` 为空——截图、端口、假 forge、日志都不能把
+   **源 checkout** 弄脏（证据：`source-git-status.txt`）。
+2. `docker ps -a` 里没有 `pf-drill*` 容器（证据：`leftover-containers.txt`）。
+3. `docker volume ls` 里没有 `pf-drill*` volume（证据：`leftover-volumes.txt`）。
+
+这就是「演练绿了、但把证据留在工作区里」这一类回归的拦截点：本轮里
+`e2e/.artifacts/` 已被 `.gitignore` 忽略、截图已移入数据目录，所以守卫是通过的；
+如果以后有人把截图、临时仓库或日志写回 checkout，这一项会红。
+
 ---
 
-## 3. 证据文件（都在 `e2e/.artifacts/delivery-drill/20261030-073152/`）
+## 3. 证据文件（都在 `e2e/.artifacts/delivery-drill/20261030-172337/`）
 
 | 文件 | 证明了什么 |
 |---|---|
-| `summary.json` | 74 项检查的 PASS/FAIL、所有 metrics、运行起止时间 |
+| `summary.json` | 119 项检查的 PASS/FAIL、所有 metrics、运行起止时间 |
+| `console.log` | 本次运行的完整控制台输出（119 项 PASS，exit 0） |
 | `container.log` | bootstrap 创建了共享服务商、`has_key=true`；种子密码已脱敏；密钥 0 次出现 |
+| `container-after-forge.log` | 开 PR 之后的完整容器日志（同样脱敏）；forge token 0 次 |
 | `setup-admin.json` / `setup-user.json` | 管理员和新用户的 first-run 状态；新用户继承共享服务商 |
 | `context.json` | 用户、项目、会话、worktree ID |
-| `events.sse` | `run.started` / `run.settled` 原始帧，settle 时间戳（270,643 bytes） |
+| `events.sse` | `run.started` / `run.settled` 原始帧，settle 时间戳（274,795 bytes） |
 | `entries.json` | 16 条 transcript：user、assistant、toolResult、toolCall |
-| `files-tree.json` | 文件树包含 `primes.js`、`package.json`、`test/primes.test.js` |
+| `entries-comment.json` | 行内评论那一轮的 transcript：`行内评论 · notes.txt:2` + 引用 + 评论 |
+| `review-comment-message.txt` | 该 user turn 的完整消息文本（含 `位置：…`） |
+| `files-tree.json` | 文件树包含 `primes.js`、`package.json`、`primes.test.js` |
 | `primes.js` | 从 API 下载的工作区副本，用于和沙箱文件比对 SHA-256 |
 | `commit.txt` | `git log -1`、HEAD、`git status --porcelain`、commit 文件列表 |
-| `test-runs.json` | 测试面板的唯一一条 run（`npm test`，TAP 输出，状态 `unrecognized`） |
+| `test-runs.json` | 测试面板的唯一一条 run（`npm test`，`passed`，2/2） |
+| `fake-forge.js` | 容器内假 forge 的完整源码（本次实际运行的那一份） |
+| `forge-control-initial.json` / `forge-control-422.json` | 假 forge 的控制文件（正常 / 强制 422） |
+| `forge-config.json` | `PUT /v1/projects/{id}/forge` 的响应（`has_token=true`，无 token 明文） |
+| `pr-preview.json` | PR 预览：分支、基准、提交数、三点 diff 的文件、标题草稿 |
+| `pr-create.json` / `pr-create-again.json` | 首次创建（201/created）与重复调用（200/existing） |
+| `pr-rejected.json` | 强制 422：`step=create` 与 forge 原文 |
+| `forge-requests.jsonl` | 假 forge 收到的每个请求（token 已替换为 `<redacted>`） |
 | `browser-tab.json` | 打开的真实页面 URL 和 tab id |
 | `browser-panel.png` | 浏览器面板截图原图（登录页） |
 | `browser-panel.json` | 截图的尺寸、字节数、采样颜色数 |
 | `ui-file-tree.png` | 真实会话页截图：`ui-live.txt` 出现在文件树中 |
 | `ui-check.json` / `ui-check.log` | Playwright 断言：appeared/noReload/primesVisible |
+| `git-status-after-comment.json` | 行内评论轮之后、discard 之后的沙箱 checkout 状态 |
 | `docker-stats.txt` | 演练结束前的内存、CPU、PIDs |
-| `e2e/.artifacts/delivery-drill/official-console-2.log` | 本次运行的完整控制台输出（74 项 PASS） |
-| `e2e/.artifacts/delivery-drill/go-test-2.log` | Go 测试套件输出 |
-| `e2e/.artifacts/delivery-drill/web-test.log` | Web 单元测试输出（22 文件 / 186 测试） |
+| `source-git-status.txt` | 源 checkout 的 `git status --porcelain`（空 = clean） |
+| `leftover-containers.txt` / `leftover-volumes.txt` | 拆除后的 Docker 残留扫描（空 = 无残留） |
+
+门禁日志与本次运行放在同一层：
+`e2e/.artifacts/delivery-drill/gate-go.log`、`gate-web-test.log`、`gate-next-build.log`、
+`gate-e2e.log`。
 
 注意：`e2e/.artifacts/` 被 `.gitignore` 忽略（第 31 行）。因此**提交的是可复跑的脚本和
-本报告，原始证据保留在本机该目录**；需要留档时请把整个 `20261030-073152/` 目录另行归档。
-本次还保留了一个失败尝试目录 `20261030-073102/`，原因见 §6.1。
+本报告，原始证据保留在本机该目录**；需要留档时请把整个 `20261030-172337/` 目录另行归档。
+`20261030-073102/` 是首轮的失败尝试，原因见 §6.1；`20261030-073152/` 是首轮的绿色
+运行，保留作对照。
 
 ---
 
@@ -369,6 +502,7 @@ pwsh -NoProfile -File .\scripts\deliver-check.ps1
   -ProviderName volc `
   -ProviderBaseURL 'https://api.example.com/v1' `
   -ProviderModel deepseek-v4-flash `
+  -FakeForgePort 7799 `
   -BrowserIdleWaitSeconds 75
 ```
 
@@ -376,10 +510,18 @@ pwsh -NoProfile -File .\scripts\deliver-check.ps1
 
 - `PIFORGE_DRILL_KEY` 缺失、镜像不存在、端口被占、`pf-drill*` 名称已存在、或
   `-ContainerName`/`-VolumeName` 指向 `pf-local` 时，**在创建任何东西之前失败**。
-- 只删除本次创建的容器和 volume；`finally` 里执行，断言失败也会清理。
+- 只删除本次创建的容器和 volume；`finally` 里执行，断言失败也会清理。假 forge 是容器内
+  的一个 `node` 进程，随容器一起消失，不需要单独的清理逻辑。
 - 任一断言失败 → exit 1；全部通过 → exit 0。
 - 控制台打印 Summary 表和 Measured 表；完整结果在 `summary.json`。
 - `-SkipUi` 跳过 Playwright 文件树检查（没有 `e2e/node_modules` 或 Chrome 时使用）。
+- 需要 **PowerShell 7**：脚本用 `-SkipHttpErrorCheck` 读 4xx/5xx 响应体（强制 422 的
+  forge 原文就是从这里来的）。Windows PowerShell 5.1 没有这个参数。
+- `-FakeForgePort` 只在容器内部监听（不发布到宿主），换端口不影响 `pf-local`；
+  容器内该端口被占用时脚本会在“fake forge is listening”这一项失败并给出原因。
+- 本次总耗时 **102.1 s**（首轮绿色运行 96 s，最近一次 75 项运行 105 s；差异主要来自
+  模型回合本身的 10–20 s）。新增两项检查大约多花 **6–8 s**：PR 链路是本地 git push +
+  容器内 HTTP，行内评论那一轮实测 4.09 s。
 
 ---
 
@@ -422,12 +564,15 @@ pwsh -NoProfile -File .\scripts\deliver-check.ps1
 9. **UI 检查依赖。** Playwright 检查需要 `e2e/node_modules` 和本机 Chrome/Chromium；
    CI 上没有时用 `-SkipUi`，但这会少一项“文件树无需刷新”的证据。
 
-10. **成本与配额。** 脚本会真实调用一次模型（本次输入 5,419 / 输出 991 tokens）；
-    重跑就是再花一次。CI 里应使用专用 key 和限额。
+10. **成本与配额。** 脚本会真实调用模型**两次**：主回合（本次输入 9,826 / 输出 1,032
+    tokens）和行内评论轮（短回复）。重跑就是再花一次。CI 里应使用专用 key 和限额。
 
 ---
 
-## 6. 失败与易碎点（本次真实观察）
+## 6. 失败与易碎点（历史观察与修复记录）
+
+> §6.1–§6.9 是**首轮**（2026-10-30 `073152`）的真实观察，保留作追溯；§6.10 记录了
+> 随后对这些点的修复。本轮扩展（PR / 行内评论 / 回归守卫）没有改动产品代码。
 
 ### 6.1 脚本自身的第一次失败：CRLF 比较
 
@@ -444,6 +589,7 @@ pwsh -NoProfile -File .\scripts\deliver-check.ps1
 原因：`internal/testrun` 的 JS 解析器只认 jest/vitest 风格摘要，不认 Node 内置
 `node --test` 的 TAP。面板仍会显示一条“未识别格式”的 run（满足“有测试运行”），
 但用户看不到 2 passed。这是展示精度问题，不是交付阻塞，本次**没有改产品代码**。
+**现状**：已在 §6.10 修掉；本轮实测 `status=passed, total=2, passed=2`。
 
 ### 6.3 直接运行 `node --test` 不会被记录
 
@@ -465,6 +611,8 @@ jest / vitest 等会建 run。演练因此在 prompt 里要求 agent 用 `npm te
 但真实用户提交后再截图，`git status` 会多出 `screenshots/` 未跟踪目录。
 如果团队要求 clean tree，需要把 `screenshots/` 加进 `.git/info/exclude` 或
 在截图后自行清理——脚本没有替产品做这个决定。
+**现状**：已在 §6.10 修掉，截图写到数据目录；本轮在截图后直接断言 sandbox
+`git status` 仍 clean，并且 `finally` 的回归守卫再查一次源 checkout。
 
 ### 6.6 健康检查的语义
 
@@ -500,8 +648,8 @@ status after settle = {... Running:false Streaming:true ...}
 
 ### 6.10 修复后（本轮）
 
-§6.2–§6.5 已作为三个易碎点修掉，原观察保留在上面作为演练记录。注意：§7 的
-「产品代码：未改动」只属于发起这次演练的那一轮，本轮为修这三个点动了产品代码。
+§6.2–§6.5 已作为三个易碎点修掉，原观察保留在上面作为演练记录。注意：**那次修复动了
+产品代码**；本轮（PR / 行内评论 / 回归守卫）没有再改产品代码。
 
 - **Node TAP（§6.2/§6.3）**：`internal/testrun` 新增 `RunnerNode`（`node --test`）/ `RunnerTSX`
   （`tsx --test`）识别与 `parse_tap.go`。它读 `# pass` / `# fail` / `# skipped` / `# tests`
@@ -528,20 +676,30 @@ status after settle = {... Running:false Streaming:true ...}
 
 ## 7. 门禁与变更声明
 
-**产品代码：未改动。** 本次只新增：
+**产品代码：未改动。** 本轮只改了两个文件：
 
-- `scripts/deliver-check.ps1`（演练脚本）
+- `scripts/deliver-check.ps1`（新增 PR、行内评论、回归守卫；既有 75 项断言原样保留）
 - `docs/DELIVERY-DRILL.md`（本报告）
 
-按任务约定，未改产品代码时只跑两套既有测试：
+断言从 **75 增至 119**（+44）：PR 路径 31 项（假 forge 安装/监听、远端、分支、提交、
+forge 配置、预览、创建、幂等、wire 断言、强制 422、token 不入日志）、行内评论 9 项
+（文件、发送、settle、transcript 锚点/引用/正文/位置说明、清理）、回归守卫 3 项
+（源 checkout、残留容器、残留 volume），外加 1 项 forge token 不得出现在 artifact 里。
+
+门禁（本轮全部通过）：
 
 | 套件 | 命令 | 结果 |
 |---|---|---|
-| Go | `cd backend; go test ./... -count=1` | 第一次与 Web 并行运行时 `internal/pi` 的 `TestRuntimeRunEventOrder` 时序失败；单测重跑通过；**单独重跑完整套件通过，exit 0**（`go-test-2.log`） |
-| Web | `pnpm --dir web test -- --run` | **22 个测试文件 / 186 个测试全部通过，exit 0**（`web-test.log`） |
+| Go build | `cd backend; go build ./...` | exit 0 |
+| Go vet | `cd backend; go vet ./...` | exit 0 |
+| Go test | `cd backend; go test ./... -count=1` | exit 0，全部包 ok（`gate-go.log`） |
+| Web 单测 | `pnpm --dir web test -- --run` | **28 文件 / 223 测试全部通过，exit 0**（`gate-web-test.log`） |
+| Web 构建 | `pnpm --dir web exec next build` | exit 0（Next 16.4.3，17 条路由）（`gate-next-build.log`） |
+| e2e | `pnpm --dir e2e test` | **164 passed**，1 worker（`gate-e2e.log`） |
+| 演练 | `pwsh -NoProfile -File ./scripts/deliver-check.ps1` | **119 PASS / 0 FAIL，exit 0，102.1 s** |
 
-未运行 `go build ./...`、`go vet ./...`、`next build` 和完整 e2e（148），因为本次没有
-产品代码变更；如果后续要改 §6.2/§6.3 的测试解析器，必须补跑这些门禁。
+未重建镜像：本轮没有改后端代码，演练用的仍是 `piforge:local`
+（`sha256:2cdba2cd…`，构建于 2026-10-30 16:58）；`scripts/build-app-image.ps1` 未运行。
 
 ---
 
@@ -549,7 +707,19 @@ status after settle = {... Running:false Streaming:true ...}
 
 - **新操作员能不能从零走到可用 agent 回合？** 能。本次在空 volume 上只给端口、
   种子账号和 bootstrap 三件套，未进设置页，新用户即完成一次真实写码/运行/测试/提交。
-- **最值得先修的产品问题？** Node 内置测试器的 TAP 解析（§6.2/§6.3）。它不阻塞交付，
-  但会让 Node 项目在测试面板上显示“未识别”，与用户看到的 `# pass 2` 不一致。
+- **能不能开出第一个 PR？** 能，而且是产品自己推的分支：`POST /git/pr` 先
+  `git push -u origin drill/pull-request`，再向假 forge 发一次 create；重复调用返回
+  `created=false` 和同一个 URL，forge 的 422 以 `step=create` + 原文上浮。token 只在
+  `Authorization` 头里，容器日志 0 次、artifact 0 次。
+- **行内评论能不能变成 agent 的输入？** 能。`notes.txt:2` 的评论经过服务器拼装后，
+  agent 的 transcript 里出现 `行内评论 · notes.txt:2`、`2 | theme: dark`、评论正文和
+  `位置：这段代码现在仍在第 2 行。`——引用是服务端拿当前文件核对过的，不是浏览器抄的。
+- **演练会不会自己弄脏仓库？** 不会。源 checkout 在演练后 `git status` 为空；
+  Docker 里没有 `pf-drill*` 容器或 volume。截图/日志都在数据卷或 ignored 的
+  `e2e/.artifacts` 下。
+- **这次扩展有没有发现产品 bug？** 没有。44 项新检查在第一次集成运行里就全绿，
+  产品代码未改；唯一一次红是回归守卫对「脚本还没提交」的预期失败（脚本正确性，
+  不是产品问题），提交脚本后复跑全绿。
 - **最值得操作员注意的风险？** 密钥在容器环境里（`docker inspect` 可见，日志不可见）；
-  种子密码会打印一次；截图会弄脏 checkout。这三点都应在生产 runbook 里写明。
+  种子密码只打印一次（现已不含密码，见 §6.10）；PR 的 forge token 是项目级、
+  只写不回显，但 `docker inspect` 仍能看到 bootstrap 密钥。生产 runbook 要写清这三件事。
