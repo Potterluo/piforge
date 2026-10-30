@@ -14,6 +14,8 @@
 
 本批（flake 修复 + FR-11.2 + FR-12.4）之后，FR-11.2 与 FR-12.4 从 PARTIAL 移入 DONE：**126 条 FR 为 DONE 60 / PARTIAL 47 / MISSING 18 / 不做 1**；加上两条交付能力后**整表 128 行 = DONE 62 / PARTIAL 47 / MISSING 18 / 不做 1**。
 
+本批（四个缺陷）之后，FR-16.3（共享 Skill 管理）从 MISSING 移入 DONE；FR-14.1 仍 PARTIAL（两种作用域都能创建、共享可见、非管理员不可改，但「同名覆盖」语义仍缺）；FR-14.4 补上「导入重启用」。非 FR 交付能力新增「项目删除不遗留沙箱目录」一条：**126 条 FR 为 DONE 61 / PARTIAL 47 / MISSING 17 / 不做 1**；**整表 129 行 = DONE 64 / PARTIAL 47 / MISSING 17 / 不做 1**。
+
 ---
 # PiForge 对照 PRD 的实现审计
 
@@ -21,7 +23,7 @@
 - 审计方法：先读 `docs/STATUS-AUDIT.md`（`06b61a3`）的每条判定，再逐条重读 `backend/internal/httpapi/router.go` 的路由表、各 handler、`web/components/**` 与 `e2e/tests/*.spec.ts`；以「实现 + 断言了用户可见结果的测试名」为准，不采信命名与注释。
 - 状态口径：**DONE** 必须点名一条断言用户可见承诺的测试或 e2e 路径；**PARTIAL** 必须写清缺什么；**MISSING** 是无实现。
 - 本版把 `06b61a3` 之后的修复接进台账：`f766651`（FR-2.5 / FR-2.6）、`bd85ade`（FR-2.7）、`9c4ab0b`（FR-11.8）、`717f7cb`（FR-12.5），以及浏览器启动按沙箱单飞与 profile 僵尸锁恢复（FR-11.1）。
-- 计数：**126 条 FR，DONE 60 / PARTIAL 47 / MISSING 18 / 不做 1**（`be01575` 时是 52 / 54；FR-1.9 与 FR-9.2 补证据后为 54 / 52 / 19，FR-3.3 从 MISSING 移入 DONE，FR-14.4、FR-6.6、FR-10.2、FR-11.2 与 FR-12.4 从 PARTIAL 移入 DONE；旧值 37 / 50 / 39 是 `2e5f206` 时代的，且 FR-12.5 等行早已过期）。另有 2 条非 FR 交付能力（见文末「交付能力」），均 DONE；**整表 128 行 = DONE 62 / PARTIAL 47 / MISSING 18 / 不做 1**。这两个数是从本文件的表格行重新数出来的，不是从旧表头抄的。
+- 计数：**126 条 FR，DONE 61 / PARTIAL 47 / MISSING 17 / 不做 1**（`be01575` 时是 52 / 54；FR-1.9 与 FR-9.2 补证据后为 54 / 52 / 19，FR-3.3 从 MISSING 移入 DONE，FR-14.4、FR-6.6、FR-10.2、FR-11.2 与 FR-12.4 从 PARTIAL 移入 DONE，FR-16.3 从 MISSING 移入 DONE；旧值 37 / 50 / 39 是 `2e5f206` 时代的，且 FR-12.5 等行早已过期）。另有 3 条非 FR 交付能力（见文末「交付能力」），均 DONE；**整表 129 行 = DONE 64 / PARTIAL 47 / MISSING 17 / 不做 1**。这两个数是从本文件的表格行重新数出来的，不是从旧表头抄的。
 
 > 说明：PRD 中没有「部署」类 FR（§12 是里程碑，`deploy/` 是 Dockerfile.app / Dockerfile.offline / Dockerfile.runner / k8s.yaml / entrypoint.sh，属交付物而非需求行），因此下面没有部署行。`sandbox-runner`（把 Docker CLI 从控制面移出去）同样是交付物而非 FR：它没有改变任何一条 FR 的状态，证据见 `docs/SANDBOX-DEPLOY.md` §1.4 与 `scripts/verify-runner-sandbox.ps1`。
 >
@@ -132,10 +134,10 @@
 | FR-13.7 连通性测试 | DONE | `provider_probe.go` + `POST /v1/providers/{id}/test`；`provider_probe_test.go` 4 例、`06-providers.spec.ts` |
 | FR-13.8 用量显示（token + 估算成本） | PARTIAL | `SessionStats.TokensIn/Out/CostUSD` + `ContextMeter`；无测试断言成本显示 |
 | FR-13.9 用户 API Key（pf_…） | DONE | `api_key_handlers.go` + `api_keys.go` + Bearer 分支（`router.go` `authed`/`mutatingBearer`）；`24-api-keys.spec.ts`、`api_keys_test.go` |
-| FR-14.1 两层作用域（admin 共享 + 用户私有，同名覆盖） | PARTIAL | `store/resources.go` `ListSkills` 的 `WHERE (scope='user' AND owner_id=?) OR scope='admin'` 只做「并集」，无同名 shadow/去重；且没有 admin 写共享 skill 的入口 |
+| FR-14.1 两层作用域（admin 共享 + 用户私有，同名覆盖） | PARTIAL | 两种作用域现在都**能创建**：`POST /v1/skills` 接受 `scope`（缺省 `user`；`admin` 需管理员，普通用户 403「共享 Skill 只能由管理员创建」），`store.CreateSkill` 落 `scope` 与 `owner_id=调用者`；共享 Skill 出现在每个用户的 `GET /v1/skills` 与 `/skill:` 面板里。证据：`skill_scope_test.go`（管理员建共享 → 普通用户列表可见、能读 bundle、第二个管理员也能开关；普通用户建共享 403 且没有落库；普通用户 `PATCH`/`DELETE`/`PUT bundle` 全 403）、`74-shared-skill-create.spec.ts`（UI 勾「共享给所有用户」创建 → 普通用户在自己的账户里看到「共享」徽章、在 `/` 面板里选到它，开关与删除禁用，API 403）。**仍缺「同名覆盖」**：`ListSkills` 只是并集，没有「私有同名优先、共享被 shadow」的规则；同名私有与共享会同时出现在列表里（挂载时 `.pi/skills/<slug>` 同名会让 `materialize.Mount` 跳过其一，但那是副作用，不是定义好的语义） |
 | FR-14.2 挂载到 worktree（只读 bind mount + content_hash） | PARTIAL | `materialize.Mount` 把 bundle **复制**到 `.pi/skills/<slug>`（不是 `.agents/skills/`、不是只读 bind mount）；`content_hash` 只存 DB，目录里没有；`materialize_test.go` |
 | FR-14.3 Skill 中心（浏览/搜索/详情/SKILL.md 渲染） | PARTIAL | `web/app/settings/skills/page.tsx`：列表/新建/删除/上传（含 `SKILL.md` 文本域）；无搜索框、无详情页（不渲染文件树与脚本预览） |
-| FR-14.4 一键安装（Git URL / zip）+ 可禁用 | DONE | `POST /v1/skills/import` 克隆仓库、按含 SKILL.md 的目录逐个导入、只取该目录下文件、4 MB 上限；`skill_import_test.go`、`38-skill-import.spec.ts`。**zip 与「可禁用」本轮补齐**：`POST /v1/skills/import/zip`（multipart `file`，8 MB 请求上限，`archive/zip` 解到临时目录后走同一个 `findSkills`；`../`、绝对路径、符号链接条目整包拒绝，解压总量 4 MB）；`PATCH /v1/skills/{id}` 改 `enabled`（共享 Skill 仅管理员）；`provision.mountTooling` 只投影 `Enabled` 的 Skill，停用后新建会话真的不挂载。UI：设置 → Skill 中心「导入 Skill」对话框有 zip 选择与「上传 zip」，每行有启用开关。测试：`e2e/tests/69-skill-zip.spec.ts` 三例（设置页上传 zip → 列表出现 pdf-tools/review 且描述正确、bundle 只含 `SKILL.md`+`scripts/split.py`、启用时新会话挂载两者、停用后新会话只挂 review；`../escape` 整包 400 且不留半成品；无 SKILL.md 的包 404）；`skill_zip_test.go` 5 例（解压+findSkills、路径穿越、绝对路径/符号链接、超大条目、非 zip）。旧代码：该路由返回 `no route for POST /v1/skills/import/zip`，设置页没有 `skill-import-zip` |
+| FR-14.4 一键安装（Git URL / zip）+ 可禁用 | DONE | `POST /v1/skills/import` 克隆仓库、按含 SKILL.md 的目录逐个导入、只取该目录下文件、4 MB 上限；`skill_import_test.go`、`38-skill-import.spec.ts`。**zip 与「可禁用」本轮补齐**：`POST /v1/skills/import/zip`（multipart `file`，8 MB 请求上限，`archive/zip` 解到临时目录后走同一个 `findSkills`；`../`、绝对路径、符号链接条目整包拒绝，解压总量 4 MB）；`PATCH /v1/skills/{id}` 改 `enabled`（共享 Skill 仅管理员）；`provision.mountTooling` 只投影 `Enabled` 的 Skill，停用后新建会话真的不挂载。UI：设置 → Skill 中心「导入 Skill」对话框有 zip 选择与「上传 zip」，每行有启用开关。测试：`e2e/tests/69-skill-zip.spec.ts` 三例（设置页上传 zip → 列表出现 pdf-tools/review 且描述正确、bundle 只含 `SKILL.md`+`scripts/split.py`、启用时新会话挂载两者、停用后新会话只挂 review；`../escape` 整包 400 且不留半成品；无 SKILL.md 的包 404）；`skill_zip_test.go` 5 例（解压+findSkills、路径穿越、绝对路径/符号链接、超大条目、非 zip）。旧代码：该路由返回 `no route for POST /v1/skills/import/zip`，设置页没有 `skill-import-zip`。**本次修复（导入重启用）**：替换一个**已停用** Skill 的 bundle 时同时把它重新启用，并在响应里回报 `enabled` / `reenabled`，UI 的 toast 写明「之前是停用状态，已重新启用」——旧行为是内容被替换、行仍是 `enabled=0`、界面报成功而新会话什么都不挂载（导出 `e2e/.artifacts/fix-orphans/fix2-fail-first.log`：旧代码 `Enabled:false Reenabled:false`）。同一次改动让导入**不覆盖**同名共享 Skill（`SkillEditable` 先判权限再写文件，返回 `skipped` + 原因），此前普通用户导入同名共享 Skill 会先把磁盘上的共享 bundle 换掉、再因 `UpdateSkillBundle` 失败被标记跳过。测试：`skill_import_reenable_test.go`（停用 → 导入同名 → 响应 `enabled=true, reenabled=true` → 行一致 → 新会话真的挂载新内容）、`69-skill-zip.spec.ts` 补了「再次导入后重新启用并在新会话里挂载」；`e2e/tests/38-skill-import.spec.ts` 与 69 的旧注释（「导入不会重新启用」）已改 |
 | FR-14.5 会话记录所用 skill@version | DONE | 挂载时把 `skill_id/name/version + 内容 sha256 + mounted_path` 写进 `session_skills`（`store/session_skills.go`，`ON CONFLICT DO NOTHING` ⇒ 写一次即事实，之后编辑 Skill 不改写）；hash 由 `materialize.Digest` 对挂载目录「路径+内容」排序计算，与上传路径的 hash 同算法；`GET /v1/sessions/{id}/skills`；日志/信息抽屉新增只读「本会话使用的 Skill」；侧车复制父会话记录；`TestDigestIsContentAddressed`、`TestSessionSkillRecordIsWriteOnce`、`SessionSkillsEndpoint`、`63-skill-version.spec.ts`。**额外修复**：Pi 只在信任项目后才加载 `.pi/skills`，此前 agent 实际从未被告知挂载的 skill；现在启动参数显式带 `--skill <worktree>/.pi/skills`（`sessionSpec.SkillsDir`），容器实测系统提示词含 `<skills>` 列表且模型按 skill 作答 |
 | FR-14.6 `/skill:name` + `/` 命令面板 | DONE | 输入框开头 `/` 打开 skill 面板（`skill-palette.tsx`，`role=listbox` + `aria-activedescendant`）；输入过滤、↑↓ 选择、Enter 插入 `/skill:name `、Esc 关闭且不中断 run；无 skill 时空态链接 Skill 中心；插入的文本走既有消息路径（不是第二套调用机制），Pi 把 `/skill:name` 展开成 `<skill name … location …>` 并加载 SKILL.md；`skill-palette.test.tsx`（6 例）、`64-skill-palette.spec.ts` |
 | FR-14.7 内置开箱可用 skill | DONE | `store/skill_seed.go` 三个内置技能（code-review / test-gap / explain-codebase），admin 共享、首次启动安装、已存在则不动；`skill_seed_test.go`、`39-builtin-skills.spec.ts` |
@@ -149,7 +151,7 @@
 | FR-15.8 工具列表（名称/描述/注解/逐个禁用） | MISSING | 无 MCP 工具枚举端点与界面 |
 | FR-16.1 用户管理（创建/禁用/重置密码/角色） | DONE | `admin_handlers.go` `handleAdminCreateUser`/`handleAdminUpdateUser`；`09-admin-users.spec.ts` 5 例、`admin_management_test.go` |
 | FR-16.2 共享 provider 管理 | DONE | `handleAdminUpsertProvider`/`handleAdminDeleteProvider` + `admin/providers` 页；`12-shared-providers.spec.ts` |
-| FR-16.3 共享 skill 管理 | MISSING | 无 admin skill 路由（`/v1/admin/skills` 不存在），页面只说明「共享 Skill 由管理员维护」 |
+| FR-16.3 共享 skill 管理 | DONE | 三件事管理员都能做：**建**（`POST /v1/skills` 带 `scope=admin`，非管理员 403；UI 新建对话框对管理员显示「共享给所有用户」开关）、**删**（`DELETE /v1/skills/{id}` → `DeleteSharedSkill`，非管理员 403）、**开关**（`PATCH` → `SetSharedSkillEnabled`，任意管理员，不只创建者）。共享 Skill 对每个用户可见（列表与 `/skill:` 面板），普通用户只能看。路由仍挂在 `/v1/skills` 上按角色区分，没有单独的 `/v1/admin/skills`，也没有单独的「共享 Skill」管理页——权限在服务端，界面是同一个 Skill 中心。测试：`skill_scope_test.go` 两例、`74-shared-skill-create.spec.ts`。**边界**：本次没有开放「管理员事后改共享 Skill 的正文」——`PUT /v1/skills/{id}/bundle` 仍只允许私有 Skill，正文在创建（或创建者本人导入）时写入；需要改内容目前只能删了重建 |
 | FR-16.4 镜像管理 | MISSING | 无镜像版本/构建状态端点或页面 |
 | FR-16.5 运行状态（在线用户/活跃沙箱/节点水位/镜像告警） | PARTIAL | `handleAdminStatus` 返回 users/sessions/sandboxes/providers/skills 计数（`admin_status_test.go`、`15-quick-open-status.spec.ts`）；无节点水位、无镜像拉取失败告警 |
 | FR-16.6 资源护栏配置 | MISSING | 无配置端点/页面（与 FR-5.8 同源缺口） |
@@ -164,8 +166,9 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 |---|---|---|
 | 首次运行 setup：`GET /v1/setup` + 首次运行面板 + `PIFORGE_BOOTSTRAP_PROVIDER` 预填（`ba532a2`） | DONE | `httpapi/setup_handlers.go` 的 `GET /v1/setup` 返回 `needs_provider` / `is_admin` / `shared_provider_available` / 非密 `bootstrap`（name/base_url/model，没有 key 字段）；`web/components/setup/first-run-setup.tsx` 在首页与会话输入框上方显示「先配置一个模型服务」，按角色提供「添加共享服务商」或设置页链接；`bootstrap.Ensure` 只在「没有可用共享服务商」时创建，重启不覆盖；启动环境持有 key，日志不打印。测试：`setup_test.go` `TestSetupReportsFirstRunState`、`TestSetupExposesBootstrapPrefillWithoutSecrets`，`bootstrap_test.go`，e2e `68-first-run.spec.ts`（新用户首页/输入框都看到面板、配好共享服务商后面板消失、管理员可从面板建共享服务商） |
 | 惰性浏览器面板 + 空闲停止（host placement，`15b995c`） | DONE | `workspace-panels.tsx` 只在浏览器面板可见时挂载它；`browser.Manager` 的 idle reaper 在无 viewer 附着 `PIFORGE_BROWSER_IDLE_TIMEOUT` 后 stop 该 sandbox 浏览器；`GET /v1/admin/status` 暴露 `browser_running` / `browser_idle_timeout`。测试：`browser/idle_test.go` 4 例、`67-browser-lazy.spec.ts` 断言「打开会话不启动、选中面板才启动、切走后停止」；部署实测选中前 `docker exec pf-local pgrep chrome` 为空，选中后才出现 |
+| 项目删除：先停进程、重试销毁，失败则拒绝并保留项目；清扫历史孤儿目录（本次修复） | DONE | `handleDeleteProject` 的顺序改为「停进程 → 重试销毁 → 删行」：`stopProjectProcesses` 先关该沙箱的浏览器、`Runtime.Stop` 每个会话的 agent、`Term.CloseSandbox` 每个 worktree 的终端（`TermManager` 新增该方法），再 `destroySandbox` 以 150ms 递增退避重试 6 次；仍失败返回 409 并**保留项目**（文案「沙箱目录删不掉，项目已保留…」），不再像旧代码那样记一条 warn 后照删项目行。历史遗留由 `internal/janitor` 处理：启动即扫一轮、之后每 `-sandbox-sweep`（默认 10m，0 关闭，仅本地 provider）扫一次，删除 `sandboxes/<user>/<project>` 中没有 projects 行的目录及其 `_state/<user>/<project>.json`，只认 `usr_*`/`prj_*` 形状的目录名。测试：`project_delete_test.go`（注入 destroy 失败 → 409 + 项目仍在 + 至少重试 2 次；释放后重试 → 行与目录都消失；终端先关后销毁的顺序）、`janitor_test.go` 5 例、`61-project-lifecycle.spec.ts`（UI 删除后**真实路径**消失；用 PowerShell `FileShare.None` 真锁住 checkout → UI 报「沙箱目录删不掉 / 项目已保留」且项目仍在，释放后重试两者都消失）、`e2e/scripts/fix-orphans-repro.ps1`（Windows 复现/验证脚本）。旧代码实测：删除返回 200、项目行消失、`sandboxes/<user>/<project>` 留盘，日志 `delete project: sandbox destroy failed ... unlinkat ...\repo\held-by-a-process.txt: The process cannot access the file...`（`e2e/.artifacts/fix-orphans/fail-first.log`） |
 
-计数：上面 126 条 FR 是 **DONE 60 / PARTIAL 47 / MISSING 18 / 不做 1**；加上这两条（均 DONE）后整表 128 行 = **DONE 62 / PARTIAL 47 / MISSING 18 / 不做 1**。
+计数：上面 126 条 FR 是 **DONE 61 / PARTIAL 47 / MISSING 17 / 不做 1**（FR-16.3 从 MISSING 移入 DONE；FR-14.1 仍 PARTIAL，创建/可见性/权限已补齐，缺「同名覆盖」语义）；加上这三条（均 DONE）后整表 129 行 = **DONE 64 / PARTIAL 47 / MISSING 17 / 不做 1**。
 
 **明确边界：远端 / AIO 沙箱里的浏览器仍不会在空闲时被停止。** `15b995c` 的 idle 策略只在 host placement 生效：控制面直接持有 Chrome 进程，`browser.Manager` 能 stop 它。远端 / AIO 模式下 Chrome 跑在沙箱里，控制面断开 CDP 只意味着没人看了，进程仍在沙箱里；`PIFORGE_BROWSER_IDLE_TIMEOUT` 不会杀它，也没有 runner 侧的空闲回收。要覆盖这条路径，需要沙箱 provider 按「无 viewer」自行 stop 浏览器（或 runner 提供 idle 端点），目前没有实现，也没有测试。
 
@@ -297,3 +300,52 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 - **FR-11.3**：输入注入可用，但接管时没有拦下 agent 的 `mcp__playwright__*`，人和 agent 仍可能同抢一页；需要浏览器锁，不是补一条测试。
 - **FR-12.1 / FR-12.2 / FR-12.6**：diff 作用域仍缺「某次提交」与「本轮」，逐 hunk 仍只有 API，开 PR 未实现。FR-12.4 只做概览，没有扩大 diff 的作用域。
 - **FR-12.4 的边界**：风险只覆盖台账点名的 lockfile 与 CI 两类（按已知文件名/目录）；二进制与 >4MB 文件的未跟踪行数记 0。这两点是刻意的，不假装覆盖任意 `*.lock` 或大文件。
+
+
+## 本次修复（四个缺陷：项目删除遗留沙箱 / 导入不重启用 / 共享 Skill 无法创建 / 最后管理员测试名不副实）
+
+### FIX 1 — 删项目遗留 `sandboxes/<user>/<project>`
+
+- **根因**：`handleDeleteProject` 把沙箱销毁当 best-effort：`Destroy` 失败只记一条 warn，然后照删 projects 行。Windows 上只要 agent / 终端 / 沙箱浏览器还占着 checkout 里的文件，`os.RemoveAll` 就报 `unlinkat ...\repo: The process cannot access the file because it is being used by another process`，于是每次这样的删除都留一个没有任何行指向的目录。
+- **旧代码实测（fail-first）**：`e2e/scripts/fix-orphans-repro.ps1` 在 `7dd8e8c` 的二进制上——DELETE 返回 200、`GET /v1/projects` 不再有该项目、`sandboxes/<user>/<project>` 仍在，日志原文 `level=WARN msg="delete project: sandbox destroy failed" ... unlinkat ...\repo\held-by-a-process.txt: The process cannot access the file because it is being used by another process.`（日志 `e2e/.artifacts/fix-orphans/fail-first.log`）。
+- **选择：拒绝删除并保留项目**（而不是「删行 + 稍后清扫」）。理由：这个缺陷的本质是「行没了、目录还在」的不一致；让删除成功再异步清扫会把这个不一致变成用户可见的常态（项目从列表消失、磁盘上还在），而失败并保留项目让行与目录始终一致，且用户拿到可操作的句子（关掉占用进程后重试）。代价是持续占用时删不掉项目——所以先停占用者（agent/终端/浏览器）并用递增退避重试 6 次（约 2.25s），把「瞬时占用」吃在内部；只有真占死才失败。历史遗留（旧代码已经造出来的孤儿）另由 janitor 清扫，因为这条策略只能防新孤儿。
+- **实现**：`stopProjectProcesses`（`Browser.Close`、每会话 `Runtime.Stop`、每 worktree `Term.CloseSandbox`；`TermManager` 新增该方法，`termAdapter` 转发到 `term.Manager.CloseSandbox`）→ `destroySandbox` 重试 → 仍失败返回 409「项目「X」的沙箱目录删不掉，项目已保留：…」。`internal/janitor` 在启动与每 `-sandbox-sweep`（默认 10m，0 关闭，只在本地 provider）删除没有 projects 行的 `usr_*/prj_*` 目录及其 `_state` 文件；目录名不符合 `usr_*`/`prj_*` 的一律不碰。
+- **测试**：`project_delete_test.go` 两例（注入 destroy 失败 → 409、项目仍在、至少重试 2 次；释放后重试 → 行与目录都消失；终端在销毁之前被关闭的顺序）；`janitor_test.go` 5 例（只删孤儿、保留活沙箱、删孤儿 state 文件、不碰外来目录、missing root 是 no-op、dry-run 不删）；e2e `61-project-lifecycle.spec.ts` 两处：删除后**真实路径**消失；用 PowerShell `FileShare.None` 真锁住 checkout（Node 的 `openSync` 带 `FILE_SHARE_DELETE`，锁不住，这条教训写进了测试注释）→ UI 报「删除失败 / 沙箱目录删不掉 / 项目已保留」、项目仍 200、目录仍在，释放后重试两者都消失。部署验证：`e2e/scripts/fix-orphans-probe.mjs`（创建项目+会话 → UI 删除 → `docker exec pf-local test -d` 确认目录消失）。
+
+### FIX 2 — 导入替换了 bundle 却不重启用
+
+- **根因**：`persistCandidates` 对同名 Skill 只写 bundle、不碰 `enabled`；挂载只投影 `Enabled` 的 Skill，于是「导入成功」的 toast 下面是一个永远不会到达 agent 的行。
+- **选择：导入即重新启用**，并在响应里回报 `enabled` / `reenabled`，UI toast 写「之前是停用状态，已重新启用」。理由：导入是明确的「我要用它」，而且旧行为的失败方式（报成功、实际不可用）正是本项目反复修的谎报类型；保持停用再补一句提示仍然让用户多点一次，并要解释一个反直觉的状态。顺带修掉同一路径上的越权：普通用户导入同名**共享** Skill 时，旧代码会先把磁盘上的共享 bundle 换掉、再因 `UpdateSkillBundle` 失败而标记 skip —— 现在 `SkillEditable` 先判权限，直接 skip 并给出原因。
+- **fail-first**：把 `skill_import.go` 回退到 HEAD、保留新测试 → `import result = {Name:pdf-tools Skipped:false Enabled:false Reenabled:false}`（`e2e/.artifacts/fix-orphans/fix2-fail-first.log`）。
+- **测试**：`skill_import_reenable_test.go` 走完整条链（建私有 Skill → PATCH 停用 → 真 local sandbox + 真 provisioner 建会话，断言 `.pi/skills/pdf-tools` 不存在 → 导入同名 zip → 响应 enabled/reenabled 为真 → 行 enabled → 新会话挂载的是新内容）；e2e `69-skill-zip.spec.ts` 追加「再次导入 → toast 含『已重新启用』→ 列表不再显示已停用 → 新会话挂载 pdf-tools」；`38` 与 `69` 里「导入不会重新启用」的过时注释同步改掉。
+
+### FIX 3 — 管理员无法创建共享 Skill
+
+- **根因**：`handleCreateSkill` 写死 `scope=user`；FR-16.3 那一行原本就写着「没有 admin 写共享 skill 的入口」，只有删除半边存在。
+- **实现**：`POST /v1/skills` 接受 `scope`；`admin` 需要管理员（否则 403「共享 Skill 只能由管理员创建」），`store.CreateSkill` 落 scope 与 owner；共享 Skill 的开关改走 `SetSharedSkillEnabled`（任意管理员都能管，不只创建者）；UI 新建对话框对管理员显示「共享给所有用户」开关（`skill-shared`），列表已有的「共享」徽章与只读开关不变。
+- **fail-first**：把后端回退到 HEAD、用新前端跑 `74-shared-skill-create.spec.ts` → 新建后 `[data-testid="skill-item"][data-name=…]` 始终不出现；直接对旧二进制发 `POST /v1/skills {"scope":"admin",…}` 得到 `400 invalid JSON body: json: unknown field "scope"`。
+- **测试**：`skill_scope_test.go`（管理员建共享 → 普通用户列表可见且能读 bundle → 第二个管理员能开关；普通用户建共享 403 且不落库、`PATCH`/`DELETE`/`PUT bundle` 403、导入同名共享 Skill 被 skip 且共享 bundle 不变）；e2e `74-shared-skill-create.spec.ts`（管理员在 UI 勾选创建 → 普通用户在自己的账户看到「共享」徽章、`/` 面板里能选到它 → 开关/删除禁用、API 四种写操作 403 → `finally` 删除以免污染下一次 preflight）。
+
+### FIX 4 — `09-admin-users` 的测试名与断言不符
+
+- **根因**：那条测试叫「the last admin cannot demote or disable themselves」，但它断言的是 `isSelf` 让按钮 disabled——十个管理员时同样为真；旧测试既没构造「最后一个管理员」，也没区分「自己」与「最后一个」。
+- **改法（采用首选方案）**：新增 API 断言：先把除种子管理员外的所有管理员临时降级（`finally` 恢复），此时降最后一个管理员 → 409 `the last admin cannot be demoted`；再提升一个临时管理员，用**同一个请求**（种子管理员降自己）→ 200。两次调用之间变的只有管理员数量，因此证明的是计数规则，不是自我守卫。另加自我停用 → 400 的 API 断言。原来的 UI 测试改名为「the user list disables self-demotion and self-disable controls」，它断言什么就叫什么；`a role can be changed` 结束时把它提升的账号降回普通用户，避免复用数据目录累积管理员。
+- **复用数据目录的注意**：`e2e/.data` 里可能有上一轮遗留的管理员，所以新测试显式先把其他管理员「停放」再恢复，否则「最后一个」不成立（这正是第一次跑失败的原因）。
+
+### 一个与四个缺陷无关的 e2e 稳定性修复
+
+- `60-session-search` 的「命令面板返回会话」这一条在第二次（复用数据目录、项目/会话更多时）连续失败：`[cmdk-item][aria-selected="true"]` 实测为 0，而 cmdk 1.1.1 的 Enter 在「没有任何选中行」时什么都不做（其 `Enter` 分支先取 `aria-selected="true"` 的项，取不到就返回）。这是 cmdk 的选择竞态（列表异步重建后没有自动选中），与本批四个缺陷无关；测试在 Enter 前显式按一次 ArrowDown（键盘用户的正常动作）并注明了原因。**产品侧的这个选择竞态仍然存在**，记在这里而不是假装修好了。
+
+## 本轮门禁（四个缺陷）
+
+- `go build ./...`：0；`go vet ./...`：0；`go test ./... -count=1`：**26 个有测试的包全部 ok**（另有 `cmd/sandbox-runner`、`tools/wsprobe` 两个无测试文件；含新包 `internal/janitor` 与 `internal/httpapi` 的 4 个新测试）。日志：`e2e/.artifacts/fix-orphans/go-test.log`。
+- `pnpm --dir web test -- --run`：**22 个文件 / 186 例通过**（与上一批一致；本轮 UI 改动没有新增单测，行为由 Go 测试与 e2e 断言）。`pnpm --dir web exec next build`：通过。日志：`e2e/.artifacts/fix-orphans/web-test.log`。
+- 完整 e2e（同一份 `e2e/.data`，未重置）：
+  - run 1：**160 passed（7.9m）** = 原 157 加本轮 3 条（`61` 的 held-handle、`74` 的共享 Skill、`09` 的最后管理员）。日志 `e2e/.artifacts/fix-orphans/full-e2e-run1.log`。
+  - run 2：**160 passed（8.3m）**，同一数据目录。日志 `full-e2e-run2b.log`。第一次 run 2 唯一失败是 `60-session-search` 的命令面板（cmdk 选择竞态，见上），修测试后连续两次全绿。
+  - **第三次连续运行（同一目录，作为额外观察）不再绿**：从第 83 条起大量 20s 超时（`26-browser-tabs`、`27-clone`、`50-error-localization`、`51-project-repo-validation`），错误都是登录后 `app-sidebar` 没出现（`session-search` 之前的 run 2 就埋下了这个量级）。此时目录里有 **788 个沙箱目录、约 2.3 万个文件**（三轮各约 250 个会话）。把失败的四条 spec 单独跑：**9 passed（28.9s）**，说明不是代码回归，而是复用目录无限增长到这个体量后整套跑不动。要长期反复跑，得在两次运行之间重建 `.data`（`pnpm --dir e2e test:fresh`）或给套件加数据清理；这一点没有在本轮改，因为四个缺陷与它无关。
+- `pwsh scripts/deliver-check.ps1`（`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入，未打印、未落盘）：run `20261030-120612`，**75 个检查全部 PASS、`failure` 为空**（`summary.json` 的 `checks` 长度 75，无 FAIL/SKIP；日志里 150 行 PASS 是表格与摘要各一次）。镜像 id `sha256:44010d16b347…` 与随后部署的一致；一次性容器 `pf-drill` 与 volume `pf-drill-data` 已删除，`pf-local` 未被触碰（drill 自己断言容器 id 前后相同）。日志：`e2e/.artifacts/fix-orphans/deliver-check.log`，summary：`e2e/.artifacts/delivery-drill/20261030-120612/summary.json`。
+- 镜像与部署：`pwsh scripts/build-app-image.ps1` 重建 `piforge:local`（`sha256:44010d16…`）；`pf-local` 用**同一个数据卷** `368d6186adb8…` 重建（新容器 `f90466d3…`，端口 7722→7700，环境仍是 `PIFORGE_DEFAULT_PROVIDER=volc` 与四个 seed 账号）。重启后 `/healthz` = ok，`GET /v1/providers` 里 `volc` 仍 `enabled=true`、`has_key=true`。
+- **janitor 在部署上第一次跑就清掉了 11 个真实孤儿目录**（本项目此前在 Windows 上删项目留下的、或旧路径遗留的）：启动日志 `msg="orphaned sandbox directories are swept" root=/data/sandboxes interval=10m0s` 之后 11 条 `msg="janitor: removed an orphaned sandbox directory" user=… project=…`；dev 账户的沙箱目录从 45 个降到 35 个（另外 1 个属于另一个账户），剩下的 35 个目录都有 projects 行，`_state` 文件数也一致。这是「旧代码确实留了孤儿」在部署上的直接证据。
+- 部署验证脚本 `e2e/scripts/fix-orphans-probe.mjs`：**17/17 检查通过**（`[RESULT] PASS`，`probe-log.json` 记了每一步）。截图（部署实例，`pf-local`）：`e2e/.artifacts/fix-orphans/fix1-delete-confirm.png`（删除确认，写明沙箱会删）、`fix1-deleted-home.png`（删除后回到首页；同一次运行里 `docker exec pf-local test -d /data/sandboxes/<user>/<project>` 从有变无）、`fix2-skill-enabled-after-import.png`（导入后列表不再有「已停用」）、`fix3-admin-create-shared-dialog.png`（管理员新建对话框的「共享给所有用户」开关已打开）、`fix3-admin-shared-created.png`（列表中的共享 Skill 与「Skill 已创建」）、`fix3-normal-user-sees-shared.png`（普通用户在**自己的账户**里看到共享徽章、开关与删除禁用；同页还能看到导入后重新启用的私有 Skill）。
+- fail-first 日志：`e2e/.artifacts/fix-orphans/fail-first.log`（旧代码删项目 200 + 目录遗留）、`fix2-fail-first.log`（旧代码导入后 `enabled=false`）、`fix3-fail-first.log`（旧后端下 UI 建共享 Skill 失败）。FIX 3 的 API 侧另有一条：旧二进制对 `{"scope":"admin"}` 返回 `400 invalid JSON body: json: unknown field "scope"`。
