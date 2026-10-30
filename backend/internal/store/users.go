@@ -220,24 +220,49 @@ func (s *Store) CreateAuthSession(ctx context.Context, userID, tokenHash string,
 // AuthSessionUser resolves a token hash to its owner, ignoring sessions that
 // expired at or before now. A disabled owner is still returned so that the
 // caller can distinguish "disabled" from "no session" and revoke the cookie.
+//
+// The lookup reads through the read pool, but a read connection that came back
+// from an interrupted query can still be inside a read transaction, and SQLite
+// then serves that frozen snapshot to every later query on it. For a list
+// endpoint that is a stale row; here it would be "you are signed out" for a
+// session the writer created a moment ago, which is the one answer that must
+// never be wrong. So a miss asks the writer -- the connection that committed
+// the session -- and a hit there is treated as proof that the read pool is
+// stale: the idle readers are dropped and every later query sees fresh data.
 func (s *Store) AuthSessionUser(ctx context.Context, tokenHash string, now time.Time) (*contracts.User, error) {
 	if tokenHash == "" {
 		return nil, fmt.Errorf("store: auth session: empty token: %w", ErrNotFound)
 	}
-	row := s.r.QueryRowContext(ctx,
-		`SELECT `+prefixed(userCols, "u")+`
-		   FROM auth_sessions a
-		   JOIN users u ON u.id = a.user_id
-		  WHERE a.token_hash = ? AND a.expires_at > ? AND u.deleted_at IS NULL`,
-		tokenHash, formatTime(now))
-	u, err := scanUser(row)
+	u, err := s.authSessionUserOn(s.r, ctx, tokenHash, now)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("store: auth session: %w", ErrNotFound)
+		fallback, ferr := s.authSessionUserOn(s.w, ctx, tokenHash, now)
+		switch {
+		case ferr == nil:
+			s.discardStaleReaders()
+			return fallback, nil
+		case errors.Is(ferr, sql.ErrNoRows):
+			return nil, fmt.Errorf("store: auth session: %w", ErrNotFound)
+		default:
+			// A writer that cannot answer is an outage, not a signed-out user.
+			return nil, fmt.Errorf("store: auth session: %w", ferr)
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: auth session: %w", err)
 	}
 	return u, nil
+}
+
+// authSessionUserOn runs the session lookup on one pool. The writer is the
+// authority; the reader is the fast path.
+func (s *Store) authSessionUserOn(db *sql.DB, ctx context.Context, tokenHash string, now time.Time) (*contracts.User, error) {
+	row := db.QueryRowContext(ctx,
+		`SELECT `+prefixed(userCols, "u")+`
+		   FROM auth_sessions a
+		   JOIN users u ON u.id = a.user_id
+		  WHERE a.token_hash = ? AND a.expires_at > ? AND u.deleted_at IS NULL`,
+		tokenHash, formatTime(now))
+	return scanUser(row)
 }
 
 // DeleteAuthSession revokes one token (logout).

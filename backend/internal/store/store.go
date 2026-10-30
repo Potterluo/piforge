@@ -36,9 +36,11 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite" // registers the pure-Go "sqlite" driver
@@ -79,6 +81,32 @@ type Store struct {
 	now    func() time.Time
 	path   string
 	memory bool
+	// staleReads counts how often a read connection was found to be serving a
+	// snapshot older than the writer's. It should be zero; the auth path repairs
+	// the pool when it happens (see AuthSessionUser) and this counter is what a
+	// regression test asserts on.
+	staleReads atomic.Int64
+}
+
+// readPoolSize is how many connections the read pool keeps. Four is enough for
+// the list/SSE endpoints to run beside each other; the number matters here
+// because dropping a stale connection works by shrinking the idle pool and
+// growing it back.
+const readPoolSize = 4
+
+// discardStaleReaders drops every idle read connection.
+//
+// A read connection that comes back from an interrupted query can still hold an
+// open read transaction, and SQLite then serves that frozen snapshot to every
+// later query on that connection -- which is how a long-lived server starts
+// answering 401 (or "project not found") for rows that are committed. Closing
+// the idle connections is the supported way to get rid of it without touching
+// queries that are in flight.
+func (s *Store) discardStaleReaders() {
+	s.staleReads.Add(1)
+	log.Printf("store: a read connection served a stale snapshot; dropping the idle read pool")
+	s.r.SetMaxIdleConns(0)
+	s.r.SetMaxIdleConns(readPoolSize)
 }
 
 // Open opens (creating if needed) the SQLite database at path, applies the
@@ -133,8 +161,8 @@ func OpenWithNow(ctx context.Context, path string, now func() time.Time) (*Store
 			_ = w.Close()
 			return nil, fmt.Errorf("store: open read pool %q: %w", path, err)
 		}
-		r.SetMaxOpenConns(4)
-		r.SetMaxIdleConns(4)
+		r.SetMaxOpenConns(readPoolSize)
+		r.SetMaxIdleConns(readPoolSize)
 		r.SetConnMaxLifetime(0)
 		if err := r.PingContext(ctx); err != nil {
 			_ = r.Close()

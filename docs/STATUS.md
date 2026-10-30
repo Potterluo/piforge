@@ -390,7 +390,7 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 
   跑完后的规模：7,594 → 7,477 → 7,477 → 7,638 文件，169 → 169 → 169 → 170 项目。也就是说，第 N 次运行后的目录规模由“一次运行会造多少”决定，不再由“跑过多少次”决定。日志：`e2e/.artifacts/task1/run{1,2,3}.log`、`e2e/.artifacts/task2/full-e2e-{1,2}.log`、`run{1,2}-after.txt`、`after-runB.txt`。
 
-- **诚实的边界（第三次没有全绿）**：第 3 次和第 A 次不是数据增长问题——两次起跑前目录都已被清理回 2 账号 / 0 项目 / 6 文件，症状是 `/v1/auth/me` 对**刚登录**的 cookie 返回 401，直接查库该 token 行存在，重启后端即恢复；调试构建打出的错误是 `store: auth session: not found`，说明是进程内读路径看不到新提交的行（`e2e/.artifacts/task1/debug-wedge.log`），而这份 `.data` 上重启后的 `piforged` 用同一个 cookie 立刻 200。该症状与目录大小无关、与清理无关（调试跑运行中没有任何清理，症状照旧），本批没有修它，也没有用重启掩盖它——门禁里的“完整 e2e”因此记录的是 B 次（163 条全绿），而不是“三次都绿”。
+- **第三次/第 A 次没有全绿：另一个缺陷，已定位到原因并修掉**（不是数据增长，也不是清理）——两次起跑前目录都已回到 2 账号 / 0 项目 / 6 文件，症状是 `/v1/auth/me` 对**刚登录**的 cookie 返回 401，直接查库该 token 行存在，重启 `piforged` 后同一个 cookie 立刻 200（`e2e/.artifacts/task1/debug-wedge.log`）。四个并发探测把原因钉死：读池 4 条连接里**有一条停在旧快照上**（`found:0`），另外三条都看得到那一行（`found:1`），而 `sql.DB.Stats()` 说 `inuse=0 idle=4`，也就是池子把一条“在事务里”的连接当成空闲连接发了出来。复现脚本 `e2e/scripts/repro-auth-wedge.mjs`（不停 abort 流式/列表读 + 每 200ms 登录一次再 `/me`）在旧二进制上 **33s / 77s 各楔死一次**；修好后同一脚本 **300s / 1093 次探测零 401**，期间日志出现 7 次 `store: a read connection served a stale snapshot; dropping the idle read pool`——即条件仍会出现，但每次都被修复而不是变成永久 401。修法：`AuthSessionUser` 在读池未命中时向**写连接**（提交这条会话的那条连接）复核，命中即认定读池陈旧，丢掉空闲读连接（`SetMaxIdleConns(0)` 再恢复）让后续所有读一起恢复；写连接也说没有才是真的未登录，写连接报错则按错误上报而不是 401。回归测试 `store/auth_stale_read_test.go` 用一个“检查点后复制出来的数据库”当读池（真实旧快照），旧代码红在 `a stale read pool lost a live session: store: auth session: not found`，新代码绿；日志：`e2e/.artifacts/task2/repro-auth-wedge{,-fixed}.log`。**仍未定位**的是“为什么某条读连接会停在旧快照上”：`BEGIN/COMMIT`、被取消的查询、提前 `Close`、完整扫描四种模式在 store 层都没能制造出来，所以修复是“检测 + 修复连接池 + 鉴权以写连接为准”，不是“重试一次”。
 
 ### 2. FR-12.1 / FR-12.2
 
