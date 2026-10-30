@@ -9,8 +9,10 @@
 保留它的原因：我此前两次在汇报里把“做完”说早了。第一次是“P2 全落地”（真），第二次暗示 PRD 全落地（假）。
 一张带证据的表比一段自我评价可靠。
 
-基线：HEAD `d0f3f7a`（"fix(fr92,fr19): a live follow view, and a no-op compaction with a reason"）；共 126 条 FR：DONE 54 / PARTIAL 52 / MISSING 19 / 不做 1。此后 FR-3.3 接上真实配置与可解释拒绝、FR-1.9 补上浏览器入口（见文末「本次修复（FR-3.3）」与「本次修复（FR-1.9 浏览器入口）」），现为 **DONE 55 / PARTIAL 52 / MISSING 18 / 不做 1**。
+基线：HEAD `d0f3f7a`（"fix(fr92,fr19): a live follow view, and a no-op compaction with a reason"）；共 126 条 FR：DONE 54 / PARTIAL 52 / MISSING 19 / 不做 1。此后 FR-3.3 接上真实配置与可解释拒绝、FR-1.9 补上浏览器入口（见文末「本次修复（FR-3.3）」与「本次修复（FR-1.9 浏览器入口）」），该轮结束时为 **DONE 55 / PARTIAL 52 / MISSING 18 / 不做 1**；当前值见下一段。
 本轮把 `15b995c`（惰性浏览器面板 + 空闲停止）与 `ba532a2`（首次运行 setup）记入「交付能力（非 FR）」两行，均为 DONE；此后 FR-14.4（zip 导入 + 可禁用）、FR-6.6（⌘⇧F 内容搜索）与 FR-10.2（终端多 tab）从 PARTIAL 移入 DONE，126 条 FR 为 DONE 58 / PARTIAL 49 / MISSING 18 / 不做 1；加上这两行后**整表 128 行：DONE 60 / PARTIAL 49 / MISSING 18 / 不做 1**。
+
+本批（flake 修复 + FR-11.2 + FR-12.4）之后，FR-11.2 与 FR-12.4 从 PARTIAL 移入 DONE：**126 条 FR 为 DONE 60 / PARTIAL 47 / MISSING 18 / 不做 1**；加上两条交付能力后**整表 128 行 = DONE 62 / PARTIAL 47 / MISSING 18 / 不做 1**。
 
 ---
 # PiForge 对照 PRD 的实现审计
@@ -19,7 +21,7 @@
 - 审计方法：先读 `docs/STATUS-AUDIT.md`（`06b61a3`）的每条判定，再逐条重读 `backend/internal/httpapi/router.go` 的路由表、各 handler、`web/components/**` 与 `e2e/tests/*.spec.ts`；以「实现 + 断言了用户可见结果的测试名」为准，不采信命名与注释。
 - 状态口径：**DONE** 必须点名一条断言用户可见承诺的测试或 e2e 路径；**PARTIAL** 必须写清缺什么；**MISSING** 是无实现。
 - 本版把 `06b61a3` 之后的修复接进台账：`f766651`（FR-2.5 / FR-2.6）、`bd85ade`（FR-2.7）、`9c4ab0b`（FR-11.8）、`717f7cb`（FR-12.5），以及浏览器启动按沙箱单飞与 profile 僵尸锁恢复（FR-11.1）。
-- 计数：**126 条 FR，DONE 58 / PARTIAL 49 / MISSING 18 / 不做 1**（`be01575` 时是 52 / 54；FR-1.9 与 FR-9.2 补证据后为 54 / 52 / 19，FR-3.3 从 MISSING 移入 DONE，FR-14.4、FR-6.6 与 FR-10.2 从 PARTIAL 移入 DONE；旧值 37 / 50 / 39 是 `2e5f206` 时代的，且 FR-12.5 等行早已过期）。另有 2 条非 FR 交付能力（见文末「交付能力」），均 DONE；**整表 128 行 = DONE 60 / PARTIAL 49 / MISSING 18 / 不做 1**。这两个数是从本文件的表格行重新数出来的，不是从旧表头抄的。
+- 计数：**126 条 FR，DONE 60 / PARTIAL 47 / MISSING 18 / 不做 1**（`be01575` 时是 52 / 54；FR-1.9 与 FR-9.2 补证据后为 54 / 52 / 19，FR-3.3 从 MISSING 移入 DONE，FR-14.4、FR-6.6、FR-10.2、FR-11.2 与 FR-12.4 从 PARTIAL 移入 DONE；旧值 37 / 50 / 39 是 `2e5f206` 时代的，且 FR-12.5 等行早已过期）。另有 2 条非 FR 交付能力（见文末「交付能力」），均 DONE；**整表 128 行 = DONE 62 / PARTIAL 47 / MISSING 18 / 不做 1**。这两个数是从本文件的表格行重新数出来的，不是从旧表头抄的。
 
 > 说明：PRD 中没有「部署」类 FR（§12 是里程碑，`deploy/` 是 Dockerfile.app / Dockerfile.offline / Dockerfile.runner / k8s.yaml / entrypoint.sh，属交付物而非需求行），因此下面没有部署行。`sandbox-runner`（把 Docker CLI 从控制面移出去）同样是交付物而非 FR：它没有改变任何一条 FR 的状态，证据见 `docs/SANDBOX-DEPLOY.md` §1.4 与 `scripts/verify-runner-sandbox.ps1`。
 >
@@ -106,7 +108,7 @@
 | FR-10.7 沙箱暂停 → 终端变灰只读 + 唤醒后回放 | MISSING | 无暂停态 UI；`terminal-pane.tsx` 只有 socket 断开覆盖层，不是沙箱暂停 |
 | FR-10.8 与 agent 共享文件系统 | DONE | 终端 cwd 取自 `worktreeRoot(sess)`，与 agent 的 `spec.Worktree` 同目录（`pty_handlers.go` vs `runtime.go spawn` `cfg.Dir`）；`03-workspace.spec.ts` |
 | FR-11.1 画面投屏（screencast → WS → canvas） | DONE | `browser.go` `Screencast`/`Page.startScreencast` + `browser_handlers.go` + `browser-panel.tsx` canvas；`08-browser.spec.ts`、`browser_test.go` `TestScreencastForwardsFramesAndAcks`。并发打开面板的启动竞态由 `be01575` 修掉（每 sandbox 单飞、失败返回 typed `LaunchError`、devtools 断线视为死会话）：`TestConcurrentEnsureLaunchesASandboxOnce`、`TestTwoSandboxesLaunchInParallel`、`TestRealChromeConcurrentEnsureSharesOneBrowser`；部署实测同 tick 打开两个面板 socket 都拿到同一个 pid。**面板生命周期（`15b995c`）**：会话页不再挂载浏览器面板，只有选中「浏览器」面板（或把它放进第二窗格）才连接 screencast，服务端因此不会在打开会话时启动 Chrome；最后一个 viewer 离开后，`Manager.StartIdleReaper` 在 `PIFORGE_BROWSER_IDLE_TIMEOUT`（默认 60s）后停止该 sandbox 的浏览器，`Len()` / `SandboxIDs()` 归零，管理页 `browser_running` / `browser_idle_timeout` 可读。测试：`idle_test.go` `TestIdlePolicyStopsOnlyUnwatchedBrowsers`、`TestIdlePolicyStopsABrowserThatWasNeverWatched`、`TestConcurrentAcquireLaunchesOneBrowserPerSandbox`，e2e `67-browser-lazy.spec.ts` 断言「打开会话 20s 内没有浏览器进程，选中面板后才启动，切走后 60s（套件里 3s）内停止」。**边界**：这条 idle 策略只覆盖 host placement；远端 / AIO 沙箱里的 Chrome 仍不会因空闲被停止（见文末「交付能力」）。 |
-| FR-11.2 观察模式（默认不可输入） | PARTIAL | 默认 `observe` 成立；`browser_handlers.go` 在非 takeover 时对 `input` 命令直接 `break`（服务端判定，不靠面板自觉）。但**没有任何测试断言「输入被丢弃」**：`browser_mode_test.go` 只读写 mode，`43-browser-mode.spec.ts` 只断言按钮文字与确认弹窗。缺：一条 observe 下键入/点击不生效、takeover 下生效的测试（单测或 e2e 均可） |
+| FR-11.2 观察模式（默认不可输入） | DONE | 默认 `observe` 成立；`browser_handlers.go` 在非 takeover 时对 `input` 命令直接 `break`（服务端判定，不靠面板自觉）。**本批补上断言**：e2e `72-observe-input.spec.ts` 起一个页面，把「最后收到的事件」写进 `document.title`，再从 `GET …/browser/tabs` 读回标题——不是读面板自己的模式按钮。observe 下点 canvas、按键后标题仍为 `observe-target`（等 1.5s 再断言，给错误转发的输入足够时间到达）；切到 takeover 后同一套点击/按键分别变成 `clicked` / `key-b`。旧代码没有行为差异可失败（守卫比测试早），所以用变异证明测试有效：删掉服务端 `browserModeOf(...) != takeover` 守卫后，同一条 spec 失败在 `Expected "observe-target" / Received "key-z"`（`e2e/.artifacts/partial-batch2/fr-11.2-mutation-fail.log`）。部署截图 `fr-11.2-observe-click-dropped.png`（观察，标题未变）与 `fr-11.2-takeover-click-delivered.png`（控制中，标题 `clicked`） |
 | FR-11.3 接管模式（输入 + 暂停 agent 浏览器工具） | PARTIAL | 输入注入可用（`Session.TabDispatch` → `Input.dispatch*`，`browser_test.go`）；没有「接管时拦截 `mcp__playwright__*`」的浏览器锁 |
 | FR-11.4 模式互斥 + 「谁在控制」标识 + 确认 | DONE | `GET/POST …/browser/mode`；进入 takeover 前弹确认（说明会中断 agent），确认后中断当前运行；面板按钮显示「观察 / 控制中」；`browser_mode_test.go`、`43-browser-mode.spec.ts` |
 | FR-11.5 地址栏 + 前进/后退/刷新 + 端口快捷入口 | PARTIAL | `browser-panel.tsx` 有 URL `Input` 与刷新/导航；无前进/后退，无端口列表下拉 |
@@ -117,7 +119,7 @@
 | FR-12.1 Diff 作用域（未暂存/已暂存/某提交/分支 vs 基准/本轮） | PARTIAL | `parseDiffScope` 支持 unstaged/staged/branch/commit；前端 `git-panel.tsx` 的 `SCOPES` 只有 3 项（**无「某次提交」**），且无「本轮」作用域 |
 | FR-12.2 逐文件 + 逐 hunk stage/unstage/revert | PARTIAL（逐 hunk 只有 API，UI 是逐文件） | `gitx/hunks.go`（客户端只传 index，补丁由服务端重建）；`POST …/git/hunk`、`POST …/git/discard`；变更面板每行「丢弃」（带确认）；`hunks_test.go`、`37-hunks.spec.ts`。**diff 视图里没有逐 hunk 按钮** |
 | FR-12.3 行内评论 → 作为 steer 发给 agent | MISSING | diff 组件没有评论入口，也无 `streaming_behavior:"steer"` 的调用链 |
-| FR-12.4 变更概览（增删行数 + 风险标记） | PARTIAL | `git-changes.tsx` 分组 + 文件列表；**无 +/- 行数汇总，无 lockfile/CI 风险标记**（`GitStatus` 也没有这些字段） |
+| FR-12.4 变更概览（增删行数 + 风险标记） | DONE | `GitStatus` 新增 `additions`/`deletions`，每个 `GitChange` 新增 `additions`/`deletions`/`risk`（`lockfile` / `ci`）。统计相对 HEAD 合并已暂存与未暂存：`git diff --numstat -z HEAD`（无 HEAD 时分别数 index 与工作区），重命名取新路径，未跟踪文件按行数计入（二进制/超过 4MB 记 0）。风险在 `gitx` 判定：`.github/workflows/`、`.circleci/`、`.buildkite/` 与常见 CI 文件为 `ci`，`go.sum`、`package-lock.json`、`pnpm-lock.yaml` 等为 `lockfile`。`git status` 改用 `--untracked-files=all`：用 `normal` 时新 `.github/workflows/ci.yml` 只显示成 `.github/` 一行，行数与风险都挂不到文件上。UI 每行显示 `+N/−N`（`git-line-counts`）与「锁文件」/「CI」徽章（`git-risk`），表头 `git-change-totals`。测试：`TestStatusCountsLinesAndFlagsRisk`（a.txt +1、b.txt −2、new.txt +2、package-lock +2/锁文件、ci.yml +1/CI，合计 +6 −2）与未跟踪分支计数；e2e `73-git-overview.spec.ts` 先断言 API 的 `+6 −1` 与逐行字段，再断言页面上的同样数字与徽章。旧代码：后端没有这些字段，spec 失败在 `expect(status.additions).toBe(6)`；只换回旧前端则失败在 `getByTestId('git-change-totals')` element not found（`fr-12.4-fail-first.log`、`fr-12.4-fail-first-ui.log`）。部署截图 `fr-12.4-change-overview.png` |
 | FR-12.5 测试结果面板 | DONE | `717f7cb`：`internal/testrun` 解析 go test / vitest / jest / pytest 输出（含 `race detected`、`file:line`），`GET /v1/sessions/{id}/test-runs` 从工具事件与终端两条来源入库，`test-panel.tsx` 有失败/通过徽章与逐条失败展开。测试：`testrun/parse_test.go`、`store/testruns_test.go`、`httpapi/test_run_handlers_test.go`；`e2e/tests/62-test-panel.spec.ts` 断言空态、失败徽章与 `TestCacheEvict` / `cache_test.go:42`、随后同一会话变成通过徽章、刷新后仍有两条且 API 与面板一致 |
 | FR-12.6 一键开 PR | MISSING | 无 `…/pr` 路由与 UI |
 | FR-12.7 产物交付（present 为下载/预览卡） | PARTIAL | 预览区与 `binary-card.tsx` 提供下载/预览；没有「present 任意产物」的语义（截图现在写入 `<dataDir>/artifacts/<session>/screenshots` 并由 artifacts 路由预览，不再写入 worktree） |
@@ -163,13 +165,13 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 | 首次运行 setup：`GET /v1/setup` + 首次运行面板 + `PIFORGE_BOOTSTRAP_PROVIDER` 预填（`ba532a2`） | DONE | `httpapi/setup_handlers.go` 的 `GET /v1/setup` 返回 `needs_provider` / `is_admin` / `shared_provider_available` / 非密 `bootstrap`（name/base_url/model，没有 key 字段）；`web/components/setup/first-run-setup.tsx` 在首页与会话输入框上方显示「先配置一个模型服务」，按角色提供「添加共享服务商」或设置页链接；`bootstrap.Ensure` 只在「没有可用共享服务商」时创建，重启不覆盖；启动环境持有 key，日志不打印。测试：`setup_test.go` `TestSetupReportsFirstRunState`、`TestSetupExposesBootstrapPrefillWithoutSecrets`，`bootstrap_test.go`，e2e `68-first-run.spec.ts`（新用户首页/输入框都看到面板、配好共享服务商后面板消失、管理员可从面板建共享服务商） |
 | 惰性浏览器面板 + 空闲停止（host placement，`15b995c`） | DONE | `workspace-panels.tsx` 只在浏览器面板可见时挂载它；`browser.Manager` 的 idle reaper 在无 viewer 附着 `PIFORGE_BROWSER_IDLE_TIMEOUT` 后 stop 该 sandbox 浏览器；`GET /v1/admin/status` 暴露 `browser_running` / `browser_idle_timeout`。测试：`browser/idle_test.go` 4 例、`67-browser-lazy.spec.ts` 断言「打开会话不启动、选中面板才启动、切走后停止」；部署实测选中前 `docker exec pf-local pgrep chrome` 为空，选中后才出现 |
 
-计数：上面 126 条 FR 是 **DONE 58 / PARTIAL 49 / MISSING 18 / 不做 1**；加上这两条（均 DONE）后整表 128 行 = **DONE 60 / PARTIAL 49 / MISSING 18 / 不做 1**。
+计数：上面 126 条 FR 是 **DONE 60 / PARTIAL 47 / MISSING 18 / 不做 1**；加上这两条（均 DONE）后整表 128 行 = **DONE 62 / PARTIAL 47 / MISSING 18 / 不做 1**。
 
 **明确边界：远端 / AIO 沙箱里的浏览器仍不会在空闲时被停止。** `15b995c` 的 idle 策略只在 host placement 生效：控制面直接持有 Chrome 进程，`browser.Manager` 能 stop 它。远端 / AIO 模式下 Chrome 跑在沙箱里，控制面断开 CDP 只意味着没人看了，进程仍在沙箱里；`PIFORGE_BROWSER_IDLE_TIMEOUT` 不会杀它，也没有 runner 侧的空闲回收。要覆盖这条路径，需要沙箱 provider 按「无 viewer」自行 stop 浏览器（或 runner 提供 idle 端点），目前没有实现，也没有测试。
 
 ## 最影响用户的缺口（按「用户多久会撞上」排序）
 
-1. **FR-11.2 观察模式的「不可输入」只有代码**——服务端确实丢弃输入，但 `browser_mode_test.go` 与 `43-browser-mode.spec.ts` 都不验证这一点；一旦回归，人和 agent 会互相抢鼠标。
+1. **FR-11.3 接管时没有浏览器锁**——输入注入可用，但没有在接管时拦下 `mcp__playwright__*`；人和 agent 仍可能同时操作同一页。（FR-11.2 的「观察下输入被丢弃」已在本批补上端到端断言，见文末。）
 2. **FR-15.x MCP 只到一半**——没有 OAuth 代办（15.3）、没有连接状态徽章（15.5）、没有一键导入 mcpServers JSON（15.6）、没有内置预设（15.7）、没有工具列表/逐个禁用（15.8）。
 3. **FR-5.8 / 16.4 / 16.6 运维面缺失**——资源护栏只有 docker provider 的启动参数，没有管理入口；镜像管理、护栏配置都没有端点或页面。
 4. **FR-9.6 多路跟随**——跟随终端没有「每分支一个跟随 tab」（单路跟随已修，见文末）；终端本体已有多 tab（FR-10.2 本轮补齐）。
@@ -249,9 +251,49 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 
 ## 本轮门禁（FR-14.4 / FR-6.6 / FR-10.2）
 
-- `go build ./...`：0；`go vet ./...`：0。`go test ./... -count=1` 第一次在全量门禁并发跑时挂在 `internal/pi` 的 `TestRuntimeRunEventOrder`（`status after settle = {Streaming:true}`，`runtime_test.go:127`）。该包本轮零改动（`internal/pi` 不在三次提交的文件里），单测单跑通过，隔离后再跑一遍全量 `go test ./... -count=1` 全绿（见下）。这是一个已存在的「收到 settled 事件后立刻读 Status」的计时竞态，不是本轮引入；没有改它，也没有把它当成本轮的门禁通过。
+- `go build ./...`：0；`go vet ./...`：0。`go test ./... -count=1` 第一次在全量门禁并发跑时挂在 `internal/pi` 的 `TestRuntimeRunEventOrder`（`status after settle = {Streaming:true}`，`runtime_test.go:127`）。该包本轮零改动（`internal/pi` 不在三次提交的文件里），单测单跑通过，隔离后再跑一遍全量 `go test ./... -count=1` 全绿（见下）。这是一个已存在的「收到 settled 事件后立刻读 Status」的计时竞态，不是本轮引入；没有改它，也没有把它当成本轮的门禁通过。（**本批已修**：`Status` 不再让 peer 的 `get_state` 覆盖事件流已宣布的 settled 状态，见文末「本次修复（任务 0）」。）
 - `pnpm --dir web test -- --run`：**22 个文件 / 186 例通过**。`pnpm --dir web exec next build`：通过（路由表含 `/settings/skills`）。
 - 完整 e2e：**154 passed（6.2m，72 个 spec 文件）**，即原有 148 条加本轮 6 条（`69-skill-zip` 3、`70-content-search` 2、`71-terminal-tabs` 1）。日志：`e2e/.artifacts/partial-batch1/full-e2e.log`。
 - `pwsh scripts/deliver-check.ps1`（`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入，未打印、未落盘）：run `20261030-090820`，**75/75 PASS，failure=null**；全新 volume `pf-drill-data` + 一次性容器 `pf-drill`，结束后容器与 volume 都已删除（`docker ps -a` 与 `docker volume ls` 无残留），`pf-local` 全程未被触碰。日志：`e2e/.artifacts/partial-batch1/deliver-check.log`，summary：`e2e/.artifacts/delivery-drill/20261030-090820/summary.json`。
 - 镜像与部署：`pwsh scripts/build-app-image.ps1` 重建 `piforge:local`（sha256 `26b57a9b69f3…`，drill 断言的是同一 id）；`pf-local` 用**同一个数据卷** `368d6186adb8…` 重启，环境仍为 `PIFORGE_DEFAULT_PROVIDER=volc` 与四个 seed 账号；重启后 `GET /v1/providers` 里 `volc` 仍 `enabled=true`、`has_key=true`（`shared-anthropic` 无 key 是部署里原有的，未改）。
 - 部署上的截图（不是 fake peer，是 `pf-local` 真实实例）：`e2e/.artifacts/partial-batch1/fr-14.4-zip-dialog.png`（导入对话框的 zip 选择与「上传 zip」）、`fr-14.4-imported-and-disabled.png`（`pdf-tools`/`review` 导入成功，`pdf-tools` 已停用）、`fr-6.6-content-results.png`（⌘⇧F，模式「内容」，结果 `docs/guide.md:3`）、`fr-6.6-line-jump.png`（点开后第 3 行高亮、「第 3 行」徽章）、`fr-10.2-terminal-tabs.png`（5 个终端 tab，其中一个改名为「构建」，当前 tab 已连接）。截图脚本：`e2e/scripts/shots-partial-batch1.mjs`（自建一个临时项目/会话与两个 Skill，结束时删除；不打印任何密钥）。
+
+## 本次修复（任务 0：settled 之后仍报 Streaming 的竞态）
+
+- **根因在产品，不在测试**。`Normalizer.Translate` 在同一个 mutex 里先 `emit(run.settled)`、再把 `Streaming` 清掉，而 `Translate` 返回前一直持有该锁；`Status` 读 `State()` 也要拿这把锁，所以订阅者看到 `run.settled` 后读到的**事件派生状态一定是 settled**。测试的读法没有竞态。
+- 真正的缺陷在 `Runtime.Status`：它拿到 `Running:false / Streaming:false` 之后，又调 peer 的 `get_state`，并用返回的 `isStreaming` / `isCompacting` / `pendingMessageCount` **覆盖**事件流已经宣布的结果。peer 会先发出 `agent_settled`、再清自己的 `isStreaming`（fake peer 的 `defer` 就是这样；`get_state` 由另一条 goroutine 应答），落在这个窗口里的 status 于是返回 `Running:false Streaming:true` —— 自相矛盾，而且足以让 UI 从 settled 翻回 running、把下一次 run 当成 busy。`Status` 的注释本来就写着「run flags 来自事件流，get_state 只做补充」，代码没有做到。
+- **修法**：事件流是权威；`get_state` 只在 `LastSeq == 0`（还没有任何事件可依据，例如刚 attach）时提供 run flags。其余时候它只补充 model、session file 与 context window。`internal/pi/runtime.go` `Status`。
+- **回归测试**：`status_test.go` 的 `TestRuntimeStatusAfterSettleDoesNotTrustALaggingPeer` 用一个 peer 包装器把每个 `get_state` 应答都改写成 `isStreaming:true`，settle 之后 `Status` 仍不得报 Streaming。旧代码失败在 `Running:false Streaming:true`。
+- **50× 证据**：单跑 `-count=50 -race` 在两种代码上都可能全绿（窗口很小），所以用 40 个并发实例各跑 50 次（=2000 次）复现：旧代码 **36 次失败**（20/40 个实例红）；修复后 **0/2000**。日志：`e2e/.artifacts/task0/stress-before.log`、`stress-after.log`。提交 `11fdea5`。
+
+## 本次修复（FR-11.2 观察模式）
+
+- **台账原文**：「默认 `observe` 成立；`browser_handlers.go` 在非 takeover 时对 `input` 命令直接 `break`（服务端判定，不靠面板自觉）。但**没有任何测试断言「输入被丢弃」**……缺：一条 observe 下键入/点击不生效、takeover 下生效的测试（单测或 e2e 均可）」。
+- **补的是一条 e2e，行为未改**：`e2e/tests/72-observe-input.spec.ts`。页面把最后收到的事件写进 `document.title`，测试从 `GET …/browser/tabs` 读 title（读面板自己的按钮只能证明按钮状态）。observe 下点 canvas、按 `z`，等 1.5s 后 title 仍是 `observe-target`；从 UI 接管（按钮 → 确认）后同一套点击/按键让 title 变成 `clicked` / `key-b`。
+- **为什么没有「旧代码失败」**：这一行缺的只是断言，守卫比测试早存在，所以上一提交必然通过——这不是可以伪造的 fail-first。改用变异证明断言有效：删掉服务端 `browserModeOf(sess.ID) != takeover` 守卫后，同一条 spec 失败在 `Expected "observe-target" / Received "key-z"`（`e2e/.artifacts/partial-batch2/fr-11.2-mutation-fail.log`）。恢复守卫后重新构建，spec 通过。
+- **部署截图**：`fr-11.2-observe-click-dropped.png`（模式「观察」，点击后 tab 标题仍是 `observe-target`）、`fr-11.2-takeover-click-delivered.png`（模式「控制中」+ toast，标题 `clicked`）。
+
+## 本次修复（FR-12.4 变更概览）
+
+- **台账原文**：「`git-changes.tsx` 分组 + 文件列表；**无 +/- 行数汇总，无 lockfile/CI 风险标记**（`GitStatus` 也没有这些字段）」。
+- **数据层**：`contracts.GitStatus` 加 `additions`/`deletions`；`contracts.GitChange` 加 `additions`/`deletions`/`risk`。`gitx.Status` 用 `git diff --numstat -z HEAD --` 统计（无 HEAD 时分别统计 index 与工作区），重命名取新路径；未跟踪文件从磁盘数行（二进制或 >4MB 记 0）。风险由 `gitx.riskOf` 判定，API 与任何客户端因此一致：`.github/workflows/`、`.circleci/`、`.buildkite/` 与 `.gitlab-ci.yml`、`Jenkinsfile` 等是 `ci`；`go.sum`、`package-lock.json`、`pnpm-lock.yaml`、`Cargo.lock` 等是 `lockfile`。
+- **一处必须改的行为**：`git status` 从 `--untracked-files=normal` 改为 `all`。`normal` 把新的 `.github/workflows/ci.yml` 报成一行 `.github/`，行数（目录）为 0、风险也匹配不到文件——两个承诺都无法兑现。
+- **UI**：每行 `+N/−N`（`git-line-counts`）与「锁文件」/「CI」徽章（`git-risk`），表头 `git-change-totals`；合计优先用服务端字段，旧服务端则按行求和。
+- **测试**：`TestStatusCountsLinesAndFlagsRisk`（a.txt +1、b.txt −2、new.txt +2、package-lock +2/锁文件、ci.yml +1/CI，合计 +6 −2）与未跟踪分支的计数；e2e `73-git-overview.spec.ts` 先断言 API 的 `+6 −1` 和逐行字段，再断言页面上的同一组数字与徽章。
+- **旧代码确实会失败**（分层证明）：只回退后端 → spec 失败在 `expect(status.additions).toBe(6)`（旧 API 无此字段，`fr-12.4-fail-first.log`）；只回退前端（后端已新）→ 失败在 `getByTestId('git-change-totals')` element not found（`fr-12.4-fail-first-ui.log`）。
+- **部署截图**：`fr-12.4-change-overview.png`（表头 `4 个改动 +6 −1`，base.txt `+1 −1`，ci.yml `+1` + 「CI」，package-lock `+2` + 「锁文件」）。
+
+## 本轮门禁（任务 0 / FR-11.2 / FR-12.4）
+
+- `go build ./...`：0；`go vet ./...`：0；`go test ./... -count=1`：全绿（含 `internal/pi` 的新回归测试与 40 路 stress）。日志：`e2e/.artifacts/partial-batch2/go-test.log`。
+- `pnpm --dir web test -- --run`：**22 个文件 / 186 例通过**；`pnpm --dir web exec next build`：通过。日志：`web-test.log`。
+- 完整 e2e：**156 passed（6.3m）**，即 154 条加本批 2 条（`72-observe-input`、`73-git-overview`）。日志：`e2e/.artifacts/partial-batch2/full-e2e-clean.log`。**一次脏数据运行**（直接复用上一批留下的 `e2e/.data`）是 153 passed / 3 failed：`30-concurrency` 失败因为 `65` 上一轮把 dev 的 `parallel` 打开后没关，`38`/`69` 失败因为上一轮 `69` 把 `pdf-tools` 停用后没恢复。这与本批改动无关；在干净的 `e2e/.data` 上（本轮记录 154 时的方式）156 全绿。旧 `.data` 已移到 `e2e/.data.before-batch2`，未删除。
+- `pwsh scripts/deliver-check.ps1`（`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入，未打印、未落盘）：run `20261030-094558`，**75/75 PASS，failure=null**；一次性容器 `pf-drill` 与 volume `pf-drill-data` 已删除，`pf-local` 全程未被触碰。日志：`deliver-check.log`，summary：`e2e/.artifacts/delivery-drill/20261030-094558/summary.json`。
+- 镜像与部署：`pwsh scripts/build-app-image.ps1` 重建 `piforge:local`（`sha256:7d4269d25296…`，drill 断言的是同一 id）；`pf-local` 用**同一个数据卷** `368d6186adb8…` 重启（新容器 `e3aa6ff3…`），环境仍是 `PIFORGE_DEFAULT_PROVIDER=volc` 与四个 seed 账号；重启后 `/healthz` 为 ok，`GET /v1/providers` 里 `volc` 仍 `enabled=true`、`has_key=true`。
+- 截图（部署实例，不是 fake peer）：`e2e/.artifacts/partial-batch2/fr-12.4-change-overview.png`、`fr-11.2-observe-click-dropped.png`、`fr-11.2-takeover-click-delivered.png`。脚本：`e2e/scripts/shots-partial-batch2.mjs`（自建临时项目/会话，截图后删除；临时页面用一次性 helper 容器发布到 docker 网关，因为部署里的 Chromium 跑在容器内，127.0.0.1 是容器自己）。
+
+## 仍是 PARTIAL 的相邻项（本批未动）
+
+- **FR-11.3**：输入注入可用，但接管时没有拦下 agent 的 `mcp__playwright__*`，人和 agent 仍可能同抢一页；需要浏览器锁，不是补一条测试。
+- **FR-12.1 / FR-12.2 / FR-12.6**：diff 作用域仍缺「某次提交」与「本轮」，逐 hunk 仍只有 API，开 PR 未实现。FR-12.4 只做概览，没有扩大 diff 的作用域。
+- **FR-12.4 的边界**：风险只覆盖台账点名的 lockfile 与 CI 两类（按已知文件名/目录）；二进制与 >4MB 文件的未跟踪行数记 0。这两点是刻意的，不假装覆盖任意 `*.lock` 或大文件。
