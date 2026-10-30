@@ -402,8 +402,8 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 
 ### 3. 门禁（本批）
 
-- `go build ./...`：0；`go vet ./...`：0；`go test ./... -count=1`：全绿（含新增 `gitx/diff_range_test.go` 与 `httpapi/git_diff_scopes_test.go`）。日志：`e2e/.artifacts/task2/go-test.log`。
+- `go build ./...`：0；`go vet ./...`：0；`go test ./... -count=1`：全绿（含新增 `gitx/diff_range_test.go`、`httpapi/git_diff_scopes_test.go` 与 `store/auth_stale_read_test.go`）。日志：`e2e/.artifacts/task2/go-test.log`、`go-test-after-auth-fix.log`。
 - `pnpm --dir web test -- --run`：**25 个文件 / 201 例通过**（新增 `lib/git/diff-scope.test.ts` 5 例）。`pnpm --dir web exec next build`：通过。日志：`web-test.log`、`next-build.log`。
-- 完整 e2e：**`pnpm --dir e2e test` → 163 passed（7.6m）**（162 + `76-diff-scopes`），且是在**复用**的 `.data` 上（不是 `test:fresh`）。日志：`e2e/.artifacts/task2/full-e2e-2.log`。
-- `pwsh scripts/deliver-check.ps1`（`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入，未打印、未落盘）：run `20261030-140727`，**75 个检查全部 PASS、`failure` 为空**；一次性容器 `pf-drill` 与 volume `pf-drill-data` 已删除，`pf-local` 容器 id 前后一致。日志：`e2e/.artifacts/task2/deliver-check.log`，summary：`e2e/.artifacts/delivery-drill/20261030-140727/summary.json`。
-- 镜像与部署：`pwsh scripts/build-app-image.ps1` 重建 `piforge:local`；`pf-local` 用**同一个数据卷** `368d6186adb8…` 重建（新容器 `d4832bcb9d3d…`，端口 7722→7700，环境仍是 `PIFORGE_DEFAULT_PROVIDER=volc` 与四个 seed 账号）。重启后 `/healthz` = 200，`GET /v1/providers` 里 `volc` 仍 `enabled=true`、`has_key=true`。
+- 完整 e2e（同一份被反复复用的 `.data`，没有一次 `test:fresh`）：**163 passed / 7.6m、163 passed / 7.9m、163 passed / 8.5m**——最后三次连续全绿，中间那次就是修复后的验证跑。日志：`e2e/.artifacts/task2/full-e2e-{2,3,4-authfix}.log`。修复前的两次楔死（第 3 次 162 条在 83 条处、A 次 163 条在 152 条处）见上。
+- `pwsh scripts/deliver-check.ps1`（`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入，未打印、未落盘）：鉴权修复前的镜像 run `20261030-140727`，修复后的镜像 run `20261030-144953`，**两次都是 75 个检查全部 PASS、`failure` 为空**；每次的一次性容器 `pf-drill` 与 volume `pf-drill-data` 都已删除，`pf-local` 容器 id 前后一致。日志：`e2e/.artifacts/task2/deliver-check.log`、`deliver-check-2.log`，summary：`e2e/.artifacts/delivery-drill/20261030-140727|20261030-144953/summary.json`。
+- 镜像与部署：`pwsh scripts/build-app-image.ps1` 重建 `piforge:local`（鉴权修复前后各一次，最终镜像即 drill 断言的同一个）；`pf-local` 用**同一个数据卷** `368d6186adb8…` 重建（最终容器 `3ffec11e5253…`，端口 7722→7700，环境仍是 `PIFORGE_DEFAULT_PROVIDER=volc` 与四个 seed 账号）。重启后 `/healthz` = 200，`GET /v1/providers` 里 `volc` 仍 `enabled=true`、`has_key=true`。
