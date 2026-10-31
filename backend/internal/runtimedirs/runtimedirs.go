@@ -88,6 +88,14 @@ var entries = []Entry{
 		Janitor:    "artifacts",
 	},
 	{
+		Name:       "gateway.key",
+		Kind:       KindFile,
+		Creator:    "cmd/piforged.loadOrCreateSigningKey on first boot (docs/EXECUTION-BOUNDARY.md stage 3)",
+		Owner:      OwnerDeployment,
+		DeletePath: "never: losing it invalidates every per-session gateway token, including the one a surviving agent is still using",
+		Fallback:   "none by design; it is part of the deployment backup, next to master.key",
+	},
+	{
 		Name:       "master.key",
 		Kind:       KindFile,
 		Creator:    "crypto.NewFromEnv when PIFORGE_MASTER_KEY is unset",

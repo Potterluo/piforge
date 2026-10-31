@@ -106,6 +106,11 @@ served. `/v1/admin/status` (admin only) is the operational truth — see below.
 
 ```
 /data/master.key            32 bytes, 0600, generated on first boot
+/data/gateway.key           32 bytes, 0600, generated on first boot: the HMAC key for the
+                            per-session model-gateway tokens. It lives on the data volume
+                            so an agent that outlives a control-plane restart keeps using
+                            the token it was started with (stage 3). Losing it invalidates
+                            every outstanding token, exactly like losing master.key.
 /data/piforge.db            SQLite; 5.2 MB + 4.2 MB -wal + 32 KB -shm at 7 sessions / 6 projects
 /data/artifacts/            screenshots and other session artifacts (<session>/screenshots/…)
 /data/pi-agents/<session>/  per-session agent config: auth.json, mcp.json, models.json, models-store.json
@@ -193,6 +198,18 @@ restart containers/sandboxes are re-found by name (docker/runner) or reused (loc
 workspaces survive, but every agent process, PTY and Chromium is gone. Terminals reconnect
 to a *new* shell (scrollback replayed from the PTY ring buffer, not restored); sessions
 show the interrupted-run marker; `healthz` answers in 20 ms.
+
+**That paragraph describes `-sandbox local` (this instance) and still holds for it.** For
+the `docker`/`runner` placements stage 3 changed the answer: the agent is a process inside
+the sandbox owned by a detached supervisor (`piforged agent-supervisor`, Unix socket in
+`/workspace/.piforge/run/`), so a control-plane restart no longer kills it. The restarted
+control plane reattaches **before it opens its port** (`Server.ReattachLiveSessions`, the
+runner's `…/reattach` verb), the run keeps going in the same `pi` process, and it settles
+into the same row. Measured on a throwaway runner deployment: same `pi` pid before/after
+`docker restart`, `scanned=1 interrupted=0 kept_live=1`, `replayed_bytes=10955 gap_bytes=0`
+on the supervisor's side, and the run's commit in the sandbox (`docs/SANDBOX-DEPLOY.md`
+§1.4.5). What still ends with the control plane: PTYs, Chromium, and any agent whose
+supervisor was killed with it (the agent dies when its supervisor dies, by design).
 
 To make it come back, change the policy on the running container (the container keeps its
 name, port mapping and the `piforge-data` volume):
@@ -375,6 +392,37 @@ Ordered roughly by how much they will hurt. Nothing here is softened.
    id, the idle-reclaim snapshot and the disk-quota measurement cannot read a workspace
    they cannot open (both fail safe and are named in `EXECUTION-BOUNDARY.md` §10.1), and
    MCP is still deliberately absent under the flag.
+
+   **Stage 3 is done, and the flag is on by default for docker/runner (2026-11-01).** The
+   three things stage 2 left open are closed, each proven on a throwaway 7723 runner
+   deployment (`docs/SANDBOX-DEPLOY.md` §1.4.5):
+
+   - **the agent survives a control-plane restart.** A detached supervisor inside the
+     sandbox owns the agent's stdio; a restarted control plane reattaches through the
+     runner's new `…/reattach` verb, before it opens its port. Measured: same `pi` pid
+     before and after `docker restart`, sandbox container untouched,
+     `scanned=1 interrupted=0 kept_live=1`, `replayed_bytes=10955 gap_bytes=0`, the run
+     settling into the same row and its commit in the sandbox. `/status` reports
+     `running:true` and `process_id` = that pid right after the restart.
+   - **MCP credentials do not enter the sandbox.** An HTTP MCP server is brokered: the
+     sandbox holds `<gateway>/gw/mcp/<per-session-token>`; the control plane injects the
+     real credential on egress and `DELETE /v1/sessions/{id}/mcp-token` revokes it. The
+     measured grep for the real credential inside the sandbox is **0 hits** (files and
+     environment), the agent used the tool through the broker (`note: stage 3 broker`),
+     and the same URL went 200 → revoke 204 → 401. A stdio server is still not staged,
+     with a log line saying why.
+   - **the agent's stderr reaches the Logs panel.** The supervisor writes
+     `/workspace/.piforge/logs/<session>.log`; `GET /v1/sessions/{id}/logs` reads it
+     through the file API. Proven with a real failure (an unwritable heartbeat marker):
+     the launcher's WARN appears in the panel verbatim.
+
+   The default flip means a fresh `docker compose -f docker-compose.runner.yml up` gives
+   the isolated instance with no extra flags (the file is self-contained now; measured on
+   7724: control plane mounts only its data volume, the runner only the docker socket, and
+   the sandbox only its own `piforge-ws-…`). `-sandbox local` is unchanged and is still
+   what the `-sandbox` default selects. Stage 4 (removing the flag, the host spawn and the
+   K8s `pods/exec` provider) has not started; the remaining limits are listed in
+   `EXECUTION-BOUNDARY.md` §10.1.
 2. **Interrupt, then send another message: the agent resumes the interrupted request.**
    Verified on 2026-10-31, deterministically (6/6 runs; `e2e/scripts/fix-interrupt-context-probe.mjs`,
    raw runs in `e2e/.artifacts/fix-interrupt-context/`). Send "Count from 1 to 200" and stop it

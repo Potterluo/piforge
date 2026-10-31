@@ -49,6 +49,16 @@ type RuntimeConfig struct {
 	// it to run the fake peer in-process over io.Pipe; a production deployment
 	// can use it to reach Pi through a sandbox shim's stdio channel.
 	Dial func(spec contracts.SessionSpec, sessionFile string) (io.ReadWriteCloser, error)
+	// LogsFor, when set, supplies the agent's stderr tail for a session whose
+	// process this runtime did not spawn itself.
+	//
+	// A locally spawned child writes stderr into a pipe that lands in the tail
+	// buffer (Logs below). An agent inside a sandbox has no such pipe: its
+	// stderr goes to a file in the workspace (internal/agentsupervisor), and the
+	// only way to read it is through the sandbox's own file API. This hook is
+	// that read, wired in cmd/piforged so this package keeps knowing nothing
+	// about sandboxes.
+	LogsFor func(ctx context.Context, sessionID string) (*contracts.SessionLogs, error)
 	// WrapArgv, when set, rewrites one session's final argv after Launcher has
 	// wrapped it. It is the outermost wrapper on purpose: the agent's liveness
 	// launcher (internal/liveness) has to be the direct parent of the agent, or
@@ -107,8 +117,8 @@ type session struct {
 	modelConfigured bool
 	file            string
 	bridge          *Bridge
-	norm       *Normalizer
-	sub        *Subscription
+	norm            *Normalizer
+	sub             *Subscription
 	// lastUsed is when this process was last asked to do anything, in unix nanos.
 	// The idle reaper reads it; nothing else should.
 	lastUsed atomic.Int64
@@ -278,10 +288,14 @@ func (r *Runtime) spawn(ctx context.Context, spec contracts.SessionSpec) (*sessi
 	cfg.Translator = norm.Translate
 
 	var bridge *Bridge
+	reattached := false
 	if r.cfg.Dial != nil {
 		t, err := r.cfg.Dial(spec, file)
 		if err != nil {
 			return nil, fmt.Errorf("pi: dial session %s: %w", spec.SessionID, err)
+		}
+		if r, ok := t.(Reattached); ok {
+			reattached = r.Reattached()
 		}
 		bridge = NewStream(t, cfg)
 	} else {
@@ -305,7 +319,13 @@ func (r *Runtime) spawn(ctx context.Context, spec contracts.SessionSpec) (*sessi
 		norm:            norm,
 		sub:             sub,
 	}
-	if spec.ModelRef != "" {
+	// The model is applied to a process this runtime started. A reattached
+	// process already has one — it is in the middle of a session, possibly in the
+	// middle of a run — and set_model would either be refused or silently change
+	// the model under a live turn. The reference it was launched with is what the
+	// session row said when that launch happened; a switch is handled by stopping
+	// the session (restartForModelSwitch), not by rewriting a running one.
+	if spec.ModelRef != "" && !reattached {
 		modelRef := spec.ModelRef
 		if r.cfg.ModelFor != nil {
 			modelRef = r.cfg.ModelFor(spec, modelRef)
@@ -314,7 +334,32 @@ func (r *Runtime) spawn(ctx context.Context, spec contracts.SessionSpec) (*sessi
 			return nil, err
 		}
 	}
+	if reattached {
+		// The replayed stream may start after the turn's agent_start, so the
+		// derived state would read idle for a run that is in fact still running.
+		// The process itself knows: ask it once, and believe it.
+		r.noteResumed(ctx, s)
+	}
 	return s, nil
+}
+
+// noteResumed asks a reattached agent whether it is in the middle of a turn and
+// marks the session running if it is.
+//
+// Bounded and best-effort: a peer that does not answer must not delay the start
+// of the control plane, and the next event corrects the state either way.
+func (r *Runtime) noteResumed(ctx context.Context, s *session) {
+	askCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var state struct {
+		IsStreaming bool `json:"isStreaming"`
+	}
+	if err := s.bridge.CallInto(askCtx, "get_state", nil, &state); err != nil {
+		return
+	}
+	if state.IsStreaming {
+		s.norm.NoteRunning()
+	}
 }
 
 // sessionFileFor resolves the JSONL file backing one session.
@@ -968,10 +1013,34 @@ func (r *Runtime) Logs(ctx context.Context, sessionID string) (*contracts.Sessio
 	r.mu.Lock()
 	s := r.sessions[sessionID]
 	r.mu.Unlock()
+	tail := ""
+	if s != nil {
+		tail = strings.TrimRight(s.bridge.StderrTail(), "\n")
+	}
+	// A sandbox-hosted agent has no stderr pipe here: its stderr is a file inside
+	// the workspace, and this process may not even have a session object for it
+	// (a restarted control plane answers the Logs panel before it reattaches).
+	// Ask the deployment for the file before answering "nothing", which would read
+	// as "this agent never said anything".
+	if tail == "" && r.cfg.LogsFor != nil {
+		remote, err := r.cfg.LogsFor(ctx, sessionID)
+		if err != nil {
+			// Not a failure of the endpoint: logs are diagnostics. Say why they
+			// are empty in the line the panel renders, and keep the empty list.
+			return &contracts.SessionLogs{
+				SessionID: sessionID,
+				Lines:     []string{"the agent log could not be read: " + err.Error()},
+				UpdatedAt: time.Now(),
+			}, nil
+		}
+		if remote != nil {
+			remote.SessionID = sessionID
+			return remote, nil
+		}
+	}
 	if s == nil {
 		return &contracts.SessionLogs{SessionID: sessionID, Lines: []string{}}, nil
 	}
-	tail := strings.TrimRight(s.bridge.StderrTail(), "\n")
 	lines := []string{}
 	if tail != "" {
 		lines = strings.Split(tail, "\n")

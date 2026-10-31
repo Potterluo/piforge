@@ -1110,6 +1110,178 @@ docker exec -u gem <sandbox> grep -c VOLCE /workspace/.piforge/agents/*/models.j
 **如果只想先跑起来**：先用（ii）proxy + 给镜像加 docker CLI，把它明确标注成"单机过渡
 方案"，并在 README 里写清楚它等价于宿主 root。不要用它承载多租户。
 
+### 1.4.5 阶段三：agent 活过控制面重启，凭据不出控制面（默认开启，2026-11-01）
+
+阶段一留下了"控制面重启 → agent 立刻死"，阶段二留下了"agent stderr 只进 runner 日志"和
+"MCP 根本没有"（`docs/EXECUTION-BOUNDARY.md` §6）。这一轮把三件事一起做完，并且**把默认翻过来**：
+`-sandbox docker`/`runner` 下 agent 默认在沙箱里跑，`-sandbox local` 不动。
+
+**形状**（控制面只持有"到 supervisor 的连接"，不再持有 agent 的 fd）：
+
+```
+控制面 ──runner attach/reattach──▶ piforged agent-attach ──unix socket──▶ supervisor ──pipes──▶ agent-launcher ──▶ pi
+```
+
+- **沙箱里的 supervisor**：`piforged agent-supervisor`（`internal/agentsupervisor`）由
+  `agent-supervisor-start` 以**独立会话**（setsid、stdio 指向日志）拉起，监听
+  `/workspace/.piforge/run/<session>.sock`，自己持有 agent 的 stdin/stdout/stderr 管道。
+  控制面死掉时它只看到"一个客户端没了"，agent 继续跑。
+- **重连**：控制面启动时（`Server.ReattachLiveSessions`，在端口打开之前）问存活探针"哪些会话
+  真有 agent"，再走 `hub.ensure` 重新订阅；`Dial` 先试 runner 的**第八个端点**
+  `POST /v1/sandboxes/{id}/reattach`（body 是 socket + helper argv，**不接受** agent argv，
+  所以"重连时再起一个 agent"这件事无法表达），失败才走 attach+`agent-supervisor-start`。
+- **握手**：supervisor 连上后先写一行 JSON（`{"type":"ready","session":…,"pid":<pi 的 pid>,
+  "started":…,"replay_from":0,"replay_bytes":N}`），之后就是 agent 的原始字节；控制面读掉这一行，
+  后面仍是原来那套 JSONL 分帧。
+- **补发**：supervisor 保留最近 8 MiB 的 stdout（按整条记录裁剪），重连时从"上一个客户端最后
+  接收到的字节"开始补发；超出窗口的部分丢弃并报告 `gap`（PRD §7.4.5：不重放已经死掉的 run）。
+- **签名密钥**：`/data/gateway.key`（0600，首次启动生成）。agent 活着而控制面重启时，它手里的
+  per-session token 必须仍然有效，否则"活下来"没有意义。
+- **MCP 凭据代理**：HTTP MCP server 不再把凭据写进沙箱。控制面给每个 `(session, server)` 生成
+  一个随机 token（库里存 hash + 封存的副本），沙箱 `mcp.json` 里是
+  `<gateway>/gw/mcp/<token>`；`POST /gw/mcp/<token>` 在出口处解密真实凭据并按 `KEY=value` 的每一行
+  注入成一个 HTTP 头；`DELETE /v1/sessions/{id}/mcp-token` 立即吊销，且**不会**在下次重启 agent 时
+  重新签发。stdio MCP server 仍然不进沙箱（没有出口可注入），启动日志会说明。
+- **stderr 进 Logs 面板**：supervisor 把 agent 的 stderr 写到
+  `/workspace/.piforge/logs/<session>.log`，`sandboxAgent.Logs` 经沙箱文件 API 读回，
+  `GET /v1/sessions/{id}/logs` 返回的就是这个文件。
+
+#### 实测（Windows 11 / Docker Desktop，7723，一次性实例；镜像 `piforge:stage3`）
+
+三个镜像都是这一棵树：
+
+```powershell
+pwsh scripts/build-app-image.ps1 -Tag piforge:stage3
+docker build -f deploy/Dockerfile.runner -t piforge/sandbox-runner:stage3 .
+docker build -f deploy/Dockerfile.sandbox-agent --build-arg AGENT_IMAGE=piforge:stage3 -t piforge/sandbox-agent:stage3 .
+```
+
+**1. 重启只重启控制面：同一个 `pi` pid，同一容器，run 继续并结算**
+
+一次"写 fizzbuzz + 测试 + 提交"的长任务（`send` 1080 ms 接受），`run.started` 之后立即
+`docker restart pf-stage3-control`（520 ms 返回），实测：
+
+```
+before: sandbox=9f095f00a2a9… 2026-10-31T17:50:51.653Z 0      # Id / StartedAt / RestartCount
+before: marker=[2026-10-31T17:51:04.735Z pid=2139] pi_pids=[2139] seq=8
+docker restart pf-stage3-control: 520 ms
+after:  sandbox=9f095f00a2a9… 2026-10-31T17:50:51.653Z 0      # 沙箱没动
+after:  marker=[2026-10-31T17:51:04.735Z pid=2139] pi_pids=[2139]
+SAME PI PID: 2139
+control plane healthy again: True
+after restart: running=True streaming=True seq=5
+status: {"running":true,"streaming":true,"process_id":2139,"session_file":"/workspace/.piforge/sessions/ses_…jsonl"}
+run settled after the restart: True (saw running: True) seq=902
+git log: 6aa7f5b PiForge Sandbox|sandbox@piforge.local add fizzbuzz script and tests
+```
+
+控制面这一侧的三行（重启后的进程）：
+
+```
+session reconciliation at startup scanned=1 interrupted=0 runs=0 kept_live=1
+reattached to surviving agents count=1 detail="stage 3: an agent that outlived this process keeps its run"
+（每个会话一行，命中 Supervisor 的 ready 帧后）agent_started=<重启前> agent_pid=2139 replayed_bytes=10955 gap_bytes=0
+```
+
+supervisor 这一侧：
+
+```
+control plane attached to the agent stream session=ses_… agent_pid=2139 replayed_bytes=10955 gap_bytes=0
+```
+
+**读法**：`kept_live=1` 这次是真的（同一 `pi` 进程）；`replayed_bytes=10955 gap_bytes=0` 说明
+控制面缺席期间 agent 的输出被补发了，没有洞；`run.settled` 落在**同一个 run 行**上，
+`git log` 里的提交就是那个 run 的结果。`process_id` 现在是沙箱里的 `pi` pid（不是 0）：
+`Bridge.PID()` 会问传输层要 pid，supervisor 报的是它从 marker 里读到的那个 pid。
+
+**2. 状态在重启后不会短暂显示"空闲"**
+
+第一次演练里重启后 `/status` 有一两秒 `running=false`：补发的字节从 turn 中间开始，未必含
+`agent_start`。修法是重连后问一次 `get_state`，进程说 `isStreaming:true` 就把会话标成运行中
+（`Normalizer.NoteRunning`，settle 事件照常清除）。上面 `after restart: running=True` 就是它。
+
+**3. MCP：沙箱里只有可吊销的 token，agent 真的能用**
+
+配置一个 HTTP MCP server（`host.docker.internal:7731/mcp`，要求
+`Authorization: Bearer <real>`），沙箱里的 `mcp.json`：
+
+```json
+{"mcpServers":{"stage3docs":{"url":"http://pf-stage3-control:7700/gw/mcp/T7rbK7jexqb…"}}}
+```
+
+agent 通过代理调用工具，拿到 `note: stage 3 broker`；从沙箱里直接打代理 URL 是 200，
+直接打上游（不带凭据）是 401：
+
+```
+=== files containing the real MCP credential (workspace/tmp/home) ===
+file hits: 0
+=== MCP credential in the environment: 0 ===
+=== provider key anywhere under /workspace: 0 ===
+=== models.json: "baseUrl": "http://pf-stage3-control:7700/gw/llm/eyJzIjoic2Vz…" ===   # 只有每会话 token
+=== before revoke: HTTP 200 ===
+DELETE /v1/sessions/{id}/mcp-token -> 204（日志 tokens=1）
+=== after revoke: HTTP 401 / HTTP 401 ===
+日志：msg="a revoked MCP broker token was used" path=/gw/mcp/<token>
+```
+
+**4. stderr 进 Logs 面板**
+
+把某个会话的 marker 文件改成 0444（真实故障：工作区只读/满），launcher 下一拍写不进去，
+它的 WARN 走的就是 agent 的 stderr 管道（`pi` 继承同一个）:
+ 
+```
+/workspace/.piforge/logs/<session>.log（沙箱内）
+2026/11/01 01:53:41 WARN liveness: could not refresh the agent heartbeat session=ses_… error="… permission denied"
+GET /v1/sessions/{id}/logs -> 200
+  "lines": ["2026/11/01 01:53:41 WARN liveness: could not refresh the agent heartbeat … permission denied", …]
+```
+
+正常运行时这个文件是 0 字节：`pi` 健康时什么都不写 stderr。写入路径另有一个 Go 测试
+（`TestSupervisorWritesTheAgentStderrToItsLog`）钉住，读取路径就是上面这条命令。
+
+**5. 默认翻转：`docker compose -f docker-compose.runner.yml up` 不加任何 flag 就是隔离实例**
+
+compose 文件现在是**自包含**的（以前是 overlay，还要手动加 `PIFORGE_AGENT_IN_SANDBOX=1` 和
+`SANDBOX_WORKSPACE_VOLUME`）。实测（7724，独立数据卷，未设 `PIFORGE_AGENT_IN_SANDBOX`）：
+
+```
+docker compose -f docker-compose.runner.yml up -d
+piforge / piforge-sandbox-runner / piforge-sandbox-image: Up
+startup: sandbox placement resolved sandbox=runner browser=remote terminal=remote files=remote
+startup: the agent runs inside the sandbox sandbox=runner user=gem pi=pi
+一次真实 prompt: send 1025 ms -> settled，transcript 里是 bash 的 compose-default-ok
+
+docker inspect piforge                -> volume pf-stage3-compose-data -> /data
+docker inspect piforge-sandbox-runner -> bind /var/run/docker.sock
+docker inspect piforge-bdcd52f14ac1718c -> volume piforge-ws-bdcd52f14ac1718c -> /workspace
+docker exec piforge ps -ef | grep "p[i] --mode rpc" -> NO_PI
+docker exec <sandbox> ps -ef -> gem agent-supervisor-start / agent-supervisor / agent-launcher / pi
+docker exec piforge ls /data -> gateway.key master.key pi-agents piforge.db … skills   # 没有 sandboxes/
+```
+
+`-sandbox local` 仍然是默认的 `-sandbox`：`pf-local`（7722）全程未动，drill 也仍然走 local 路径。
+
+#### 本轮修掉的两个缺陷（都有测试）
+
+1. **supervisor 的读缓冲被复用，导致记录被截断。** `pump` 把 `buf[:n]` 直接排队给写
+   goroutine，下一次 `Read` 会覆盖它：一条响应记录的开头会被抹掉，控制面于是等一个永远不来的
+   响应（表现为 `POST /messages` 卡 58 s 后 499）。`TestSupervisorCarriesSeveralRPCRoundTrips`
+   一轮就复现（第一轮响应就缺头），修法是入队前复制。
+2. **runner 的 `DockerProvider` 没有 `Reattach` 方法**，第八个端点在 runner 下回 501，于是重启后
+   走的是"attach + supervisor-start"（虽然也接上了同一个 supervisor，但不是 reattach 语义）。
+
+#### 本轮的门禁与清理
+
+见 `docs/SANDBOX-DEPLOY.md` 文末的"本轮的验收"表（同一棵树：Go/web/e2e/delivery drill）。
+
+**仍然是明确没做的**（`docs/EXECUTION-BOUNDARY.md` §10.1 逐条写明原因）：
+
+- `worktrees.base_commit`、回收快照、配额测量、容器内 `CloneSession`（阶段二遗留，未变）；
+- stdio MCP server 在 flag 下仍然不进沙箱（没有出口可注入凭据）；
+- 补发窗口内的字节会重复投递一次（有界：一个 socket 缓冲，不是整个 run）；
+- 阶段四（删掉 flag、删掉 host spawn、K8s `pods/exec` provider）没有开始。
+
+
 ### 1.5 推荐方案下仍然会坏的地方（这一节是重点）
 
 | 事件 | 会发生什么 | 缓解 |

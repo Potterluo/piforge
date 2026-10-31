@@ -394,3 +394,23 @@ CREATE INDEX IF NOT EXISTS test_runs_session ON test_runs (session_id, started_a
 -- uniqueness is partial: otherwise every terminal run would collide on ''.
 CREATE UNIQUE INDEX IF NOT EXISTS test_runs_tool_call
     ON test_runs (session_id, tool_call_id) WHERE tool_call_id <> '';
+-- Per-session MCP broker tokens (docs/EXECUTION-BOUNDARY.md §4, stage 3).
+--
+-- The sandbox never holds a user's MCP credential. It holds
+-- <gateway>/gw/mcp/<token>; this row says which session and server that token
+-- stands for, and revoking it (revoked_at) stops the proxy immediately. The
+-- token itself is stored twice on purpose: hashed for lookup, sealed for the
+-- launch path that has to hand the same token to a restarted agent instead of
+-- minting a second live credential.
+CREATE TABLE IF NOT EXISTS mcp_tokens (
+    id           TEXT PRIMARY KEY,
+    session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    server_id    TEXT NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+    token_hash   TEXT NOT NULL,
+    token_cipher BLOB,
+    created_at   TEXT NOT NULL,
+    revoked_at   TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS mcp_tokens_hash ON mcp_tokens (token_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS mcp_tokens_session_server ON mcp_tokens (session_id, server_id);

@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/piforge/piforge/backend/internal/agentsupervisor"
 	"github.com/piforge/piforge/backend/internal/aio"
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/bootstrap"
@@ -65,6 +66,13 @@ func main() {
 	// because its argv belongs to the agent, not to the server. See
 	// internal/liveness for why a marker needs its own process.
 	if code, handled := liveness.MaybeLaunch(context.Background(), os.Args); handled {
+		os.Exit(code)
+	}
+	// The stage-3 supervisor family: `agent-supervisor` (the detached process
+	// that owns an agent inside the sandbox), `agent-supervisor-start` (start it
+	// if needed, then attach) and `agent-attach` (connect to one that is already
+	// there). All three run *inside the sandbox*; see internal/agentsupervisor.
+	if code, handled := agentsupervisor.MaybeRun(context.Background(), os.Args); handled {
 		os.Exit(code)
 	}
 	if err := run(); err != nil {
@@ -284,11 +292,15 @@ func run() error {
 		"base URL of the sandbox-runner service, with -sandbox runner (e.g. http://sandbox-runner:7801)")
 	flag.StringVar(&opt.sandboxRunnerToken, "sandbox-runner-token", envOr("PIFORGE_SANDBOX_RUNNER_TOKEN", ""),
 		"shared bearer token of the sandbox-runner service, with -sandbox runner")
-	// Stage 1 of docs/EXECUTION-BOUNDARY.md. Off by default so a deployment keeps
-	// the proven behaviour until this path has been exercised on it; the flag is
-	// rejected for -sandbox local, where there is no container to run in.
+	// Stage 3 of docs/EXECUTION-BOUNDARY.md changed the default: the agent runs
+	// inside the sandbox for every container provider (docker/runner), because a
+	// detached supervisor now keeps it alive across a control-plane restart
+	// (internal/agentsupervisor). -sandbox local keeps it off: there is no
+	// container to run in, and the local placement is what development uses.
+	// resolveAgentInSandbox below is where the tri-state is decided; this default
+	// only matters for the help text and for an explicit env override.
 	flag.BoolVar(&opt.agentInSandbox, "agent-in-sandbox", envOr("PIFORGE_AGENT_IN_SANDBOX", "0") == "1",
-		"run the agent process inside the sandbox (docker/runner) instead of beside the control plane")
+		"run the agent process inside the sandbox (docker/runner). Default: on for docker/runner, off for local (env PIFORGE_AGENT_IN_SANDBOX)")
 	flag.StringVar(&opt.sandboxAgentLauncher, "sandbox-agent-launcher", envOr("PIFORGE_SANDBOX_AGENT_LAUNCHER", "/opt/piforge/piforged"),
 		"path of the piforged binary inside the sandbox (it provides agent-launcher: the heartbeat supervisor)")
 	flag.StringVar(&opt.sandboxAgentPi, "sandbox-agent-pi", envOr("PIFORGE_SANDBOX_AGENT_PI", "pi"),
@@ -337,6 +349,15 @@ func run() error {
 	if err := validateSandboxFlags(opt.sandboxKind, opt.sandboxRunnerURL, opt.sandboxRunnerToken); err != nil {
 		return err
 	}
+	// Where the agent runs is a function of the provider, not only of the flag:
+	// stage 3 made the sandboxed placement the default for container providers.
+	// Resolve it before anything else reads it, so no later check sees a
+	// half-decided value.
+	agentInSandbox, err := resolveAgentInSandbox(flag.CommandLine, opt.agentInSandbox, opt.sandboxKind)
+	if err != nil {
+		return err
+	}
+	opt.agentInSandbox = agentInSandbox
 	// Stage 1 of the execution boundary: the agent can only move into a container
 	// that exists. -sandbox local has no process namespace to attach to, and
 	// pretending otherwise would leave a flag that silently does nothing.
@@ -482,10 +503,20 @@ func run() error {
 	} else if warning != "" {
 		logger.Warn(warning, "default_provider", opt.defaultProvider)
 	}
-	signingKey := make([]byte, 32)
-	if _, rerr := rand.Read(signingKey); rerr != nil {
-		return fmt.Errorf("init gateway signer: %w", rerr)
+	// The gateway's HMAC key is *persisted*, and that is a stage-3 requirement,
+	// not a convenience. A token is minted when an agent starts and lives in that
+	// agent's models.json; an agent that now outlives the control plane (see
+	// internal/agentsupervisor) keeps using the token it was started with, so a
+	// randomly regenerated key on every boot would make every surviving agent
+	// start failing its model calls after a restart — the exact opposite of what
+	// the supervisor is for. Stored beside the database, 0600, backed up with it.
+	signingKey, err := loadOrCreateSigningKey(filepath.Join(opt.dataDir, "gateway.key"))
+	if err != nil {
+		return fmt.Errorf("init gateway signer: %w", err)
 	}
+	logger.Info("model gateway tokens survive a restart",
+		"key", abs(filepath.Join(opt.dataDir, "gateway.key")),
+		"detail", "the signing key is on the data volume, so an agent that outlived this process keeps working")
 	signer, err := llmgw.NewSigner(signingKey, llmgw.DefaultTTL)
 	if err != nil {
 		return fmt.Errorf("init gateway signer: %w", err)
@@ -732,10 +763,11 @@ func run() error {
 		resolvedModels.Unlock()
 
 		// MCP servers reach the agent the only way Pi accepts them: a file in the
-		// session's agent directory. Credentials are decrypted here, per session, and
-		// written as environment variables — never on a command line where `ps` would
-		// show them.
-		if entries, merr := mcpEntriesFor(ctx, st, spec.UserID); merr != nil {
+		// session's agent directory. Under -agent-in-sandbox the file holds a
+		// broker URL and a revocable per-session token instead of a credential —
+		// see mcpEntriesForSession.
+		entries, merr := mcpEntriesForSession(ctx, st, spec, opt.agentInSandbox, gatewayBase, logger)
+		if merr != nil {
 			logger.Warn("cannot prepare MCP servers for this session",
 				"session", spec.SessionID, "error", merr.Error())
 		} else if _, werr := pimodel.WriteMCP(res.Dir, entries); werr != nil {
@@ -1014,7 +1046,7 @@ func run() error {
 		Logger:  logger,
 		Now:     time.Now,
 	})
-	handler := httpapi.NewRouter(httpapi.Deps{
+	handler := httpapi.NewServer(httpapi.Deps{
 		Store:              st,
 		Auth:               authn,
 		Runtime:            rt,
@@ -1039,13 +1071,14 @@ func run() error {
 		SetupDefaults:      setupDefaults,
 		BrowserTakeoverTTL: opt.browserTakeoverTTL,
 		Reconciler:         rec,
+		Probe:              livenessProbe,
 		Now:                time.Now,
 		Logger:             logger,
 	})
 
 	srv := &http.Server{
 		Addr:              opt.addr,
-		Handler:           handler,
+		Handler:           handler.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// No WriteTimeout: the SSE endpoint is a long-lived stream.
 		IdleTimeout: 120 * time.Second,
@@ -1074,6 +1107,27 @@ func run() error {
 		"kept_live", report.Live,
 		"watchdog", opt.sessionReconcileInterval.String())
 	go rec.Start(ctx, opt.sessionReconcileInterval)
+
+	// Stage 3: after reconciliation has decided which runs are really alive,
+	// reconnect to them. The agents kept running inside their sandboxes while this
+	// process was gone; without this pass their events would accumulate in the
+	// supervisor's replay buffer and their runs would never settle. It runs after
+	// the boot pass on purpose — a session whose agent is provably gone has
+	// already been marked interrupted and is not reattached — and it runs *before*
+	// the port opens, so a client asking /status in the first second gets the
+	// reattached truth instead of a process-less zero.
+	if opt.agentInSandbox {
+		reattachCtx, reattachCancel := context.WithTimeout(ctx, 60*time.Second)
+		reattached, rerr := handler.ReattachLiveSessions(reattachCtx)
+		reattachCancel()
+		if rerr != nil {
+			logger.Warn("could not reattach to agents that outlived the previous process",
+				"error", rerr.Error())
+		}
+		logger.Info("reattached to surviving agents",
+			"count", reattached,
+			"detail", "stage 3: an agent that outlived this process keeps its run")
+	}
 
 	// Idle agents are stopped on their own (FR-5.x): a session keeps its process warm
 	// for speed, but nothing else bounded how many of those a long-lived deployment
@@ -1319,6 +1373,9 @@ func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSp
 			return agent.ContainerWorktree(context.Background(), spec)
 		}
 		cfg.SessionFileFor = agent.SessionFile
+		// The agent's stderr is a file inside the workspace now, not a pipe this
+		// process owns: the Logs panel reads it through the sandbox API.
+		cfg.LogsFor = agent.Logs
 		// A jail wraps a local argv; there is no local argv here. The isolation
 		// boundary is the container the process now runs in.
 		cfg.Launcher = nil
@@ -1652,10 +1709,59 @@ func abs(p string) string {
 	return p
 }
 
-// mcpEntriesFor turns a user's stored MCP servers into what Pi reads, decrypting each
-// credential for this launch only.
-func mcpEntriesFor(ctx context.Context, st *store.Store, userID string) ([]pimodel.MCPEntry, error) {
-	servers, err := st.ListMCPServers(ctx, userID)
+// loadOrCreateSigningKey returns the deployment's gateway HMAC key, creating it
+// on first boot.
+//
+// It is a 32-byte secret on the data volume (0600), the same shape as master.key
+// and with the same consequence: back it up with the database, or every
+// outstanding agent token dies with the volume. The file exists because tokens
+// must outlive the process that issued them — see the call site.
+func loadOrCreateSigningKey(path string) ([]byte, error) {
+	if raw, err := os.ReadFile(path); err == nil {
+		if len(raw) < 32 {
+			return nil, fmt.Errorf("the gateway signing key at %s is %d bytes, not 32", path, len(raw))
+		}
+		return raw[:32], nil
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read the gateway signing key: %w", err)
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, fmt.Errorf("generate the gateway signing key: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("create the data directory for the gateway signing key: %w", err)
+	}
+	// Write through a temporary file so a crash cannot leave a half-written key
+	// that every later boot would reject.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, key, 0o600); err != nil {
+		return nil, fmt.Errorf("write the gateway signing key: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return nil, fmt.Errorf("install the gateway signing key: %w", err)
+	}
+	return key, nil
+}
+
+// mcpEntriesForSession renders the MCP configuration Pi reads for one session.
+//
+// Two shapes, one function, because the difference is *what the sandbox is
+// allowed to hold*, not how a file is written:
+//
+//   - local and shared-volume deployments: the server's own credentials,
+//     decrypted here and written as environment variables (the historical
+//     shape). The agent runs beside this process, so those credentials were
+//     never further from the control plane than the agent itself.
+//   - -agent-in-sandbox: an HTTP MCP server is **brokered**. The sandbox gets
+//     `<gateway>/gw/mcp/<token>`; the control plane injects the real credential
+//     on egress, and the token is per-session and revocable
+//     (DELETE /v1/sessions/{id}/mcp-token). A **stdio** server is not staged at
+//     all, with a log line saying why: its credential would have to live in the
+//     sandbox's environment, which is the thing stage 1 of
+//     docs/EXECUTION-BOUNDARY.md removed (design §4).
+func mcpEntriesForSession(ctx context.Context, st *store.Store, spec contracts.SessionSpec, sandboxed bool, gatewayBase string, logger *slog.Logger) ([]pimodel.MCPEntry, error) {
+	servers, err := st.ListMCPServers(ctx, spec.UserID)
 	if err != nil {
 		return nil, err
 	}
@@ -1671,8 +1777,35 @@ func mcpEntriesFor(ctx context.Context, st *store.Store, userID string) ([]pimod
 			Args:      server.Args,
 			URL:       server.URL,
 		}
+		if sandboxed {
+			if !strings.EqualFold(string(server.Transport), string(contracts.MCPHTTP)) {
+				logger.Warn("an MCP server is not staged into the sandbox",
+					"session", spec.SessionID, "server", server.Name, "transport", server.Transport,
+					"reason", "a stdio MCP server needs its credentials in the sandbox environment, which is what the execution boundary forbids",
+					"fix", "use an HTTP MCP server: it is proxied with a revocable per-session token")
+				continue
+			}
+			token, terr := st.EnsureMCPToken(ctx, spec.UserID, spec.SessionID, server.ID)
+			if terr != nil {
+				if errors.Is(terr, store.ErrMCPTokenRevoked) {
+					logger.Warn("this session's MCP access was revoked; the server is not staged again",
+						"session", spec.SessionID, "server", server.Name)
+				} else {
+					logger.Warn("cannot mint an MCP broker token",
+						"session", spec.SessionID, "server", server.Name, "error", terr.Error())
+				}
+				continue
+			}
+			// The token is the path, not a header: Pi's mcp.json has a url field
+			// and no place to put an Authorization header, and a token in a URL
+			// the sandbox owns is exactly the revocable credential this is for.
+			entry.URL = strings.TrimRight(gatewayBase, "/") + httpapi.MCPGatewayPrefix + token
+			entry.Env = nil
+			entries = append(entries, entry)
+			continue
+		}
 		if server.HasSecrets {
-			secret, serr := st.MCPServerSecrets(ctx, userID, server.ID)
+			secret, serr := st.MCPServerSecrets(ctx, spec.UserID, server.ID)
 			if serr != nil {
 				_ = serr // logged by the caller; a missing credential is not fatal to the session
 			} else if env := pimodel.ParseMCPSecrets(secret); len(env) > 0 {

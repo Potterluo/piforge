@@ -1,7 +1,9 @@
 package main
 
 import (
+	"flag"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -215,4 +217,47 @@ func validateAgentWorkspace(agentInSandbox bool, files string) error {
 		return nil
 	}
 	return fmt.Errorf("-agent-in-sandbox keeps the workspace inside the sandbox, so the file panel must be remote too (got -sandbox-files %s); drop the flag to keep a shared workspace", files)
+}
+
+// resolveAgentInSandbox decides where the agent process runs.
+//
+// It is a tri-state, and each arm is a real deployment:
+//
+//   - the flag was passed: it wins, in both directions. An operator who writes
+//     `-agent-in-sandbox=false` on a runner deployment is deliberately running
+//     the old, weaker shape (the agent beside the control plane) and gets it.
+//   - PIFORGE_AGENT_IN_SANDBOX is set: the environment wins, because compose
+//     files configure this deployment that way. Both "1" and "0" are honoured.
+//   - neither: **on for docker and runner, off for local**. That is the stage-3
+//     flip. The container providers now have a supervisor that keeps the agent
+//     alive and reattachable, so "the agent runs in the sandbox" is the honest
+//     default for them; `local` has no container to run in, and it is what
+//     development uses.
+//
+// The local arm is not a compromise: -agent-in-sandbox is rejected for local a
+// few lines further down, so returning true there would be a startup error
+// rather than a different design.
+func resolveAgentInSandbox(fs *flag.FlagSet, value bool, kind string) (bool, error) {
+	if fs != nil {
+		explicit := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "agent-in-sandbox" {
+				explicit = true
+			}
+		})
+		if explicit {
+			return value, nil
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("PIFORGE_AGENT_IN_SANDBOX"))) {
+	case "":
+		// No opinion: the provider decides.
+	case "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("PIFORGE_AGENT_IN_SANDBOX must be 0 or 1, got %q", os.Getenv("PIFORGE_AGENT_IN_SANDBOX"))
+	}
+	return isContainerSandbox(kind), nil
 }

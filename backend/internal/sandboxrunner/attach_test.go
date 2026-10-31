@@ -188,3 +188,118 @@ func TestAttachSaysSoWhenTheProviderCannot(t *testing.T) {
 		t.Fatalf("error = %v, want 501", err)
 	}
 }
+
+// fakeReattacher stands in for the Docker provider's reattach: it records the
+// spec and hands back a stream whose first line is a supervisor handshake,
+// followed by whatever the test writes.
+type fakeReattacher struct {
+	mu   sync.Mutex
+	spec sandbox.ReattachSpec
+	body string
+}
+
+func (f *fakeReattacher) Reattach(ctx context.Context, sandboxID string, spec sandbox.ReattachSpec) (io.ReadWriteCloser, error) {
+	f.mu.Lock()
+	f.spec = spec
+	f.mu.Unlock()
+	pr, pw := io.Pipe()
+	go func() {
+		if f.body != "" {
+			_, _ = pw.Write([]byte(f.body))
+		}
+	}()
+	return &pipeStream{r: pr, w: nopWriteCloser{}, closeIn: pr, closeOut: pw}, nil
+}
+
+func (f *fakeReattacher) Spec() sandbox.ReattachSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.spec
+}
+
+// reattachProvider is attachProvider plus the reattach capability.
+type reattachProvider struct {
+	*attachProvider
+	reattacher sandbox.Reattacher
+}
+
+func (p *reattachProvider) Reattach(ctx context.Context, sandboxID string, spec sandbox.ReattachSpec) (io.ReadWriteCloser, error) {
+	return p.reattacher.Reattach(ctx, sandboxID, spec)
+}
+
+// A reattach carries the socket and the helper argv, and the bytes the supervisor
+// writes are handed to the caller untouched: the control plane reads the
+// handshake itself.
+func TestReattachCarriesTheSocketAndTheStream(t *testing.T) {
+	fake := &fakeReattacher{body: "{\"type\":\"ready\",\"session\":\"ses_1\",\"pid\":77}\n"}
+	provider := &reattachProvider{
+		attachProvider: &attachProvider{fakeProvider: &fakeProvider{record: testRecord()}},
+		reattacher:     fake,
+	}
+	runner := newRunnerClient(t, provider)
+
+	stream, err := runner.Reattach(context.Background(), "piforge-abc123", sandbox.ReattachSpec{
+		Socket: "/workspace/.piforge/run/ses_1.sock",
+		Helper: []string{"/opt/piforge/piforged", "agent-attach", "-session", "ses_1"},
+		Dir:    "/workspace/repo",
+		User:   "gem",
+	})
+	if err != nil {
+		t.Fatalf("reattach: %v", err)
+	}
+	defer stream.Close()
+
+	spec := fake.Spec()
+	if spec.Socket != "/workspace/.piforge/run/ses_1.sock" {
+		t.Fatalf("socket reached the provider as %q", spec.Socket)
+	}
+	if got := strings.Join(spec.Helper, " "); got != "/opt/piforge/piforged agent-attach -session ses_1" {
+		t.Fatalf("helper reached the provider as %q", got)
+	}
+	if spec.Dir != "/workspace/repo" || spec.User != "gem" {
+		t.Fatalf("dir/user reached the provider as %q/%q", spec.Dir, spec.User)
+	}
+
+	line := make([]byte, 128)
+	n, rerr := stream.Read(line)
+	if rerr != nil {
+		t.Fatalf("read: %v", rerr)
+	}
+	if !strings.HasPrefix(string(line[:n]), `{"type":"ready"`) {
+		t.Fatalf("the handshake was altered: %q", string(line[:n]))
+	}
+}
+
+func TestReattachRequiresASocketAndAHelper(t *testing.T) {
+	provider := &reattachProvider{
+		attachProvider: &attachProvider{fakeProvider: &fakeProvider{record: testRecord()}},
+		reattacher:     &fakeReattacher{},
+	}
+	runner := newRunnerClient(t, provider)
+	if _, err := runner.Reattach(context.Background(), "piforge-abc", sandbox.ReattachSpec{Helper: []string{"piforged"}}); err == nil {
+		t.Fatal("a reattach without a socket must be refused by the client")
+	}
+	if _, err := runner.Reattach(context.Background(), "piforge-abc", sandbox.ReattachSpec{Socket: "/s.sock"}); err == nil {
+		t.Fatal("a reattach without a helper must be refused by the client")
+	}
+}
+
+// A runner whose provider has no exec surface answers 501, and its message says
+// which verb it cannot serve.
+func TestReattachSaysSoWhenTheProviderCannot(t *testing.T) {
+	runner := newRunnerClient(t, &fakeProvider{record: testRecord()})
+	_, err := runner.Reattach(context.Background(), "piforge-abc", sandbox.ReattachSpec{
+		Socket: "/workspace/.piforge/run/ses_1.sock",
+		Helper: []string{"/opt/piforge/piforged", "agent-attach"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "501") {
+		t.Fatalf("error = %v, want 501", err)
+	}
+}
+
+// nopWriteCloser is a write side that accepts and discards, so a fake stream has
+// a closable stdin like a real process does.
+type nopWriteCloser struct{}
+
+func (nopWriteCloser) Write(p []byte) (int, error) { return len(p), nil }
+func (nopWriteCloser) Close() error                { return nil }

@@ -110,6 +110,10 @@ func New(cfg Config) (*Server, error) {
 	// agent's RPC channel and for nothing else; see attach.go and
 	// docs/EXECUTION-BOUNDARY.md §2.
 	mux.HandleFunc("POST /v1/sandboxes/{id}/attach", server.handleAttach)
+	// Its counterpart for a process that is already there: stage 3's reattach,
+	// which is how a restarted control plane reaches the agent the supervisor
+	// kept alive. See reattach.go and docs/EXECUTION-BOUNDARY.md §6.
+	mux.HandleFunc("POST /v1/sandboxes/{id}/reattach", server.handleReattach)
 	server.handler = server.authenticate(server.logRequests(mux))
 	return server, nil
 }

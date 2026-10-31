@@ -16,8 +16,9 @@ read `/data`: the SQLite database, `master.key`, `skills/`, and every other tena
 `/data/sandboxes/<user>/<project>`.
 
 This document is the design for closing that gap for the `docker` and `runner`
-providers. It is written before the code, and it is deliberately staged: stages 1 and 2
-are implemented, stages 3–4 are not, and each stage names the test that accepts it.
+providers. It is written before the code, and it is deliberately staged: stages
+1–3 are implemented, stage 4 is not, and each stage names the test that accepts
+it.
 
 ## 1. The two things that have to move
 
@@ -44,7 +45,7 @@ Three candidates, and why the third wins for stage 1:
 | Channel | Shape | Verdict |
 |---|---|---|
 | Framed protocol over the sandbox's `/v1/shell/exec` | JSON `{seq,channel,data}` written to a persistent shell session, output polled from `/v1/shell/view` | Rejected. That session is line-oriented and shared with the user's terminal; it has no EOF, no binary safety and no backpressure. JSONL records contain newlines inside strings; encoding them again is a second framing layer over a transport that already mangles them. |
-| Newline/JSON frames over a TCP socket the sandbox dials back | control plane listens, a shim inside the sandbox connects out | Kept for stage 3. It is the only shape that survives a control-plane restart (the socket reconnects), but it needs a shim *inside* the sandbox plus a reconnect protocol. |
+| Newline/JSON frames over a TCP socket the sandbox dials back | control plane listens, a shim inside the sandbox connects out | **Stage 3, with one change.** The shim is real and it is in the sandbox — but it is a *supervisor* with a Unix socket, not a client that dials back: the control plane must be able to attach whenever it likes, including after a restart, and a connection the sandbox established would have to be re-established on a schedule it cannot know. See §6. |
 | **The container runtime's own exec as a byte stream** | `docker exec -i -u <user> -w <dir> <container> <argv>` with stdin/stdout spliced to one hijacked HTTP response | **Stage 1.** The runtime already has a correct, binary-safe, EOF-correct stdio primitive. The runner already holds the Docker CLI; this exposes exactly that primitive and nothing else. |
 
 Stage 1 therefore adds **one** endpoint to the runner:
@@ -154,12 +155,25 @@ points at the sandbox path. The gateway URL must be reachable *from the sandbox*
 is bound to `(session, user, provider, model)`, so a sandbox that keeps a copy keeps a
 credential that is useless for another session.
 
-**MCP is different and is deliberately not in stage 1.** `pimodel.WriteMCP` decrypts MCP
-credentials and writes them as environment variables into `mcp.json`. That file is a
-provider-equivalent secret; writing it into a tenant's sandbox is exactly the thing this
-document is trying to stop. Until there is a credential broker (stage 3: the sandbox
-holds a placeholder, the gateway injects the value on egress), a session with MCP
-servers runs without them under the flag, and says so in the log.
+**MCP was the case that needed a broker, and stage 3 built one.** `pimodel.WriteMCP`
+decrypts MCP credentials and writes them as environment variables into `mcp.json`;
+writing that file into a tenant's sandbox is exactly what this document exists to
+stop. Stage 3 therefore brokers **HTTP** MCP servers:
+
+- the control plane mints a random token per `(session, server)`, stores its hash and a
+  sealed copy in `mcp_tokens`, and writes `<gateway>/gw/mcp/<token>` into the sandbox's
+  `mcp.json`;
+- `POST /gw/mcp/<token>` resolves that token, loads the server, decrypts the credential
+  and injects it as headers on the way out (`KEY=value` per line of the secret blob =
+  one header, e.g. `Authorization=Bearer sk-…`), streaming the answer back;
+- `DELETE /v1/sessions/{id}/mcp-token` revokes every live token of the session, and a
+  revoked token is refused on the next request **and not re-minted** by a respawn.
+
+What the sandbox holds is therefore a revocable, per-session, per-server credential
+rather than a copy of the user's. A **stdio** MCP server is still not staged under the
+flag, with a log line saying why: its credential would have to live in the sandbox's
+environment, and there is no egress point to inject anything at. That is a limitation of
+the transport, not of the broker.
 
 ## 5. Liveness and reconciliation with a remote agent
 
@@ -171,36 +185,75 @@ writes it — the supervisor now runs in the sandbox — and nothing else:
   2 min);
 - `sessionLivenessProbe` is unchanged, so a restarted control plane can still answer
   "alive" from a sandbox it did not start;
-- what changes is that the answer becomes **true**. Today `kept_live=1` after a restart
-  means "the marker is 40 s old but the process it described died with the control
-  plane". With the agent in the sandbox the process really can outlive the restart —
-  provided the RPC channel outlives it too, which stage 1's direct pipe does **not**
-  (§6, and the measured restart test in `docs/SANDBOX-DEPLOY.md` §1.4.3).
+- what changes is that the answer becomes **true**. Before stage 3, `kept_live=1` after a
+  restart meant "the marker is 40 s old but the process it described died with the
+  control plane". Since stage 3 the process really does outlive the restart, and the
+  measured restart test (`docs/SANDBOX-DEPLOY.md` §1.4.5) shows the same `pi` pid, a
+  fresh marker and a run that settles instead of being interrupted.
 - stage 2 shifted the marker's *home*: it stayed at `/workspace/.piforge/live/<sid>`,
   but the workspace is now a volume only the sandbox mounts, so the writer and the reader
   are the only two parties that touch it. The marker still carries a pid and not a boot
   id — §10.1 item 3.
 
-## 6. What still breaks, and the honest answer
+## 6. Surviving a restart: the sandbox-side supervisor
 
-Stage 1's channel is a TCP connection owned by the control plane. When the control
-plane is restarted:
+Stage 1's channel was owned by the control plane: restart it and `docker exec` sees EOF
+on stdin, `pi` exits, the launcher removes the marker, and reconciliation answers "dead".
+Stage 3 interposes a process that owns the agent's descriptors instead:
 
-- the connection closes → `docker exec` sees EOF on stdin → `pi` exits → the launcher
-  removes the marker → the next reconciliation answers "dead" and marks the run
-  interrupted;
+```
+control plane ──runner attach/reattach──▶ piforged agent-attach ──unix socket──▶ supervisor ──pipes──▶ agent-launcher ──▶ pi
+```
 
-so **the agent does not survive a control-plane restart in stages 1 and 2**, and the
-restart test asserts exactly that (plus: it dies for a stated reason, not silently).
-Survival is stage 3: the sandbox-side supervisor owns a Unix socket in
-`/workspace/.piforge/run/`, survives the control plane, and the control plane
-reattaches to it by writing a `connect` frame. Buffering a disconnected run is
-explicitly *not* promised — PRD §7.4.5 forbids replaying a run whose control plane died.
+`piforged agent-supervisor` (inside the sandbox, `internal/agentsupervisor`) is started
+detached — its own session, no controlling terminal, stdio on
+`/workspace/.piforge/logs/<session>.supervisor.log` — and it listens on
+`/workspace/.piforge/run/<session>.sock`. It owns the agent's stdin/stdout/stderr as
+pipes, so nothing the control plane does to its own connection can reach the agent. On
+connect it writes one JSON line and then the agent's bytes:
 
-The other stage-1 gap is still open in stage 2 (it is `§10.1` item 2): the agent's
-stderr goes to the runner's log, not to the session's Logs panel
-(`Bridge.StderrTail` is fed only by a locally spawned child). The plan is unchanged —
-write `/workspace/.piforge/logs/<session>.log` and tail it through the file API.
+```
+{"type":"ready","session":"…","pid":812,"started":"…","replay_from":0,"replay_bytes":2579}
+…the agent's stdout, exactly as written…
+```
+
+The control plane consumes that one line in `sandboxAgent.Dial` (`handshake`), so the
+RPC bridge, its framing and its id correlation are the unchanged code. There are two
+ways to get such a stream, and they are deliberately different verbs:
+
+- **reattach** (`POST /v1/sandboxes/{id}/reattach`, the eighth runner endpoint): connect
+  to the supervisor that is already there. Its body is a socket and a helper argv, never
+  an agent argv, so "start a second agent on reattach" is not expressible;
+- **attach** (stage 1's verb): start `piforged agent-supervisor-start`, which starts a
+  detached supervisor *if none is listening* and then attaches. A first launch and a
+  reattach therefore reach the same handshake.
+
+After the handshake, `main` runs `Server.ReattachLiveSessions` **before the port opens**:
+it asks the liveness probe which sessions really have an agent, and calls the same
+`hub.ensure` a message uses. The subscription, the event pump and the derived run state
+resume exactly as they do for a fresh process, so the run settles into the same row
+instead of being marked interrupted.
+
+Three honest costs, all measured:
+
+- **The replayed bytes are not free.** The supervisor keeps the last 8 MiB of agent
+  stdout in a record-aligned window and resumes a reattaching client at the last byte it
+  handed to the previous one. Bytes that the previous control plane had already persisted
+  are therefore delivered again — bounded by what was in flight (one socket buffer plus
+  whatever it had not yet processed), not by the run. The measured drill replayed 2579
+  bytes with `gap_bytes=0`.
+- **A longer outage loses bytes, not the agent.** Beyond the window the supervisor drops
+  whole records and reports the count as `gap`. The conversation itself is Pi's session
+  file inside the sandbox, and PRD §7.4.5 still forbids replaying a *run* on the control
+  plane's side: what resumes is the stream, not the turn.
+- **The gateway signing key is now on the data volume** (`/data/gateway.key`). An agent
+  that outlives the control plane keeps using the token it was started with, so a
+  per-process random key would make every survivor fail its model calls after a restart.
+  The file is 0600, created on first boot, and must be backed up with the database.
+
+The agent's stderr no longer goes only to the runner's log: the supervisor writes it to
+`/workspace/.piforge/logs/<session>.log` and `sandboxAgent.Logs` reads it through the
+file API, so the Logs panel shows the same bytes `docker exec cat` would.
 
 Two smaller ones, both consequences of the session file living in the workspace:
 
@@ -271,29 +324,32 @@ not a silent coupling).
 |---|---|---|---|
 | 1 | `pi` runs inside the sandbox via `docker exec` over the runner's attach endpoint; model config through the file API; heartbeat inside; provider key still only in the control plane | `-agent-in-sandbox` (env `PIFORGE_AGENT_IN_SANDBOX`), default **off** | On a throwaway deployment: `ps -ef` **inside** the sandbox contains `pi` and `ps -ef` in the control plane does not; `cat /data/piforge.db` fails inside the sandbox; one real prompt commits in the sandbox worktree; panels/tests/inline review work; restart kills the agent for the stated reason. **Done** (`docs/SANDBOX-DEPLOY.md` §1.4.3). |
 | 2 | `materialize` + `provision` through the sandbox file API; the workspace is a volume of the sandbox's own; `chmod a+rwX` and `safe.directory` dropped where one writer owns the tree | same flag | The same prompt completes with **no host mount of the workspace** in the control plane; a skill bundle is read-only inside the sandbox; `git worktree add` for a branch session happens entirely through the API. **Done** (`docs/SANDBOX-DEPLOY.md` §1.4.4). |
-| 3 | Detached supervisor: agent survives a control-plane restart, control plane reattaches; MCP credential broker; `pods/exec`-shaped provider for K8s | flag **on by default** for docker/runner | Restart the control plane mid-run: the same `pi` pid answers `get_state` after reattach; the run settles instead of interrupted; a run whose control plane is gone for longer than TTL is honestly interrupted (no replay) |
-| 4 | Remove the flag; delete the in-process host spawn for container providers; `sandbox.Docker.Attach` becomes the only path | — | Full gates (Go, web, e2e, delivery drill) green with the flag gone, and `ps` proofs hold on a Linux host, not only Docker Desktop |
+| 3 | Detached supervisor: agent survives a control-plane restart, control plane reattaches; MCP credential broker; agent stderr through the file API | flag **on by default** for docker/runner | Restart the control plane mid-run: the same `pi` pid answers `get_state` after reattach; the run settles instead of interrupted; a run whose control plane is gone for longer than TTL is honestly interrupted (no replay). **Done** (`docs/SANDBOX-DEPLOY.md` §1.4.5). |
+| 4 | Remove the flag; delete the in-process host spawn for container providers; `sandbox.Docker.Attach` becomes the only path; a K8s `pods/exec`-shaped provider | — | Full gates (Go, web, e2e, delivery drill) green with the flag gone, and `ps` proofs hold on a Linux host, not only Docker Desktop. **Not done.** |
 
-Stages 1 and 2 are implemented; 3 and 4 are not. `docs/SANDBOX-DEPLOY.md` §1.4.3 and
-§1.4.4 record them with raw `ps`/`mount`/`chmod`/commit output.
+Stages 1–3 are implemented; stage 3 is the default for `docker`/`runner`, and stage 4 is
+not started. `docs/SANDBOX-DEPLOY.md` §1.4.3, §1.4.4 and §1.4.5 record them with raw
+`ps`/`mount`/`chmod`/commit/restart output.
 
-### 10.1 Stage 2's remaining work (named, not hidden)
+### 10.1 What is still not moved (named, not hidden)
 
-These are the pieces stage 2 did **not** move off the host path. Each one is a
-deliberate exception, not an oversight:
+These are the pieces stages 1–3 did **not** close. Each one is a deliberate exception,
+an accepted cost, or work that needs a K8s provider to exist first:
 
 1. **`worktrees.base_commit` is empty for a detached workspace.** Reading `HEAD` is a
    `git rev-parse` on a path the control plane cannot open, and the runner exposes no
    exec for it. The column is informational (nothing branches on it); the panel's diffs
    come from the container's own git. Fix: return `HEAD` in the `…/worktrees` response,
    or let the provider answer a `head` question through the API it already uses.
-2. **Agent stderr still goes to the runner's log**, not to the session's Logs panel
-   (`Bridge.StderrTail` is fed only by a locally spawned child). §6's plan — write
-   `/workspace/.piforge/logs/<session>.log` and tail it through the file API — is
-   unchanged and still open.
-3. **The marker carries a pid, not a boot id.** §5's stage-2 item. A probe on a
-   restarted container can still read a marker written by a previous boot as proof of
-   life. The window is the marker TTL (2 min).
+2. ~~Agent stderr goes to the runner's log.~~ **Done in stage 3**: the supervisor writes
+   `/workspace/.piforge/logs/<session>.log` and `sandboxAgent.Logs` reads it through the
+   file API (`RuntimeConfig.LogsFor`). `pi` itself prints nothing to stderr on a healthy
+   run, so the panel is legitimately empty until the agent fails — which is what it is
+   for.
+3. **The marker carries a pid, not a boot id.** A probe on a restarted container can
+   still read a marker written by a previous boot as proof of life. The window is the
+   marker TTL (2 min). Not fixed by stage 3; the supervisor's socket makes the lie much
+   less likely (a dead supervisor removes both the marker and the socket).
 4. **The agent runtime is in the image, not staged per container** (`deploy/Dockerfile.sandbox-agent`).
    §3's `stageAgentRuntime` tar upload is unnecessary while the image carries `pi`, and an
    image without it fails loudly at launch. If a deployment ever needs an image it does
@@ -306,12 +362,23 @@ deliberate exception, not an oversight:
    (`runtimedirs.Measure` on a host path). Enforcement never refuses a run it cannot
    measure, which is the safe direction, but the number is not true. Fix: a `du`-shaped
    question through the sandbox API.
-7. **`models.json` staging still reads the host copy** under `<dataDir>/pi-agents` and
-   writes it into the sandbox. That file is deployment state (it holds only the gateway
-   URL and a per-session token), not workspace, so it stays on the state volume by
-   design — but it does mean a control plane that loses its data volume cannot
-   reconstruct a running session's model configuration.
-8. **`-agent-in-sandbox` is still off by default, and it now also requires
-   `-sandbox-files remote`** (the file panel has no host tree to read). That is a
-   startup check, not a silent coupling.
+7. **`models.json` / `mcp.json` staging still reads the host copy** under
+   `<dataDir>/pi-agents` and writes it into the sandbox. Those files hold deployment
+   state (a gateway URL, a per-session gateway token, a per-session MCP broker token),
+   not workspace, so they stay on the state volume by design. For `mcp.json` that is now
+   a *requirement* as well as a choice: the host copy must be rendered without the real
+   credential, and it is.
+8. **A stdio MCP server is still not staged under the flag.** Its credential would have
+   to be an environment variable in the sandbox and there is no egress point to inject it
+   at. The launch logs which server was skipped and why.
+9. **The replay window duplicates bytes, and it is bounded.** A reattaching control plane
+   is resumed at the last byte the previous one accepted, so the in-flight tail is
+   delivered twice (one socket buffer's worth, not the run). This is a documented cost of
+   a real reconnect, not a promise of exactly-once delivery.
+10. **The gateway signing key moves to the data volume** (`/data/gateway.key`). A
+    deployment that loses it invalidates every token it ever issued — which is the same
+    consequence as losing `master.key`, and the reason both belong in the backup.
+11. **`-agent-in-sandbox` is on by default for docker/runner and still off for local**;
+    it also requires `-sandbox-files remote` (the file panel has no host tree to read).
+    That is a startup check, not a silent coupling. Removing the flag entirely is stage 4.
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/piforge/piforge/backend/internal/agentsupervisor"
 	"github.com/piforge/piforge/backend/internal/aio"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/liveness"
@@ -90,6 +92,11 @@ type sandboxAgent struct {
 	// piBin is the agent executable inside the sandbox, on PATH.
 	piBin  string
 	logger *slog.Logger
+	// bootedAt is when this control-plane process started. It is how a handshake
+	// is classified: an agent whose supervisor started before this instant was
+	// hosting a run that survived a restart, one that started after it is new.
+	// The distinction matters in a log line a human reads after an incident.
+	bootedAt time.Time
 }
 
 // newSandboxAgent builds the launcher, or explains why it cannot exist.
@@ -110,6 +117,7 @@ func newSandboxAgent(provider sandbox.Remote, attacher sandbox.Attacher, keys sa
 		launcher: opt.sandboxAgentLauncher,
 		piBin:    opt.sandboxAgentPi,
 		logger:   logger,
+		bootedAt: time.Now(),
 	}, nil
 }
 
@@ -241,10 +249,23 @@ func (a *sandboxAgent) ContainerWorktree(ctx context.Context, spec contracts.Ses
 // as it treats a child process's pipes, so every RPC semantic — framing, ids,
 // settle detection, subscriptions — is the unchanged code path.
 //
-// There is deliberately no context parameter: the stream outlives the request
-// that asked for it (Bridge.Start ignores ctx for the same reason), so the
-// handshake gets its own bounded context and the connection is closed by
-// Bridge.Close, not by a cancelled HTTP request.
+// Two steps, in this order, and the order is the stage-3 promise:
+//
+//  1. **Reattach.** If a supervisor is already listening on
+//     /workspace/.piforge/run/<session>.sock, connect to it and use the agent it
+//     is hosting. This is what makes a control-plane restart invisible: the same
+//     `pi` pid, the bytes that accumulated while nobody was reading, and the run
+//     still settling into the same database row.
+//  2. **Launch.** Otherwise ask the sandbox to start
+//     `piforged agent-supervisor-start`, which starts a detached supervisor and
+//     then attaches to it. The supervisor — not this process — owns the agent's
+//     file descriptors from that moment on, so a later restart of this process
+//     cannot close them.
+//
+// Both steps speak the same handshake (one JSON line, then raw agent bytes), so
+// everything downstream of the handshake is the same stream either way. The only
+// difference the runtime is told about is `Reattached()`, which stops it from
+// sending `set_model` to a process in the middle of a session.
 func (a *sandboxAgent) Dial(spec contracts.SessionSpec, sessionFile string) (io.ReadWriteCloser, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), agentStartTimeout)
 	defer cancel()
@@ -278,6 +299,21 @@ func (a *sandboxAgent) Dial(spec contracts.SessionSpec, sessionFile string) (io.
 		containerSession = sessionFile
 	}
 
+	// Stage 3: the agent's stdio belongs to a supervisor inside the sandbox.
+	// These three paths are the whole contract between the two sides.
+	socket := agentsupervisor.SocketPath(root, spec.SessionID)
+	stderrLog := agentsupervisor.LogPath(root, spec.SessionID)
+
+	if stream, err := a.reattach(ctx, target.SandboxID, socket, spec.SessionID, worktree); err == nil {
+		a.logAgentHandshake(fmt.Sprintf("the agent already in %s", target.SandboxID), spec, stream)
+		return stream, nil
+	} else {
+		// Not an error: the ordinary case is "no supervisor yet". Debug, not warn,
+		// because every first launch takes this path.
+		a.logger.Debug("no agent supervisor to reattach to; starting one",
+			"session", spec.SessionID, "sandbox", target.SandboxID, "reason", err.Error())
+	}
+
 	setup := a.setup(spec)
 	client, err := a.client(ctx, target.SandboxID)
 	if err != nil {
@@ -298,7 +334,7 @@ func (a *sandboxAgent) Dial(spec contracts.SessionSpec, sessionFile string) (io.
 			"session", spec.SessionID, "error", err.Error())
 	}
 
-	argv := []string{
+	agentArgv := []string{
 		a.launcher, liveness.LauncherCommand,
 		"-root", root,
 		"-session", spec.SessionID,
@@ -312,22 +348,40 @@ func (a *sandboxAgent) Dial(spec contracts.SessionSpec, sessionFile string) (io.
 		// unexpected argument fails at the agent with its own message instead of
 		// being silently rewritten here.
 		if translated, ok := containerUnder(target.RootDir, root, arg); ok {
-			argv = append(argv, translated)
+			agentArgv = append(agentArgv, translated)
 			continue
 		}
-		argv = append(argv, arg)
+		agentArgv = append(agentArgv, arg)
 	}
 	// The bridge appends --session itself when it spawns a child. Over an attach
 	// it does not, so the sandbox-side path is added here.
-	argv = append(argv, "--session", containerSession)
+	agentArgv = append(agentArgv, "--session", containerSession)
+
+	// The supervisor start is the outer argv: it is what the runner starts, and
+	// it is what makes the agent's stdio the supervisor's pipes instead of the
+	// exec stream's.
+	argv := []string{
+		a.launcher, agentsupervisor.StartCommand,
+		"-root", root,
+		"-session", spec.SessionID,
+		"-socket", socket,
+		"-stderr-log", stderrLog,
+		"--",
+	}
+	argv = append(argv, agentArgv...)
 
 	env := sandboxAgentEnv(setup.Env, agentDir)
-	a.logger.Info("agent runs inside the sandbox",
+	// The launch branch can still *attach* to a supervisor that was already
+	// there: `agent-supervisor-start` attaches when the socket answers. So the
+	// decision of what to log is made from the handshake, not from which code
+	// path ran.
+	a.logger.Debug("asking the sandbox for an agent supervisor",
 		"session", spec.SessionID, "sandbox", target.SandboxID,
 		"dir", worktree, "user", agentSandboxUser,
-		"session_file", containerSession)
+		"session_file", containerSession,
+		"socket", socket, "log", stderrLog)
 
-	stream, err := a.attacher.Attach(ctx, target.SandboxID, sandbox.AttachSpec{
+	raw, err := a.attacher.Attach(ctx, target.SandboxID, sandbox.AttachSpec{
 		Argv: argv,
 		Dir:  worktree,
 		Env:  env,
@@ -336,7 +390,170 @@ func (a *sandboxAgent) Dial(spec contracts.SessionSpec, sessionFile string) (io.
 	if err != nil {
 		return nil, fmt.Errorf("agent-in-sandbox: start the agent in %s: %w", target.SandboxID, err)
 	}
+	stream, err := handshake(raw, spec.SessionID, agentsupervisorLaunchTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("agent-in-sandbox: the agent supervisor in %s did not come up: %w", target.SandboxID, err)
+	}
+	a.logAgentHandshake(fmt.Sprintf("the sandbox %s", target.SandboxID), spec, stream)
 	return stream, nil
+}
+
+// logAgentHandshake is the one line an operator reads to know whether an agent
+// survived a restart or was started now.
+//
+// The classification is the supervisor's own start time against this process's:
+// an agent older than this control plane is a survivor, and saying "reattached"
+// for a fresh process (or the other way round) would make the restart proof
+// meaningless in exactly the case it exists for.
+func (a *sandboxAgent) logAgentHandshake(where string, spec contracts.SessionSpec, stream *agentStream) {
+	attrs := []any{
+		"session", spec.SessionID,
+		"target", where,
+		"agent_pid", stream.PID,
+		"agent_started", stream.AgentStartedAt.UTC().Format(time.RFC3339),
+		"replayed_bytes", stream.ReplayedBytes,
+		"gap_bytes", stream.GapBytes,
+	}
+	if !stream.AgentStartedAt.IsZero() && stream.AgentStartedAt.Before(a.bootedAt) {
+		attrs = append(attrs, "detail", "this agent process predates the control plane: its supervisor kept it alive and the run continues instead of being interrupted")
+		a.logger.Info("reattached to an agent that outlived the control plane", attrs...)
+		return
+	}
+	attrs = append(attrs, "detail", "a new supervisor owns this agent's stdio; the provider key never enters the container")
+	a.logger.Info("agent runs inside the sandbox", attrs...)
+}
+
+// reattach connects to an existing supervisor, if there is one.
+//
+// The error is deliberately returned rather than logged as a warning by every
+// caller: "no supervisor" is the normal state of a session that has not started
+// yet, and it must be cheap. Nothing about it is fatal.
+func (a *sandboxAgent) reattach(ctx context.Context, sandboxID, socket, sessionID, worktree string) (*agentStream, error) {
+	reattacher, ok := a.attacher.(sandbox.Reattacher)
+	if !ok {
+		return nil, fmt.Errorf("this provider has no reattach verb")
+	}
+	spec := sandbox.ReattachSpec{
+		Socket: socket,
+		// The helper is the sandbox's copy of this binary, in its attach mode:
+		// the runner appends `-socket <socket>` to it.
+		Helper: []string{a.launcher, agentsupervisor.AttachCommand, "-session", sessionID},
+		Dir:    worktree,
+		User:   agentSandboxUser,
+	}
+	// Bounded: a reattach is a local dial inside the container, and a control
+	// plane that waits two minutes for it would turn every session start into a
+	// stall.
+	actx, cancel := context.WithTimeout(ctx, agentsupervisorReattachTimeout)
+	defer cancel()
+	raw, err := reattacher.Reattach(actx, sandboxID, spec)
+	if err != nil {
+		return nil, err
+	}
+	stream, err := handshake(raw, sessionID, agentsupervisorReattachTimeout)
+	if err != nil {
+		return nil, err
+	}
+	stream.reattached = true
+	return stream, nil
+}
+
+// Timeouts for the two handshakes. A reattach is a dial; a launch has to start a
+// detached process inside a container.
+const (
+	agentsupervisorReattachTimeout = 20 * time.Second
+	agentsupervisorLaunchTimeout   = 90 * time.Second
+)
+
+// agentStream is the supervisor's stream as the bridge sees it: the handshake
+// line has already been consumed (and verified), so Read returns agent bytes
+// only.
+type agentStream struct {
+	stream     io.ReadWriteCloser
+	reader     *bufio.Reader
+	reattached bool
+	// PID is the process the supervisor is hosting (the heartbeat launcher, whose
+	// child is `pi`), ReplayedBytes is how much of the stream this client missed,
+	// GapBytes is how much of it the backlog had already dropped, and
+	// AgentStartedAt is when that supervisor started — which is how "survived a
+	// restart" is told apart from "started now".
+	PID            int
+	ReplayedBytes  int64
+	GapBytes       int64
+	AgentStartedAt time.Time
+}
+
+func (s *agentStream) Read(p []byte) (int, error)  { return s.reader.Read(p) }
+func (s *agentStream) Write(p []byte) (int, error) { return s.stream.Write(p) }
+func (s *agentStream) Close() error                { return s.stream.Close() }
+
+// CloseWrite half-closes the stream so the supervisor's client loop sees EOF —
+// which ends the *client*, not the agent.
+func (s *agentStream) CloseWrite() error {
+	if cw, ok := s.stream.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
+// Reattached implements pi.Reattached.
+func (s *agentStream) Reattached() bool { return s.reattached }
+
+// ProcessID implements the bridge's optional transport-pid interface: the API's
+// process_id is the agent's pid inside the sandbox, not this process's child.
+func (s *agentStream) ProcessID() int { return s.PID }
+
+// handshake consumes exactly one frame from the stream and verifies it.
+//
+// The read is bounded: the stream is a live connection to another container, and
+// a handshake that never arrives must fail the launch instead of hanging the
+// control plane's spawn path.
+func handshake(raw io.ReadWriteCloser, sessionID string, timeout time.Duration) (*agentStream, error) {
+	reader := bufio.NewReaderSize(raw, 64<<10)
+	type result struct {
+		frame agentsupervisor.Frame
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		frame, err := agentsupervisor.ReadFrame(reader)
+		done <- result{frame: frame, err: err}
+	}()
+	select {
+	case got := <-done:
+		if got.err != nil {
+			_ = raw.Close()
+			return nil, got.err
+		}
+		if got.frame.Type != "ready" {
+			_ = raw.Close()
+			msg := got.frame.Message
+			if msg == "" {
+				msg = got.frame.Type
+			}
+			return nil, fmt.Errorf("supervisor answered %q", msg)
+		}
+		if got.frame.Session != sessionID {
+			_ = raw.Close()
+			return nil, fmt.Errorf("supervisor hosts session %q, not %q", got.frame.Session, sessionID)
+		}
+		if got.frame.PID <= 0 {
+			_ = raw.Close()
+			return nil, fmt.Errorf("supervisor reported no agent process")
+		}
+		started, _ := time.Parse(time.RFC3339Nano, got.frame.Started)
+		return &agentStream{
+			stream:         raw,
+			reader:         reader,
+			PID:            got.frame.PID,
+			ReplayedBytes:  got.frame.ReplayBytes,
+			GapBytes:       got.frame.Gap,
+			AgentStartedAt: started,
+		}, nil
+	case <-time.After(timeout):
+		_ = raw.Close()
+		return nil, fmt.Errorf("no handshake within %s", timeout)
+	}
 }
 
 // stageModelConfig writes the session's models.json into the sandbox and returns
@@ -379,8 +596,78 @@ func (a *sandboxAgent) stageModelConfig(ctx context.Context, sandboxID string, s
 			return "", fmt.Errorf("agent-in-sandbox: write %s/models.json: %w", agentDir, err)
 		}
 	}
+	// mcp.json follows the same rule as models.json, and it has to be staged for
+	// a different reason: without it an agent in the sandbox has no MCP servers
+	// at all. What it contains is decided in main.go — under this flag it is a
+	// broker URL and a revocable per-session token, never a credential
+	// (docs/EXECUTION-BOUNDARY.md §4, stage 3).
+	if mcpRaw, merr := os.ReadFile(filepath.Join(a.dataDir, "pi-agents", spec.SessionID, "mcp.json")); merr == nil {
+		if err := client.WriteBytes(ctx, path.Join(agentDir, "mcp.json"), mcpRaw); err != nil {
+			return "", fmt.Errorf("agent-in-sandbox: write %s/mcp.json: %w", agentDir, err)
+		}
+	} else if !os.IsNotExist(merr) {
+		return "", fmt.Errorf("agent-in-sandbox: read the session's MCP configuration: %w", merr)
+	}
 	return agentDir, nil
 }
+
+// Logs returns the tail of the agent's stderr log, read from inside the sandbox.
+//
+// Stage 3 item 3 of docs/EXECUTION-BOUNDARY.md. The agent's stderr used to land
+// only in the runner's log: the bridge's tail buffer is fed by a locally spawned
+// child, and the sandbox agent is not one. The supervisor writes that stream to
+// /workspace/.piforge/logs/<session>.log, so the Logs panel can show the same
+// bytes the operator would find with `docker exec cat`.
+func (a *sandboxAgent) Logs(ctx context.Context, sessionID string) (*contracts.SessionLogs, error) {
+	target, err := a.store.SessionSandboxFor(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("agent-in-sandbox: resolve the sandbox for session %s: %w", sessionID, err)
+	}
+	if strings.TrimSpace(target.RootDir) == "" {
+		return nil, fmt.Errorf("agent-in-sandbox: sandbox %s reports no workspace", target.SandboxID)
+	}
+	root, err := a.provider.ContainerPath(target.RootDir)
+	if err != nil {
+		return nil, fmt.Errorf("agent-in-sandbox: map the workspace of %s: %w", target.SandboxID, err)
+	}
+	client, err := a.client(ctx, target.SandboxID)
+	if err != nil {
+		return nil, err
+	}
+	logPath := agentsupervisor.LogPath(root, sessionID)
+	file, err := client.ReadFile(ctx, logPath)
+	if err != nil {
+		// No file yet means the supervisor has not started this agent, which is
+		// an empty log rather than a broken panel. Say which file was expected so
+		// an operator can look for it themselves.
+		return &contracts.SessionLogs{
+			SessionID: sessionID,
+			Lines:     []string{},
+			UpdatedAt: time.Now(),
+		}, nil
+	}
+	text := strings.TrimRight(file.Content, "\n")
+	lines := []string{}
+	truncated := false
+	if text != "" {
+		lines = strings.Split(text, "\n")
+		// The panel is a tail viewer, and the file is bounded at 1 MiB by the
+		// supervisor's rotation; a few hundred lines is what a person reads.
+		if len(lines) > sessionLogTailLines {
+			lines = lines[len(lines)-sessionLogTailLines:]
+			truncated = true
+		}
+	}
+	return &contracts.SessionLogs{
+		SessionID: sessionID,
+		Lines:     lines,
+		Truncated: truncated,
+		UpdatedAt: time.Now(),
+	}, nil
+}
+
+// sessionLogTailLines is how much of the agent log the Logs panel shows.
+const sessionLogTailLines = 200
 
 // client builds a sandbox API client for one sandbox, with that sandbox's own
 // key — the same resolution the panels use.

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"strings"
 	"testing"
 )
@@ -247,5 +248,61 @@ func TestValidateAgentWorkspace(t *testing.T) {
 				t.Fatalf("validateAgentWorkspace(%v, %q) = %v", tc.agent, tc.files, err)
 			}
 		})
+	}
+}
+
+// The stage-3 flip: the agent runs in the sandbox by default for the container
+// providers, and stays beside the control plane for -sandbox local. The flag and
+// the environment still win, in both directions, because an operator who pinned
+// the old shape must get it.
+func TestResolveAgentInSandbox(t *testing.T) {
+	cases := []struct {
+		name string
+		kind string
+		flag string // "" = not passed
+		env  string
+		want bool
+	}{
+		{name: "docker defaults on", kind: "docker", want: true},
+		{name: "runner defaults on", kind: "runner", want: true},
+		{name: "local defaults off", kind: "local", want: false},
+		{name: "docker can be turned off", kind: "docker", flag: "false", want: false},
+		{name: "local cannot be turned on by the provider default", kind: "local", flag: "false", want: false},
+		{name: "the flag beats the environment", kind: "runner", flag: "false", env: "1", want: false},
+		{name: "the environment turns it on for docker", kind: "docker", env: "1", want: true},
+		{name: "the environment turns it off for runner", kind: "runner", env: "0", want: false},
+		{name: "the environment works for local too", kind: "local", env: "1", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PIFORGE_AGENT_IN_SANDBOX", tc.env)
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			value := false
+			fs.BoolVar(&value, "agent-in-sandbox", false, "")
+			args := []string{}
+			if tc.flag != "" {
+				args = append(args, "-agent-in-sandbox="+tc.flag)
+			}
+			if err := fs.Parse(args); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			got, err := resolveAgentInSandbox(fs, value, tc.kind)
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("kind=%s flag=%q env=%q: got %v, want %v", tc.kind, tc.flag, tc.env, got, tc.want)
+			}
+		})
+	}
+}
+
+// A value that is neither 0 nor 1 is a configuration error, not a default: an
+// operator who wrote PIFORGE_AGENT_IN_SANDBOX=yes expects "yes" to mean
+// something, and silently choosing the provider default would bury the typo.
+func TestResolveAgentInSandboxRejectsANonsenseEnvironment(t *testing.T) {
+	t.Setenv("PIFORGE_AGENT_IN_SANDBOX", "maybe")
+	if _, err := resolveAgentInSandbox(nil, false, "runner"); err == nil {
+		t.Fatal("a non-boolean environment value must be a startup error")
 	}
 }

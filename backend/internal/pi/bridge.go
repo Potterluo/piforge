@@ -22,6 +22,20 @@ import (
 // PRD §7.4.5 forbids replaying it automatically.
 var ErrClosed = errors.New("pi: bridge closed")
 
+// Reattached is implemented by a Dial transport that is connected to a peer
+// which was *already* running when this control plane started — a sandbox
+// supervisor that outlived the previous process (docs/EXECUTION-BOUNDARY.md
+// stage 3).
+//
+// The bridge behaves identically either way (the same framing, the same ids);
+// what changes is what the runtime may do to the process. In particular it must
+// not select a model on a process it did not launch: that process is in the
+// middle of a conversation, possibly of a run, and its model configuration is
+// the one it started with.
+type Reattached interface {
+	Reattached() bool
+}
+
 // CommandError reports a command that Pi answered with success:false. The
 // message is Pi's own text, kept verbatim so the HTTP layer can surface it.
 type CommandError struct {
@@ -223,12 +237,21 @@ func (b *Bridge) Start(ctx context.Context) error {
 	return nil
 }
 
-// PID returns the child's process id, or 0 for a stream-backed bridge.
+// PID returns the child's process id, or the transported peer's when the stream
+// knows it.
+//
+// A sandbox agent is not this process's child: it is a process a supervisor
+// inside the container started, and `process_id` in the API is what an operator
+// (and a restart test) compares against `ps` in the sandbox. A transport that can
+// answer therefore reports it through ProcessID.
 func (b *Bridge) PID() int {
-	if b.cmd == nil || b.cmd.Process == nil {
-		return 0
+	if b.cmd != nil && b.cmd.Process != nil {
+		return b.cmd.Process.Pid
 	}
-	return b.cmd.Process.Pid
+	if p, ok := b.stream.(interface{ ProcessID() int }); ok {
+		return p.ProcessID()
+	}
+	return 0
 }
 
 // SessionFile returns the JSONL file this process owns.

@@ -64,10 +64,83 @@ type Attacher interface {
 	Attach(ctx context.Context, sandboxID string, spec AttachSpec) (io.ReadWriteCloser, error)
 }
 
+// ReattachSpec is one *existing* process to connect to inside a sandbox.
+//
+// Stage 3 of docs/EXECUTION-BOUNDARY.md puts a supervisor inside the sandbox
+// that owns the agent's stdio (internal/agentsupervisor). The agent therefore
+// outlives the control plane, and the control plane needs a verb that means "get
+// me the stdio of the process that is already there" rather than "start one".
+// The two are deliberately separate verbs even though the transport is the same
+// docker exec primitive: a reattach that starts a second agent would be the one
+// failure this stage exists to prevent, so it must not be expressible as an
+// attach with a different argv.
+//
+// Socket is the Unix socket inside the sandbox. Helper is the argv prefix that
+// connects to it (the sandbox's copy of piforged, `agent-attach`); the provider
+// appends `-socket <socket>`. Both are explicit because the runner has no way to
+// know either: the socket is named by the control plane's session, and the helper
+// lives in the sandbox image.
+type ReattachSpec struct {
+	Socket string   `json:"socket"`
+	Helper []string `json:"helper,omitempty"`
+	Dir    string   `json:"dir,omitempty"`
+	Env    []string `json:"env,omitempty"`
+	User   string   `json:"user,omitempty"`
+}
+
+// Reattacher is the optional provider capability behind ReattachSpec.
+type Reattacher interface {
+	Reattach(ctx context.Context, sandboxID string, spec ReattachSpec) (io.ReadWriteCloser, error)
+}
+
 var (
-	_ Attacher = (*Docker)(nil)
-	_ Attacher = (*Runner)(nil)
+	_ Attacher   = (*Docker)(nil)
+	_ Attacher   = (*Runner)(nil)
+	_ Reattacher = (*Docker)(nil)
+	_ Reattacher = (*Runner)(nil)
 )
+
+// reattachArgv is the one place that turns a ReattachSpec into an argv. It is
+// shared (as a shape) by both providers so a spec that means one thing here
+// cannot mean another over HTTP.
+func reattachArgv(spec ReattachSpec) ([]string, error) {
+	socket := strings.TrimSpace(spec.Socket)
+	if socket == "" {
+		return nil, fmt.Errorf("reattach needs a socket")
+	}
+	if len(spec.Helper) == 0 || strings.TrimSpace(spec.Helper[0]) == "" {
+		return nil, fmt.Errorf("reattach needs a helper argv")
+	}
+	argv := append([]string{}, spec.Helper...)
+	return append(argv, "-socket", socket), nil
+}
+
+// Reattach connects to the supervisor already listening on spec.Socket.
+func (d *Docker) Reattach(ctx context.Context, sandboxID string, spec ReattachSpec) (io.ReadWriteCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("sandbox: docker: reattach: %w", err)
+	}
+	argv, err := reattachArgv(spec)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: docker: %w", err)
+	}
+	args := []string{"exec", "-i"}
+	if user := strings.TrimSpace(spec.User); user != "" {
+		args = append(args, "-u", user)
+	}
+	if dir := strings.TrimSpace(spec.Dir); dir != "" {
+		args = append(args, "-w", dir)
+	}
+	for _, entry := range spec.Env {
+		if strings.TrimSpace(entry) == "" {
+			continue
+		}
+		args = append(args, "-e", entry)
+	}
+	args = append(args, d.resolve(sandboxID))
+	args = append(args, argv...)
+	return startDockerExec(args)
+}
 
 // Attach starts argv inside the sandbox and returns its stdio.
 //
@@ -110,13 +183,32 @@ func (r *Runner) Attach(ctx context.Context, sandboxID string, spec AttachSpec) 
 	if len(spec.Argv) == 0 {
 		return nil, fmt.Errorf("sandbox: runner: attach needs an argv")
 	}
+	return r.stream(ctx, sandboxID, "attach", spec)
+}
+
+// Reattach asks the runner to connect to the supervisor already inside the
+// sandbox. The stream it returns is the agent's stdio, exactly like Attach's.
+func (r *Runner) Reattach(ctx context.Context, sandboxID string, spec ReattachSpec) (io.ReadWriteCloser, error) {
+	if _, err := reattachArgv(spec); err != nil {
+		return nil, fmt.Errorf("sandbox: runner: %w", err)
+	}
+	return r.stream(ctx, sandboxID, "reattach", spec)
+}
+
+// stream performs one hijacking request against a runner verb.
+//
+// The HTTP exchange is written by hand because net/http's client cannot hand
+// back a live connection: the response body IS the channel, and the request
+// body must be finished before the stream starts. Hijacking is the server's half
+// of the same decision (internal/sandboxrunner).
+func (r *Runner) stream(ctx context.Context, sandboxID, verb string, spec any) (io.ReadWriteCloser, error) {
 	payload, err := json.Marshal(spec)
 	if err != nil {
-		return nil, fmt.Errorf("sandbox: runner: encode attach: %w", err)
+		return nil, fmt.Errorf("sandbox: runner: encode %s: %w", verb, err)
 	}
 	base, err := url.Parse(r.baseURL)
 	if err != nil {
-		return nil, fmt.Errorf("sandbox: runner: attach: base url: %w", err)
+		return nil, fmt.Errorf("sandbox: runner: %s: base url: %w", verb, err)
 	}
 	addr := base.Host
 	if base.Port() == "" {
@@ -134,7 +226,7 @@ func (r *Runner) Attach(ctx context.Context, sandboxID string, spec AttachSpec) 
 		conn, err = dialer.DialContext(ctx, "tcp", addr)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("sandbox: runner: attach %s: %w", sandboxID, err)
+		return nil, fmt.Errorf("sandbox: runner: %s %s: %w", verb, sandboxID, err)
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
@@ -142,7 +234,7 @@ func (r *Runner) Attach(ctx context.Context, sandboxID string, spec AttachSpec) 
 
 	req := &http.Request{
 		Method: http.MethodPost,
-		URL:    &url.URL{Scheme: base.Scheme, Host: base.Host, Path: sandboxResource(sandboxID, "attach")},
+		URL:    &url.URL{Scheme: base.Scheme, Host: base.Host, Path: sandboxResource(sandboxID, verb)},
 		Host:   base.Host,
 		Header: http.Header{
 			"Authorization": {"Bearer " + r.cfg.Token},
@@ -154,18 +246,18 @@ func (r *Runner) Attach(ctx context.Context, sandboxID string, spec AttachSpec) 
 	}
 	if err := req.Write(conn); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("sandbox: runner: attach %s: write request: %w", sandboxID, err)
+		return nil, fmt.Errorf("sandbox: runner: %s %s: write request: %w", verb, sandboxID, err)
 	}
 	reader := bufio.NewReaderSize(conn, 64<<10)
 	resp, err := http.ReadResponse(reader, req)
 	if err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("sandbox: runner: attach %s: read response: %w", sandboxID, err)
+		return nil, fmt.Errorf("sandbox: runner: %s %s: read response: %w", verb, sandboxID, err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		_ = conn.Close()
-		return nil, fmt.Errorf("sandbox: runner: attach %s: HTTP %d: %s", sandboxID, resp.StatusCode, truncateText(string(body), 300))
+		return nil, fmt.Errorf("sandbox: runner: %s %s: HTTP %d: %s", verb, sandboxID, resp.StatusCode, truncateText(string(body), 300))
 	}
 	// The handshake is done: the stream is the agent, with no request deadline.
 	_ = conn.SetDeadline(time.Time{})

@@ -185,6 +185,21 @@ func (p *DockerProvider) Attach(ctx context.Context, sandboxID string, spec sand
 	return provider.Attach(ctx, sandboxID, spec)
 }
 
+// Reattach connects to a process that is already inside an existing container.
+//
+// It is the eighth operation, added with stage 3 of docs/EXECUTION-BOUNDARY.md:
+// the agent now outlives the control plane, so a restarted control plane has to
+// reach the supervisor that kept it alive instead of starting a second agent.
+// Like Attach it is a Docker CLI operation on the container, so it delegates to
+// the same *sandbox.Docker the in-process provider uses.
+func (p *DockerProvider) Reattach(ctx context.Context, sandboxID string, spec sandbox.ReattachSpec) (io.ReadWriteCloser, error) {
+	provider, err := p.api("")
+	if err != nil {
+		return nil, err
+	}
+	return provider.Reattach(ctx, sandboxID, spec)
+}
+
 // creator builds a provider that can create a container: image and CLI required.
 func (p *DockerProvider) creator(request sandbox.RunnerRequest) (*sandbox.Docker, error) {
 	image := firstNonEmpty(request.Image, p.opts.Image)

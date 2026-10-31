@@ -179,6 +179,10 @@ type Deps struct {
 	// request. Nil keeps the old behaviour (the persisted row alone decides);
 	// cmd/piforged always wires one.
 	Reconciler *reconcile.Reconciler
+	// Probe is the liveness authority the deployment trusts. ReattachLiveSessions
+	// asks it before reconnecting to a session, so "running in the database" is
+	// not on its own a reason to spawn or attach to an agent.
+	Probe contracts.LivenessProbe
 	// Now defaults to time.Now.
 	Now func() time.Time
 	// Logger defaults to slog.Default().
@@ -222,9 +226,29 @@ type server struct {
 
 // NewRouter builds the complete HTTP handler, including the recover middleware.
 func NewRouter(d Deps) http.Handler {
-	s := newServer(d)
-	return s.recoverer(s.routes())
+	return NewServer(d).Handler()
 }
+
+// Server is the HTTP surface plus the operations that are not request-shaped.
+//
+// It exists for the boot-time passes that need the same wiring the handlers use
+// — today that is ReattachLiveSessions, which reconnects this process to agents
+// that outlived the previous one (docs/EXECUTION-BOUNDARY.md stage 3). Returning
+// only an http.Handler would leave those passes to rebuild the store lookup, the
+// session spec and the hub's single-subscription rule somewhere else.
+type Server struct {
+	handler http.Handler
+	s       *server
+}
+
+// NewServer builds the handler and keeps the server for the boot-time passes.
+func NewServer(d Deps) *Server {
+	s := newServer(d)
+	return &Server{handler: s.recoverer(s.routes()), s: s}
+}
+
+// Handler returns the http.Handler to serve.
+func (sv *Server) Handler() http.Handler { return sv.handler }
 
 // newServer normalises Deps and is what tests use to tune SSE timings.
 func newServer(d Deps) *server {
@@ -388,6 +412,10 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /v1/mcp/servers", s.authed(s.handleListMCPServers))
 	mux.Handle("POST /v1/mcp/servers", s.mutatingBearer(s.handleCreateMCPServer))
 	mux.Handle("DELETE /v1/mcp/servers/{id}", s.mutatingBearer(s.handleDeleteMCPServer))
+	// Stage 3's revocable credential. The sandbox holds /gw/mcp/<token> instead
+	// of a user's MCP credential, and this is how the deployment takes it away
+	// (docs/EXECUTION-BOUNDARY.md §4).
+	mux.Handle("DELETE /v1/sessions/{id}/mcp-token", s.mutatingBearer(s.handleRevokeMCPTokens))
 
 	// Admin.
 	mux.Handle("GET /v1/admin/status", s.authed(s.handleAdminStatus))
@@ -413,6 +441,10 @@ func (s *server) routes() http.Handler {
 	if s.deps.LLMGateway != nil {
 		mux.Handle("/gw/llm/", s.deps.LLMGateway)
 	}
+	// The MCP broker. Same shape as the model gateway: the path token is the
+	// credential, so it sits outside the cookie chain. Unlike the gateway it has no
+	// dependency to be nil, because the store it needs is required anyway.
+	mux.Handle(MCPGatewayPrefix, http.HandlerFunc(s.handleMCPGateway))
 
 	if strings.TrimSpace(s.deps.WebUpstream) != "" {
 		web, werr := s.newWebProxy(s.deps.WebUpstream)

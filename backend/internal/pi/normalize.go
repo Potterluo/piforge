@@ -308,6 +308,22 @@ func (n *Normalizer) State() State {
 	return n.state
 }
 
+// NoteRunning marks the session as serving a turn without emitting an event.
+//
+// It exists for exactly one case: a control plane that reattached to an agent in
+// the middle of a turn (docs/EXECUTION-BOUNDARY.md stage 3). The replayed stream
+// starts wherever the previous control plane stopped, which may be *after* the
+// turn's agent_start — so the derived state would read idle while the process
+// itself answers isStreaming:true, and GET /status would show a run that is not
+// running. The settle event still clears it (Translate handles agent_settled), so
+// this cannot outlive the turn it describes.
+func (n *Normalizer) NoteRunning() {
+	n.mu.Lock()
+	n.state.Running = true
+	n.state.Streaming = true
+	n.mu.Unlock()
+}
+
 // LastSeq returns the seq of the newest emitted event.
 func (n *Normalizer) LastSeq() int64 {
 	n.mu.Lock()

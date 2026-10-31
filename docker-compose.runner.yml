@@ -1,82 +1,95 @@
-# The two-service shape: piforge has no Docker CLI and no daemon, sandbox-runner
-# owns both.
+# The isolated deployment: a control plane, a sandbox-runner, and one sandbox
+# image — with the agent running *inside* the sandbox and the workspace living
+# only there.
 #
-#   docker compose -f docker-compose.yml -f docker-compose.runner.yml up -d --build
+#   docker compose -f docker-compose.runner.yml up -d --build
 #
-# `docker-compose.yml` on its own still describes the single-container deployment
-# (the pod *is* the sandbox), and nothing here changes it until this overlay is
-# named. What the overlay adds:
+# This file is deliberately self-contained. It used to be an overlay that had to
+# be combined with `docker-compose.yml` and then completed with
+# `PIFORGE_AGENT_IN_SANDBOX=1` / `SANDBOX_WORKSPACE_VOLUME=...`; stage 3 of
+# docs/EXECUTION-BOUNDARY.md made the sandboxed placement the default for the
+# container providers, so the isolated shape is now a plain `up` with no extra
+# flags and no shared workspace volume.
 #
-#   - sandbox-runner, the only service that mounts /var/run/docker.sock. It runs
-#     the same sandbox provider code the single-host build does, so the container
-#     rules (one workspace per (user, project), mount verification, checkout via
-#     the sandbox's own API, branch worktrees as `gem`) exist once;
-#   - piforged switched to `-sandbox runner`, talking to it over the
-#     sandbox-control network with a shared bearer token.
+# What "isolated" means here, concretely (docs/SANDBOX-DEPLOY.md §1.4.5):
 #
-# Why the data volume is on both services, at the same path:
+#   - each (user, project) gets its own container and its own workspace volume
+#     (`piforge-ws-<pair hash>`); neither this control plane nor the runner
+#     mounts that volume;
+#   - the agent (`pi --mode rpc`) is a process inside that container, owned by a
+#     supervisor that survives a restart of this file's `piforge` service, and
+#     the restarted control plane reattaches to it;
+#   - the only credential the sandbox holds is the per-session model gateway
+#     token (and, for an HTTP MCP server, a per-session broker token) — never a
+#     provider key and never an MCP credential;
+#   - sandbox containers are addressed by name on `piforge-sandboxes` and publish
+#     no port on the host.
 #
-#   a sandbox's workspace is a *directory* that has to mean one thing to three
-#   processes: the control plane writes skills/MCP files into it, the runner hands
-#   it to the daemon when it creates the container, and the sandbox sees it at
-#   /workspace. Mounting one volume at /data in both services is the "same
-#   directory" half of that; the other half is that the daemon must be able to
-#   resolve it, and it cannot resolve a path that only exists inside these two
-#   containers. A bind mount source is resolved on the *daemon's* host, so
-#   `-v /data/sandboxes/<u>/<p>` from inside the runner creates an empty directory
-#   on the daemon's filesystem (on Docker Desktop, inside its VM) and the sandbox
-#   gets an empty /workspace while the control plane keeps writing into the
-#   volume. Nothing errors: both sides name the same string, which is why the
-#   provider's own data-root check cannot see it either.
-#
-#   So sandboxes mount the volume itself, with each project's directory as the
-#   volume subpath (`--mount type=volume,...,volume-subpath=sandboxes/<u>/<p>`,
-#   relative to the volume's root, which is /data here). That needs
-#   SANDBOX_WORKSPACE_VOLUME below, a named volume (the `name:` on the volume —
-#   the daemon resolves the name, not a path), and Docker Engine 25+ for the
-#   subpath. It works unchanged on Linux hosts and on Docker Desktop.
-#
-# There is a second shape, and it is the one -agent-in-sandbox uses
-# (docs/EXECUTION-BOUNDARY.md stage 2, docs/SANDBOX-DEPLOY.md §1.4.4): each
-# sandbox gets a volume of its own (`piforge-ws-<pair hash>`) and nothing else in
-# the deployment mounts it. The control plane then reaches the workspace only
-# through the sandbox API, so it needs no workspace mount at all, and
-# SANDBOX_WORKSPACE_VOLUME / SANDBOX_WORKSPACE_VOLUME_ROOT must be **removed**
-# before setting PIFORGE_AGENT_IN_SANDBOX=1: the two shapes contradict each other
-# and the provider refuses the combination at construction rather than picking
-# one. With the flag on, this service no longer needs `piforge-data:/data`
-# either — SANDBOX_DATA_ROOT is then only a path inside this container.
-#
-# Sandbox containers join `piforge-sandboxes` and are addressed by container name
-# (SANDBOX_CONTAINER_ENDPOINT=1), so no sandbox port is published on the host.
-# piforge joins that network to reach them; the runner joins it too because the
-# checkout it performs runs from the runner process, against the container's API.
-#
-# The volume and networks are named explicitly, so they are not prefixed with the
-# compose project name: the volume name is what the runner passes to the daemon,
-# and the network name is what SANDBOX_NETWORK refers to. A prefixed name would
-# still work as long as both sides used it, but a `name:` makes the three
-# references (daemon, runner, control plane) one string that cannot drift.
-
+# Requirements: Docker Engine 25+ (volume-subpath), a daemon the runner can reach
+# through /var/run/docker.sock, and the two images below. `sandbox-image` builds
+# the second one from the first; it runs nothing (its entrypoint exits) and exists
+# so a cold checkout gets both images from one `--build`.
 services:
   piforge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${PIFORGE_IMAGE:-piforge:dev}
+    container_name: piforge
+    ports:
+      - "${PIFORGE_PUBLISH:-7700}:7700"
     environment:
+      # Seeded on the first boot only; change these before exposing the port.
+      PIFORGE_SEED_EMAIL: ${PIFORGE_SEED_EMAIL:-admin@piforge.local}
+      PIFORGE_SEED_PASSWORD: ${PIFORGE_SEED_PASSWORD:-piforge-admin-123}
+      PIFORGE_SEED_USER_EMAIL: ${PIFORGE_SEED_USER_EMAIL:-dev@piforge.local}
+      PIFORGE_SEED_USER_PASSWORD: ${PIFORGE_SEED_USER_PASSWORD:-piforge-dev-123}
+      # Keys are sealed with this; a deployment should set it and keep it. The
+      # gateway's own signing key is written next to the database on the data
+      # volume, so agents that outlive this process keep working.
+      PIFORGE_MASTER_KEY: ${PIFORGE_MASTER_KEY:-}
+      PIFORGE_DEFAULT_PROVIDER: ${PIFORGE_DEFAULT_PROVIDER:-shared-anthropic}
+      PIFORGE_BOOTSTRAP_PROVIDER: ${PIFORGE_BOOTSTRAP_PROVIDER:-}
+      PIFORGE_BOOTSTRAP_PROVIDER_KEY: ${PIFORGE_BOOTSTRAP_PROVIDER_KEY:-}
+      HTTP_PROXY: ${PIFORGE_HTTP_PROXY:-}
+      HTTPS_PROXY: ${PIFORGE_HTTP_PROXY:-}
+      NO_PROXY: localhost,127.0.0.1,piforge,sandbox-runner
+      # The agent's gateway has to be reachable *from the sandbox*, by name: the
+      # agent is a process in another container, so 127.0.0.1 would be its own.
+      PIFORGE_GATEWAY_URL: http://piforge:7700
+      # The sandboxed placement. It is the default for runner placements since
+      # stage 3; pinned here so the file says what it deploys.
+      PIFORGE_AGENT_IN_SANDBOX: "1"
       PIFORGE_SANDBOX: runner
       PIFORGE_SANDBOX_RUNNER_URL: http://sandbox-runner:7801
       PIFORGE_SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:?set SANDBOX_RUNNER_TOKEN to a long random string}
-      PIFORGE_SANDBOX_IMAGE: ${PIFORGE_SANDBOX_IMAGE:?set PIFORGE_SANDBOX_IMAGE to the all-in-one sandbox image}
+      PIFORGE_SANDBOX_IMAGE: ${PIFORGE_SANDBOX_IMAGE:-piforge/sandbox-agent:dev}
+      # The agent inside the sandbox needs the binaries the sandbox image
+      # provides; these are also the defaults, named here for anyone reading the
+      # file instead of the flag help.
+      PIFORGE_SANDBOX_AGENT_LAUNCHER: /opt/piforge/piforged
+      PIFORGE_SANDBOX_AGENT_PI: pi
       # Each sandbox gets its own API key: the runner generates it when it creates
-      # the container and reports it once, and piforged seals it in the sandbox row.
-      # PIFORGE_SANDBOX_API_KEY is only a *fixed* override for debugging one
-      # deployment (all sandboxes share it); leave it empty for tenants.
+      # the container and reports it once, and piforged seals it in the sandbox
+      # row. PIFORGE_SANDBOX_API_KEY is only a *fixed* override for debugging one
+      # deployment; leave it empty for tenants.
       PIFORGE_SANDBOX_API_KEY: ${PIFORGE_SANDBOX_API_KEY:-}
       PIFORGE_SANDBOX_NETWORK: piforge-sandboxes
+    volumes:
+      - piforge-data:/data
     networks:
       - default
       - sandbox-control
       - piforge-sandboxes
     depends_on:
       - sandbox-runner
+    # The control plane runs as root; dropping DAC_OVERRIDE is what makes the
+    # read-only skill copies (0444) real instead of aspirational. It costs
+    # nothing because every file it writes is its own.
+    cap_drop:
+      - DAC_OVERRIDE
+    shm_size: "1gb"
+    restart: unless-stopped
 
   sandbox-runner:
     build:
@@ -87,13 +100,12 @@ services:
     # Reap the `docker` processes this service spawns.
     init: true
     environment:
-      # The runner refuses to start without a token, and every request must carry
-      # it. There is no TLS between the two services: keep them on an internal
+      # There is no TLS between the two services: keep them on an internal
       # network and do not publish 7801.
       RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:?set SANDBOX_RUNNER_TOKEN to a long random string}
       SANDBOX_RUNNER_ADDR: 0.0.0.0:7801
       SANDBOX_DATA_ROOT: /data/sandboxes
-      SANDBOX_IMAGE: ${PIFORGE_SANDBOX_IMAGE:?set PIFORGE_SANDBOX_IMAGE to the all-in-one sandbox image}
+      SANDBOX_IMAGE: ${PIFORGE_SANDBOX_IMAGE:-piforge/sandbox-agent:dev}
       # Empty is the default and the secure value: sandbox.Docker then generates a
       # 32-byte key per container. Set it only to pin one key for debugging.
       SANDBOX_API_KEY: ${PIFORGE_SANDBOX_API_KEY:-}
@@ -101,24 +113,35 @@ services:
       # Report http://piforge-<hash8>:8080 instead of a published loopback port:
       # piforged is a container here, so 127.0.0.1:<port> would be its own loopback.
       SANDBOX_CONTAINER_ENDPOINT: "1"
-      # Give each sandbox its project's directory out of the volume the daemon
-      # already knows, instead of a bind source that only exists in here. The name
-      # is the `name:` of the volume below; the root is where that volume is
-      # mounted here, which is what turns /data/sandboxes/<u>/<p> into the
-      # volume-relative subpath `sandboxes/<u>/<p>` a sandbox mount takes.
-      SANDBOX_WORKSPACE_VOLUME: piforge-data
-      SANDBOX_WORKSPACE_VOLUME_ROOT: /data
+      # No SANDBOX_WORKSPACE_VOLUME / SANDBOX_WORKSPACE_VOLUME_ROOT: those describe
+      # the *shared volume* shape, which contradicts the sandboxed placement (each
+      # sandbox gets a volume of its own). The provider refuses the combination.
     volumes:
-      # The only mount of the daemon socket in this deployment. It is deliberately
-      # not `:ro`: a socket mount's read-only flag does not restrict the API, and
-      # writing it that way would suggest a boundary that is not there.
+      # The only mount of the daemon socket in this deployment. Not `:ro`: a
+      # socket mount's read-only flag does not restrict the API, and writing it
+      # that way would suggest a boundary that is not there.
       - /var/run/docker.sock:/var/run/docker.sock
-      # Same volume, same path, as piforge — see the note above.
-      - piforge-data:/data
     networks:
       - sandbox-control
       - piforge-sandboxes
     restart: unless-stopped
+
+  # Build-only: produces the sandbox image the two services above name. It has no
+  # long-running process, so it exits immediately; `docker compose up` starts it,
+  # sees it exit and carries on. Building it from `piforge` is what keeps the
+  # agent's `pi` on exactly the version the control plane was built with.
+  sandbox-image:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.sandbox-agent
+      args:
+        AGENT_IMAGE: ${PIFORGE_IMAGE:-piforge:dev}
+    image: ${PIFORGE_SANDBOX_IMAGE:-piforge/sandbox-agent:dev}
+    container_name: piforge-sandbox-image
+    depends_on:
+      - piforge
+    entrypoint: ["/bin/true"]
+    restart: "no"
 
 networks:
   sandbox-control:
@@ -128,7 +151,8 @@ networks:
     name: piforge-sandboxes
 
 volumes:
-  # Named, and the same name in the single-container deployment: the sandbox mount
-  # refers to the daemon's volume by name, so this string is a contract.
+  # The control plane's own state (SQLite, master.key, gateway.key, artifacts).
+  # The workspaces are *not* here: each sandbox has a volume of its own,
+  # `piforge-ws-<pair hash>`, which nothing else mounts.
   piforge-data:
-    name: piforge-data
+    name: ${PIFORGE_DATA_VOLUME:-piforge-data}
