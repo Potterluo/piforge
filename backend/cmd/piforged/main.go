@@ -907,6 +907,7 @@ func run() error {
 			Sessions:      st,
 			Sandboxes:     st,
 			Skills:        st,
+			SnapshotRows:  st,
 			Logger:        logger,
 			Interval:      opt.sandboxSweep,
 		})

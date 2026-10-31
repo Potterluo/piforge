@@ -205,6 +205,13 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if err := execScript(ctx, db, string(raw)); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
+	// The snapshots table was created without a foreign key, so a project delete
+	// left one row per reclaim behind forever. The key is the lifecycle (cascade
+	// from sandboxes); a database that predates it is rebuilt in place, keeping
+	// every row.
+	if err := ensureSnapshotOwnership(ctx, db); err != nil {
+		return fmt.Errorf("store: migrate: %w", err)
+	}
 	// Columns added after the first release. `CREATE TABLE IF NOT EXISTS` cannot
 	// add them to an existing database, and SQLite has no "add column if not
 	// exists", so the duplicate-column error is the success case.
@@ -230,6 +237,108 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		if err := addColumn(ctx, db, "projects", column.name, column.ddl); err != nil {
 			return fmt.Errorf("store: migrate: %w", err)
 		}
+	}
+	return nil
+}
+
+// snapshotsCascadeToSandboxes reports whether the snapshots table already has
+// the ON DELETE CASCADE foreign key this package requires. PRAGMA foreign_key_list
+// is the only honest answer: a regex over sqlite_master would also match a
+// comment.
+func snapshotsCascadeToSandboxes(ctx context.Context, db *sql.DB) (bool, error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA foreign_key_list(snapshots)`)
+	if err != nil {
+		return false, fmt.Errorf("read snapshots foreign keys: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			id, seq                                int
+			table, from, onUpdate, onDelete, match string
+			to                                     sql.NullString
+		)
+		if err := rows.Scan(&id, &seq, &table, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+			return false, fmt.Errorf("read snapshots foreign keys: %w", err)
+		}
+		if table == "sandboxes" && from == "sandbox_id" && onDelete == "CASCADE" {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("read snapshots foreign keys: %w", err)
+	}
+	return false, nil
+}
+
+// ensureSnapshotOwnership gives snapshots.sandbox_id the foreign key schema.sql
+// declares.
+//
+// `CREATE TABLE IF NOT EXISTS` never alters an existing table and SQLite cannot
+// add a constraint in place, so an installation that already has rows is rebuilt
+// the only safe way: a new table with the key, a copy of every row, a rename —
+// all inside one transaction, so a crash leaves the old table untouched.
+//
+// Every row is carried over. A row whose sandbox is already gone is not the
+// migration's to judge: the janitor removes it, and only after the directory is
+// gone too. That is why foreign-key enforcement is switched off for the copy —
+// it must not refuse to copy a row this code is deliberately not deleting.
+func ensureSnapshotOwnership(ctx context.Context, db *sql.DB) error {
+	owned, err := snapshotsCascadeToSandboxes(ctx, db)
+	if err != nil {
+		return err
+	}
+	if owned {
+		return nil
+	}
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("rebuild snapshots: %w", err)
+	}
+	defer conn.Close()
+	// A pragma, not a transaction setting: SQLite ignores it inside one. The pool
+	// is a single connection and this runs before the store serves a request.
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		return fmt.Errorf("rebuild snapshots: %w", err)
+	}
+	defer func() {
+		_, _ = conn.ExecContext(context.WithoutCancel(ctx), `PRAGMA foreign_keys=ON`)
+	}()
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("rebuild snapshots: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// The column list is the one in schema.sql; a database from an older build has
+	// exactly these columns (nothing here was ever added by addColumn).
+	const cols = `id, user_id, sandbox_id, kind, git_commit, content_hash, size_bytes, blob_key, created_at`
+	statements := []string{
+		`DROP TABLE IF EXISTS snapshots_rebuild`,
+		`CREATE TABLE snapshots_rebuild (
+			id           TEXT PRIMARY KEY,
+			user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			sandbox_id   TEXT NOT NULL REFERENCES sandboxes(id) ON DELETE CASCADE,
+			kind         TEXT NOT NULL,
+			git_commit   TEXT NOT NULL DEFAULT '',
+			content_hash TEXT NOT NULL,
+			size_bytes   INTEGER NOT NULL DEFAULT 0,
+			blob_key     TEXT NOT NULL DEFAULT '',
+			created_at   TEXT NOT NULL)`,
+		`INSERT INTO snapshots_rebuild (` + cols + `) SELECT ` + cols + ` FROM snapshots`,
+		`DROP TABLE snapshots`,
+		`ALTER TABLE snapshots_rebuild RENAME TO snapshots`,
+		`CREATE INDEX IF NOT EXISTS snapshots_sandbox ON snapshots (sandbox_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS snapshots_sweep ON snapshots (sandbox_id, id, blob_key)`,
+	}
+	for _, stmt := range statements {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("rebuild snapshots: %w (statement: %.60s)", err, stmt)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("rebuild snapshots: %w", err)
 	}
 	return nil
 }

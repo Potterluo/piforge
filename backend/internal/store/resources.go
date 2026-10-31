@@ -614,6 +614,77 @@ func (s *Store) ListSnapshots(ctx context.Context, userID, sandboxID string) ([]
 	return out, nil
 }
 
+// SnapshotRef is the janitor's view of one snapshot row: which row it is, which
+// sandbox owns it, and which manifest it claims to describe.
+//
+// The blob key is the manifest path relative to <dataDir>/snapshots
+// ("<sandbox>/<stamp>/manifest.json"), so the sweep can ask the filesystem
+// whether the directory a row points at still exists without a second query.
+type SnapshotRef struct {
+	ID        string
+	SandboxID string
+	BlobKey   string
+}
+
+// SnapshotIndex lists every snapshot row with its owner and blob key. It is one
+// query per janitor pass, not one per row, and it is the only reading that lets
+// the sweep decide whether a row still has an owner.
+func (s *Store) SnapshotIndex(ctx context.Context) ([]SnapshotRef, error) {
+	rows, err := s.r.QueryContext(ctx, `SELECT id, sandbox_id, blob_key FROM snapshots`)
+	if err != nil {
+		return nil, fmt.Errorf("store: snapshot index: %w", err)
+	}
+	defer rows.Close()
+	out := make([]SnapshotRef, 0, 16)
+	for rows.Next() {
+		var ref SnapshotRef
+		if err := rows.Scan(&ref.ID, &ref.SandboxID, &ref.BlobKey); err != nil {
+			return nil, fmt.Errorf("store: snapshot index: %w", err)
+		}
+		out = append(out, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: snapshot index: %w", err)
+	}
+	return out, nil
+}
+
+// deleteSnapshotBatch is how many ids one statement removes. SQLite's variable
+// limit is per statement; batching keeps a deployment with a long history from
+// failing the sweep on arity instead of on a real error.
+const deleteSnapshotBatch = 400
+
+// DeleteSnapshots removes the named snapshot rows and returns how many went.
+//
+// It is the janitor's eager-delete fallback: rows whose manifest directory is
+// gone or whose sandbox row no longer exists. Deleting a row whose directory and
+// sandbox are both alive is the caller's decision to make and this method has no
+// opinion about it — the sweep is what stays conservative.
+func (s *Store) DeleteSnapshots(ctx context.Context, ids []string) (int, error) {
+	removed := 0
+	for start := 0; start < len(ids); start += deleteSnapshotBatch {
+		end := start + deleteSnapshotBatch
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+		args := make([]any, len(batch))
+		for i, id := range batch {
+			args[i] = id
+		}
+		res, err := s.w.ExecContext(ctx,
+			`DELETE FROM snapshots WHERE id IN (`+placeholders+`)`, args...)
+		if err != nil {
+			return removed, fmt.Errorf("store: delete snapshot rows: %w", err)
+		}
+		if n, aerr := res.RowsAffected(); aerr == nil {
+			removed += int(n)
+		}
+	}
+	return removed, nil
+}
+
 // DeleteSharedSkill removes an admin-owned skill. It is separate from DeleteSkill on
 // purpose: deleting something every user can see is a different act from cleaning up
 // your own, and only an admin route may call this.

@@ -13,6 +13,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/sandbox"
 	"github.com/piforge/piforge/backend/internal/skillsnap"
 	"github.com/piforge/piforge/backend/internal/store"
 )
@@ -472,10 +473,20 @@ const (
 // nothing; a Windows process that was just killed typically lets go within a few
 // hundred milliseconds, which is the whole point of the retry. The last error is
 // returned so the caller can tell the user what is still holding the directory.
-func (s *server) destroySandbox(ctx context.Context, sandbox *contracts.Sandbox) error {
+// destroySandbox releases a project's sandbox before its rows are deleted.
+//
+// "The provider does not know this sandbox" is success, not failure: the idle
+// reaper destroys the provider side and keeps the row (the snapshot rows must stay
+// readable), so a project whose sandbox was reclaimed must still be deletable.
+// Refusing here left such a project undeletable forever — the delete said 409, the
+// user retried, and the sandbox would never come back.
+func (s *server) destroySandbox(ctx context.Context, sb *contracts.Sandbox) error {
 	var err error
 	for attempt := 1; attempt <= sandboxDestroyAttempts; attempt++ {
-		if err = s.deps.Sandbox.Destroy(ctx, sandbox.ID); err == nil {
+		if err = s.deps.Sandbox.Destroy(ctx, sb.ID); err == nil {
+			return nil
+		}
+		if errors.Is(err, sandbox.ErrNotFound) {
 			return nil
 		}
 		if attempt == sandboxDestroyAttempts {

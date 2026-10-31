@@ -236,10 +236,15 @@ CREATE TABLE IF NOT EXISTS session_skills (
 CREATE INDEX IF NOT EXISTS session_skills_session ON session_skills (session_id, name);
 
 -- ============ snapshots ============
+-- A snapshot belongs to its sandbox row, and the foreign key is the lifecycle:
+-- a project delete cascades to sandboxes, and the rows go with it. Databases
+-- created before this column had the key are rebuilt by
+-- store.ensureSnapshotOwnership on the next Open (the same idempotent-migration
+-- rule as the rest of this file).
 CREATE TABLE IF NOT EXISTS snapshots (
     id           TEXT PRIMARY KEY,
     user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    sandbox_id   TEXT NOT NULL,
+    sandbox_id   TEXT NOT NULL REFERENCES sandboxes(id) ON DELETE CASCADE,
     kind         TEXT NOT NULL,
     git_commit   TEXT NOT NULL DEFAULT '',
     content_hash TEXT NOT NULL,
@@ -248,6 +253,10 @@ CREATE TABLE IF NOT EXISTS snapshots (
     created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS snapshots_sandbox ON snapshots (sandbox_id, created_at DESC);
+-- Covers the janitor's sweep, which reads (id, sandbox_id, blob_key) for every
+-- row once per pass: an index-only scan, so the sweep never reads the table it
+-- is deciding about.
+CREATE INDEX IF NOT EXISTS snapshots_sweep ON snapshots (sandbox_id, id, blob_key);
 
 -- ============ auth sessions: opaque tokens, stored as sha256 hashes ============
 CREATE TABLE IF NOT EXISTS auth_sessions (

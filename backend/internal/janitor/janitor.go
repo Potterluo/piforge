@@ -14,6 +14,8 @@
 //   - <artifacts>/<session> with no sessions row (browser screenshots);
 //   - <skill-snapshots>/<session> with no session (FR-14.2 frozen trees);
 //   - <snapshots>/<sandbox> with no sandboxes row (the idle reaper's manifests);
+//   - snapshot rows whose manifest directory or sandbox row is gone: the
+//     directory half above has an owner, the rows used to have none;
 //   - <skills>/<skl_…> with no skills row, including a stale skl_*.tmp staging
 //     directory left by an interrupted bundle upload.
 //
@@ -36,6 +38,7 @@ import (
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/skillsnap"
+	"github.com/piforge/piforge/backend/internal/store"
 )
 
 // stateDirName is the sandbox provider's own bookkeeping, next to the per-user
@@ -83,6 +86,18 @@ type Skills interface {
 	SkillIDs(ctx context.Context) ([]string, error)
 }
 
+// SnapshotRows is what the janitor asks the store about the snapshots table.
+//
+// The table needs the same fallback the directories have: a snapshot row is
+// garbage when the manifest it names is gone or when its sandbox row is gone, and
+// nothing else removes it (the eager path is the project delete's cascade). The
+// sweep is deliberately conservative: a row is only deleted when one of those two
+// facts is proven from the filesystem or the sandbox index.
+type SnapshotRows interface {
+	SnapshotIndex(ctx context.Context) ([]store.SnapshotRef, error)
+	DeleteSnapshots(ctx context.Context, ids []string) (int, error)
+}
+
 // Config wires a Janitor. A pass runs only for the halves that are configured:
 // a deployment with a container provider has no sandbox directories here, a
 // deployment that never took a screenshot has no artifacts, and so on.
@@ -109,6 +124,10 @@ type Config struct {
 	Sandboxes Sandboxes
 	// Skills is required for the skill-bundle half. Nil disables it.
 	Skills Skills
+	// SnapshotRows is required for the snapshot-row half; it also needs
+	// SnapshotsRoot (to check the directory a row names) and Sandboxes (to check
+	// the owner). Nil disables it.
+	SnapshotRows SnapshotRows
 	// Unmount detaches a directory that is still bind-mounted; nil uses the
 	// platform's lazy detach. Tests use it to observe the order.
 	Unmount func(string) error
@@ -145,9 +164,12 @@ type Result struct {
 	ArtifactBytes        int64
 	RemovedSandboxShots  int
 	SandboxSnapshotBytes int64
-	RemovedSkillBundles  int
-	SkillBytes           int64
-	Failures             int
+	// RemovedSnapshotRows is how many snapshots-table rows lost their owner or
+	// their manifest directory and were deleted.
+	RemovedSnapshotRows int
+	RemovedSkillBundles int
+	SkillBytes          int64
+	Failures            int
 }
 
 // Janitor sweeps every orphaned directory in the runtime inventory.
@@ -235,6 +257,13 @@ func (j *Janitor) RunOnce(ctx context.Context) (Result, error) {
 	}
 	if j.cfg.SnapshotsRoot != "" && j.cfg.Sandboxes != nil {
 		if err := j.sweepSandboxSnapshots(ctx, &res); err != nil {
+			return res, err
+		}
+	}
+	// After the directories: a directory removed above takes its row with it in
+	// this same pass, so an operator sees both halves settle at once.
+	if j.cfg.SnapshotsRoot != "" && j.cfg.SnapshotRows != nil && j.cfg.Sandboxes != nil {
+		if err := j.sweepSnapshotRows(ctx, &res); err != nil {
 			return res, err
 		}
 	}
@@ -369,6 +398,79 @@ func (j *Janitor) sweepSandboxSnapshots(ctx context.Context, res *Result) error 
 		func(name string) bool { return sandboxDirPattern.MatchString(name) },
 		func(name string) bool { return live[name] },
 		j.cfg.RemoveTree, &res.RemovedSandboxShots, &res.SandboxSnapshotBytes, res)
+}
+
+// sweepSnapshotRows reclaims rows whose manifest directory or owning sandbox no
+// longer exists.
+//
+// The rule is the product's, not this pass's: a row is garbage only when a fact
+// proves it. The sandbox index is read once per pass; the directory is checked
+// per row, because that is the only thing the row claims about the filesystem. A
+// row with no blob key cannot prove its directory is gone, so it survives unless
+// its sandbox is gone — "unknown" never becomes "delete".
+func (j *Janitor) sweepSnapshotRows(ctx context.Context, res *Result) error {
+	rows, err := j.cfg.SnapshotRows.SnapshotIndex(ctx)
+	if err != nil {
+		return fmt.Errorf("janitor: snapshot row index: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	ids, err := j.cfg.Sandboxes.SandboxIDs(ctx)
+	if err != nil {
+		return fmt.Errorf("janitor: sandbox index: %w", err)
+	}
+	live := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		live[id] = true
+	}
+
+	orphans := make([]string, 0, 8)
+	for _, row := range rows {
+		if live[row.SandboxID] && j.manifestDirExists(row.BlobKey) {
+			continue
+		}
+		orphans = append(orphans, row.ID)
+	}
+	if len(orphans) == 0 {
+		return nil
+	}
+	if j.cfg.DryRun {
+		j.cfg.Logger.Info("janitor: would remove snapshot rows with no directory or owning sandbox",
+			"count", len(orphans))
+		res.RemovedSnapshotRows += len(orphans)
+		return nil
+	}
+	removed, derr := j.cfg.SnapshotRows.DeleteSnapshots(ctx, orphans)
+	if derr != nil {
+		// One unreadable row set is logged and retried, like a directory that is
+		// still held; the rest of the pass has already run.
+		res.Failures++
+		j.cfg.Logger.Warn("janitor: snapshot rows with no owner could not be removed; will retry",
+			"count", len(orphans), "error", derr.Error())
+		return nil
+	}
+	res.RemovedSnapshotRows += removed
+	j.cfg.Logger.Info("janitor: removed snapshot rows with no directory or owning sandbox",
+		"count", removed)
+	return nil
+}
+
+// manifestDirExists reports whether the manifest directory a snapshot row names
+// still exists under the snapshot root.
+//
+// A row with no blob key answers true: it makes no claim about the filesystem, and
+// this sweep only deletes what it can prove is garbage.
+func (j *Janitor) manifestDirExists(blobKey string) bool {
+	key := strings.TrimSpace(blobKey)
+	if key == "" {
+		return true
+	}
+	dir := filepath.Join(j.cfg.SnapshotsRoot, filepath.FromSlash(filepath.Dir(key)))
+	if _, err := os.Stat(dir); err != nil {
+		return false
+	}
+	return true
 }
 
 // sweepSkillBundles reclaims <data>/skills/<skl_…> when the skills row is gone,

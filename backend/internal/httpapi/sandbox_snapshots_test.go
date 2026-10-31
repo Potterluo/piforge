@@ -82,3 +82,35 @@ func TestSandboxSnapshotsAreListedReadOnly(t *testing.T) {
 		t.Errorf("POST snapshots = %d, want no write route", rec.Code)
 	}
 }
+
+// The user path for the row lifecycle: DELETE /v1/projects/{id} cascades to the
+// sandboxes row, and the snapshot rows go with it. Before this, deleting a
+// project left one row per reclaim behind for the life of the database.
+func TestDeleteProjectRemovesItsSnapshotRowsOverHTTP(t *testing.T) {
+	env := newTestEnv(t)
+	user := env.mkUser("dev@piforge.local", "pw", contracts.RoleUser)
+	c := env.login("dev@piforge.local", "pw")
+	project, sess := env.mkSessionFor(user.ID, "repo")
+	sb := attachSandbox(t, env, user.ID, project, sess)
+	ctx := context.Background()
+	if _, err := env.store.CreateSnapshot(ctx, user.ID, store.Snapshot{
+		SandboxID: sb.ID, Kind: "fs", ContentHash: "abc123",
+		BlobKey: sb.ID + "/20260301T120000.000000000Z/manifest.json",
+	}); err != nil {
+		t.Fatalf("CreateSnapshot: %v", err)
+	}
+
+	rec := env.doAuthed(http.MethodDelete, "/v1/projects/"+project.ID, nil, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete project = %d body %s", rec.Code, rec.Body.String())
+	}
+	// The read path is gone with the session, so the assertion is the table: the
+	// row must not outlive its owner.
+	rows, err := env.store.SnapshotIndex(ctx)
+	if err != nil {
+		t.Fatalf("SnapshotIndex: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("snapshot rows survived the deleted project: %+v", rows)
+	}
+}

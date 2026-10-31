@@ -423,6 +423,40 @@ func (s *Store) SandboxIDs(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
+// SandboxDirectory is one sandbox's host checkout. It is what the disk-quota
+// report in GET /v1/admin/status measures, and it exists as a row type because
+// the admin screen needs the owner and the project next to the bytes: a number
+// without "whose sandbox is close to its budget" is not actionable.
+type SandboxDirectory struct {
+	ID        string
+	UserID    string
+	ProjectID string
+	RootDir   string
+}
+
+// SandboxDirectories lists every sandbox's root once per admin status read. One
+// query, not one per sandbox.
+func (s *Store) SandboxDirectories(ctx context.Context) ([]SandboxDirectory, error) {
+	rows, err := s.r.QueryContext(ctx,
+		`SELECT id, user_id, project_id, root_dir FROM sandboxes ORDER BY created_at`)
+	if err != nil {
+		return nil, fmt.Errorf("store: sandbox directories: %w", err)
+	}
+	defer rows.Close()
+	out := make([]SandboxDirectory, 0, 8)
+	for rows.Next() {
+		var row SandboxDirectory
+		if err := rows.Scan(&row.ID, &row.UserID, &row.ProjectID, &row.RootDir); err != nil {
+			return nil, fmt.Errorf("store: sandbox directories: %w", err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: sandbox directories: %w", err)
+	}
+	return out, nil
+}
+
 // SandboxIDsForProject lists the sandboxes a project owns. A project normally
 // has one, but the rows are the source of truth and a delete has to reclaim
 // every snapshot directory they name.
