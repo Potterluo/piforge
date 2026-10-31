@@ -48,6 +48,14 @@ test("the changes panel follows the worktree during a run, without a reload", as
   });
   expect(commit.status).toBe(200);
 
+  // The commit happened through the API, so the panel's cached status (fetched
+  // while count.js was still untracked) can outlive it; nothing invalidated it.
+  // Reloading *here* is setup, not the behaviour under test: the panel is still
+  // opened before the run, and the no-reload assertion below happens after the
+  // marker is set.
+  await page.reload();
+  await expect(page.getByTestId("composer-input")).toBeVisible({ timeout: 40_000 });
+
   // The panel is opened *before* the run: a panel mounted after the change
   // would fetch fresh data and pass even on the broken build.
   await page.getByTestId("panel-tab-changes").click();
