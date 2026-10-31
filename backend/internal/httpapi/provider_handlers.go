@@ -15,6 +15,15 @@ import (
 // inherited plus the caller's own, shadowed by name (PRD §5.7.1).
 type providersResponse struct {
 	Providers []*contracts.Provider `json:"providers"`
+	// DefaultModelRef is what 「默认模型」 actually resolves to for this account:
+	// the deployment default when it is usable, otherwise the first provider that
+	// can answer. Empty means nothing is configured.
+	//
+	// The picker needs it because listing a provider that lacks a key directly
+	// under 默认模型 read as "the default is broken" — while the default was a
+	// working model the whole time. Naming the resolved model is the only honest
+	// answer to "which model will this session use".
+	DefaultModelRef string `json:"default_model_ref,omitempty"`
 }
 
 type providerResponse struct {
@@ -33,7 +42,12 @@ func (s *server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, providersResponse{Providers: merged})
+	// An empty session has no pinned model, so this is exactly the resolution a
+	// new session with 默认模型 selected will get on its first send.
+	writeJSON(w, http.StatusOK, providersResponse{
+		Providers:       merged,
+		DefaultModelRef: s.resolvedModelRef(r.Context(), user.ID, &contracts.Session{}),
+	})
 }
 
 // mergedProviders is the inherited-over-own shadowing rule in one place, so the

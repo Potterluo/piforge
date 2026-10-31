@@ -6,6 +6,7 @@ import { Activity, Boxes, Cpu, GitBranch, Globe, HardDrive, MessagesSquare, Serv
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Item, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "@/components/ui/item";
 import { Skeleton } from "@/components/ui/skeleton";
+import { agentMetrics } from "@/lib/admin/status-metrics";
 import { api } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
 import { ApiError } from "@/lib/types";
@@ -24,6 +25,14 @@ export default function AdminStatusPage() {
 
   const data = status.data;
   const forbidden = status.error instanceof ApiError && status.error.status === 403;
+  // Two numbers, two labels: see lib/admin/status-metrics.ts. The page used to
+  // print the process count as 「运行中的 agent」, so an idle fork raised it.
+  const agents = data
+    ? agentMetrics(data)
+    : {
+        runs: { label: "进行中的运行", value: 0, hint: "", testId: "stat-runs" },
+        processes: { label: "agent 进程", value: 0, hint: "", testId: "stat-agent-processes" },
+      };
 
   return (
     <div className="flex flex-col gap-5 p-4" data-testid="admin-status">
@@ -65,10 +74,10 @@ export default function AdminStatusPage() {
             />
             <Stat
               icon={<Cpu />}
-              label="运行中的 agent"
-              value={String(data.agents_running)}
-              hint={`${data.sessions_live} 个未结束的会话`}
-              testId="stat-agents"
+              label={agents.runs.label}
+              value={String(agents.runs.value)}
+              hint={agents.runs.hint}
+              testId={agents.runs.testId}
             />
             <Stat
               icon={<Boxes />}
@@ -102,6 +111,19 @@ export default function AdminStatusPage() {
                   </ItemTitle>
                   <ItemDescription>
                     并行分支上限（1–{data.parallel_limit_max}，来自 -parallel-limit）
+                  </ItemDescription>
+                </ItemContent>
+              </Item>
+              <Item variant="outline" data-testid={agents.processes.testId}>
+                <ItemMedia variant="icon">
+                  <Cpu />
+                </ItemMedia>
+                <ItemContent>
+                  <ItemTitle data-testid="agent-processes-value">
+                    {agents.processes.value}
+                  </ItemTitle>
+                  <ItemDescription>
+                    {agents.processes.label}：{agents.processes.hint}
                   </ItemDescription>
                 </ItemContent>
               </Item>

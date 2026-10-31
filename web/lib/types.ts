@@ -602,6 +602,10 @@ export interface DeploymentStatus {
   sessions: number;
   sessions_live: number;
   agents_running: number;
+  /** Turns in flight right now — the runtime's own running/streaming state. */
+  runs_running: number;
+  /** Agent processes alive, warm-but-idle included (same value as agents_running). */
+  agents_live?: number;
   sandboxes: number;
   sandboxes_up: number;
   providers: number;

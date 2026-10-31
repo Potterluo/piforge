@@ -25,7 +25,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Spinner } from "@/components/ui/spinner";
 import { humanizeError } from "@/lib/errors";
-import { buildModelChoices } from "@/lib/session/model-options";
+import { buildModelChoices, defaultModelCopy } from "@/lib/session/model-options";
 import { useCreateSession, useProviders } from "@/lib/session/queries";
 
 const THINKING_LEVELS = [
@@ -76,6 +76,19 @@ export function NewSessionDialog({
   const blocked = useMemo(
     () => buildModelChoices(providers.data?.providers).blocked,
     [providers.data],
+  );
+
+  // What 「默认模型」 resolves to, straight from the server. Without it the
+  // dialog only said which providers cannot be chosen, which read as if the
+  // default were broken.
+  const defaultModel = useMemo(
+    () =>
+      defaultModelCopy(
+        providers.data?.default_model_ref,
+        providers.data?.providers,
+        blocked,
+      ),
+    [providers.data, blocked],
   );
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -159,9 +172,18 @@ export function NewSessionDialog({
                   ))}
                 </SelectContent>
               </Select>
+              {/* The default row says which model it resolves to, so the
+                  warning below cannot be read as "the default is broken".
+                  Nothing is claimed until the server has answered: "还没有可用
+                  的默认模型" while the list is loading would be its own lie. */}
+              {providers.data ? (
+                <FieldDescription data-testid="model-default-hint" data-default={defaultModel.label}>
+                  {defaultModel.hint}
+                </FieldDescription>
+              ) : null}
               {blocked.length > 0 ? (
                 <FieldDescription data-testid="model-blocked-hint">
-                  {blocked.map((provider) => provider.name).join("、")} 缺少 API Key，不能选择。
+                  {defaultModel.blockedHint}
                   <Link
                     href="/settings/providers"
                     className="ms-1 text-primary underline underline-offset-2"

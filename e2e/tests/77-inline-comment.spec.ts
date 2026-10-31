@@ -76,6 +76,18 @@ test("a line comment survives a reload and reaches the agent with its quote", as
   const row = await openDiff();
 
   // --- 1. the affordance is on the line, and the editor quotes it ----------
+  // Visible *without* hovering: the acceptance pass only found this control by
+  // inspecting the DOM, because it carried `opacity-0` until a hover nobody
+  // would think to try. Low contrast is fine; invisible is not.
+  const affordance = row.getByTestId("diff-line-comment");
+  await expect(affordance).toBeVisible();
+  const resting = await affordance.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { opacity: Number(style.opacity), visibility: style.visibility };
+  });
+  expect(resting.opacity).toBeGreaterThan(0);
+  expect(resting.visibility).not.toBe("hidden");
+
   await row.hover();
   await row.getByTestId("diff-line-comment").click();
   const editor = page.getByTestId("review-comment-editor");

@@ -183,9 +183,15 @@ func (s *server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Two different questions, two different numbers. `agents_live` counts agent
+	// processes: a kept-warm child is alive between turns, and merely opening an
+	// idle fork starts one. `runs_running` counts turns actually in flight, which
+	// is what 「运行中的 agent」 used to claim while reporting the process count.
 	running := 0
+	runsRunning := 0
 	if s.hub != nil {
 		running = s.hub.liveCount()
+		runsRunning = s.hub.runsInFlight(r.Context())
 	}
 
 	// Sandbox browsers are processes, not sessions: a leaked one is invisible in
@@ -221,12 +227,15 @@ func (s *server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		"sessions":       stats.Sessions,
 		"sessions_live":  stats.SessionsLive,
 		"agents_running": running,
-		"sandboxes":      stats.Sandboxes,
-		"sandboxes_up":   stats.SandboxesUp,
-		"providers":      stats.Providers,
-		"skills":         stats.Skills,
-		"mcp_servers":    stats.MCP,
-		"events":         stats.Events,
+		// The honest split an operator needs: a warm process is not a busy one.
+		"agents_live":  running,
+		"runs_running": runsRunning,
+		"sandboxes":    stats.Sandboxes,
+		"sandboxes_up": stats.SandboxesUp,
+		"providers":    stats.Providers,
+		"skills":       stats.Skills,
+		"mcp_servers":  stats.MCP,
+		"events":       stats.Events,
 		// The lazy-mount fix makes this count meaningful: it stays at zero until a
 		// human selects the browser panel, and drops back after the idle timeout.
 		"browsers_running":   browsersRunning,

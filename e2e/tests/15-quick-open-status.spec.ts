@@ -73,7 +73,14 @@ test.describe("runtime status", () => {
       return total >= 2 && active >= 1 && active <= total ? 1 : 0;
     }, { timeout: 20_000 }).toBe(1);
     await expect(page.getByTestId("stat-sandboxes")).toBeVisible();
-    await expect(page.getByTestId("stat-agents")).toBeVisible();
+    // The agent numbers are split: turns in flight are not live processes, and
+    // the old single "运行中的 agent" card counted processes. Both cards must be
+    // there, and the runs one must be labelled for what it counts.
+    await expect(page.getByTestId("stat-runs")).toBeVisible();
+    await expect(page.getByTestId("stat-runs")).toContainText("进行中的运行");
+    await expect(page.getByTestId("stat-agent-processes")).toBeVisible();
+    await expect(page.getByTestId("stat-agent-processes")).toContainText("agent 进程");
+    await expect(page.getByTestId("stat-agents")).toHaveCount(0);
     // The runtime-directory block is the operator's view of <dataDir>: one row
     // per directory the server creates, with entries and bytes. It is the same
     // inventory the janitor sweeps, so a missing row is a lifecycle gap.

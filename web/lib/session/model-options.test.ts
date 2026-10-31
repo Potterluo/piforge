@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { buildModelChoices } from "./model-options";
+import { buildModelChoices, defaultModelCopy, modelRefLabel } from "./model-options";
 import type { Provider } from "@/lib/types";
 
 const provider = (overrides: Partial<Provider> = {}): Provider => ({
@@ -83,5 +83,50 @@ describe("buildModelChoices", () => {
     ]);
     expect(options).toHaveLength(2);
     expect(options.every((option) => !option.selectable && option.note === "缺少 API Key")).toBe(true);
+  });
+});
+
+describe("the default model's copy", () => {
+  const keyless = provider({
+    name: "shared-anthropic",
+    api: "anthropic-messages",
+    has_key: false,
+    models: [model("claude-sonnet-4-5", "Claude Sonnet 4.5")],
+  });
+
+  test("names the model the default resolves to", () => {
+    // The acceptance trap: a keyless provider was named right under 默认模型, so
+    // the dialog read as "the default is broken" while it resolved to a working
+    // model. The sentence now starts with that model.
+    const copy = defaultModelCopy("volc/deepseek-v4-flash", [keyless, provider()], [
+      { name: "shared-anthropic", reason: "缺少 API Key" },
+    ]);
+    expect(copy.label).toBe("volc / deepseek-v4-flash");
+    expect(copy.hint).toContain("默认模型会使用 volc / deepseek-v4-flash");
+    // The blocked provider is still named, with the fact that it does not touch
+    // the default.
+    expect(copy.blockedHint).toContain("shared-anthropic");
+    expect(copy.blockedHint).toContain("这不影响默认模型");
+    expect(copy.blockedHint).not.toContain("默认模型无法使用");
+  });
+
+  test("uses the provider's display name for the model when it has one", () => {
+    expect(
+      modelRefLabel("shared-anthropic/claude-sonnet-4-5", [keyless]),
+    ).toBe("shared-anthropic / Claude Sonnet 4.5");
+    // An unknown provider keeps the raw reference rather than inventing a name.
+    expect(modelRefLabel("nope/model-x", [keyless])).toBe("nope / model-x");
+    expect(modelRefLabel("", [keyless])).toBe("");
+  });
+
+  test("says plainly when nothing can answer", () => {
+    const copy = defaultModelCopy("", [keyless], [
+      { name: "shared-anthropic", reason: "缺少 API Key" },
+    ]);
+    expect(copy.label).toBe("");
+    expect(copy.hint).toContain("还没有可用的默认模型");
+    expect(copy.hint).toContain("API Key");
+    expect(copy.blockedHint).toContain("shared-anthropic");
+    expect(copy.blockedHint).not.toContain("不影响默认模型");
   });
 });

@@ -267,6 +267,40 @@ func (h *hub) liveCount() int {
 	return len(h.subs)
 }
 
+// runsInFlight counts the sessions whose agent is in the middle of a run.
+//
+// A live agent process is not a run: Pi keeps the child warm between turns, and
+// opening an idle fork starts one. The admin page used to report the process
+// count as 「运行中的 agent」, so a reviewer opening an idle fork moved the
+// number from 1 to 2 with nobody working. The question "is a turn in flight" is
+// answered by the runtime's own state, per session, so that is what this asks.
+// The ids are copied under the lock and queried outside it: a status call can
+// talk to the child, and holding the hub lock while it does would stall every
+// other session's start.
+func (h *hub) runsInFlight(ctx context.Context) int {
+	if h.rt == nil {
+		return 0
+	}
+	h.mu.Lock()
+	ids := make([]string, 0, len(h.subs))
+	for id := range h.subs {
+		ids = append(ids, id)
+	}
+	h.mu.Unlock()
+
+	count := 0
+	for _, id := range ids {
+		status, err := h.rt.Status(ctx, id)
+		if err != nil {
+			continue
+		}
+		if status.Running || status.Streaming {
+			count++
+		}
+	}
+	return count
+}
+
 // live reports whether the runtime still has a working process for a session.
 //
 // Status answers from the normalizer, so a dead process reads as ProcessID 0. That is

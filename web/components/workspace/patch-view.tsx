@@ -86,9 +86,13 @@ export function PatchView({
             aria-label={`评论 ${path}:${number}`}
             title={`评论 ${path}:${number}`}
             onClick={() => setEditing(line)}
-            className="invisible shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition group-hover:visible group-hover:opacity-100 hover:bg-accent hover:text-foreground focus:visible focus:opacity-100"
+            // Visible without hovering: the acceptance pass only found this by
+            // inspecting the DOM, because it was `opacity-0` until a hover that
+            // a reviewer has no reason to try. Low contrast at rest, full
+            // contrast on hover/focus.
+            className="shrink-0 rounded p-0.5 text-muted-foreground opacity-60 transition-opacity hover:bg-accent hover:text-foreground hover:opacity-100 focus-visible:bg-accent focus-visible:opacity-100 focus-visible:outline-none"
           >
-            <MessageSquarePlusIcon className="size-3" />
+            <MessageSquarePlusIcon className="size-3.5" />
           </button>
         ) : (
           <span className="w-[18px] shrink-0" />
@@ -241,9 +245,10 @@ export function PatchView({
                     aria-label={`评论 ${path}:${line.newLine ?? line.oldLine}`}
                     title={`评论 ${path}:${line.newLine ?? line.oldLine}`}
                     onClick={() => setEditing(line)}
-                    className="invisible shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition group-hover:visible group-hover:opacity-100 hover:bg-accent hover:text-foreground focus:visible focus:opacity-100"
+                    // Same as the split view: findable at rest, never invisible.
+                    className="shrink-0 rounded p-0.5 text-muted-foreground opacity-60 transition-opacity hover:bg-accent hover:text-foreground hover:opacity-100 focus-visible:bg-accent focus-visible:opacity-100 focus-visible:outline-none"
                   >
-                    <MessageSquarePlusIcon className="size-3" />
+                    <MessageSquarePlusIcon className="size-3.5" />
                   </button>
                 </div>
                 {renderComments(line)}

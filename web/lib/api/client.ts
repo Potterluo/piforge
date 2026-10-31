@@ -555,7 +555,14 @@ export interface UpdateProviderInput {
 }
 
 export const providers = {
-  list: () => request<{ providers: Provider[] }>("/v1/providers"),
+  /**
+   * `default_model_ref` is what 「默认模型」 resolves to for this account. It is
+   * the server's answer, not a client-side guess from the list: a deployment
+   * whose default provider lacks a key falls back to another usable provider,
+   * and the picker must name the model the session will actually run on.
+   */
+  list: () =>
+    request<{ providers: Provider[]; default_model_ref?: string }>("/v1/providers"),
   create: (input: CreateProviderInput) =>
     request<{ provider: Provider }>("/v1/providers", { method: "POST", body: input }),
   update: (id: string, input: UpdateProviderInput) =>
