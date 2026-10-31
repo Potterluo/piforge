@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -35,6 +37,14 @@ type Client struct {
 	stream *http.Client
 	// Root is the workspace directory inside the container ("/home/gem" upstream).
 	Root string
+
+	// Exec runs commands in a small pool of *pinned* sessions. See Exec: the
+	// image creates a shell session for every exec that does not name one, and
+	// it evicts the oldest idle session once ten exist — which is how the user's
+	// terminal was being killed mid-session (measured, docs/HANDOFF.md).
+	execSessions []string
+	execMu       sync.Mutex
+	execNext     int
 }
 
 // Config configures a client.
@@ -47,6 +57,14 @@ type Config struct {
 	Root string
 	// Timeout bounds one request; screenshots and shell calls are not instant.
 	Timeout time.Duration
+	// ExecSessions is how many pinned shell sessions Exec uses (default 2).
+	// Each one serializes the commands it runs — the image holds a per-session
+	// exec lock — so more sessions mean more parallel file/git work. Every
+	// session counts against the image's ten-session cap, which is shared with
+	// the user's terminals.
+	ExecSessions int
+	// ExecSessionPrefix names the pinned sessions (default "pf-exec").
+	ExecSessionPrefix string
 }
 
 // New builds a client.
@@ -66,14 +84,39 @@ func New(cfg Config) (*Client, error) {
 	if root == "" {
 		root = "/home/gem"
 	}
+	count := cfg.ExecSessions
+	if count <= 0 {
+		count = 2
+	}
+	if count > 4 {
+		count = 4
+	}
+	prefix := strings.TrimSpace(cfg.ExecSessionPrefix)
+	if prefix == "" {
+		prefix = "pf-exec"
+	}
+	sessions := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		sessions = append(sessions, fmt.Sprintf("%s-%d", prefix, i))
+	}
+	// Start each client at a different slot: the components build their own
+	// clients for the same sandbox, and if all of them started at slot 0 every
+	// file operation would queue behind every other one (the image serializes
+	// the commands of one session).
+	slot := int(clientSeq.Add(1)-1) % len(sessions)
 	return &Client{
-		base:   base,
-		key:    strings.TrimSpace(cfg.APIKey),
-		http:   &http.Client{Timeout: timeout},
-		stream: &http.Client{},
-		Root:   root,
+		base:         base,
+		key:          strings.TrimSpace(cfg.APIKey),
+		http:         &http.Client{Timeout: timeout},
+		stream:       &http.Client{},
+		Root:         root,
+		execSessions: sessions,
+		execNext:     slot,
 	}, nil
 }
+
+// clientSeq spreads clients across the pinned exec sessions.
+var clientSeq atomic.Uint64
 
 // BaseURL is the endpoint this client talks to.
 func (c *Client) BaseURL() string { return c.base }
@@ -108,7 +151,10 @@ func (c *Client) request(ctx context.Context, method, path string, body any, out
 		return fmt.Errorf("aio: read %s: %w", path, err)
 	}
 	if res.StatusCode >= 400 {
-		return fmt.Errorf("aio: %s %s: %d: %s", method, path, res.StatusCode, truncate(string(payload), 300))
+		// Typed, not a formatted string: the callers that have to tell "the
+		// sandbox refused this" from "the sandbox is not there yet" need the
+		// status, and a string cannot carry one.
+		return &HTTPError{Status: res.StatusCode, Path: method + " " + path, Message: truncate(string(payload), 300)}
 	}
 	if out == nil {
 		return nil
@@ -160,6 +206,15 @@ type ShellResult struct {
 // The command runs in cwd when one is given. The image accepts a `cwd` field and
 // ignores it — probed on 1.11.0: with cwd=/workspace/a/b, `pwd` still answered
 // /home/gem — so the directory is entered by the command itself.
+//
+// The request names a session. That is not an optimisation: without an `id` the
+// image creates a *new* shell session for every exec, keeps at most ten, and
+// evicts the oldest idle one to make room. A provisioning pass or an agent
+// startup runs dozens of execs, so the picture was a storm of sessions that
+// evicted whatever was oldest and idle — which is exactly what an open terminal
+// is (measured on the isolated deployment: the user's shell was created at
+// 04:35:57 and evicted at 04:36:01 while `Exec` calls were still arriving, and
+// the panel went dead). Pinned sessions bound the count to the pool size.
 func (c *Client) Exec(ctx context.Context, command string, cwd string) (ShellResult, error) {
 	body := map[string]any{"command": command, "async_mode": false}
 	if dir := strings.TrimSpace(cwd); dir != "" {
@@ -167,6 +222,31 @@ func (c *Client) Exec(ctx context.Context, command string, cwd string) (ShellRes
 		command = "cd -- " + Quote(dir) + " && " + command
 		body["command"] = command
 	}
+	id := c.nextExecSession()
+	if !c.sessionEnsured(id) {
+		if err := c.createSession(ctx, id, ""); err != nil {
+			return ShellResult{}, err
+		}
+		markSessionEnsured(c.base, id)
+	}
+	result, err := c.execIn(ctx, id, body)
+	if err != nil && isMissingSession(err) {
+		// The session was evicted or the container restarted under it. One
+		// re-create, one retry: the command itself is stateless here, so this is
+		// safe, and it keeps a long-lived client working across a sandbox restart.
+		forgetSessionEnsured(c.base, id)
+		if cerr := c.createSession(ctx, id, ""); cerr != nil {
+			return ShellResult{}, cerr
+		}
+		markSessionEnsured(c.base, id)
+		result, err = c.execIn(ctx, id, body)
+	}
+	return result, err
+}
+
+// execIn runs one command in an existing pinned session.
+func (c *Client) execIn(ctx context.Context, id string, body map[string]any) (ShellResult, error) {
+	body["id"] = id
 	var out struct {
 		Data struct {
 			Output   string `json:"output"`
@@ -183,6 +263,47 @@ func (c *Client) Exec(ctx context.Context, command string, cwd string) (ShellRes
 		result.Output, result.ExitCode = out.Output, out.ExitCode
 	}
 	return result, nil
+}
+
+// nextExecSession round-robins over the pinned pool.
+func (c *Client) nextExecSession() string {
+	if len(c.execSessions) == 0 {
+		return ""
+	}
+	c.execMu.Lock()
+	defer c.execMu.Unlock()
+	id := c.execSessions[c.execNext%len(c.execSessions)]
+	c.execNext++
+	return id
+}
+
+// createSession makes sure a pinned session exists. The endpoint is idempotent:
+// an existing id answers "Session had created successfully".
+func (c *Client) createSession(ctx context.Context, id, dir string) error {
+	_, err := c.CreateShellSession(ctx, id, dir)
+	return err
+}
+
+// ensuredShells remembers which (sandbox, session) pairs this process has already
+// created. It is process-wide because every component builds its own client for
+// the same container — the file panel, the liveness probe, the terminal — and a
+// per-client cache would make each of them pay a create per call.
+var ensuredShells sync.Map // "base|id" -> struct{}
+
+func shellKey(base, id string) string { return base + "|" + id }
+
+func (c *Client) sessionEnsured(id string) bool {
+	_, ok := ensuredShells.Load(shellKey(c.base, id))
+	return ok
+}
+
+func markSessionEnsured(base, id string) { ensuredShells.Store(shellKey(base, id), struct{}{}) }
+
+func forgetSessionEnsured(base, id string) { ensuredShells.Delete(shellKey(base, id)) }
+
+// isMissingSession reports the 404 the image answers for an id it does not have.
+func isMissingSession(err error) bool {
+	return StatusOf(err) == http.StatusNotFound
 }
 
 // OpError is the structured failure the /v1/file/* endpoints return.
@@ -676,16 +797,36 @@ func decodeBase64Image(encoded string) ([]byte, error) {
 // output — and it is what the image actually offers.
 
 // ShellSession is one long-lived shell inside the sandbox.
+//
+// The running image answers `session_id`, not `id` (probed on 1.11.0). Both are
+// kept: a create whose answer carries a generated id must be able to tell the
+// caller which session now exists, or every follow-up call addresses a session
+// the container never registered.
 type ShellSession struct {
-	ID      string `json:"id"`
-	Cwd     string `json:"-"`
-	Command string `json:"command"`
-	Output  string `json:"output"`
-	Status  string `json:"status"`
-	Exit    *int   `json:"exit_code"`
+	ID        string `json:"-"`
+	SessionID string `json:"session_id"`
+	Cwd       string `json:"-"`
+	Command   string `json:"command"`
+	Output    string `json:"output"`
+	Status    string `json:"status"`
+	Exit      *int   `json:"exit_code"`
+}
+
+// ShellID is the id of the session this answer describes, whichever field the
+// image used.
+func (s ShellSession) ShellID() string {
+	if s.SessionID != "" {
+		return s.SessionID
+	}
+	return s.ID
 }
 
 // CreateShellSession opens a shell session in dir.
+//
+// The returned session id is the one the container actually registered: the
+// image may answer with a different id than the one requested (it reuses a
+// pre-warmed session and stamps the requested id onto it, and future versions
+// may generate their own). Callers must address the session with this id.
 func (c *Client) CreateShellSession(ctx context.Context, id, dir string) (ShellSession, error) {
 	body := map[string]any{"id": id}
 	if strings.TrimSpace(dir) != "" {
@@ -697,6 +838,7 @@ func (c *Client) CreateShellSession(ctx context.Context, id, dir string) (ShellS
 	if err := c.request(ctx, http.MethodPost, "/v1/shell/sessions/create", body, &out); err != nil {
 		return ShellSession{}, err
 	}
+	out.Data.ID = out.Data.ShellID()
 	if out.Data.ID == "" {
 		out.Data.ID = id
 	}
@@ -721,5 +863,19 @@ func (c *Client) ViewShell(ctx context.Context, id string) (ShellSession, error)
 	if err := c.request(ctx, http.MethodPost, "/v1/shell/view", map[string]any{"id": id}, &out); err != nil {
 		return ShellSession{}, err
 	}
+	out.Data.ID = out.Data.ShellID()
+	if out.Data.ID == "" {
+		out.Data.ID = id
+	}
 	return out.Data, nil
+}
+
+// StatusOf reports the HTTP status behind err, or 0 when err did not come from
+// an HTTP answer (a DNS failure, a refused connection, a cancelled context).
+func StatusOf(err error) int {
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.Status
+	}
+	return 0
 }

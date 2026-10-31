@@ -244,16 +244,23 @@ export const TerminalPane = React.forwardRef<TerminalPaneHandle, TerminalPanePro
                       ? "正在重连终端"
                       : pty.status === "error"
                         ? "终端连接失败"
-                        : "正在连接终端"}
+                        : pty.status === "closed"
+                          ? "终端已断开"
+                          : "正在连接终端"}
                   </EmptyTitle>
-                  <EmptyDescription>{pty.error ?? PTY_NOTICE}</EmptyDescription>
+                  <EmptyDescription>{pty.error ?? pty.notice ?? PTY_NOTICE}</EmptyDescription>
                 </EmptyHeader>
                 <EmptyContent>
                   <code className="block w-full truncate rounded border bg-muted px-2 py-1 text-left font-mono text-[10px]">
                     WS /v1/sessions/{sessionId}/pty
                   </code>
-                  {pty.status === "error" ? (
-                    <Button size="sm" variant="outline" onClick={pty.reconnect}>
+                  {pty.status === "error" || pty.status === "closed" ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      data-testid="terminal-reconnect"
+                      onClick={pty.reconnect}
+                    >
                       重新连接
                     </Button>
                   ) : null}

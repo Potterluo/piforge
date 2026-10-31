@@ -87,6 +87,7 @@ func (r *recordingTerm) Write(string, []byte) error               { return nil }
 func (r *recordingTerm) Resize(string, int, int) error            { return nil }
 func (r *recordingTerm) Close(string) error                       { return nil }
 func (r *recordingTerm) Read(string, int64) ([]byte, int64, bool) { return nil, 0, true }
+func (r *recordingTerm) Info(string) (TermSession, bool)          { return TermSession{}, false }
 func (r *recordingTerm) CloseSandbox(sandboxID string) int {
 	r.closed = append(r.closed, sandboxID)
 	r.rec.add("term:" + sandboxID)

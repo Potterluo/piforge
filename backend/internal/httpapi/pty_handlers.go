@@ -110,6 +110,9 @@ func (s *server) handleSessionPTY(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Write(ctx, websocket.MessageText, mustJSON(map[string]string{
 			"type": "error", "message": err.Error(),
 		}))
+		// A close status, not a dropped socket: the panel must be able to tell
+		// "this terminal failed" from "the connection wobbled and is retrying".
+		conn.Close(websocket.StatusInternalError, "terminal unavailable")
 		return
 	}
 
@@ -136,11 +139,27 @@ func (s *server) pumpPTYToWS(ctx context.Context, conn *websocket.Conn, tabID st
 	if cursor < 0 {
 		cursor = 0
 	}
+	// The last retry transition this socket reported. A sandbox shell that stops
+	// answering is retried by the session; the panel has to hear about it, or a
+	// frozen terminal and a working one look the same. The sequence starts at
+	// zero, so nothing is sent until the session actually changes state.
+	retrySeq := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		}
+
+		if info, ok := s.deps.Term.Info(tabID); ok && info.RetrySeq != retrySeq {
+			retrySeq = info.RetrySeq
+			if info.Retrying {
+				_ = conn.Write(ctx, websocket.MessageText, mustJSON(map[string]string{
+					"type": "reconnecting", "message": info.RetryWhy,
+				}))
+			} else {
+				_ = conn.Write(ctx, websocket.MessageText, mustJSON(map[string]string{"type": "resumed"}))
+			}
 		}
 
 		data, next, eof := s.deps.Term.Read(tabID, cursor)
@@ -161,6 +180,18 @@ func (s *server) pumpPTYToWS(ctx context.Context, conn *websocket.Conn, tabID st
 				tap.eof()
 			}
 			s.dropTestTap(tabID)
+			// A terminal that stopped because its shell broke is not a shell that
+			// exited. The panel renders an `error` frame as a failure with a
+			// reason and a retry button, and a clean close as "the shell ended";
+			// turning the first into the second is what made a dead sandbox
+			// shell look like a terminal that was still connecting.
+			if info, ok := s.deps.Term.Info(tabID); ok && info.Err != "" {
+				_ = conn.Write(ctx, websocket.MessageText, mustJSON(map[string]string{
+					"type": "error", "message": info.Err,
+				}))
+				conn.Close(websocket.StatusInternalError, "terminal failed")
+				return
+			}
 			_ = conn.Write(ctx, websocket.MessageText, mustJSON(map[string]string{"type": "exit"}))
 			conn.Close(websocket.StatusNormalClosure, "shell exited")
 			return

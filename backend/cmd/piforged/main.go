@@ -1048,12 +1048,12 @@ func run() error {
 		Now:     time.Now,
 	})
 	handler := httpapi.NewServer(httpapi.Deps{
-		Store:              st,
-		Auth:               authn,
-		Runtime:            rt,
-		Workspace:          files,
-		DefaultProvider:    opt.defaultProvider,
-		ParallelLimit:      parallelLimit,
+		Store:           st,
+		Auth:            authn,
+		Runtime:         rt,
+		Workspace:       files,
+		DefaultProvider: opt.defaultProvider,
+		ParallelLimit:   parallelLimit,
 		// The panels have to answer "can this MCP server reach the agent at all?",
 		// and the answer follows the placement: a container deployment runs every
 		// agent in its sandbox, so a stdio server cannot be staged there
@@ -1295,6 +1295,17 @@ func (a termAdapter) Resize(tabID string, cols, rows int) error {
 func (a termAdapter) Close(tabID string) error { return a.m.Close(tabID) }
 func (a termAdapter) Read(tabID string, from int64) ([]byte, int64, bool) {
 	return a.m.Read(tabID, from)
+}
+func (a termAdapter) Info(tabID string) (httpapi.TermSession, bool) {
+	info, ok := a.m.Info(tabID)
+	if !ok {
+		return httpapi.TermSession{}, false
+	}
+	return httpapi.TermSession{
+		TabID: info.TabID, Shell: info.Shell, PID: info.PID,
+		Start: info.Start, End: info.End, Err: info.Err,
+		Retrying: info.Retrying, RetrySeq: info.RetrySeq, RetryWhy: info.RetryWhy,
+	}, true
 }
 
 // CloseSandbox closes every terminal tab opened against one worktree. A project

@@ -29,6 +29,12 @@ export interface PtySession {
   status: PtyStatus;
   /** Error text when status is "error". */
   error: string | null;
+  /**
+   * Why the terminal is not live while it is not an error: "shell 已退出" after a
+   * clean end, or the relay's reason while it reconnects. Without this the pane
+   * could only say "connecting", which is a lie for a shell that has ended.
+   */
+  notice: string | null;
   /** Bytes received since the last reset; feed straight into xterm. */
   onData: (handler: (chunk: string) => void) => () => void;
   send: (data: string) => void;
@@ -72,12 +78,18 @@ function ptyUrl(sessionId: string, tab: string, fromOffset: number | null): stri
 export function usePtySession({ sessionId, tab = "main", enabled = true }: Options): PtySession {
   const [status, setStatus] = React.useState<PtyStatus>("connecting");
   const [error, setError] = React.useState<string | null>(null);
+  const [notice, setNotice] = React.useState<string | null>(null);
   const listeners = React.useRef(new Set<(chunk: string) => void>());
   const socket = React.useRef<WebSocket | null>(null);
   const offset = React.useRef<number | null>(null);
   const attempt = React.useRef(0);
   const timer = React.useRef<number | undefined>(undefined);
   const [generation, setGeneration] = React.useState(0);
+  // The server named a failure. A reconnect loop after that would replace a
+  // visible error with a spinner, which is the bug this exists to end.
+  const serverFailed = React.useRef(false);
+  // A clean close after `ready` is a shell that ended, not a socket that wobbled.
+  const sawReady = React.useRef(false);
 
   // Keystrokes typed while the socket was CONNECTING (first connect, or a
   // reconnect after a drop). One entry per `send` call, flushed in order.
@@ -139,12 +151,15 @@ export function usePtySession({ sessionId, tab = "main", enabled = true }: Optio
       pendingSize.current = null;
     }
     acceptInput.current = true;
+    serverFailed.current = false;
+    sawReady.current = false;
 
     let disposed = false;
 
     const connect = () => {
       if (disposed) return;
       setStatus(attempt.current === 0 ? "connecting" : "reconnecting");
+      setNotice(attempt.current === 0 ? null : "连接中断，正在重连…");
 
       let ws: WebSocket;
       try {
@@ -167,6 +182,7 @@ export function usePtySession({ sessionId, tab = "main", enabled = true }: Optio
         flushPending(ws);
         setStatus("open");
         setError(null);
+        setNotice(null);
       };
 
       ws.onmessage = (event: MessageEvent<string | ArrayBuffer>) => {
@@ -180,12 +196,29 @@ export function usePtySession({ sessionId, tab = "main", enabled = true }: Optio
             if (message.type === "ready" && typeof message.end === "number") {
               // The ring's current end: from here the server streams live.
               offset.current = message.end;
+              sawReady.current = true;
+              setStatus("open");
+              setError(null);
+              setNotice(null);
+            } else if (message.type === "reconnecting") {
+              // The sandbox shell stopped answering; the control plane is
+              // retrying it. Saying so is the difference between a terminal
+              // that is frozen and one that is recovering.
+              setStatus("reconnecting");
+              setNotice(message.message || "终端无响应，正在重连…");
+            } else if (message.type === "resumed") {
+              setStatus("open");
+              setError(null);
+              setNotice(null);
             } else if (message.type === "exit") {
               acceptInput.current = false;
               setStatus("closed");
+              setNotice("shell 已退出");
             } else if (message.type === "error") {
               acceptInput.current = false;
+              serverFailed.current = true;
               setError(message.message ?? "终端错误");
+              setNotice(null);
               setStatus("error");
             }
           } catch {
@@ -201,17 +234,32 @@ export function usePtySession({ sessionId, tab = "main", enabled = true }: Optio
       ws.onclose = (event) => {
         socket.current = null;
         if (disposed) return;
+        if (serverFailed.current) {
+          // The server already said why. Keep that message on screen.
+          acceptInput.current = false;
+          setStatus("error");
+          return;
+        }
         if (event.code === 1000) {
           // A clean close is a deliberate end of this shell (tab closed, shell
           // exited). There is nothing left to type into.
           acceptInput.current = false;
           setStatus("closed");
+          setNotice(sawReady.current ? "shell 已退出" : "终端已关闭");
+          return;
+        }
+        if (event.code === 1011) {
+          // The relay reported a terminal failure without a message frame.
+          acceptInput.current = false;
+          setError("终端连接失败");
+          setStatus("error");
           return;
         }
         // A dropped connection is not an ended shell: keep accepting input so
         // keystrokes typed during the backoff are flushed on the next socket.
         attempt.current += 1;
         setStatus("reconnecting");
+        setNotice("连接中断，正在重连…");
         const delay = Math.min(500 * 2 ** (attempt.current - 1), MAX_BACKOFF);
         timer.current = window.setTimeout(connect, delay);
       };
@@ -261,6 +309,10 @@ export function usePtySession({ sessionId, tab = "main", enabled = true }: Optio
   }, []);
 
   const reconnect = React.useCallback(() => {
+    serverFailed.current = false;
+    sawReady.current = false;
+    setError(null);
+    setNotice(null);
     setGeneration((value) => value + 1);
   }, []);
 
@@ -282,7 +334,8 @@ export function usePtySession({ sessionId, tab = "main", enabled = true }: Optio
     ws?.close(1000, "tab closed");
     socket.current = null;
     setStatus("closed");
+    setNotice(null);
   }, []);
 
-  return { status, error, onData, send, resize, reconnect, terminate };
+  return { status, error, notice, onData, send, resize, reconnect, terminate };
 }

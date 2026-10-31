@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
@@ -32,6 +33,14 @@ func TestClientSpeaksTheSandboxAPI(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"data": map[string]any{"output": "hi\n", "exit_code": 0},
+		})
+	})
+	// Exec names a pinned session, so the client creates one first (idempotent).
+	mux.HandleFunc("/v1/shell/sessions/create", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"session_id": body["id"], "working_dir": "/home/gem"},
 		})
 	})
 	mux.HandleFunc("/v1/file/write", func(w http.ResponseWriter, r *http.Request) {
@@ -352,5 +361,176 @@ func TestNewValidatesItsConfig(t *testing.T) {
 	}
 	if client.Root != "/home/gem" {
 		t.Fatalf("default root = %q", client.Root)
+	}
+}
+
+// A command names a pinned shell session, and the session is created once.
+//
+// Without an id the image creates a session per exec, keeps ten and evicts the
+// oldest idle one — which killed the user's terminal while provisioning or an
+// agent startup was running execs (measured on the isolated deployment).
+func TestExecPinsItsShellSessions(t *testing.T) {
+	var mu sync.Mutex
+	var creates []string
+	var execIDs []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/shell/sessions/create", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ID string `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		creates = append(creates, body.ID)
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"session_id": body.ID, "working_dir": "/home/gem"},
+		})
+	})
+	mux.HandleFunc("/v1/shell/exec", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ID string `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		execIDs = append(execIDs, body.ID)
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"output": "ok\n", "exit_code": 0},
+		})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL, ExecSessions: 2})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	for i := 0; i < 4; i++ {
+		if _, err := client.Exec(ctx, "true", ""); err != nil {
+			t.Fatalf("Exec %d: %v", i, err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, id := range execIDs {
+		if id == "" {
+			t.Fatal("an exec was sent without a session id; the image will create a new session for it")
+		}
+	}
+	if len(execIDs) != 4 {
+		t.Fatalf("exec ids = %v", execIDs)
+	}
+	if execIDs[0] == execIDs[1] {
+		t.Fatalf("two consecutive execs shared one session (%v); the pool is not round-robining", execIDs)
+	}
+	// Four execs, two sessions: each session is created once, not once per call.
+	if len(creates) != 2 {
+		t.Fatalf("creates = %v, want one per pinned session", creates)
+	}
+}
+
+// A second client for the same sandbox must not re-create the sessions: every
+// component builds its own client, and the file panel would otherwise create two
+// sessions per request.
+func TestExecSessionCreationIsCachedPerSandbox(t *testing.T) {
+	var mu sync.Mutex
+	creates := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/shell/sessions/create", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ID string `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		creates++
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"session_id": body.ID, "working_dir": "/home/gem"},
+		})
+	})
+	mux.HandleFunc("/v1/shell/exec", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"output": "ok\n", "exit_code": 0},
+		})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	for i := 0; i < 3; i++ {
+		client, err := New(Config{BaseURL: server.URL, ExecSessions: 2})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if _, err := client.Exec(context.Background(), "true", ""); err != nil {
+			t.Fatalf("Exec: %v", err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if creates != 2 {
+		t.Fatalf("creates = %d across three clients, want 2 (one per pinned session)", creates)
+	}
+}
+
+// An evicted session is re-created once and the command is retried, so a sandbox
+// restart does not turn every later file operation into a 404.
+func TestExecRecoversFromAnEvictedSession(t *testing.T) {
+	var mu sync.Mutex
+	creates, execs := 0, 0
+	evicted := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/shell/sessions/create", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ID string `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		creates++
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"session_id": body.ID, "working_dir": "/home/gem"},
+		})
+	})
+	mux.HandleFunc("/v1/shell/exec", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		execs++
+		gone := evicted
+		evicted = false // one 404, then the re-created session works
+		mu.Unlock()
+		if gone {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"success":false,"message":"Session pf-exec-recover-0 not found"}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"output": "ok\n", "exit_code": 0},
+		})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL, ExecSessions: 2, ExecSessionPrefix: "pf-exec-recover"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := client.Exec(ctx, "true", ""); err != nil {
+		t.Fatalf("first Exec: %v", err)
+	}
+	mu.Lock()
+	evicted = true
+	mu.Unlock()
+	if _, err := client.Exec(ctx, "true", ""); err != nil {
+		t.Fatalf("Exec after eviction: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if execs != 3 {
+		t.Fatalf("execs = %d, want 3 (one failed, one retried, one after)", execs)
+	}
+	if creates != 3 {
+		t.Fatalf("creates = %d, want 3 (two sessions plus the re-create)", creates)
 	}
 }

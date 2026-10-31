@@ -157,3 +157,95 @@ describe("usePtySession input buffer", () => {
     expect(socket.sent).toHaveLength(0);
   });
 });
+
+/**
+ * The other half of the terminal defect: what the panel says when the shell is
+ * not there.
+ *
+ * Measured on the isolated deployment: the relay sent `ready` and then `exit`,
+ * and the panel rendered 「正在连接终端」 forever — a live-looking spinner over a
+ * shell that had already gone. The hook now has to distinguish "still
+ * connecting", "the shell ended", "the shell is being retried" and "it failed",
+ * and it must not turn a named failure back into a retry loop.
+ */
+describe("usePtySession honest states", () => {
+  beforeEach(() => {
+    FakeSocket.instances = [];
+    vi.stubGlobal("WebSocket", FakeSocket);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  const message = (socket: FakeSocket, payload: unknown) => {
+    socket.onmessage?.({ data: JSON.stringify(payload) } as MessageEvent);
+  };
+
+  it("reports a shell that exited as an ended terminal, not as connecting", () => {
+    const { result } = renderHook(() => usePtySession({ sessionId: "ses_exit" }));
+    const socket = FakeSocket.instances[0];
+
+    act(() => socket.open());
+    act(() => message(socket, { type: "ready", end: 0, shell: "aio", pid: 0 }));
+    act(() => message(socket, { type: "exit" }));
+    act(() => socket.close(1000, "shell exited"));
+
+    expect(result.current.status).toBe("closed");
+    expect(result.current.notice).toBe("shell 已退出");
+    expect(result.current.error).toBeNull();
+  });
+
+  it("shows the relay's reason and stops reconnecting when the sandbox failed", () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() => usePtySession({ sessionId: "ses_err" }));
+    const socket = FakeSocket.instances[0];
+
+    act(() => socket.open());
+    act(() => message(socket, { type: "ready", end: 0, shell: "aio", pid: 0 }));
+    act(() =>
+      message(socket, {
+        type: "error",
+        message: "term: sandbox view for tab t1 failed after 7 attempt(s): 500",
+      }),
+    );
+    act(() => socket.close(1011, "terminal failed"));
+
+    expect(result.current.status).toBe("error");
+    expect(result.current.error).toContain("failed after 7 attempt(s)");
+
+    // A named failure must not be replaced by a spinner and a retry loop.
+    act(() => {
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(FakeSocket.instances).toHaveLength(1);
+  });
+
+  it("says it is reconnecting while the sandbox shell is retried, then goes live again", () => {
+    const { result } = renderHook(() => usePtySession({ sessionId: "ses_retry" }));
+    const socket = FakeSocket.instances[0];
+
+    act(() => socket.open());
+    act(() => message(socket, { type: "ready", end: 0, shell: "aio", pid: 0 }));
+    act(() => message(socket, { type: "reconnecting", message: "view failed: 500" }));
+
+    expect(result.current.status).toBe("reconnecting");
+    expect(result.current.notice).toContain("view failed");
+
+    act(() => message(socket, { type: "resumed" }));
+    expect(result.current.status).toBe("open");
+    expect(result.current.notice).toBeNull();
+  });
+
+  it("renders a 1011 close with no message frame as a failure, not a clean end", () => {
+    const { result } = renderHook(() => usePtySession({ sessionId: "ses_1011" }));
+    const socket = FakeSocket.instances[0];
+
+    act(() => socket.open());
+    act(() => socket.close(1011, "terminal failed"));
+
+    expect(result.current.status).toBe("error");
+    expect(result.current.error).not.toBeNull();
+  });
+});

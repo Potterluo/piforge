@@ -53,6 +53,17 @@ func (f *fakeSandbox) server() *httptest.Server { return httptest.NewServer(f.ha
 
 func (f *fakeSandbox) handler() http.Handler {
 	mux := http.NewServeMux()
+	// Exec names a pinned shell session, so the client creates one first.
+	mux.HandleFunc("/v1/shell/sessions/create", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ID string `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"session_id": body.ID, "working_dir": "/workspace"},
+		})
+	})
 	mux.HandleFunc("/v1/file/list", f.handleList)
 	mux.HandleFunc("/v1/file/read", f.handleRead)
 	mux.HandleFunc("/v1/file/download", f.handleDownload)

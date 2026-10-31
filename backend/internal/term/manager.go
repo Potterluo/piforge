@@ -95,6 +95,14 @@ type Config struct {
 	// container refuses to create the session, Open fails instead of silently
 	// running the terminal on the wrong machine.
 	Remote func(ctx context.Context, sandboxID string) (client *aio.Client, sessionID string, cwd string, err error)
+	// RemoteRetryBudget bounds how long a failing sandbox shell is retried
+	// before the terminal reports failure (default RemoteRetryBudget).
+	// RemoteRetryBase/RemoteRetryMax override the backoff, and
+	// RemotePollInterval the poll period (tests shorten all four).
+	RemoteRetryBudget  time.Duration
+	RemoteRetryBase    time.Duration
+	RemoteRetryMax     time.Duration
+	RemotePollInterval time.Duration
 }
 
 func (c Config) normalise() Config {
@@ -144,6 +152,17 @@ type Info struct {
 	Closed bool `json:"closed"`
 	// ExitCode is the shell's exit status when it has exited (-1 otherwise).
 	ExitCode int `json:"exit_code"`
+	// Err is why the terminal stopped when it did not stop normally (a sandbox
+	// shell that stopped answering, an API key the sandbox refused). The relay
+	// forwards it to the panel instead of closing as if the shell had exited.
+	Err string `json:"error,omitempty"`
+	// Retrying is true while a sandbox shell is being retried after a failed
+	// read, and RetrySeq changes on every transition into and out of that state
+	// so the relay can report each one exactly once. RetryWhy carries the last
+	// failure, for the panel's "reconnecting" notice.
+	Retrying bool   `json:"retrying,omitempty"`
+	RetrySeq int    `json:"retry_seq,omitempty"`
+	RetryWhy string `json:"retry_error,omitempty"`
 }
 
 // session is one PTY.
@@ -214,12 +233,28 @@ func (m *Manager) Open(ctx context.Context, sandboxID, tabID, shell string) (*In
 		m.mu.RUnlock()
 		return &info, nil
 	}
-	if r, ok := m.remotes[tabID]; ok && !r.isClosed() {
+	deadRemote := (*RemoteSession)(nil)
+	if r, ok := m.remotes[tabID]; ok {
 		info, _ := r.Info(tabID)
-		m.mu.RUnlock()
-		return &info, nil
+		if !r.isClosed() && !info.EOF {
+			m.mu.RUnlock()
+			return &info, nil
+		}
+		// The container-side shell ended (or failed). Reopening the tab must
+		// start a new shell: handing back the dead session would replay its EOF
+		// to every reconnect, which is exactly the "terminal never connects"
+		// shape. Drop it before anything else looks at the tab.
+		deadRemote = r
 	}
 	m.mu.RUnlock()
+	if deadRemote != nil {
+		m.mu.Lock()
+		if m.remotes[tabID] == deadRemote {
+			delete(m.remotes, tabID)
+		}
+		m.mu.Unlock()
+		_ = deadRemote.Close(tabID)
+	}
 
 	// A docker-backed terminal is opened in the container and never resolves a
 	// host shell: the machine that matters is the one holding the files.
@@ -250,8 +285,11 @@ func (m *Manager) Open(ctx context.Context, sandboxID, tabID, shell string) (*In
 	}
 	if r, ok := m.remotes[tabID]; ok && !r.isClosed() {
 		info, _ := r.Info(tabID)
-		m.mu.Unlock()
-		return &info, nil
+		if !info.EOF {
+			m.mu.Unlock()
+			return &info, nil
+		}
+		delete(m.remotes, tabID)
 	}
 	if m.closed {
 		m.mu.Unlock()
@@ -303,6 +341,11 @@ func (m *Manager) openRemote(ctx context.Context, sandboxID, tabID string, clien
 		ReadChunk: m.cfg.ReadChunk,
 		Cols:      m.cfg.Cols,
 		Rows:      m.cfg.Rows,
+
+		RetryBudget:  m.cfg.RemoteRetryBudget,
+		RetryBase:    m.cfg.RemoteRetryBase,
+		RetryMax:     m.cfg.RemoteRetryMax,
+		PollInterval: m.cfg.RemotePollInterval,
 	})
 	if err != nil {
 		return nil, err

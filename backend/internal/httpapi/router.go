@@ -58,6 +58,9 @@ type TermManager interface {
 	Resize(tabID string, cols, rows int) error
 	Close(tabID string) error
 	Read(tabID string, fromOffset int64) ([]byte, int64, bool)
+	// Info reports why a tab stopped, if it stopped abnormally. The relay uses
+	// it to send an error frame instead of closing as if the shell had exited.
+	Info(tabID string) (TermSession, bool)
 	// CloseSandbox closes every tab opened against one sandbox key and reports
 	// how many were closed. The PTY handler opens with the session's worktree
 	// id as that key (pty_handlers.go), so callers pass a worktree id.
@@ -73,6 +76,13 @@ type TermSession struct {
 	PID   int
 	Start int64
 	End   int64
+	// Err is set when the terminal stopped abnormally; empty means it exited.
+	Err string
+	// Retrying says the sandbox shell is being retried, and RetrySeq changes on
+	// every transition so the relay reports each one once.
+	Retrying bool
+	RetrySeq int
+	RetryWhy string
 }
 
 // Deps is everything the router needs. The zero value is not usable: Store and

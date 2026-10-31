@@ -32,6 +32,17 @@ type recordingSandbox struct {
 
 func (s *recordingSandbox) handler(t *testing.T) http.Handler {
 	mux := http.NewServeMux()
+	// Exec names a pinned shell session (aio.Client.Exec), so the client creates
+	// one before its first command.
+	mux.HandleFunc("/v1/shell/sessions/create", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ID string `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		writeJSON(t, w, map[string]any{
+			"data": map[string]any{"session_id": body.ID, "working_dir": "/workspace"},
+		})
+	})
 	mux.HandleFunc("/v1/shell/exec", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Command string `json:"command"`
@@ -222,4 +233,3 @@ func TestNewSandboxFSValidatesItsConfig(t *testing.T) {
 		t.Fatalf("NewSandboxFS = %v, want an error naming the missing root", err)
 	}
 }
-

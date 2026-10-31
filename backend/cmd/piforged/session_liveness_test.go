@@ -59,6 +59,17 @@ func newFakeAIO(t *testing.T) *fakeAIO {
 	a := &fakeAIO{}
 	a.mode.Store("alive")
 	mux := http.NewServeMux()
+	// Exec names a pinned shell session, so the client creates one first.
+	mux.HandleFunc("/v1/shell/sessions/create", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ID string `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"session_id": body.ID, "working_dir": "/workspace"},
+		})
+	})
 	mux.HandleFunc("/v1/shell/exec", func(w http.ResponseWriter, r *http.Request) {
 		a.calls.Add(1)
 		a.key.Store(r.Header.Get("X-AIO-API-Key"))
