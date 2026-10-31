@@ -507,7 +507,11 @@ Invoke-WebRequest "$base/v1/sessions/$sid/messages" -Method Post -WebSession $we
 
 # 7. 终止：只删这套一次性实例（不要动 pf-local / piforge / piforge-data）
 docker rm -f pf-drill-control pf-drill-runner
-docker ps -aq --filter 'name=piforge-' | ForEach-Object { docker rm -f $_ }
+# 沙箱容器名是 piforge-<sha256(user/project) 前 8 字节>，只删这一种名字的
+docker ps -aq --filter 'name=piforge-' | ForEach-Object {
+  $n = (docker inspect --format '{{.Name}}' $_).TrimStart('/')
+  if ($n -match '^piforge-[0-9a-f]+$') { docker rm -f $n }
+}
 docker volume rm pf-drill-data
 docker network rm pf-drill-net
 docker rmi piforge:runner-drill piforge/sandbox-runner:drill   # 镜像可留，留着就跳过这一行
