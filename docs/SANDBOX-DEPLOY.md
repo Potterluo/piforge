@@ -1484,18 +1484,26 @@ docker network connect piforge-sandboxes pf-stage4-restore
 | `go test ./... -count=1` | 全部包 ok（新增 `internal/mcpstage` 5 例、`materialize` 的 manifest 一例、`httpapi` 的 panel/tooling 两例（隔离/本地各一遍）、`cmd/piforged` 的 `TestRejectDisabledIsolation` 13 条；删除 `pi/wrap_test.go` 与 `agent_git_env_test.go`） |
 | `pnpm --dir web test -- --run` | **276 / 276**（35 文件；新增 `web/lib/mcp.test.ts` 4 例） |
 | `pnpm --dir web exec next build` | 通过 |
-| `pnpm --dir e2e test` | **182 / 182 passed（8.7m）**，exit 0 |
+| `pnpm --dir e2e test` | **182 / 182 passed（8.6m，零重试）**，exit 0，跑在 `c685e37`（HEAD；这一提交只改文档和一句面板文案）。同一棵树跑过三次：`01f681e` 前后各一次（8.7m 零重试 / 11.9m 有 2 条 flaky 重试后通过），HEAD 一次 |
 | `pwsh scripts/deliver-check.ps1 -Image piforge:stage4` | 见本节末的最后一跑 |
 
-**关于演练的两次记录，写清楚免得被误读**：这一轮第一次跑演练时，唯一的失败项是
+**关于演练的三次记录，写清楚免得被误读**：这一轮第一次跑演练时，唯一的失败项是
 `the source checkout is clean after the drill`——因为阶段四自己的改动还没提交，脚本看到
 `git status` 非空就觉得是它弄脏了仓库（`118 PASS / 1 FAIL`，run `20261101-030116`，
 其余 118 条全过，包括 `pf-local` 前后同 id、`/healthz` 200、临时容器/卷都清掉、密钥在所有
-文本 artifact 里 0 次）。把这一棵树的改动提交后再跑一次，就是下表这一次：
+文本 artifact 里 0 次）。提交之后跑的那次是 **119 PASS / 0 FAIL**（run `20261101-030532`）。
+最后一次提交（面板文案）之后又跑了一次，仍然是 **119 PASS / 0 FAIL**，就是下表这一次。
+
+中间还有两次 `the Playwright UI check exited 0` 失败（run `20261101-032252`、`20261101-032443`），
+原因值得记下来：这两次之间我用 `pnpm --dir web exec next build` **手工**重建了
+`web/.next`，而 `web/.env.local` 当时存在（`NEXT_PUBLIC_PIFORGE_WS_BASE=ws://127.0.0.1:8080`），
+Next 会把这个值内联进 bundle——镜像里的 UI 于是把实时通道指向容器的 8080，文件树收不到推送。
+`scripts/build-app-image.ps1` 就是为此把那两个文件临时挪走的（脚本注释里写着）。用规范脚本重建
+之后同一棵树立刻是 119/119。结论：**构建镜像只用脚本，不要手工 `next build` 进去**。
 
 | 演练 | 结果 |
 |---|---|
-| `pwsh scripts/deliver-check.ps1 -Image piforge:stage4` | run `20261101-030532`：**119 PASS / 0 FAIL**，`failure` 为空，101.9 s，镜像 `sha256:3bff909b7fc4…`（本仓库这一棵树的构建；演练用 local 放置，`the source checkout is clean after the drill` 为 `<clean>`） |
+| `pwsh scripts/deliver-check.ps1 -Image piforge:stage4` | run `20261101-032706`：**119 PASS / 0 FAIL**，`failure` 为空，101.1 s，镜像 `sha256:4d5448c2aa45…`（`scripts/build-app-image.ps1` 构建；演练跑在 `92c933a`，其代码与 HEAD `c685e37` 相同，差别只有文档和那句面板文案）。演练用 local 放置，`the source checkout is clean after the drill` 为 `<clean>` |
 
 `pf-local`（7722）前后同一个容器 id `7dc14e4a7525…`、`/healthz` 200。一次性实例已删：
 compose 栈（`piforge` / `piforge-sandbox-runner` / `piforge-sandbox-image`）、恢复实例

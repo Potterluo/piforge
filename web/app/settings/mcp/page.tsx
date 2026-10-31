@@ -152,9 +152,9 @@ export default function McpPage() {
             <p className="font-medium text-foreground">{STDIO_UNAVAILABLE_HEADLINE}</p>
             <p className="mt-1">
               这个部署的 agent 跑在每个会话自己的沙箱容器里；stdio server 的凭据必须写进沙箱环境，
-              而沙箱里没有可供控制面注入凭据的出口，所以下面标记的 stdio server 不会被装进沙箱——
-              它仍然能用，只是这个会话的 agent 拿不到这些工具。改用 http（远程端点）：控制面代理出口，
-              沙箱里只有可吊销的每会话 token，真实凭据不出控制面。
+              而沙箱里没有可供控制面注入凭据的出口，所以下面标记的 stdio server 不会被装进沙箱，
+              那个会话的 agent 也就没有这些工具。改用 http（远程端点）：控制面代理出口，沙箱里只有
+              可吊销的每会话 token，真实凭据不出控制面。
             </p>
           </div>
         ) : null}

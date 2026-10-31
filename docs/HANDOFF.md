@@ -49,6 +49,13 @@ both on the published base image (~90 s, Chromium included):
 pwsh scripts/build-app-image.ps1            # -Tag defaults to piforge:local
 ```
 
+**Build the image only through this script.** It stashes `web/.env.local` (and
+`web/.env`) for the build on purpose: Next inlines `NEXT_PUBLIC_*` at build time, so a
+bundle built with that file present sends the terminal and browser sockets to
+`ws://127.0.0.1:8080` — a port the container never listens on. The delivery drill's UI
+check catches it as `the Playwright UI check exited 0 — exit=1` (measured twice this
+round: `SANDBOX-DEPLOY.md` §1.4.6).
+
 The underlying from-scratch build (installs node/pi/Chromium, ~20 minutes; only needed
 when the base image is unavailable) is:
 
