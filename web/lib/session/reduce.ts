@@ -97,6 +97,17 @@ export interface SessionState {
    * can check.
    */
   notes: NoteMarker[];
+  /**
+   * Every interruption, in the order it happened. Each one stays in the
+   * transcript; only the newest one can offer 继续.
+   */
+  interruptions: InterruptionMarker[];
+  /**
+   * The interruption that is still actionable. A later run.started clears it,
+   * which is how a marker knows the user already continued instead of offering
+   * the same action forever.
+   */
+  activeInterruption?: number;
   queue: QueuedPrompt[];
   usage?: LiveUsage;
   /** True between run.started and run.settled. */
@@ -135,10 +146,29 @@ export interface NoteMarker {
   text: string;
 }
 
+/**
+ * A run that ended without a result: stopped, interrupted by a restart, or cut
+ * off when its agent process died.
+ *
+ * It lives in the timeline (not in a banner above it) because "where the run
+ * stopped" is the place a person looks. The cause is recorded by the server; the
+ * marker component reads the live checkout summary from the recovery endpoint.
+ */
+export interface InterruptionMarker {
+  id: string;
+  seq: number;
+  ts: string;
+  /** "stop" | "restart" | "process_exit" | "" (an old record, unrecognised). */
+  cause: string;
+  /** The server's sentence, e.g.「服务重启，本次运行被中断」. */
+  reason: string;
+}
+
 export const initialSessionState: SessionState = {
   turns: [],
   markers: [],
   notes: [],
+  interruptions: [],
   queue: [],
   running: false,
   streaming: false,
@@ -161,6 +191,15 @@ function asRecord(value: unknown): Payload {
 
 function str(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+/** The cause sentence an old record carries. Matching the server's exact
+ * sentences is evidence; an unrecognised sentence stays unknown. */
+export function interruptionCause(reason: string): string {
+  if (reason.includes("服务重启")) return "restart";
+  if (reason.includes("进程已退出") || reason.includes("进程退出")) return "process_exit";
+  if (reason.includes("停止") || reason.includes("用户")) return "stop";
+  return "";
 }
 
 function num(value: unknown): number | undefined {
@@ -381,12 +420,69 @@ function isAbortEcho(error?: string, stopReason?: string): boolean {
   return Boolean(error) && /abort/i.test(error as string);
 }
 
+/**
+ * Gives every in-flight tool call a terminal, non-failing state after an
+ * interruption.
+ *
+ * A restart or a dead agent child never writes tool.ended: the call was cut off
+ * with the process. Leaving `done: false` paints 「运行中」 under a marker that
+ * says the run is over, which is a second lie stacked on the first. The same
+ * rule as a user stop applies — the call was interrupted, not failed.
+ */
+function terminalizeTools(turns: Turn[]): Turn[] {
+  return turns.map((turn) => {
+    let changed = false;
+    const blocks = turn.blocks.map((block) => {
+      if (block.kind !== "tool" || block.done) return block;
+      changed = true;
+      return block.isError ? { ...block, aborted: true } : { ...block, done: true, aborted: true };
+    });
+    return changed ? { ...turn, blocks } : turn;
+  });
+}
+
+/**
+ * Adds an interruption marker, collapsing the duplicate the reconciler writes.
+ *
+ * A reconciled run produces three events (settled, run.interrupted,
+ * platform.error); only one marker should reach the transcript. The explicit
+ * marker arrives first in the normal order; the fallback matches it on the
+ * sentence it already carries.
+ */
+function withInterruption(state: SessionState, marker: InterruptionMarker): SessionState {
+  const last = state.interruptions[state.interruptions.length - 1];
+  const base: SessionState = {
+    ...state,
+    running: false,
+    streaming: false,
+    turns: terminalizeTools(state.turns),
+    error: null,
+  };
+  if (last && last.reason === marker.reason) {
+    return { ...base, activeInterruption: last.seq };
+  }
+  return {
+    ...base,
+    interruptions: [...state.interruptions, marker],
+    activeInterruption: marker.seq,
+  };
+}
+
 function applyEvent(state: SessionState, event: PfEvent): SessionState {
   const payload = asRecord(event.payload);
 
   switch (event.type) {
     case EV.runStarted: {
-      return { ...state, running: true, streaming: true, error: null, aborted: false };
+      // A new run means the previous interruption is history: the marker stays
+      // in the transcript, but it must stop offering 继续.
+      return {
+        ...state,
+        running: true,
+        streaming: true,
+        error: null,
+        aborted: false,
+        activeInterruption: undefined,
+      };
     }
 
     case EV.runAborted: {
@@ -419,13 +515,11 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
       // next turn, so treating them as completion makes the UI flicker idle.
       const settled = asRecord(event.payload);
       const stopped = settled.aborted === true;
-      // A run the reconciler interrupted settles with status "interrupted" and
-      // the sentence an operator needs ("服务重启，本次运行被中断"). Without this
-      // the run stopped but the transcript said nothing about why.
-      const interrupted =
-        str(settled.status) === "interrupted"
-          ? str(settled.reason) || str(settled.message) || "本次运行被中断"
-          : undefined;
+      // A run the reconciler interrupted settles with status "interrupted". It
+      // is not a runtime error and must not paint the 运行时报告了错误 banner:
+      // the run.interrupted marker (or the platform.error fallback below) owns
+      // the explanation, in place.
+      const interrupted = str(settled.status) === "interrupted";
       return {
         ...state,
         running: false,
@@ -437,8 +531,23 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
           const error = stopped && isAbortEcho(turn.error, turn.stopReason) ? undefined : turn.error;
           return { ...turn, streaming: false, error };
         }),
-        error: interrupted ?? (stopped ? null : state.error),
+        error: interrupted ? state.error : stopped ? null : state.error,
       };
+    }
+
+    case EV.runInterrupted: {
+      // The explicit recovery marker. The cause is part of the record, so a
+      // restart and a dead agent child do not have to be told apart by
+      // matching an error sentence.
+      const reason = str(payload.reason) ?? "本次运行被中断";
+      const cause = str(payload.cause) ?? interruptionCause(reason);
+      return withInterruption(state, {
+        id: `interruption-${event.seq}`,
+        seq: event.seq,
+        ts: event.ts,
+        cause,
+        reason,
+      });
     }
 
     case EV.turnStarted:
@@ -708,6 +817,20 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
     }
 
     case EV.platformErr: {
+      // An interruption is not a runtime error. Old sessions only have this
+      // event (the reconciler wrote it before run.interrupted existed), so it is
+      // the fallback that still puts the marker in the right place.
+      if (str(payload.code) === "run_interrupted") {
+        const reason = str(payload.reason) || str(payload.message) || "本次运行被中断";
+        const cause = str(payload.cause) ?? interruptionCause(reason);
+        return withInterruption(state, {
+          id: `interruption-${event.seq}`,
+          seq: event.seq,
+          ts: event.ts,
+          cause,
+          reason,
+        });
+      }
       const message = str(payload.message) ?? str(payload.code) ?? "运行时错误";
       return { ...state, error: message };
     }
@@ -819,20 +942,47 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
 export type TimelineItem =
   | { kind: "turn"; key: string; ts: string; turn: Turn }
   | { kind: "marker"; key: string; ts: string; marker: ContextMarker }
-  | { kind: "note"; key: string; ts: string; text: string };
+  | { kind: "note"; key: string; ts: string; text: string }
+  | { kind: "interruption"; key: string; ts: string; marker: InterruptionMarker };
 
 /**
- * Interleaves compaction markers with turns. Turn order is the arrival order
- * (authoritative), while markers are placed before the first turn that was
- * created after them.
+ * Interleaves compaction markers and one-line facts with turns. Turn order is
+ * the arrival order (authoritative), while markers are placed before the first
+ * turn that was created after them.
+ *
+ * An interruption is a fact too, and it belongs where it happened: dropping it
+ * next to "now" would make a restart that ended three turns ago look like the
+ * last thing that occurred.
  */
 export function selectTimeline(state: SessionState): TimelineItem[] {
   const items: TimelineItem[] = [];
   const pending = state.markers.slice();
-  // Notes interleave with turns on their timestamp, which is all either kind has in
-  // common. They are merged here rather than in a second pass so the order a person
-  // reads matches the order things happened.
-  const pendingNotes = state.notes.slice();
+  type Fact = { at: number; order: number; item: TimelineItem };
+  const facts: Fact[] = [];
+  state.notes.forEach((note, index) => {
+    const at = Date.parse(note.ts);
+    facts.push({
+      at: Number.isFinite(at) ? at : Number.POSITIVE_INFINITY,
+      order: index,
+      item: { kind: "note", key: note.id, ts: note.ts, text: note.text },
+    });
+  });
+  state.interruptions.forEach((marker, index) => {
+    const at = Date.parse(marker.ts);
+    facts.push({
+      at: Number.isFinite(at) ? at : Number.POSITIVE_INFINITY,
+      order: state.notes.length + index,
+      item: { kind: "interruption", key: marker.id, ts: marker.ts, marker },
+    });
+  });
+  facts.sort((a, b) => a.at - b.at || a.order - b.order);
+  let nextFact = 0;
+  const takeFacts = (limit: number) => {
+    while (nextFact < facts.length && facts[nextFact].at <= limit) {
+      items.push(facts[nextFact].item);
+      nextFact += 1;
+    }
+  };
   const take = (limit: number) => {
     while (pending.length > 0) {
       const ts = Date.parse(pending[0].ts);
@@ -847,17 +997,9 @@ export function selectTimeline(state: SessionState): TimelineItem[] {
 
   for (const turn of state.turns) {
     const ts = Date.parse(turn.ts);
-    take(Number.isFinite(ts) ? ts : Number.POSITIVE_INFINITY);
     const turnTs = Number.isFinite(ts) ? ts : Number.POSITIVE_INFINITY;
-    while (pendingNotes.length > 0) {
-      const noteTs = Date.parse(pendingNotes[0].ts);
-      if (Number.isFinite(noteTs) && noteTs <= turnTs) {
-        const note = pendingNotes.shift() as NoteMarker;
-        items.push({ kind: "note", key: note.id, ts: note.ts, text: note.text });
-        continue;
-      }
-      break;
-    }
+    take(turnTs);
+    takeFacts(turnTs);
     // Pi retries a failed provider call on its own, and every attempt lands as
     // its own empty assistant message. Four identical boxes say less than one
     // that admits it kept trying, so consecutive failures of the same kind
@@ -878,9 +1020,7 @@ export function selectTimeline(state: SessionState): TimelineItem[] {
     items.push({ kind: "turn", key: turn.id, ts: turn.ts, turn });
   }
   take(Number.POSITIVE_INFINITY);
-  for (const note of pendingNotes) {
-    items.push({ kind: "note", key: note.id, ts: note.ts, text: note.text });
-  }
+  takeFacts(Number.POSITIVE_INFINITY);
   return items;
 }
 

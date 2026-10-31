@@ -295,6 +295,10 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /v1/sessions/{id}", s.authed(s.handleGetSession))
 	mux.Handle("PATCH /v1/sessions/{id}", s.mutatingBearer(s.handlePatchSession))
 	mux.Handle("GET /v1/sessions/{id}/status", s.authed(s.handleSessionStatus))
+	// What happened and what survived after a run ended without a result
+	// (stopped / restarted / agent gone). 继续 composes its message through
+	// POST /messages with continue_interrupted.
+	mux.Handle("GET /v1/sessions/{id}/recovery", s.authed(s.handleSessionRecovery))
 	mux.Handle("DELETE /v1/sessions/{id}", s.mutatingBearer(s.handleDeleteSession))
 	mux.Handle("GET /v1/sessions/{id}/export", s.authed(s.handleExportSession))
 	mux.Handle("GET /v1/sessions/{id}/stats", s.authed(s.handleSessionStats))

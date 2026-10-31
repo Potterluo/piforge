@@ -1,4 +1,4 @@
-import type { ContextMarker, TimelineItem, Turn } from "@/lib/session/reduce";
+import type { ContextMarker, InterruptionMarker, TimelineItem, Turn } from "@/lib/session/reduce";
 
 /**
  * The transcript's rendering unit is a *run*, not a Pi message.
@@ -13,7 +13,8 @@ export type TranscriptItem =
   | { kind: "turn"; key: string; ts: string; turn: Turn }
   | { kind: "run"; key: string; ts: string; turns: Turn[] }
   | { kind: "marker"; key: string; ts: string; marker: ContextMarker }
-  | { kind: "note"; key: string; ts: string; text: string };
+  | { kind: "note"; key: string; ts: string; text: string }
+  | { kind: "interruption"; key: string; ts: string; marker: InterruptionMarker };
 
 export function groupTranscript(items: TimelineItem[]): TranscriptItem[] {
   const out: TranscriptItem[] = [];
@@ -42,6 +43,8 @@ export function groupTranscript(items: TimelineItem[]): TranscriptItem[] {
       out.push({ kind: "turn", key: item.key, ts: item.ts, turn: item.turn });
     } else if (item.kind === "marker") {
       out.push({ kind: "marker", key: item.key, ts: item.ts, marker: item.marker });
+    } else if (item.kind === "interruption") {
+      out.push({ kind: "interruption", key: item.key, ts: item.ts, marker: item.marker });
     } else {
       out.push({ kind: "note", key: item.key, ts: item.ts, text: item.text });
     }

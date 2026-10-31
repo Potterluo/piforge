@@ -54,6 +54,7 @@ export const SSE_EVENT_TYPES = [
   "run.settled",
   "run.retry",
   "run.aborted",
+  "run.interrupted",
   "turn.started",
   "turn.ended",
   "message.started",

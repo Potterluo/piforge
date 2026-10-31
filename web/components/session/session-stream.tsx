@@ -26,6 +26,7 @@ import { cn } from "@/lib/utils";
 
 import { CompactionMarker } from "./context-marker";
 import { MessageItem } from "./message-item";
+import { RecoveryMarker } from "./recovery-marker";
 import { AssistantRun } from "./run-item";
 import { useSessionEventState } from "./session-events-provider";
 
@@ -38,11 +39,14 @@ import { useSessionEventState } from "./session-events-provider";
  */
 export function SessionStream({
   className,
+  sessionId,
   sessionModel,
   onFork,
   resolveForkEntry,
 }: {
   className?: string;
+  /** Needed by the recovery marker: it reads the live checkout summary. */
+  sessionId: string;
   /** The model the session is pinned to; inherited sessions have none. */
   sessionModel?: string;
   onFork?: (entryId: string) => void;
@@ -149,16 +153,25 @@ export function SessionStream({
                         <MarkerContent>{item.text}</MarkerContent>
                       </Marker>
                     </MessageScrollerItem>
+                  ) : item.kind === "interruption" ? (
+                    <MessageScrollerItem key={item.key}>
+                      <RecoveryMarker
+                        sessionId={sessionId}
+                        marker={item.marker}
+                        active={state.activeInterruption === item.marker.seq}
+                      />
+                    </MessageScrollerItem>
                   ) : (
                     <MessageScrollerItem key={item.key}>
                       <CompactionMarker marker={item.marker} />
                     </MessageScrollerItem>
                   ),
                 )}
-                {state.aborted ? (
-                  // A stop is a normal outcome, so it reads as a neutral marker
-                  // where the run stopped — not as 模型调用失败 with advice about
-                  // the provider's key (QA-14).
+                {state.aborted && state.interruptions.length === 0 ? (
+                  // The fallback for a session whose stop was recorded before
+                  // run.interrupted existed. New stops render the recovery
+                  // marker above, where the cause and the surviving work are
+                  // named.
                   <MessageScrollerItem>
                     <Marker data-testid="run-interrupted">
                       <MarkerIcon>

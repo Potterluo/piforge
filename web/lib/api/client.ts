@@ -25,6 +25,7 @@ import {
   type SupportNotice,
   type PromptResult,
   type Provider,
+  type RecoveryView,
   type RuntimeStatus,
   type SearchResult,
   type Session,
@@ -213,6 +214,12 @@ export interface SendMessageInput {
     quote?: string[];
     body: string;
   };
+  /**
+   * The 继续 action for an interrupted run. The server composes the text from
+   * the event log and the checkout, so `text` must be empty; the transcript
+   * then shows exactly what the agent received.
+   */
+  continue_interrupted?: boolean;
 }
 
 /**
@@ -327,6 +334,12 @@ export const sessions = {
       method: "POST",
       body: { clear_queue: clearQueue },
     }),
+  /**
+   * What happened and what survived after a run ended without a result. The
+   * answer also says whether 继续 is possible; the UI must render the block
+   * reason rather than a button that would fail.
+   */
+  recovery: (id: string) => request<RecoveryView>(`/v1/sessions/${id}/recovery`),
   fork: (id: string, entryId: string, label: string) =>
     request<{ session: Session }>(`/v1/sessions/${id}/fork`, {
       method: "POST",

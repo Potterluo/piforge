@@ -272,9 +272,10 @@ describe("completion signal", () => {
     expect(state.turns[0].streaming).toBe(false);
   });
 
-  it("an interrupted settle stops the run and shows why it was cut off", () => {
-    // The reconciler's run.settled carries the restart reason; the transcript
-    // must say it instead of silently returning to idle.
+  it("an interrupted settle stops the run without painting a runtime error", () => {
+    // The reconciler's run.settled carries status interrupted. It is an outcome,
+    // not a provider failure: the error banner must stay empty and the
+    // interruption marker owns the explanation.
     const state = reduceAll([
       event(EV.turnStarted, {}, { seq: 1 }),
       delta(2, "turn-1", 0, "说到一半"),
@@ -287,7 +288,84 @@ describe("completion signal", () => {
 
     expect(state.running).toBe(false);
     expect(state.streaming).toBe(false);
-    expect(state.error).toBe("服务重启，本次运行被中断");
+    expect(state.error).toBeNull();
+  });
+
+  it("run.interrupted puts the cause and the sentence in the timeline", () => {
+    // The marker is placed where the run stopped and stays there; the reason and
+    // cause come from the event, not from matching an error sentence.
+    const state = reduceAll([
+      event(EV.turnStarted, {}, { seq: 1 }),
+      event(EV.runSettled, { status: "interrupted", reason: "服务重启，本次运行被中断" }, { seq: 2 }),
+      event(
+        EV.runInterrupted,
+        { cause: "restart", reason: "服务重启，本次运行被中断" },
+        { seq: 3 },
+      ),
+      // The reconciler also writes its visible error. It must not become a
+      // second marker, and it must not become a red banner.
+      event(
+        EV.platformErr,
+        { code: "run_interrupted", message: "服务重启，本次运行被中断" },
+        { seq: 4 },
+      ),
+    ]);
+
+    expect(state.interruptions).toHaveLength(1);
+    expect(state.interruptions[0]).toMatchObject({
+      cause: "restart",
+      reason: "服务重启，本次运行被中断",
+      seq: 3,
+    });
+    expect(state.activeInterruption).toBe(3);
+    expect(state.error).toBeNull();
+    const timeline = selectTimeline(state);
+    expect(timeline.some((item) => item.kind === "interruption")).toBe(true);
+  });
+
+  it("an interrupted run does not leave a tool call 运行中", () => {
+    // A restart kills the agent mid-tool: no tool.ended ever arrives. The
+    // marker says the run is over, so the tool row must not keep saying it is
+    // still running.
+    const state = reduceAll([
+      event(EV.runStarted, {}, { seq: 1 }),
+      event(EV.toolStarted, { tool_call_id: "t1", name: "bash", args: { command: "sleep 240" } }, { seq: 2 }),
+      event(EV.runSettled, { status: "interrupted", reason: "服务重启，本次运行被中断" }, { seq: 3 }),
+      event(EV.runInterrupted, { cause: "restart", reason: "服务重启，本次运行被中断" }, { seq: 4 }),
+    ]);
+
+    const tool = state.turns.flatMap((turn) => turn.blocks).find((block) => block.kind === "tool");
+    expect(tool).toMatchObject({ id: "t1", done: true, aborted: true });
+    expect(runningToolCount(state)).toBe(0);
+  });
+
+  it("a later run.started makes the interruption historical", () => {
+    const state = reduceAll([
+      event(EV.runSettled, { aborted: true }, { seq: 1 }),
+      event(EV.runAborted, {}, { seq: 2 }),
+      event(EV.runInterrupted, { cause: "stop", reason: "用户停止，本次运行被中断" }, { seq: 3 }),
+      event(EV.runStarted, {}, { seq: 4 }),
+    ]);
+
+    // The marker stays in the transcript, but 继续 must not be offered again.
+    expect(state.interruptions).toHaveLength(1);
+    expect(state.activeInterruption).toBeUndefined();
+  });
+
+  it("an old platform.error still explains an interruption", () => {
+    const state = reduceAll([
+      event(
+        EV.platformErr,
+        { code: "run_interrupted", message: "服务重启，本次运行被中断" },
+        { seq: 1 },
+      ),
+    ]);
+
+    expect(state.error).toBeNull();
+    expect(state.interruptions[0]).toMatchObject({
+      cause: "restart",
+      reason: "服务重启，本次运行被中断",
+    });
   });
 });
 

@@ -104,17 +104,21 @@ func (c InterruptClaim) Changed() bool { return c.SessionChanged || len(c.RunIDs
 //   - only runs still "started" are settled, with interrupted_by/reason so the
 //     record says why;
 //   - a run.settled event goes into the transcript (it is the only completion
-//     signal the UI listens to) and one platform.error carries the reason to a
-//     person who opens the session later.
+//     signal the UI listens to), a run.interrupted event names the cause for the
+//     recovery marker, and one platform.error carries the reason to a person who
+//     opens the session later.
 //
 // A call with nothing left to change writes no event, which is what makes the
 // watchdog and the delete guard safe to run as often as they like.
-func (s *Store) InterruptRunningSession(ctx context.Context, userID, sessionID, reason string, at time.Time) (InterruptClaim, error) {
+func (s *Store) InterruptRunningSession(ctx context.Context, userID, sessionID, cause, reason string, at time.Time) (InterruptClaim, error) {
 	if userID == "" || sessionID == "" {
 		return InterruptClaim{}, fmt.Errorf("store: interrupt running session: user and session are required: %w", ErrInvalid)
 	}
 	if reason == "" {
 		return InterruptClaim{}, fmt.Errorf("store: interrupt running session: a reason is required: %w", ErrInvalid)
+	}
+	if cause == "" {
+		return InterruptClaim{}, fmt.Errorf("store: interrupt running session: a cause is required: %w", ErrInvalid)
 	}
 	if at.IsZero() {
 		at = s.now()
@@ -163,6 +167,7 @@ func (s *Store) InterruptRunningSession(ctx context.Context, userID, sessionID, 
 		settledPayload, err := json.Marshal(map[string]any{
 			"status":     "interrupted",
 			"reason":     reason,
+			"cause":      cause,
 			"reconciled": true,
 		})
 		if err != nil {
@@ -196,17 +201,45 @@ func (s *Store) InterruptRunningSession(ctx context.Context, userID, sessionID, 
 			claim.EventSeqs = append(claim.EventSeqs, seq)
 		}
 
+		// The recovery marker. One per session: the user needs one place that
+		// says "this run stopped for this reason", not a row per internal step.
+		// The run id is the last started run, which is the one the marker is
+		// about.
+		interruptedPayload, err := json.Marshal(map[string]any{
+			"cause":  cause,
+			"reason": reason,
+		})
+		if err != nil {
+			return fmt.Errorf("store: interrupt session %q: marshal interruption: %w", sessionID, err)
+		}
+		interruptedRun := ""
+		if len(runIDs) > 0 {
+			interruptedRun = runIDs[len(runIDs)-1]
+		}
+		seq, err := insertEvent(ctx, tx, &contracts.Event{
+			SessionID: sessionID,
+			RunID:     interruptedRun,
+			Type:      contracts.EvRunInterrupted,
+			Payload:   interruptedPayload,
+			TS:        at,
+		}, at)
+		if err != nil {
+			return err
+		}
+		claim.EventSeqs = append(claim.EventSeqs, seq)
+
 		// One visible explanation per session, even when no run row survived:
 		// the transcript is where a person looks after a restart.
 		errorPayload, err := json.Marshal(map[string]any{
 			"code":    "run_interrupted",
 			"message": reason,
 			"reason":  reason,
+			"cause":   cause,
 		})
 		if err != nil {
 			return fmt.Errorf("store: interrupt session %q: marshal error event: %w", sessionID, err)
 		}
-		seq, err := insertEvent(ctx, tx, &contracts.Event{
+		seq, err = insertEvent(ctx, tx, &contracts.Event{
 			SessionID: sessionID,
 			Type:      contracts.EvPlatformErr,
 			Payload:   errorPayload,

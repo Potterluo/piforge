@@ -44,19 +44,21 @@ import (
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/recovery"
 	"github.com/piforge/piforge/backend/internal/store"
 )
 
 // The two reasons a run is interrupted. They are user-visible (they land in the
 // transcript as platform.error and in runs.completion_note), so they are
-// sentences rather than error codes.
+// sentences rather than error codes. The copy is owned by internal/recovery,
+// which also composes the "继续" follow-up: one sentence, one source.
 const (
 	// ReasonRestart is the boot pass: the process that was running the turn is
 	// gone with the previous control plane.
-	ReasonRestart = "服务重启，本次运行被中断"
+	ReasonRestart = recovery.ReasonRestart
 	// ReasonProcessGone is the watchdog / on-demand pass: the control plane is
 	// the same process, but the agent child it started is no longer there.
-	ReasonProcessGone = "运行进程已退出，本次运行被中断"
+	ReasonProcessGone = recovery.ReasonProcessGone
 )
 
 // Liveness is the in-process authority for "is an agent serving this session".
@@ -209,7 +211,8 @@ func (r *Reconciler) reconcile(ctx context.Context, candidates []store.RunningSe
 				"phase", phase, "session", candidate.SessionID, "project", candidate.ProjectID)
 			continue
 		}
-		claim, err := r.cfg.Store.InterruptRunningSession(ctx, candidate.UserID, candidate.SessionID, reason, r.cfg.Now())
+		claim, err := r.cfg.Store.InterruptRunningSession(ctx, candidate.UserID, candidate.SessionID,
+			recovery.CauseFromReason(reason), reason, r.cfg.Now())
 		if err != nil {
 			errs = append(errs, err)
 			r.cfg.Logger.WarnContext(ctx, "session reconciliation could not interrupt a run",

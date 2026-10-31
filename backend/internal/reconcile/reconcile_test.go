@@ -149,13 +149,15 @@ func TestBootReconcileInterruptsAnOrphanedRun(t *testing.T) {
 	}
 
 	events := f.events(t)
-	var settled, platformErr *contracts.Event
+	var settled, platformErr, interrupted *contracts.Event
 	for _, ev := range events {
 		switch ev.Type {
 		case contracts.EvRunSettled:
 			settled = ev
 		case contracts.EvPlatformErr:
 			platformErr = ev
+		case contracts.EvRunInterrupted:
+			interrupted = ev
 		}
 	}
 	if settled == nil {
@@ -164,6 +166,7 @@ func TestBootReconcileInterruptsAnOrphanedRun(t *testing.T) {
 	var settledPayload struct {
 		Status string `json:"status"`
 		Reason string `json:"reason"`
+		Cause  string `json:"cause"`
 	}
 	if err := json.Unmarshal(settled.Payload, &settledPayload); err != nil {
 		t.Fatalf("run.settled payload: %v", err)
@@ -171,18 +174,41 @@ func TestBootReconcileInterruptsAnOrphanedRun(t *testing.T) {
 	if settled.RunID != f.runID || settledPayload.Status != "interrupted" || settledPayload.Reason != ReasonRestart {
 		t.Fatalf("run.settled = %+v payload=%+v", settled, settledPayload)
 	}
+	if settledPayload.Cause != "restart" {
+		t.Fatalf("run.settled cause = %q, want restart", settledPayload.Cause)
+	}
 	if platformErr == nil {
 		t.Fatal("no platform.error event was appended")
 	}
 	var errPayload struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
+		Cause   string `json:"cause"`
 	}
 	if err := json.Unmarshal(platformErr.Payload, &errPayload); err != nil {
 		t.Fatalf("platform.error payload: %v", err)
 	}
 	if errPayload.Code != "run_interrupted" || errPayload.Message != ReasonRestart {
 		t.Fatalf("platform.error = %+v", errPayload)
+	}
+	if errPayload.Cause != "restart" {
+		t.Fatalf("platform.error cause = %q, want restart", errPayload.Cause)
+	}
+	// The recovery marker the transcript renders in place. Without it a restart
+	// reads as "something was interrupted"; with it the marker can say 重启 and
+	// offer 继续 without parsing the error sentence.
+	if interrupted == nil {
+		t.Fatal("no run.interrupted event was appended")
+	}
+	var interruptedPayload struct {
+		Cause  string `json:"cause"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(interrupted.Payload, &interruptedPayload); err != nil {
+		t.Fatalf("run.interrupted payload: %v", err)
+	}
+	if interruptedPayload.Cause != "restart" || interruptedPayload.Reason != ReasonRestart {
+		t.Fatalf("run.interrupted = %+v", interruptedPayload)
 	}
 
 	// The summary count an operator reads after a restart.
@@ -309,8 +335,15 @@ func TestReconcileInterruptsARunningSessionWithNoRunRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListEvents: %v", err)
 	}
-	if len(events) != 1 || events[0].Type != contracts.EvPlatformErr {
-		t.Fatalf("events = %+v, want one platform.error", events)
+	if len(events) != 2 {
+		t.Fatalf("events = %+v, want run.interrupted and platform.error", events)
+	}
+	byType := map[string]*contracts.Event{}
+	for _, ev := range events {
+		byType[ev.Type] = ev
+	}
+	if byType[contracts.EvRunInterrupted] == nil || byType[contracts.EvPlatformErr] == nil {
+		t.Fatalf("events = %+v, want run.interrupted and platform.error", events)
 	}
 }
 

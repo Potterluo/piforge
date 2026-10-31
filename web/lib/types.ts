@@ -167,6 +167,12 @@ export const EV = {
   runSettled: "run.settled",
   runRetry: "run.retry",
   runAborted: "run.aborted",
+  /**
+   * A run ended without a result (stop / restart / agent gone). The payload
+   * carries the cause, so the transcript can say where it came from instead of
+   * inferring it from an error sentence.
+   */
+  runInterrupted: "run.interrupted",
   turnStarted: "turn.started",
   turnEnded: "turn.ended",
   msgStarted: "message.started",
@@ -207,6 +213,49 @@ export interface ToolPayload {
 export interface SettledPayload {
   aborted: boolean;
   run_id?: string;
+}
+
+/**
+ * Why a run ended without a result. The server writes one of the three explicit
+ * causes; an old record that predates the field is matched from its sentence,
+ * and an unrecognised sentence stays "" (unknown) rather than being forced into
+ * a bucket.
+ */
+export type InterruptedCause = "stop" | "restart" | "process_exit" | "";
+
+/** Payload of run.interrupted. */
+export interface InterruptedPayload {
+  cause?: InterruptedCause;
+  reason?: string;
+}
+
+/**
+ * What the checkout still holds after an interruption (GET
+ * /v1/sessions/{id}/recovery). `summary` is composed server-side so the UI
+ * cannot turn an unreadable worktree into "clean".
+ */
+export interface RecoverySurvival {
+  summary: string;
+  unavailable?: "sandbox" | "workspace";
+  dirty_known: boolean;
+  dirty_count: number;
+  commit_known: boolean;
+  last_commit?: string;
+}
+
+/** The recovery answer for one interrupted session. */
+export interface RecoveryView {
+  interrupted: boolean;
+  cause?: InterruptedCause;
+  cause_label?: string;
+  reason?: string;
+  /** The last user request in the interrupted run, from the event log. */
+  last_request?: string;
+  interrupted_at?: string;
+  survival: RecoverySurvival;
+  can_continue: boolean;
+  /** Why 继续 is not offered; absent when it is. */
+  blocked_reason?: string;
 }
 
 /** Payload of context.compaction. */

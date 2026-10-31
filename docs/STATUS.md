@@ -24,6 +24,8 @@
 
 本批（FR-12.6 一键开 PR）之后，FR-12.6 从 MISSING 移入 DONE，FR-8.8（fetch/pull/push + 开 PR）也随之从 PARTIAL 移入 DONE：**126 条 FR 为 DONE 67 / PARTIAL 43 / MISSING 15 / 不做 1**；**整表 130 行 = DONE 71 / PARTIAL 43 / MISSING 15 / 不做 1**。这两个数是本批逐行重数表格得到的；上一行记录是 65 / 44 / 16，而旧表头写的是 64 / 44 / 17（早已与表格不一致），本批以实际行为准，并把这个差异写在这里而不是继续抄旧数。
 
+本批（中断恢复）之后，FR 状态不变：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；非 FR 交付能力新增「中断恢复：原因 + 存活状态 + 继续」一条（均 DONE）：**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。PRD 没有「运行被中断后怎么恢复」的 FR 行，所以它不是 FR；但它改的是三个真实结局（用户停止 / 服务重启 / agent 进程退出）共用的一条用户可见路径，证据见文末「本批：中断恢复」。
+
 ---
 # PiForge 对照 PRD 的实现审计
 
@@ -31,7 +33,7 @@
 - 审计方法：先读 `docs/STATUS-AUDIT.md`（`06b61a3`）的每条判定，再逐条重读 `backend/internal/httpapi/router.go` 的路由表、各 handler、`web/components/**` 与 `e2e/tests/*.spec.ts`；以「实现 + 断言了用户可见结果的测试名」为准，不采信命名与注释。
 - 状态口径：**DONE** 必须点名一条断言用户可见承诺的测试或 e2e 路径；**PARTIAL** 必须写清缺什么；**MISSING** 是无实现。
 - 本版把 `06b61a3` 之后的修复接进台账：`f766651`（FR-2.5 / FR-2.6）、`bd85ade`（FR-2.7）、`9c4ab0b`（FR-11.8）、`717f7cb`（FR-12.5），以及浏览器启动按沙箱单飞与 profile 僵尸锁恢复（FR-11.1）。本批补上 FR-12.6（一键开 PR）并把 FR-8.8 从 PARTIAL 移到 DONE——开 PR 是那一条里唯一缺的能力。
-- 计数（按本文件表格行重数，不是抄旧表头）：**126 条 FR = DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**（`be01575` 时是 52 / 54；此后 FR-1.9、FR-9.2、FR-3.3、FR-14.4、FR-6.6、FR-10.2、FR-11.2、FR-12.4、FR-14.1、FR-12.1、FR-12.2、FR-16.3、FR-12.3、FR-12.6、FR-8.8、FR-11.3 逐一移入 DONE）。另有 8 条非 FR 交付能力（见「交付能力（非 FR，单独计）」），均 DONE；**整表 134 行 = DONE 76 / PARTIAL 42 / MISSING 15 / 不做 1**。本批（重启对账）不改变任何 FR 状态，只新增一条非 FR 行。
+- 计数（按本文件表格行重数，不是抄旧表头）：**126 条 FR = DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**（`be01575` 时是 52 / 54；此后 FR-1.9、FR-9.2、FR-3.3、FR-14.4、FR-6.6、FR-10.2、FR-11.2、FR-12.4、FR-14.1、FR-12.1、FR-12.2、FR-16.3、FR-12.3、FR-12.6、FR-8.8、FR-11.3 逐一移入 DONE）。另有 9 条非 FR 交付能力（见「交付能力（非 FR，单独计）」），均 DONE；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。重启对账那一批不改变任何 FR 状态，只新增一条非 FR 行。
 - 本批（远端存活探测）同样不改任何 FR 状态、不加表格行：它补的是 `internal/reconcile` 权威来源那一块（上一批自己在「边界」里写明没做），所以只改「重启对账」那一行的证据，行数与计数仍是 **134 行 = DONE 76 / PARTIAL 42 / MISSING 15 / 不做 1**。PRD 没有「谁来证明控制面之外的 agent 还活着」的 FR 行，把它塞进 FR 表会把「产品需求覆盖」和「交付可靠性」混成一个数字；理由与边界写在「本批：远端存活探测」。
 
 > 说明：PRD 中没有「部署」类 FR（§12 是里程碑，`deploy/` 是 Dockerfile.app / Dockerfile.offline / Dockerfile.runner / k8s.yaml / entrypoint.sh，属交付物而非需求行），因此下面没有部署行。`sandbox-runner`（把 Docker CLI 从控制面移出去）同样是交付物而非 FR：它没有改变任何一条 FR 的状态，证据见 `docs/SANDBOX-DEPLOY.md` §1.4 与 `scripts/verify-runner-sandbox.ps1`。
@@ -169,7 +171,7 @@
 
 ## 交付能力（非 FR，单独计）
 
-PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用户可见证据的交付能力。放在这里而不是塞进 FR 表，是为了不把「产品需求覆盖」和「交付流程」混成同一个数字。
+PRD 没有这些条目的 FR 行，但它们是演练或真实事故暴露、已修复、且有用户可见证据的交付能力。放在这里而不是塞进 FR 表，是为了不把「产品需求覆盖」和「交付流程」混成同一个数字。
 
 | 能力 | 状态 | 证据 |
 |---|---|---|
@@ -180,9 +182,11 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 | ⌘K 命令面板的默认选中 / Enter（PRD §10.1-5、§13「全部交互可键盘到达」；PRD 没有对应 FR 行） | DONE | 旧实现把选择交给 cmdk 1.1.1，它按行的 `value` 字符串认选中行。会话行的 label 在 projects 查询返回后才从「项目」变成真实项目名，`value` 随之变化，存储的选中值不再匹配任何行：`[cmdk-item][aria-selected="true"]` 实测 0，而 cmdk 的 Enter 只会向选中行派发，于是「输入 → 回车」什么都不发生。现在面板自己管理选择：行有稳定 id（`session:<id>` 等），active 行由可见列表**推导**（当前 id 不在了就选第一行），`aria-selected`、`aria-activedescendant`、`role=listbox/option`、`aria-controls/expanded` 同源；↑↓/Home/End/Enter 由面板处理。列表仍在加载时按 Enter **忽略而不是排队**：结果随时可能变化，排队的 Enter 会执行用户没看见的行；面板保持打开，行出现后下一次 Enter 生效。测试：`web/components/shell/command-palette.test.tsx` 4 例（异步落定后第一行默认选中且 Enter 进入会话、label 变化不丢选择、加载中 Enter 无效、↑↓ 仍可用）、`e2e/tests/60-session-search.spec.ts` 的「Ctrl+K → 输入 → Enter 直接打开」（旧代码在保留新 spec、去掉 ArrowDown 后必失败）与「列表仍在加载时 Enter 被忽略，随后生效」；部署实例探针 `e2e/scripts/fix-palette-shadow-probe.mjs` 旧构建 `selected=0`、URL 未变。 |
 | 运行时目录生命周期：`<dataDir>` 下每个目录都有 owner、删除路径与 janitor 兜底 | DONE | 见「本批：运行时目录生命周期」。`backend/internal/runtimedirs` 是唯一清单（sandboxes / pi-agents / skill-snapshots / snapshots / artifacts / skills，外加 piforge.db、master.key、secret.key 三个部署文件）；`TestEveryInventoryEntryHasALifecycle` 逐行要求 creator/owner/delete path/fallback，`TestEveryDataDirLiteralIsInTheInventory` 扫描 `filepath.Join(dataDir, …)`，新目录没有生命周期会失败。删会话级联 pi-agents + artifacts + skill-snapshots；删项目级联所有子会话的同三类目录与每个 sandbox 的 `snapshots/<sbx>`；janitor 每类一条 count/bytes 日志，单个失败不中断、索引读不到拒扫。`GET /v1/admin/status` 的 `storage` 块与 admin 页面按目录报告 entries/bytes。测试：`runtime_dirs_test.go` 4 例、`janitor_test.go` 新增 4 例（含 live-owner fixture 与索引失败）、`runtimedirs` 4 例；部署探针 `e2e/scripts/dirlifecycle-probe.mjs` 旧镜像留下两个目录、新镜像 10s 内清零，设计见 `e2e/.artifacts/fix-dirlifecycle/`。 |
 | 快照记录（`snapshots` 表行）的生命周期：外键级联 + janitor 行清扫 + 迁移 | DONE | 见「本批：快照行生命周期 + 沙箱磁盘配额」。`snapshots.sandbox_id` 现在是 `REFERENCES sandboxes(id) ON DELETE CASCADE` 的真外键（删项目 → 级联 sandboxes → 行随目录一起消失）；老库在 `store.Open` 时幂等重建（一个事务里建新表、原样拷贝每一行、改名，外键校验在拷贝期间关闭，所以「sandbox 已经没了」的历史行留给 janitor 而不是迁移删掉）；janitor 每轮读 `SnapshotIndex`（一条查询、covering index `snapshots_sweep`），只删「manifest 目录不存在」或「sandbox 行不存在」的行，目录和 sandbox 都活着的一行不碰、没有 blob_key 的行不猜也不删；`DeleteSnapshots` 分批删。另外修掉让删除根本走不到级联的那个缺陷：sandbox 被空闲回收后再删项目会 409（provider 已经不认这个 id），现在 `sandbox.ErrNotFound` 视为「已经销毁」。 |
-| 重启对账：声称 running 但没有进程的会话/运行被标记 `interrupted`（本次修复 + 远端存活探测） | DONE | 见「本批：重启对账」与「本批：远端存活探测」。`internal/reconcile` 在**启动时（端口打开前）**、看门狗每 `-session-reconcile-interval`（默认 30s，0 关闭周期）以及**删项目守卫里**核对 `sessions.status='running'` 或 `runs.status='started'` 的行，把没有进程服务的行在**一个事务**里改成 `interrupted`：session 置 `interrupted`、started run 落成 `interrupted`（`interrupted_by=reconcile`、`completion_note` 写原因），追加 `run.settled`（payload 带 `status`/`reason`）与一条 `platform.error`（`code=run_interrupted`）。**权威是一个可替换的探针，不是写死的内置注册表**：`contracts.LivenessProbe.Alive(ctx, sessionID) (bool, error)` 是唯一问题；`-sandbox local` 用 `liveness.Process`（进程内注册表 `pi.Runtime.Alive`），`docker`/`runner` 用 `liveness.Composite`（注册表 **+** 沙箱工作区里的心跳 marker，经沙箱自己的 shell API 读取；agent 在沙箱里活过控制面重启，所以新的控制面必须问沙箱）。**三值语义**：`true` → 保留（`kept_live`）；只有 `false` → 写 interrupted；`error` → **unknown，保留并 WARN**（写明 session/project/原因，`unknown=` 计数，单次探针 10s 超时同样算 unknown）。没有探针（Probe 与 Runtime 都 nil）→ 保持旧行为（只问注册表）并 WARN；只配 Runtime → 启动日志写明「no liveness probe is configured」。启动日志一行 `session reconciliation at startup scanned=… interrupted=… runs=… kept_live=… unknown=…`；看门狗只在真修复或有 unknown 时打 summary。幂等：第二遍看不到 running/started 行，不追加事件。删项目不再被谎言永久钉住：守卫先对项目做同一轮对账再数 running，仍有活进程才 409。测试：`reconcile/reconcile_test.go` 12 例（含 6 个探针用例：活着的远端 run 不动、探针 error → unknown 且不改行、只有明确 false 才中断、composite 在沙箱答不上来时保守、超时算 unknown、旧接线把活着的远端 run 写成 interrupted 的 bug 冻结）、`liveness/` 19 例（marker 租约与路径、launcher 写/刷新/删除 marker 与退出码、fake 沙箱的 HTTP 路径、composite 规则）、`cmd/piforged/session_liveness_test.go` 4 例（真 store + 真 runner 客户端 + fake runner + fake 沙箱的重启接线；无探针时 local 只问注册表；launcher argv）、`store/session_sandbox_test.go`、`pi/wrap_test.go`。**fail-first（旧二进制）**：`e2e/scripts/fix-liveness-restart.mjs` 用 `51ff223` 的二进制 + `-sandbox runner` 指向一个报告「心跳新鲜」的 fake 沙箱 → 活着的远端 session 被写成 `interrupted`、`interrupted=1`、沙箱一次都没被问；同一脚本的新二进制 `kept_live=1 unknown=0`、session 仍 `running`、沙箱被问 1 次（`e2e/.artifacts/fix-liveness/restart-old.json` / `restart-new.json`）。部署实测：local 部署（`pf-local`，:7722）上真实 run 跨 15 次采样/76s（≥2 个 30s 看门狗周期）仍 `running`，DB 无恢复事件，容器日志无 `interrupted an orphaned run`（`live-live-local.json` + 截图 `live-run-mid-watchdog.png`）。 |
+| 重启对账：声称 running 但没有进程的会话/运行被标记 `interrupted`（本次修复 + 远端存活探测） | DONE | 见「本批：重启对账」与「本批：远端存活探测」。`internal/reconcile` 在**启动时（端口打开前）**、看门狗每 `-session-reconcile-interval`（默认 30s，0 关闭周期）以及**删项目守卫里**核对 `sessions.status='running'` 或 `runs.status='started'` 的行，把没有进程服务的行在**一个事务**里改成 `interrupted`：session 置 `interrupted`、started run 落成 `interrupted`（`interrupted_by=reconcile`、`completion_note` 写原因），追加 `run.settled`（payload 带 `status`/`reason`/`cause`）、`run.interrupted`（恢复标记，带 `cause`）与一条 `platform.error`（`code=run_interrupted`，同样带 `cause`）。**权威是一个可替换的探针，不是写死的内置注册表**：`contracts.LivenessProbe.Alive(ctx, sessionID) (bool, error)` 是唯一问题；`-sandbox local` 用 `liveness.Process`（进程内注册表 `pi.Runtime.Alive`），`docker`/`runner` 用 `liveness.Composite`（注册表 **+** 沙箱工作区里的心跳 marker，经沙箱自己的 shell API 读取；agent 在沙箱里活过控制面重启，所以新的控制面必须问沙箱）。**三值语义**：`true` → 保留（`kept_live`）；只有 `false` → 写 interrupted；`error` → **unknown，保留并 WARN**（写明 session/project/原因，`unknown=` 计数，单次探针 10s 超时同样算 unknown）。没有探针（Probe 与 Runtime 都 nil）→ 保持旧行为（只问注册表）并 WARN；只配 Runtime → 启动日志写明「no liveness probe is configured」。启动日志一行 `session reconciliation at startup scanned=… interrupted=… runs=… kept_live=… unknown=…`；看门狗只在真修复或有 unknown 时打 summary。幂等：第二遍看不到 running/started 行，不追加事件。删项目不再被谎言永久钉住：守卫先对项目做同一轮对账再数 running，仍有活进程才 409。测试：`reconcile/reconcile_test.go` 12 例（含 6 个探针用例：活着的远端 run 不动、探针 error → unknown 且不改行、只有明确 false 才中断、composite 在沙箱答不上来时保守、超时算 unknown、旧接线把活着的远端 run 写成 interrupted 的 bug 冻结）、`liveness/` 19 例（marker 租约与路径、launcher 写/刷新/删除 marker 与退出码、fake 沙箱的 HTTP 路径、composite 规则）、`cmd/piforged/session_liveness_test.go` 4 例（真 store + 真 runner 客户端 + fake runner + fake 沙箱的重启接线；无探针时 local 只问注册表；launcher argv）、`store/session_sandbox_test.go`、`pi/wrap_test.go`。**fail-first（旧二进制）**：`e2e/scripts/fix-liveness-restart.mjs` 用 `51ff223` 的二进制 + `-sandbox runner` 指向一个报告「心跳新鲜」的 fake 沙箱 → 活着的远端 session 被写成 `interrupted`、`interrupted=1`、沙箱一次都没被问；同一脚本的新二进制 `kept_live=1 unknown=0`、session 仍 `running`、沙箱被问 1 次（`e2e/.artifacts/fix-liveness/restart-old.json` / `restart-new.json`）。部署实测：local 部署（`pf-local`，:7722）上真实 run 跨 15 次采样/76s（≥2 个 30s 看门狗周期）仍 `running`，DB 无恢复事件，容器日志无 `interrupted an orphaned run`（`live-live-local.json` + 截图 `live-run-mid-watchdog.png`）。 |
 
-计数：上面 126 条 FR 是 **DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**（按表格行逐行重数）；加上八条非 FR 交付能力（均 DONE）后整表 **134 行 = DONE 76 / PARTIAL 42 / MISSING 15 / 不做 1**。本批（重启对账）不改变任何 FR 状态（FR-5.8 仍是 PARTIAL：配额按运行边界周期性测量，且本地 provider 仍无 CPU/内存限制），新增第八行非 FR；FR-14.2 仍是 PARTIAL（Windows 仍没有目录级不可变，且 copy-ro 不阻止在目录里新建文件）。
+| 中断恢复：标记写明原因与存活状态，一键「继续」重新建立上下文（本次修复） | DONE | 见「本批：中断恢复」。三种结局共用 `run.interrupted` 事件（payload 的 `cause` = `stop` / `restart` / `process_exit` 加原因句）：用户停止由 `handleInterrupt` 写，重启与进程退出由 `store.InterruptRunningSession` 在同一个事务里随 `run.settled` 写（`platform.error` 也补上 `cause`）。`GET /v1/sessions/{id}/recovery` 返回原因、来源、上次请求、`survival.summary`（未提交文件数与 HEAD 由 `Workspace.Status` + `Workspace.Log` 实测；沙箱 `MISSING`/`TERMINATED`、worktree 行不存在或读不到时写「沙箱/工作区已不存在…无法确认」，不冒充干净）以及 `can_continue` / `blocked_reason`。`POST /messages` 的 `continue_interrupted` 由服务端 `internal/recovery.ComposeContinue` 拼出「上次请求 + 中断原因 + 先检查当前状态」，与行内评论一样在转录里显示的就是 agent 收到的；`run.started` 之后同一标记不再提供继续，绝不自动发送。测试：`internal/recovery/recovery_test.go`（三种原因的消息都含上次请求、原因与核对指令；存活摘要覆盖 dirty/HEAD、无提交、读不到、沙箱不存在）、`httpapi/recovery_test.go` 四例（真实路由 GET + 继续消息真的进 runtime、沙箱 MISSING 时拒绝且不发送、已继续过不再提供、停止写入 cause）、`reconcile_test.go` 断言 `run.interrupted` 与 `cause`；e2e `85-recovery.spec.ts` 点停止 → 标记显示「停止」与「工作区有 1 个未提交改动 / 最后一次提交」→ 点继续 → 转录里的消息含上次请求与核对指令。旧前端跑新 spec 失败在 `recovery-cause` 不存在（`e2e/.artifacts/fix-recovery/fail-first-e2e.log`）。 |
+
+计数：上面 126 条 FR 是 **DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**（按表格行逐行重数）；加上九条非 FR 交付能力（均 DONE）后整表 **135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。本批（中断恢复）不改变任何 FR 状态（FR-5.8 仍是 PARTIAL：配额按运行边界周期性测量，且本地 provider 仍无 CPU/内存限制）；FR-14.2 仍是 PARTIAL（Windows 仍没有目录级不可变，且 copy-ro 不阻止在目录里新建文件）。
 
 **明确边界：远端 / AIO 沙箱里的浏览器仍不会在空闲时被停止。** `15b995c` 的 idle 策略只在 host placement 生效：控制面直接持有 Chrome 进程，`browser.Manager` 能 stop 它。远端 / AIO 模式下 Chrome 跑在沙箱里，控制面断开 CDP 只意味着没人看了，进程仍在沙箱里；`PIFORGE_BROWSER_IDLE_TIMEOUT` 不会杀它，也没有 runner 侧的空闲回收。要覆盖这条路径，需要沙箱 provider 按「无 viewer」自行 stop 浏览器（或 runner 提供 idle 端点），目前没有实现，也没有测试。
 
@@ -992,3 +996,84 @@ UI：徽章的 `title` 与 `aria-label` 各一句可访问说明，区别是真�
 - 部署实测（local，:7722）：见 §6(a)（`live-live-local.json`、`live-run-mid-watchdog.png`、`probe-live-local-console.log`）。
 - `pwsh scripts/deliver-check.ps1`（`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入，未打印、未落盘）：run `20261031-162307`，**119 条 `[PASS]` / 0 条 FAIL**，`failure` 为 null（`checks` 长度 119）；镜像 id 与部署的同一个 `sha256:6a6b3dcd…`；一次性容器 `pf-drill` / volume `pf-drill-data` 已删除，`pf-local` 全程未被触碰（前后容器 id 都是 `a4d6765e…`，`/healthz` 200）；drill 的「source checkout is clean」守卫通过。日志：`deliver-check.log`；summary：`e2e/.artifacts/delivery-drill/20261031-162307/summary.json`。
 - 证据目录：`e2e/.artifacts/fix-liveness/`（`go-build.log`、`go-vet.log`、`go-test.log`、`web-test.log`、`web-build.log`、`e2e-full.log`、`build-image.log`、`deploy.log`、`startup.log`、`live-live-local.json`、`live-run-mid-watchdog.png`、`probe-live-local-console.log`、`restart-old.json`、`restart-new.json`、`restart-new-no-key-unknown.json`、`restart-old-boot.log`、`restart-new-boot.log`、`restart-prepare-boot.log`、`probe-restart-console.log`、`restart-findings.json`、`deliver-check.log`、`delivery-drill/<run>/summary.json`）。
+
+## 本批：中断恢复（原因 + 存活状态 + 继续）
+
+### 1. 三种结局共用一条恢复路径
+
+一次运行可以三种方式结束而没有结果：用户点「停止」、控制面重启（启动对账）、agent 子进程退出（看门狗）。旧实现里只有停止有 `run.settled{aborted}`，重启/退出有一条 `platform.error`，转录里要么只有「已中断」，要么把中断画成红色的「运行时报告了错误」；用户回来后得自己判断工作区是什么状态、下一句该说什么。
+
+现在三条路都写同一个 `run.interrupted` 事件，payload 带 `cause`（`stop` / `restart` / `process_exit`）与原因句：
+
+- 停止由 `handleInterrupt` 写。写之前先确认「session 是 running **且** 有一个 status=started 的 run」，所以一个落在运行结束之后的点击不会在成功的回合下面留下假的中断标记。
+- 重启与进程退出由 `store.InterruptRunningSession` 在**同一个事务**里随 `run.settled` 写，`platform.error` 与 `run.settled` 的 payload 也补上 `cause`；旧记录没有 `cause` 时，`recovery.CauseFromReason` 只匹配服务器自己的那三句原话，匹配不上就是 unknown，不硬塞进三个桶。
+
+`docs/STATUS.md` 不把这条记成 FR：PRD 没有「中断后怎么恢复」的需求行；它是三种真实结局共用的一条交付能力。
+
+### 2. 标记里的每个事实从哪来
+
+- **原因**：事件日志。`GET /v1/sessions/{id}/recovery` 取最新的 `run.interrupted`（兼容旧的 `platform.error{code=run_interrupted}` 与 `run.settled{status=interrupted}`），返回 `cause` / `cause_label` / `reason`。
+- **存活状态**：`survival` 由服务端在请求时实测——`Workspace.Status` 的变更条数、`Workspace.Log` 的 HEAD（`内部 -> 7 位短哈希`），不是客户端拼的字符串。沙箱行是 `MISSING`/`TERMINATED`、worktree 行不存在时返回「沙箱已不存在，工作区改动与最后一次提交无法确认」；git 读不到时写「工作区改动无法确认 / 最后一次提交无法确认」。任何情况下都不把「读不到」写成「干净」或编一个提交。
+- **来源**：标记上另有一行「来源：停止 / 服务重启 / 进程退出」，直接用 `cause_label`，与原因句分开；重启和进程退出的原因句沿用旧文案，停止的新文案是「用户停止，本次运行被中断」。
+- **上次请求**：中断事件之前最后一条 `message.final{role=user}`，事件被清理时回退到 `messages` 表。没有文本（例如只有图片）就返回空，页面因此不提供「继续」——不能假装知道用户在做什么。
+
+### 3. 「继续」是服务端拼的一条消息
+
+`POST /v1/sessions/{id}/messages` 新增 `continue_interrupted: true`。客户端只表达意图，正文由 `internal/recovery.ComposeContinue` 拼出：
+
+```
+继续上次被中断的工作。
+
+上次的请求：
+<中断前最后一条用户消息；超过 4000 rune 时明确写「只保留开头」>
+
+中断原因：<原因句>（来源：<停止/服务重启/进程退出>）
+当前工作区：<工作区有 N 个未提交改动 · 最后一次提交 xxxxxxx>
+
+继续之前，请先检查当前状态：运行 git status 和 git log，确认工作区改动与最后一次提交；
+不要重复已经完成的工作，也不要丢弃未提交的改动。
+```
+
+它和行内评论一样在 `POST /messages` 的同一路径里发送，所以转录里显示的就是 agent 收到的字符串。**不自动发送**：只有点「继续」才会发；`run.started` 之后同一个标记不再显示按钮（`activeInterruption` 被清空），再点也只会得到 409「这次中断已经继续过了」。沙箱已不存在时页面上只有「沙箱已不存在，无法继续；请新建一个会话」，没有按钮；就算陈旧客户端直接 POST，也返回 409 且不触碰 agent。
+
+### 4. 不把「运行中」留在死掉的回合里
+
+重启/进程退出不会再有 `tool.ended`。标记出现时，reducer 把仍未结束的工具块收成 `done + aborted`（与用户停止同一规则），所以重启后工具行是「1 个已中断」而不是永远「1 个运行中」。这也是部署截图里能看到的差异之一。
+
+### 5. 测试与 fail-first
+
+- `internal/recovery/recovery_test.go`：三种原因的 `ComposeContinue` 都含上次请求、原因、来源与核对指令；空请求/空原因被拒绝；存活摘要覆盖 dirty+HEAD、干净、还没有提交、HEAD 读不到、变更读不到、沙箱不存在、工作区不存在；`CauseFromReason` 对三句原话与未知句子。
+- `httpapi/recovery_test.go` 5 例（真实路由 + 真 store）：GET 返回原因/上次请求/dirty 2/HEAD；`continue_interrupted` 真的把拼好的消息送进 runtime；沙箱 MISSING 时 `can_continue=false`、摘要写「无法确认」、POST 409 且 runtime 收到 0 条；停止在有 started run 时写 `cause=stop`，没有 started run 时不写；已继续过（中断后有 `run.started`）不再提供。
+- `reconcile/reconcile_test.go`：原有 12 例保留；启动对账现在断言 `run.interrupted` 与 `cause=restart`（以及 `run.settled`/`platform.error` 的 `cause`），「只有 session 行没有 run 行」那条断言两个事件都在。
+- `web/lib/session/reduce.test.ts`：`run.interrupted` 进时间线且不画错误横幅、旧的 `platform.error` 仍能解释、`run.started` 让标记变历史、被中断的工具收成终态。
+- e2e `85-recovery.spec.ts`：点「停止」→ 标记含「停止」与「工作区有 1 个未提交改动 / 最后一次提交」→ 点「继续」→ `turn-user` 含上次请求、原因与「请先检查当前状态」→ 按钮消失。
+- **fail-first**：
+  - Go：先写 `recovery/recovery_test.go`、用空实现跑，`ComposeContinue: not implemented`、存活摘要 `summary "" is missing …`（`e2e/.artifacts/fix-recovery/fail-first-go.log`）。
+  - e2e：把前端 stash 回旧实现、只保留新后端与新的 spec，旧页面在 `getByTestId('recovery-cause')` 处失败（element not found），证明这条 spec 断的是新行为（`e2e/.artifacts/fix-recovery/fail-first-e2e.log`）。
+
+### 6. 部署实测
+
+镜像用 `scripts/build-app-image.ps1` 重建（`sha256:32d0cc88…`），`pf-local` 在同一个卷 `9ce20975…` 上重建，`CapDrop=["CAP_DAC_OVERRIDE"]`、`PIFORGE_DEFAULT_PROVIDER=volc`、端口 7722→7700、默认 2 GiB 配额；`/healthz` 200，启动日志 `session reconciliation at startup scanned=0 …`。
+
+`e2e/scripts/fix-recovery-probe.mjs` 对着 :7722 跑真实模型：
+
+- **停止**：真实 `sleep 240` 运行中点停止 → 标记 `已中断 / 用户停止，本次运行被中断 / 来源：停止 / 工作区有 1 个未提交改动 · 最后一次提交 ae0b1b3` + 「继续」（`01-stop-marker.png`）；点继续后转录里的消息就是上面的模板（`02-stop-continued-turn.png`），再读 `/recovery` 得到 `can_continue=false`。
+- **重启**：另一个运行中点停止之前 `docker restart pf-local`，启动日志 `interrupted an orphaned run … reason=服务重启，本次运行被中断`、`scanned=1 interrupted=1 runs=1`；页面重载后同一位置的标记变成 `来源：服务重启 / 服务重启，本次运行被中断`，存活状态仍是实测（`03-restart-marker.png`），与停止的文案不同。
+- 探针结束删除两个 probe 项目，复查 `running=0`、`probe_sessions=0`、无 `probe-recovery-*` 项目；证据 `probe.json`、`probe-console.log`。
+
+### 7. 门禁（本批）
+
+- `go build ./...` 退出 0（`go-build.log`）；`go vet ./...` 退出 0（`go-vet.log`）；`go test ./... -count=1` 全部 ok、退出 0（`go-test.log`）。
+- `pnpm --dir web test -- --run`：**31 个文件 / 256 例通过**（`web-test.log`）。
+- `pnpm --dir web exec next build`：退出 0（`web-build.log`）。
+- 完整 e2e：**174 passed**（原 173 + 新 `85-recovery.spec.ts`，同一份 `.data`；`e2e-full.log`）。
+- `pwsh scripts/deliver-check.ps1`：`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入（未打印、未落盘），**119 条 `[PASS]` / 0 FAIL**，`pf-local` 全程未被触碰；`deliver-check.log`。
+- 证据目录：`e2e/.artifacts/fix-recovery/`（`fail-first-go.log`、`go-unit-pass.log`、`fail-first-e2e.log`、`e2e-pass.log`、`e2e-full.log`、`web-test.log`、`web-build.log`、`go-build.log`、`go-vet.log`、`go-test.log`、`build-image.log`、`deploy.log`、`startup.log`、`probe.json`、`probe-console.log`、`01-stop-marker.png`、`02-stop-continued-turn.png`、`03-restart-marker.png`、`deliver-check.log`）。
+
+### 8. 边界（明确没做的）
+
+- **没有自动恢复**。重启/进程退出后不会自动发一条继续消息：用户可能只是想看看到底发生了什么，自动发送会在用户没同意时消耗一次模型调用并改动工作区。恢复是一个需要点击的动作。
+- 存活状态读的是**点击/加载时的当前工作区**，不是中断瞬间的快照。中断到点击之间用户或终端可能改过文件；标记不说「这是本次运行留下的」，只说「工作区现在有 N 个未提交改动」。要归因需要运行开始时的基线，本批没做。
+- 只显示未提交文件数与 HEAD，不显示「测试跑过没有」。测试行（`test_runs`）是另一个数据源，本批没有把它拼进摘要；PRD 也没有这条要求。
+- 旧会话如果连最后一条用户消息都没有（图片-only 或事件被清理且 messages 也缺失），「继续」被禁用并写明原因——不能凭空编一个「上次请求」。
+- `run.interrupted` 的停止路径依赖「有 started run」这个持久事实；一个极端的顺序（run 行创建前用户就点停止）不会写标记，旧行为仍然保留（只显示 `run.settled{aborted}` 的「已中断」）。

@@ -243,23 +243,30 @@ type Event struct {
 // Normalized event types. These are deliberately stable strings: the frontend
 // switches on them and the tests assert on them.
 const (
-	EvRunStarted   = "run.started"
-	EvRunSettled   = "run.settled"
-	EvRunRetry     = "run.retry"
-	EvRunAborted   = "run.aborted"
-	EvTurnStarted  = "turn.started"
-	EvTurnEnded    = "turn.ended"
-	EvMsgStarted   = "message.started"
-	EvMsgDelta     = "message.delta"
-	EvMsgFinal     = "message.final"
-	EvToolStarted  = "tool.started"
-	EvToolProgress = "tool.progress"
-	EvToolEnded    = "tool.ended"
-	EvQueueChanged = "queue.updated"
-	EvCompaction   = "context.compaction"
-	EvContextUsage = "context.usage"
-	EvPtyStream    = "pty.stream"
-	EvPlatformErr  = "platform.error"
+	EvRunStarted = "run.started"
+	EvRunSettled = "run.settled"
+	EvRunRetry   = "run.retry"
+	EvRunAborted = "run.aborted"
+	// EvRunInterrupted is the recovery marker: one run ended without a result
+	// (the user stopped it, the control plane restarted, or the agent child
+	// died). Its payload names the cause and the sentence, so the transcript
+	// explains what happened in place instead of leaving the user to work it
+	// out. It is written alongside the existing run.settled/platform.error
+	// events, not instead of them.
+	EvRunInterrupted = "run.interrupted"
+	EvTurnStarted    = "turn.started"
+	EvTurnEnded      = "turn.ended"
+	EvMsgStarted     = "message.started"
+	EvMsgDelta       = "message.delta"
+	EvMsgFinal       = "message.final"
+	EvToolStarted    = "tool.started"
+	EvToolProgress   = "tool.progress"
+	EvToolEnded      = "tool.ended"
+	EvQueueChanged   = "queue.updated"
+	EvCompaction     = "context.compaction"
+	EvContextUsage   = "context.usage"
+	EvPtyStream      = "pty.stream"
+	EvPlatformErr    = "platform.error"
 )
 
 // ---------------------------------------------------------------------------

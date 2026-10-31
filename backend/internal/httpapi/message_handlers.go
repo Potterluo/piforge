@@ -10,6 +10,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/recovery"
 	"github.com/piforge/piforge/backend/internal/sandbox"
 	"github.com/piforge/piforge/backend/internal/store"
 )
@@ -31,6 +32,12 @@ type messageRequest struct {
 	// comment, so the transcript, the agent's prompt and the stored message are
 	// one string instead of three that can disagree.
 	ReviewComment *ReviewComment `json:"review_comment,omitempty"`
+	// ContinueInterrupted asks the server to compose the follow-up that the
+	// 继续 action on an interruption marker sends. The text is built here from
+	// the event log (the last request, the cause) and the measured checkout, so
+	// the transcript shows exactly what the agent received. It is a deliberate
+	// request: nothing sends it on its own.
+	ContinueInterrupted bool `json:"continue_interrupted,omitempty"`
 }
 
 // handlePostMessage submits a user message.
@@ -69,7 +76,30 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	// composed here, before the empty-text check, because the client sends the
 	// anchor (path, line, quote) rather than a prompt.
 	if in.ReviewComment != nil {
+		if in.ContinueInterrupted {
+			s.fail(w, r, apiErr(contracts.ErrInvalidArgument,
+				"continue_interrupted and review_comment cannot be combined"))
+			return
+		}
 		composed, cerr := s.reviewPrompt(r.Context(), user.ID, sess, *in.ReviewComment)
+		if cerr != nil {
+			s.fail(w, r, cerr)
+			return
+		}
+		in.Text = composed
+	}
+	// A run that ended without a result has one deliberate recovery action: the
+	// server composes a follow-up from the event log (what was asked, why the run
+	// stopped) and the measured checkout, then sends it through the ordinary
+	// message path. The client never supplies the text, so the transcript cannot
+	// disagree with what the agent received.
+	if in.ContinueInterrupted {
+		if strings.TrimSpace(in.Text) != "" {
+			s.fail(w, r, apiErr(contracts.ErrInvalidArgument,
+				"continue_interrupted composes its text on the server; text must be empty"))
+			return
+		}
+		composed, cerr := s.continuePrompt(r.Context(), user.ID, sess)
 		if cerr != nil {
 			s.fail(w, r, cerr)
 			return
@@ -261,6 +291,55 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// stopIsInFlight reports whether a run row is still started for this session.
+//
+// The session row alone is not enough: it can lag the run by a moment, and a
+// stop that arrives after the run completed would otherwise write an
+// interruption marker over a successful turn. Both must agree.
+func (s *server) stopIsInFlight(ctx context.Context, userID string, sess *contracts.Session) bool {
+	if sess.Status != contracts.StatusRunning {
+		return false
+	}
+	runs, err := s.deps.Store.ListRuns(ctx, userID, sess.ID)
+	if err != nil {
+		return false
+	}
+	for _, run := range runs {
+		if run.Status == "started" {
+			return true
+		}
+	}
+	return false
+}
+
+// recordStop writes the user-stop interruption marker.
+//
+// A stop is not an error, so it does not go through the reconciler: the control
+// plane is healthy and the run settled normally. This event is only about the
+// cause, which the terminal event cannot express. The append survives the client
+// navigating away (detached, bounded), and a failure is logged rather than
+// surfaced: the interrupt already happened.
+func (s *server) recordStop(r *http.Request, userID, sessionID string) {
+	payload, err := json.Marshal(map[string]any{
+		"cause":  recovery.CauseStop,
+		"reason": recovery.ReasonStop,
+	})
+	if err != nil {
+		return
+	}
+	ctx, cancel := detach(r.Context(), 5*time.Second)
+	defer cancel()
+	if _, err := s.deps.Store.AppendEvent(ctx, userID, &contracts.Event{
+		SessionID: sessionID,
+		Type:      contracts.EvRunInterrupted,
+		Payload:   payload,
+		TS:        s.now(),
+	}); err != nil {
+		s.log.WarnContext(r.Context(), "stop marker not recorded",
+			"session", sessionID, "error", err.Error())
+	}
+}
+
 // handleInterrupt aborts the run and returns whatever the user had queued so
 // the composer can put it back (PRD FR-1.4).
 func (s *server) handleInterrupt(w http.ResponseWriter, r *http.Request) {
@@ -284,10 +363,22 @@ func (s *server) handleInterrupt(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	// Whether the stop is about an actual in-flight run is decided before the
+	// abort: a click that lands just after the run finished must not leave a
+	// false "interrupted" marker in a transcript whose run completed.
+	stopping := s.stopIsInFlight(r.Context(), user.ID, sess)
 	res, err := rt.Interrupt(r.Context(), sess.ID)
 	if err != nil {
 		s.fail(w, r, err)
 		return
+	}
+	// Record why the run stopped. run.settled{aborted} already tells the
+	// transcript that a stop happened, but not that it was the user's decision:
+	// the recovery marker names the cause, and without this event a stop would
+	// be indistinguishable from a run that simply ended. Best effort — the stop
+	// itself succeeded and must not fail because a marker could not be written.
+	if stopping {
+		s.recordStop(r, user.ID, sess.ID)
 	}
 	if res.ClearedSteering == nil {
 		res.ClearedSteering = []string{}
