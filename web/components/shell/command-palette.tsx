@@ -220,7 +220,7 @@ export function CommandPalette({
   const settingsEntries: PaletteEntry[] = [
     {
       id: "settings:providers",
-      search: "模型与凭据 设置",
+      search: "打开设置 模型与凭据 凭据 设置",
       node: (
         <>
           <KeyRound />
@@ -231,7 +231,7 @@ export function CommandPalette({
     },
     {
       id: "settings:api-keys",
-      search: "API Key 设置",
+      search: "打开设置 API Key 密钥 设置",
       node: (
         <>
           <KeyRound />
@@ -242,7 +242,7 @@ export function CommandPalette({
     },
     {
       id: "settings:skills",
-      search: "Skill 中心 设置",
+      search: "打开设置 Skill 中心 技能 设置",
       node: (
         <>
           <Sparkles />
@@ -253,7 +253,7 @@ export function CommandPalette({
     },
     {
       id: "settings:mcp",
-      search: "MCP 中心 设置",
+      search: "打开设置 MCP 中心 设置",
       node: (
         <>
           <Boxes />
@@ -264,7 +264,7 @@ export function CommandPalette({
     },
     {
       id: "settings:general",
-      search: "通用设置",
+      search: "打开设置 通用设置",
       node: (
         <>
           <SlidersHorizontal />

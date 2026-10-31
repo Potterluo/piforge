@@ -171,6 +171,21 @@ describe("command palette selection", () => {
     expect(screen.getByTestId("palette-loading")).toBeVisible();
   });
 
+  it("finds the settings screens when the user types 打开设置", () => {
+    // The palette has always listed the settings commands, but their search
+    // text was only the screen name: an acceptance pass typed 采用/合并 and
+    // concluded the palette had no commands at all. "打开设置" is the phrase a
+    // user reaches for, so every settings row answers to it.
+    mocks.state.sessions = { data: { sessions: [] }, isPending: false, isFetching: false };
+    renderPalette();
+    fireEvent.change(input(), { target: { value: "打开设置" } });
+
+    const labels = options().map((option) => option.textContent ?? "");
+    expect(labels.some((label) => label.includes("模型与凭据"))).toBe(true);
+    expect(labels.some((label) => label.includes("Skill 中心"))).toBe(true);
+    expect(labels.some((label) => label.includes("MCP 中心"))).toBe(true);
+  });
+
   it("keeps ArrowUp/Down navigation working", () => {
     mocks.state.sessions = {
       data: { sessions: [session, { ...session, id: "ses_2", title: "调一下另一个会话" }] },
