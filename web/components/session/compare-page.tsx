@@ -80,6 +80,13 @@ export function ComparePage({ projectId, ids }: { projectId: string; ids: string
         </Button>
       </div>
 
+      {/* The "0 个文件" on the main session is correct but looks like a bug: its
+          branch *is* the base, so there is no diff to show. One line prevents a
+          reader from concluding the panel is broken. */}
+      <p className="text-[11px] text-muted-foreground" data-testid="compare-explainer">
+        「改动」是相对分支基准算的：主会话的分支就是基准本身，所以它对自己永远是 0 个文件；分支列显示的是它相对基准多出来的提交与未提交改动。
+      </p>
+
       {compare.isLoading ? (
         <Skeleton className="h-40 w-full" />
       ) : compare.isError ? (
@@ -138,7 +145,7 @@ function CompareColumn({ projectId, row }: { projectId: string; row: CompareRow 
         <Metric label="输入 token" value={row.tokens_in.toLocaleString()} />
         <Metric label="输出 token" value={row.tokens_out.toLocaleString()} note={inheritedTokens} />
         <Metric label="最近活动" value={formatRelative(row.last_active_at)} />
-        <Metric label="模型" value={row.model_ref || "跟随默认"} />
+        <Metric label="模型" value={row.model_ref || "默认模型"} />
       </dl>
 
       <div className="mt-auto flex items-center gap-2 pt-1">

@@ -316,6 +316,25 @@ export function FileTree({ sessionId, revision = 0, activePath, onOpenFile, onRe
           </span>
         ) : null}
         <div className="ms-auto flex items-center gap-1.5">
+          {/* Always available, not only in the empty state: once the tree has a
+              file, the acceptance pass could not find any way to create another
+              and gave up on the panel. */}
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label="新建文件"
+                  data-testid="file-create-header"
+                  onClick={openNewFile}
+                />
+              }
+            >
+              <PlusIcon />
+            </TooltipTrigger>
+            <TooltipContent side="bottom">新建文件</TooltipContent>
+          </Tooltip>
           <Tooltip>
             <TooltipTrigger
               render={

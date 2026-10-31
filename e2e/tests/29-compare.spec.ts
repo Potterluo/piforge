@@ -126,6 +126,13 @@ test("two branches can be compared side by side with real numbers", async ({ pag
   await expect(page.getByTestId("compare-grid")).toBeVisible({ timeout: 40_000 });
   await expect(page.getByTestId("compare-column")).toHaveCount(3, { timeout: 20_000 });
 
+  // The main session's 0 is correct, not broken: it is the base branch. The page
+  // says so, because "0 个文件" otherwise reads like the old counting bug.
+  const explainer = page.getByTestId("compare-explainer");
+  await expect(explainer).toBeVisible();
+  await expect(explainer).toContainText("相对分支基准");
+  await expect(explainer).toContainText("0 个文件");
+
   const committedColumn = page.locator(
     `[data-testid="compare-column"][data-session="${committedBranch}"]`,
   );

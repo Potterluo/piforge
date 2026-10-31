@@ -29,7 +29,7 @@ import { buildModelChoices } from "@/lib/session/model-options";
 import { useCreateSession, useProviders } from "@/lib/session/queries";
 
 const THINKING_LEVELS = [
-  { value: "default", label: "跟随默认" },
+  { value: "default", label: "默认" },
   { value: "off", label: "不推理" },
   { value: "low", label: "低" },
   { value: "medium", label: "中" },

@@ -21,6 +21,13 @@ test.describe("conversation", () => {
     });
     await expect(page.getByTestId("turn-user").first()).toContainText("cache eviction");
 
+    // Icon-only controls need an accessible name (acceptance pass 3, minor).
+    // The stop button's visible text is 停止 plus a key hint, so its computed
+    // name used to be "停止 Esc"; the explicit label makes it exact. While a run
+    // is in flight the send control is the labelled 下一轮执行 button.
+    await expect(page.getByRole("button", { name: "下一轮执行" })).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByTestId("composer-stop")).toHaveAttribute("aria-label", "停止");
+
     // The scripted peer always emits one bash tool call, folded into the run's single tool
     // row. Opening it **mid-run** used to collapse again under the user's finger: the row
     // was keyed by its position, so every appended block remounted it.
@@ -35,6 +42,8 @@ test.describe("conversation", () => {
     await expect(page.getByTestId("run-state")).toHaveAttribute("data-state", "settled", {
       timeout: 60_000,
     });
+    // Back to the idle composer: the arrow button's accessible name is 发送.
+    await expect(page.getByTestId("composer-send")).toHaveAttribute("aria-label", "发送");
 
     expect(await page.getByTestId("turn-assistant").count()).toBeGreaterThanOrEqual(2);
   });

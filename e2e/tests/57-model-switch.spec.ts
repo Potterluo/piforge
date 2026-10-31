@@ -12,9 +12,9 @@ import { freshAccount } from "./isolation";
  * or fails in Chinese before anything runs — never a silent fallback.
  */
 test.describe("the composer model picker", () => {
-  test("picking a provider with no key fails clearly instead of answering", async ({ page }) => {
+  test("a keyless model reference fails clearly instead of answering", async ({ page }) => {
     await freshAccount(page, "model-switch");
-    await openNewSession(page);
+    const sessionId = await openNewSession(page);
     await sendPrompt(page, "hello there");
     const answeredBefore = await page.getByTestId("turn-assistant").count();
     expect(answeredBefore).toBeGreaterThan(0);
@@ -29,20 +29,18 @@ test.describe("the composer model picker", () => {
     });
     expect(created.status).toBeLessThan(300);
 
-    // The composer's option list is a cached provider query; reload so the new
-    // provider is in it, the way an operator who just saved it would see it.
+    // The picker no longer offers it (80-keyless-picker pins that), so the only
+    // way into this state is the API — which is exactly what a stale session
+    // from before the guard looks like. The next turn must still refuse it,
+    // rather than silently answering from the old model.
+    const patched = await apiWrite(page, "PATCH", `/v1/sessions/${sessionId}`, {
+      model_ref: `${provider}/ghost-model`,
+    });
+    expect(patched.status).toBeLessThan(300);
+
+    // The composer's provider query is cached; reload so the row is in it.
     await page.reload();
     await expect(page.getByTestId("composer-input")).toBeVisible({ timeout: 40_000 });
-
-    await page.getByTestId("composer-model").click();
-    const option = page.getByRole("option", { name: new RegExp(`${provider}/`) }).first();
-    await option.waitFor({ timeout: 20_000 });
-    await option.click();
-    // The switch is announced, because the next turn restarts the agent.
-    await expect(page.locator("[data-sonner-toast]").filter({ hasText: "已切换模型" }).first()).toBeVisible({
-      timeout: 20_000,
-    });
-    // The picker and the session agree about the choice.
     await expect(page.getByTestId("composer-model")).toContainText("ghost-model", { timeout: 20_000 });
 
     const usersBefore = await page.getByTestId("turn-user").count();
@@ -76,11 +74,15 @@ test.describe("the composer model picker", () => {
     });
     expect(patched.status).toBeLessThan(300);
 
-    // Back to 跟随默认 through the picker, then a normal turn.
+    // Back to 默认模型 through the picker, then a normal turn.
     await page.getByTestId("composer-model").click();
-    const inherit = page.getByRole("option", { name: "跟随默认" }).first();
+    const inherit = page.getByRole("option", { name: "默认模型" }).first();
     await inherit.waitFor({ timeout: 20_000 });
     await inherit.click();
+
+    // The copy is 默认模型: "跟随默认" was the header jargon the acceptance pass
+    // flagged, and one spelling for one concept is the rule.
+    await expect(page.getByTestId("composer-model")).toContainText("默认模型", { timeout: 20_000 });
 
     await sendPrompt(page, "still working?");
     await expect(page.getByTestId("turn-error")).toHaveCount(0);
