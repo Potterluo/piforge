@@ -411,6 +411,316 @@ go run ./tools/wsprobe -base ws://127.0.0.1:7700 -session <session id> `
 - **升级路径**：从没有 `SANDBOX_API_KEY` 的旧容器升级（`Ensure` 会重建）没有实测，
   只有单元测试覆盖。
 
+### 1.4.2 已验证：runner 提供方的端到端（2026-10-31）
+
+上面 §1.4.1 记录的是"compose 起得来"。这一节记录的是**控制面 + runner + 沙箱跑完一次真实
+的 agent 任务**：Windows 11 / Docker Desktop / Engine 29.9.2，`pf-local`（7722，`-sandbox local`）
+全程没有被触碰，另起一套一次性实例在 **7723**，`-sandbox runner`，`--cap-drop DAC_OVERRIDE`
+（与文档默认一致），工作区是**卷 + 子路径**（§1.4 第 2 条），沙箱不发布宿主端口。
+
+**形状**（`docker inspect` 实测）：
+
+```
+pf-drill-control   CapDrop=["CAP_DAC_OVERRIDE"] CapAdd=null  7723->7700
+                   /var/run/docker.sock: No such file or directory; command -v docker -> 无
+pf-drill-runner    /run/host-services/docker.proxy.sock->/var/run/docker.sock, pf-drill-data:/data
+piforge-b04d0a79…  8080/tcp（EXPOSE，无宿主端口）  Up (healthy)
+```
+
+启动日志（控制面）：
+
+```
+msg="sandbox placement resolved" sandbox=runner browser=remote terminal=remote files=remote
+msg="skill mounts use read-only copies" mechanism=copy-ro reason="no CAP_SYS_ADMIN and no CAP_DAC_OVERRIDE: ..."
+msg="sandbox lifecycle runs through the runner" url=http://pf-drill-runner:7801
+msg="workspace files are read and written through the sandbox" sandbox=runner
+msg="session liveness: container agents run under a heartbeat launcher" sandbox=runner beat=15s
+msg="session liveness: the in-process registry and the sandbox heartbeat marker" ttl=2m0s
+msg="sandbox API keys are per sandbox" sandbox=runner
+```
+
+#### 命令（按顺序，可整段执行）
+
+```powershell
+# 0. provider key：从凭据文件读入进程变量，绝不打印、绝不落盘
+$cred = Get-Content (Join-Path $env:USERPROFILE '.dsh\.credentials.yaml') -Raw
+$env:PIFORGE_DRILL_KEY = [regex]::Match($cred, '(?m)^\s*VOLCE_API_KEY:\s*(\S+)\s*$').Groups[1].Value
+$volc  = 'https://api.example.com/v1'   # 本机 pf-local 里存的同一个 volc 端点
+$image = 'enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0'
+$tok   = -join (1..64 | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })   # runner 的 bearer token
+
+# 1. 两个镜像（控制面用规范脚本；runner 用它的 Dockerfile）
+pwsh scripts/build-app-image.ps1 -Tag piforge:runner-drill
+docker build -f deploy/Dockerfile.runner -t piforge/sandbox-runner:drill .
+
+# 2. 一次性网络 + 卷（沙箱从"卷 + 子路径"挂工作区，宿主路径不进这条链路）
+docker network create pf-drill-net
+docker volume create pf-drill-data
+
+# 3. runner：唯一持有 socket 的进程，六个动作，无 exec/无文件端点
+docker run -d --name pf-drill-runner --network pf-drill-net `
+  -e "RUNNER_TOKEN=$tok" -e SANDBOX_RUNNER_ADDR=0.0.0.0:7801 `
+  -e SANDBOX_DATA_ROOT=/data/sandboxes -e SANDBOX_NETWORK=pf-drill-net `
+  -e SANDBOX_CONTAINER_ENDPOINT=1 `
+  -e SANDBOX_WORKSPACE_VOLUME=pf-drill-data -e SANDBOX_WORKSPACE_VOLUME_ROOT=/data `
+  -e "SANDBOX_IMAGE=$image" `
+  -v /var/run/docker.sock:/var/run/docker.sock -v pf-drill-data:/data `
+  piforge/sandbox-runner:drill
+
+# 4. 第二个 PiForge 实例（7723），不动 7722 上的 pf-local
+docker run -d --name pf-drill-control --network pf-drill-net -p 7723:7700 `
+  -v pf-drill-data:/data --cap-drop DAC_OVERRIDE `
+  -e PIFORGE_PORT=7700 -e PIFORGE_DATA=/data `
+  -e PIFORGE_GATEWAY_URL=http://pf-drill-control:7700 `
+  -e PIFORGE_SEED_EMAIL=admin@piforge.local -e PIFORGE_SEED_PASSWORD=piforge-admin-123 `
+  -e PIFORGE_SEED_USER_EMAIL=dev@piforge.local -e PIFORGE_SEED_USER_PASSWORD=piforge-dev-123 `
+  -e PIFORGE_DEFAULT_PROVIDER=volc `
+  -e "PIFORGE_BOOTSTRAP_PROVIDER=volc|$volc|deepseek-v4-flash" `
+  -e "PIFORGE_BOOTSTRAP_PROVIDER_KEY=$env:PIFORGE_DRILL_KEY" `
+  -e PIFORGE_SANDBOX=runner `
+  -e PIFORGE_SANDBOX_RUNNER_URL=http://pf-drill-runner:7801 `
+  -e "PIFORGE_SANDBOX_RUNNER_TOKEN=$tok" -e "PIFORGE_SANDBOX_IMAGE=$image" `
+  piforge:runner-drill
+
+# 5. 登录 → 建项目 → 建会话（会话创建时 Ensure 才真的建容器与 checkout）
+$base = 'http://127.0.0.1:7723'
+$web  = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
+$login = Invoke-WebRequest "$base/v1/auth/login" -Method Post -SessionVariable web `
+  -ContentType application/json -NoProxy `
+  -Body ([Text.Encoding]::UTF8.GetBytes('{"email":"admin@piforge.local","password":"piforge-admin-123"}'))
+$csrf = ($login.Content | ConvertFrom-Json).csrf
+$proj = Invoke-WebRequest "$base/v1/projects" -Method Post -WebSession $web -NoProxy `
+  -Headers @{'X-PF-CSRF'=$csrf} -ContentType application/json `
+  -Body ([Text.Encoding]::UTF8.GetBytes('{"name":"runner-drill","default_branch":"main"}'))
+$pid2 = ($proj.Content | ConvertFrom-Json).project.id
+$sess = Invoke-WebRequest "$base/v1/projects/$pid2/sessions" -Method Post -WebSession $web -NoProxy `
+  -Headers @{'X-PF-CSRF'=$csrf} -ContentType application/json `
+  -Body ([Text.Encoding]::UTF8.GetBytes('{"kind":"main","title":"prime drill"}'))
+$sid  = ($sess.Content | ConvertFrom-Json).session.id
+
+# 6. 发那条任务，等 run.settled（status.running 由 true 变 false）
+$body = @{ text = '写一个 Node 脚本输出前 10 个素数，配一个测试并运行，然后提交'; client_msg_id = [guid]::NewGuid().ToString() }
+Invoke-WebRequest "$base/v1/sessions/$sid/messages" -Method Post -WebSession $web -NoProxy `
+  -Headers @{'X-PF-CSRF'=$csrf} -ContentType application/json `
+  -Body ([Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Compress)))
+# 之后每 1s GET /v1/sessions/$sid/status，直到 running 变成 false
+
+# 7. 终止：只删这套一次性实例（不要动 pf-local / piforge / piforge-data）
+docker rm -f pf-drill-control pf-drill-runner
+docker ps -aq --filter 'name=piforge-' | ForEach-Object { docker rm -f $_ }
+docker volume rm pf-drill-data
+docker network rm pf-drill-net
+docker rmi piforge:runner-drill piforge/sandbox-runner:drill   # 镜像可留，留着就跳过这一行
+```
+
+停止 runner 而保留沙箱（容器由 runner 创建、不归 compose 管）：
+`docker stop pf-drill-runner`；之后重启 `docker start pf-drill-runner` 不影响已有容器（runner 无状态），
+端点由容器名 + `SANDBOX_CONTAINER_ENDPOINT=1` 决定，不需要重新发布端口。
+
+#### 时间（实测，热镜像）
+
+| 步骤 | 耗时 |
+|---|---|
+| 登录 `POST /v1/auth/login` | **74 ms** |
+| 建项目 `POST /v1/projects` | **4 ms** |
+| 建会话（含 `Ensure`：建容器 3960 ms + 容器内 checkout） | **4052 ms** |
+| 发消息 → `{accepted:true,disposition:"started"}` | **255 ms** |
+| 该 run `run.started` → `run.settled`（写脚本 + 写测试 + 跑 + 提交） | **18 452 ms** |
+| 面板文件树 / 读 / 写 | 1569 ms（第一次） / 8 ms / 7 ms |
+| 变更面板 status / diff / stage / commit | 876 / 958 / 309 / 1305 ms |
+| 行内评论被接受 | **61 ms** |
+| 只重启控制面（`docker restart`，不碰容器）→ `/healthz` 200 | **1021 ms** |
+
+#### 隔离与真实执行的证据（每条都是命令 + 原始输出）
+
+1. **三台不同的机器**，宿主没有这些路径：
+
+   ```
+   host=<host-name>  control=aa5c3b01f5b9  sandbox=eb386c352f77
+   docker exec <sandbox> hostname -> eb386c352f77
+   Test-Path C:\data\sandboxes -> False
+   ```
+
+2. **同一棵树、两个容器、同一个 inode**（工作区是卷，不是宿主目录）：
+
+   ```
+   sandbox   /workspace/repo            -> 2096:456006
+   control   /data/sandboxes/<u>/<p>/repo -> 2096:456006
+   ```
+
+3. **agent 进程在哪**（这一条是这一轮最重要的诚实结论）：
+
+   ```
+   docker exec pf-drill-control ps -ef
+   root  11  8  /app/bin/piforged -addr 0.0.0.0:7700 ...
+   root  37 11  /app/bin/piforged agent-launcher -root /data/sandboxes/<u>/<p> \
+                 -session ses_… -interval 15s -- pi --mode rpc --model piforge/deepseek-v4-flash \
+                 --skill /data/sandboxes/<u>/<p>/repo/.pi/skills --session /tmp/.piforge/sessions/ses_….jsonl
+   root  45 37  pi
+   docker exec <sandbox> ps -ef   -> gem.sh / supervisord / python-server / code-server / jupyter，**没有 pi**
+   ```
+
+   也就是说：**agent 进程跑在控制面容器里，和沙箱共用同一个工作区卷**。pi 的 cwd 是
+   `/data/sandboxes/<u>/<p>/repo`（控制面的视图），不是 `/workspace/repo`。这一点在下面
+   "还没修"一节里说清后果。
+
+4. **提交在沙箱里，作者是沙箱 checkout 的身份**：
+
+   ```
+   docker exec <sandbox> sh -c 'cd /workspace/repo && git -c safe.directory=/workspace/repo log --format="%h %an|%ae %s" -5'
+   6c87b48 PiForge Sandbox|sandbox@piforge.local drill: a second commit from the changes panel
+   1431a7b PiForge Sandbox|sandbox@piforge.local docs: 说明 2 为何在偶数检查前特判
+   af50057 PiForge Sandbox|sandbox@piforge.local drill: a commit from the changes panel
+   453c7c5 PiForge Sandbox|sandbox@piforge.local feat: 输出前 10 个素数的 Node 脚本及测试
+   c8eb55f PiForge Sandbox|sandbox@piforge.local piforge: initial commit
+   ```
+
+5. **agent 写的文件**：Files API 与容器一致，宿主项目树里没有它的字节。
+
+   ```
+   GET /v1/sessions/<sid>/files?path=primes.js -> 200, size=800
+   docker exec <sandbox> sha256sum /workspace/repo/primes.js -> 758f11c13fa7…
+   C:\Users\<user>\Downloads\piforge 下 12 个 800 字节的 .js，sha256 与它相同的：0 个
+   ```
+
+6. **沙箱里没有 provider key**（key 只在进程变量里，输出只给了命中数）：
+
+   ```
+   docker exec <sandbox> env | Select-String <key>         -> 0 hits
+   find / -name models.json  (in the sandbox)              -> 无（沙箱里根本没有 models.json）
+   控制面 /data/pi-agents/*/models.json 里的 apiKey        -> "apiKey": "<per-session token>"
+   grep -c <key> /data/pi-agents/*/models.json             -> 0
+   docker inspect pf-drill-control env                     -> 1 hit（PIFORGE_BOOTSTRAP_PROVIDER_KEY，控制面持有，按设计）
+   ```
+
+7. **每沙箱一把 key，跨租户 401**（直接打容器，不经过控制面）：
+
+   ```
+   A ...1051d5d5  B ...cb79648a  (两把不同的 64 位 hex)
+   GET http://B:8080/v1/browser/info  X-AIO-API-Key: <A 的 key> -> 401
+   同一条请求用 B 自己的 key                                      -> 200
+   不带 key                                                       -> 401
+   ```
+
+8. **终端在 UI 里就是容器 shell**（`backend/tools/wsprobe`，与浏览器面板同一个 WebSocket）：
+
+   ```
+   go run ./tools/wsprobe -base ws://127.0.0.1:7723 -session <sid> -cookie <pf_session> `
+       -cmd "hostname; pwd; stat -c '%U %a' /workspace/repo" -grace 10s
+   CTRL: {"shell":"aio","type":"ready",...}
+   OUTPUT: "hostname; pwd; stat -c '%U %a' /workspace/repo\r\neb386c352f77\n/workspace/repo\ngem 777\n"
+   ```
+
+9. **测试面板与行内评论**：agent 用 `npm test` 跑了 3 个用例（`status=passed 3/3, 34 ms,
+   source=agent`），记录在 `GET /v1/sessions/<sid>/test-runs`；行内评论提交
+   `{path:"primes.js",line:12,side:"new",hunk:"@@ -10,6 +10,7 @@",quote:[...],body:"..."}`
+   被接受（61 ms），服务端组装的那一轮原文：
+
+   ```
+   行内评论 · primes.js:12 | diff 片段：@@ -10,6 +10,7 @@ | 引用的代码： … | 评论：… |
+   位置：这段代码现在在第 9 行（写评论后文件改过，行号有偏移），以当前文件为准。
+   ```
+
+   agent 据此改代码并提交 `1431a7b`，测试仍 3/3。
+
+#### 这一轮修掉的两个缺陷（都带测试，都在主线上）
+
+**D1 — 文档默认的 compose 根本建不出 checkout。** 沙箱里的 checkout 由 `gem`（uid 1000）创建，
+而控制面以 root 运行、`--cap-drop DAC_OVERRIDE`（这是让 `copy-ro` 技能只读成立的那一条）。
+两个身份写同一棵树，于是每个新会话的 provisioning 都死在第一次写：
+
+```
+provision: mount tooling: materialize: create skills root:
+mkdir /data/sandboxes/<u>/<p>/repo/.pi: permission denied
+liveness: create the marker directory ... mkdir /data/sandboxes/<u>/<p>/.piforge: permission denied
+```
+
+（同一路径用 `docker run --cap-add DAC_OVERRIDE` 可以写：我用这条对照实验确认了原因是
+capability，不是挂载。）修法：`planCheckout` / `planBranchWorktree` 在**创建 checkout 的那一次**
+结尾多一步 `chmod -R a+rwX /workspace`（分支会话是对 worktree 目录），**只在创建时**跑——
+放到 ready 路径上会连 `materialize` 写的 0444/0555 技能副本一起放宽，那正是只读保证本身。
+`chmod` 不是 git，所以 `checkoutCommand` 只对 `git` 注入 `-c safe.directory=<dir>`：
+否则那串会被 chmod 当成 mode（`chmod: invalid mode: 'safe.directory=…'`）。
+测试：`TestPlanCheckout`、`TestPlanBranchWorktree`、`TestDockerProviderCheckoutUsesTheSandboxAPI`
+（钉住 `'chmod' '-R' 'a+rwX' '/workspace'` 这条命令与 `cwd`）。
+
+**D2 — agent 的 `git commit` 被 "dubious ownership" 挡住。** checkout 归 `gem`，agent 进程是
+root，git 2.39 在跑任何命令之前就拒绝这个仓库：
+
+```
+fatal: detected dubious ownership in repository at '/data/sandboxes/<u>/<p>/repo'
+```
+
+这是**属主**判断，改文件模式没有用。修法：容器提供方给每个会话的 agent 注入
+`GIT_CONFIG_COUNT/KEY_0/VALUE_0=safe.directory=<本会话 worktree>`（分支会话再加
+`<pair>/repo`，因为 linked worktree 的 gitdir 在那里），**不是** `safe.directory=*`；
+`-sandbox local` 不注入（那里没有第二个账号）。
+测试：`cmd/piforged/agent_git_env_test.go`（含"绝不写成通配符"的断言）。
+
+#### 重启：只重启控制面，不碰容器
+
+`docker restart pf-drill-control`（1021 ms 回来后），沙箱容器 id / `StartedAt` / `RestartCount`
+都没变（`eb386c352f77… 14:31:05 0`）。启动对账：
+
+```
+msg="session reconciliation at startup" scanned=1 interrupted=0 runs=0 kept_live=1 unknown=0
+```
+
+**没有把它标成 interrupted**——这正是设计要求：心跳 marker 还在 TTL（2 分钟）内，探针的
+三值语义是"没证据 ≠ 死"。但同一时刻：
+
+```
+pi process in the control plane after restart: False          # 它本来就是控制面的子进程，随容器一起死
+/workspace/.piforge/live/<session> 内容: 2026-10-31T14:40:52.092262032Z pid=45
+```
+
+marker 是**死掉的 launcher 最后一次心跳**，所以 2 分钟 TTL 到期后看门狗补了一刀：
+
+```
+14:42:59 msg="interrupted an orphaned run" phase=watchdog session=ses_… runs=1
+        reason=运行进程已退出，本次运行被中断
+```
+
+结论要说清：**探针本身没有在重启时误杀**（任务关心的是这条），但它也拦不住"agent 其实已经
+死了"——它只能证明心跳文件还新。真要让它有意义，agent 得活在沙箱里（见下）。另外重启后那一小段
+时间里 `GET /status` 是 `running=false`，而库里那行仍是 running（kept_live），UI 会短暂显示"空闲"。
+
+#### 还没修、但仍然为真（不要当成已验证）
+
+1. **agent 在控制面容器里执行，不在沙箱里。** 上面的 `ps`、pi 的 cwd
+   （`/data/sandboxes/<u>/<p>/repo`）、以及 marker 位置（`<pair>/.piforge/live/…`，由控制面
+   写、经沙箱 API 读）都是同一条事实。后果：
+   - **"agent 代码在沙箱里跑"这句话，对本地实现不成立**——沙箱是**工作区**边界（文件、终端、
+     浏览器、git 面板都在里面），不是**执行**边界。agent 的 bash/node/git 与控制面同容器，
+     因此它读得到 `/data`（SQLite、`master.key`、别的租户的 workspace）。
+   - 控制面重启会杀掉 agent（`docker restart` 之后 pi 进程没了），所以上面那条
+     `kept_live=1` 只是"心跳还没过期"。
+   - 要真正修，得把 pi 放进沙箱（镜像里有 node，路径是 `aio` 的 shell API 或一个 stdio
+     shim），并把 `materialize` 改走沙箱文件 API；那是接口层的改造，不是几行。
+2. **面板改不了 agent 创建的文件**（反向的同一类属主问题）。agent 以 root 写出的文件是 0644，
+   面板以 `gem` 写：
+
+   ```
+   PUT /v1/sessions/<sid>/files?path=primes.js -> 500
+   error="workspaceremote: write \"primes.js\": aio: write /workspace/repo/primes.js:
+          Permission denied: [Errno 13]"
+   stat: root 644 /workspace/repo/primes.js   gem 644 /workspace/repo/panel-note.md
+   ```
+
+   反方向可用（面板提交发生在 agent 提交之后、agent 再提交也成功，因为 git 用 lock+rename，
+   目录是 0777）。彻底修法与第 1 条是同一件：**一个写者**。过渡办法是把 agent 进程树的
+   umask 设成 0（它新建的文件就是 0666），那也只是让"agent 写、用户改"这一半成立。
+3. **沙箱镜像的 `gem` 与宿主属主仍可能对不上**（bind 形态在 Linux 宿主上），这一轮只在
+   Docker Desktop + 卷上验证过。
+4. **多主机**：控制面、runner、daemon 三者在三个地方时没验证。`SANDBOX_CONTAINER_ENDPOINT=1`
+   的容器名寻址依赖"控制面与沙箱同一个 Docker 网络"，跨机器要换成可路由的名字或 router；
+   runner 的 7801 没有 TLS，只应在内网。
+5. **密钥轮换**：resume 不换 key，也没有轮换接口（§1.4 第 6 条）；这一轮没有改变它。
+
+清理（本轮的实例已按这段删掉）：`docker rm -f pf-drill-control pf-drill-runner`、删掉本轮
+`piforge-*` 沙箱、`docker volume rm pf-drill-data`、`docker network rm pf-drill-net`。
+`pf-local` 的前后指纹：容器 `7dc14e4a7525…`、`/healthz` 200，未变。
+
 
 为什么是它：
 
@@ -962,10 +1272,10 @@ Pod 没有"暂停"。三种候选，逐个排除：
 - 我们的 sandbox provider 在 K8s 下的真实冷启动时间（没有实测，只有上游的 42–50s）；
 - `docker-compose.runner.yml` 的**Linux 宿主**部署：runner 镜像（`deploy/Dockerfile.runner`）
   已经实际构建过，compose 也在 Docker Desktop 上跑起来过（§1.4.1 记录了那次的命令、`ps`
-  输出和修掉的五处故障）；没有一手证据的是 Linux 服务器上的同一套 compose（卷映射、
-  `volume-subpath` 与 Engine 版本），以及 runner 的端到端验证——那一轮是在 Windows 上
-  用两个本机进程跑的（runner 8111 + piforged 8112，见
-  `scripts/verify-runner-sandbox.ps1`）。
+  输出和修掉的五处故障）；**runner 的端到端已经在这台机器上验证**（§1.4.2：runner 容器 +
+  第二个控制面实例 + 一次性卷，跑完一次真实 agent 任务，并修掉了两个阻断缺陷）。仍然没有
+  一手证据的是 Linux 服务器上的同一套 compose（卷映射、`volume-subpath` 与 Engine 版本），
+  以及控制面 / runner / daemon 分处三台机器的形态（§1.4.2 末尾）。
 
 ## 9. 来源
 

@@ -287,15 +287,41 @@ Seams, in the order they will bite:
 
 Ordered roughly by how much they will hurt. Nothing here is softened.
 
-1. **This deployment has no isolation at all.** The startup line is
+1. **This instance has no isolation at all — but the product path that does has been
+   proven here.** The startup line is
    `sandbox=local browser=host terminal=host files=host`: there is one container, and
    every project is a plain directory under `/data/sandboxes/<user>/<project>`. A
    terminal opened in one project had hostname `0fe80fa91b45` — the control-plane
    container itself — and could read `/data` (I read `/data/skills` and other projects'
    paths from it). `docs/SANDBOX-DEPLOY.md` §3 says this plainly for `local`: it is not
-   a tenant boundary, it protects against typos only. If a customer is told "code runs in
-   an isolated sandbox", this deployment is not what that sentence describes; you need
-   `-sandbox runner` (same host, real container boundary) or K8s + gVisor.
+   a tenant boundary, it protects against typos only.
+
+   **What changed on 2026-10-31:** `-sandbox runner` was brought up on this same machine
+   (Docker Desktop, Engine 29.9.2) as a second instance on 7723, with the runner holding
+   the only docker socket and a throwaway volume, and a real agent task ran inside it
+   ("write a Node script for the first 10 primes, test it, run it, commit"): one commit
+   `453c7c5` in the sandbox, tests 3/3, panel/changes/inline-review all working,
+   61 ms–18.5 s timings, `docs/SANDBOX-DEPLOY.md` §1.4.2 has the commands and the raw
+   evidence. So "code runs in an isolated sandbox" is now a demonstrated mode of this
+   codebase, not a design claim — and two blocking defects had to be fixed to get there
+   (the checkout was not writable by the root control plane; the agent's git refused a
+   checkout owned by `gem`).
+
+   **What is still not true, and must not be said:** the agent *process* (`pi` and the
+   bash/node/git it spawns) runs in the **control-plane container**, not in the sandbox
+   — `ps` shows `piforged agent-launcher … -- pi` there, and pi's cwd is
+   `/data/sandboxes/<u>/<p>/repo` (the control plane's view of the shared volume), while
+   the sandbox sees the same inode at `/workspace/repo`. The sandbox is the **workspace**
+   boundary (files, terminal, browser, panel git), not an *execution* boundary: the agent
+   can read `/data` (SQLite, `master.key`, other tenants' workspaces), and a
+   control-plane restart kills it. Two user-visible consequences are recorded in
+   §1.4.2: a control-plane restart keeps the run "live" for up to the 2-minute heartbeat
+   TTL before the watchdog marks it interrupted (the probe does **not** mis-kill at
+   startup — `scanned=1 interrupted=0 kept_live=1`), and the panel cannot edit a file the
+   agent created (`PUT /files` -> 500, `Permission denied`, because root wrote 0644 and
+   the panel writes as `gem`). Making the sentence "agent code runs in the sandbox"
+   literally true needs pi inside the sandbox plus `materialize` through the sandbox file
+   API; that is not done.
 2. **Interrupt, then send another message: the agent resumes the interrupted request.**
    Verified on 2026-10-31, deterministically (6/6 runs; `e2e/scripts/fix-interrupt-context-probe.mjs`,
    raw runs in `e2e/.artifacts/fix-interrupt-context/`). Send "Count from 1 to 200" and stop it
