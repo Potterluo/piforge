@@ -49,7 +49,7 @@ func startProcess(ctx context.Context, argv []string, dir string, cols, rows int
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "PIFORGE_TERM=1")
+	cmd.Env = terminalEnv()
 	f, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 	if err != nil {
 		return nil, err

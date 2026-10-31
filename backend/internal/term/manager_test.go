@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -435,4 +436,78 @@ func TestShellShowsAPrompt(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatal("the shell printed nothing at all, so the terminal looks dead")
+}
+
+// TestGitLogReturnsToThePrompt is the pager regression: `git log` in the terminal
+// started a pager with no hint, printed `(END)`, and every following keystroke
+// went into the pager instead of the shell. The environment the PTY starts with
+// must make git print and return.
+//
+// It has to be a real PTY: the pager only engages when stdout is a terminal, so a
+// unit test over gitx.Exec would never reproduce it.
+func TestGitLogReturnsToThePrompt(t *testing.T) {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is not installed")
+	}
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		full := append([]string{
+			"-c", "user.name=PiForge test",
+			"-c", "user.email=test@piforge.local",
+			"-c", "init.defaultBranch=main",
+		}, args...)
+		cmd := exec.Command(gitPath, full...)
+		cmd.Dir = dir
+		if out, runErr := cmd.CombinedOutput(); runErr != nil {
+			t.Fatalf("git %v: %v\n%s", args, runErr, out)
+		}
+	}
+	git("init", "-q")
+	for _, commit := range []struct{ file, message string }{
+		{"a.txt", "first commit subject"},
+		{"b.txt", "second commit subject"},
+	} {
+		if writeErr := os.WriteFile(filepath.Join(dir, commit.file), []byte("x\n"), 0o644); writeErr != nil {
+			t.Fatalf("seed %s: %v", commit.file, writeErr)
+		}
+		git("add", commit.file)
+		git("commit", "-q", "-m", commit.message)
+	}
+
+	m := New(Config{
+		WorkDir: func(context.Context, string) (string, error) { return dir, nil },
+	})
+	defer m.CloseAll()
+
+	if _, err := m.Open(context.Background(), "sbx", "tab-git-log", ""); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := m.Write("tab-git-log", []byte("git log --oneline\n")); err != nil {
+		t.Fatalf("write git log: %v", err)
+	}
+	// Both commits are printed, in full, without a pager prompt.
+	waitFor(t, m, "tab-git-log", "second commit subject", 20*time.Second)
+	waitFor(t, m, "tab-git-log", "first commit subject", 20*time.Second)
+
+	// The real proof that the shell came back: a command typed after `git log`
+	// runs. A pager is still reading stdin, so this file would never appear.
+	marker := "pager-marker.txt"
+	if err := m.Write("tab-git-log", []byte("echo done > "+marker+"\n")); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, statErr := os.Stat(filepath.Join(dir, marker)); statErr == nil {
+			data, _, _ := m.Read("tab-git-log", 0)
+			if strings.Contains(string(data), "(END)") {
+				t.Fatalf("git log left a pager in the terminal: %q", data)
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	data, _, _ := m.Read("tab-git-log", 0)
+	t.Fatalf("the command typed after `git log` never ran; the pager still owns stdin. output = %q", data)
 }

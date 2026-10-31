@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -75,7 +74,7 @@ func startProcess(ctx context.Context, argv []string, dir string, cols, rows int
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	cmd.Env = append(os.Environ(), "TERM=dumb", "PIFORGE_TERM=1")
+	cmd.Env = terminalEnv()
 	cmd.Stdout = pw
 	cmd.Stderr = pw
 
