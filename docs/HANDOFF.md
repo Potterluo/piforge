@@ -412,9 +412,12 @@ Seams, in the order they will bite:
   rather than invented numbers.
 
 ## Known limits
+
+Ordered roughly by how much they will hurt. Nothing here is softened.
+
 0. **Tenancy is now an operating property on the isolated shape — with four named
-   exceptions.** Since 2026-11-01 (`docs/EXECUTION-BOUNDARY.md` §12,
-   `docs/SANDBOX-DEPLOY.md` §1.7):
+   exceptions.**
+   Since 2026-11-01 (`docs/EXECUTION-BOUNDARY.md` §12, `docs/SANDBOX-DEPLOY.md` §1.7):
 
    - **Network:** sandboxes no longer share `piforge-sandboxes`. Each tenant gets a
      bridge of its own (`piforge-t-<hash>`, created by the runner, labelled
@@ -449,7 +452,6 @@ Seams, in the order they will bite:
    one Docker Desktop host, not fifty.
 
 
-Ordered roughly by how much they will hurt. Nothing here is softened.
 
 1. **This instance has no isolation at all — but the product path that does has been
    proven here.** The startup line is
