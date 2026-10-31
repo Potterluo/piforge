@@ -5,6 +5,8 @@ import * as React from "react";
 import api from "@/lib/api/client";
 import type { GitChange, GitGraph, GitStatus } from "@/lib/types";
 import { useAsync, type AsyncResult } from "@/components/workspace/use-async";
+import { useDebouncedCallback } from "@/hooks/use-debounced-callback";
+import { useOptionalSessionEventState } from "@/components/session/session-events-provider";
 
 /**
  * Shared git state for the 变更 and Git tabs.
@@ -38,8 +40,59 @@ export function GitProvider({
   children: React.ReactNode;
 }) {
   const [revision, setRevision] = React.useState(0);
-  const status = useAsync(`git-status:${sessionId}`, () => api.git.status(sessionId));
-  const log = useAsync(`git-log:${sessionId}`, () => api.git.log(sessionId, 200));
+
+  /**
+   * Bumped when something outside this provider says the checkout changed.
+   *
+   * The acceptance pass watched a run edit `count.js` while 变更 still said
+   * 工作区干净，没有改动。: the status was fetched once at mount and never again,
+   * while the file tree beside it kept up because it listens to the session
+   * event stream. This is the same signal, and `revision` also refetches the
+   * open diff and the remote counts, so no part of the panel can keep showing
+   * the old tree.
+   */
+  const refresh = React.useCallback(() => setRevision((current) => current + 1), []);
+
+  // Several signals can describe one change (the tool ends, the run settles,
+  // the window comes back). Coalescing them keeps a streaming run from causing
+  // one status request per event.
+  const scheduleRefresh = useDebouncedCallback(refresh, 400);
+
+  const events = useOptionalSessionEventState();
+  // `workspace` is the file tree's existing signal: tool.ended / run.settled.
+  // `settled` is the run counter, the backstop for a run that ended without a
+  // tool event being reported.
+  const workspace = events?.workspace ?? 0;
+  const settled = events?.state.settled ?? 0;
+
+  React.useEffect(() => {
+    if (workspace === 0 && settled === 0) return;
+    scheduleRefresh();
+  }, [workspace, settled, scheduleRefresh]);
+
+  // A command typed in the terminal or a run in a background tab changes the
+  // worktree with no event addressed to this panel. Regaining focus is the one
+  // signal that always means "look again".
+  React.useEffect(() => {
+    const onFocus = () => scheduleRefresh();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") scheduleRefresh();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [scheduleRefresh]);
+
+  // `revision` is part of the key, not a second `reload()` call: one bump
+  // refetches both halves in the same render, so 变更 and Git cannot disagree
+  // about which revision they are showing.
+  const status = useAsync(`git-status:${sessionId}:${revision}`, () =>
+    api.git.status(sessionId),
+  );
+  const log = useAsync(`git-log:${sessionId}:${revision}`, () => api.git.log(sessionId, 200));
 
   // Rebuilt every render on purpose: `useAsync` returns a fresh object anyway,
   // and the panels are cheap. A memo here would only hide the churn.
@@ -48,11 +101,7 @@ export function GitProvider({
     status,
     log,
     revision,
-    refresh: () => {
-      status.reload();
-      log.reload();
-      setRevision((current) => current + 1);
-    },
+    refresh,
   };
 
   return <GitDataContext.Provider value={value}>{children}</GitDataContext.Provider>;
