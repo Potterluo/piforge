@@ -30,6 +30,8 @@
 
 本批（fork 转录的截断 + Node 24 spec reporter）之后，FR 状态不变：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**（按表格行重数）。fork 不再复制父会话的事件，而是记录 `sessions.forked_at_seq`，读取时把父日志（cut 之前）与分支自己的事件合并成一条单调转录；那条把长会话截断在 1000 条的 `ListEvents` 复制路径已经删除。测试面板补上 Node 24 默认的 spec reporter（`ℹ pass N`），直接 `node x.test.js` 的输出不再记为未识别格式。证据见文末「本批：fork 转录的截断（lineage）+ Node 24 spec reporter」。
 
+本批（终端输入的三个缺陷）同样不改变任何 FR 状态：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。三处都是「实现声称支持、实际会丢用户输入」，不是缺功能：①**快速输入丢字**——`use-pty.ts` 在 socket 未 OPEN 时直接把按键丢掉（不是客户端合并、不是 PTY 读循环、也没有 debounce），量到「输入开始 → socket open」的窗口后按 `send` 逐条排队并在 open 时按序逐帧 flush；②**`git log` 进分页器**——PTY 环境没有 `GIT_PAGER`/`PAGER`，`less` 吃掉后续按键，现在 PTY 环境固定 `PAGER=cat`/`GIT_PAGER=cat`/`GIT_TERMINAL_PROMPT=0`；③**分叉对话框的「创建分支」无故禁用**——补上「分支名称必填」说明与按钮 `title`。根因测量、fail-first 与门禁见文末「本批：终端输入的三个缺陷」。
+
 ---
 # PiForge 对照 PRD 的实现审计
 
@@ -116,9 +118,9 @@
 | FR-9.4 命令重放（历史命令列表） | MISSING | 无命令历史面板/端点 |
 | FR-9.5 长输出 >5000 行折叠 + 完整输出路径 | PARTIAL | `tool-trace.tsx` 可折叠输出；无 5000 行阈值，无 `fullOutputPath` 概念 |
 | FR-9.6 多路跟随（每分支一个跟随 tab） | MISSING | 无跟随 tab 体系 |
-| FR-10.1 完整 PTY + xterm（支持 TUI） | DONE | `term/manager.go`（真 PTY，`pty_unix.go`/`pty_windows.go`）+ `terminal-surface.tsx`（`@xterm/xterm`）；`03-workspace.spec.ts` "the terminal opens a real PTY in the sandbox"、"keystrokes reach the shell and output comes back" |
+| FR-10.1 完整 PTY + xterm（支持 TUI） | DONE | `term/manager.go`（真 PTY，`pty_unix.go`/`pty_windows.go`）+ `terminal-surface.tsx`（`@xterm/xterm`）；`03-workspace.spec.ts` "the terminal opens a real PTY in the sandbox"、"keystrokes reach the shell and output comes back"。**本批修掉「快速输入丢字」**：`use-pty.ts` 的 `send` 过去在 `readyState !== OPEN` 时直接 `return`（socket 还在握手，或断线退避中），于是这段时间的按键被静默丢弃；现在按 `send` 调用逐条排队、`onopen` 时按原顺序逐帧 flush（不合并、不延迟已打开路径），`terminate`/干净关闭/协议错误时清空队列，连接期间的 resize 也只保留最新一次并在打开后发送。同批让 PTY 环境无分页器：`process.go` 的 `terminalEnv()` 覆盖 `PAGER=cat`、`GIT_PAGER=cat`、`GIT_TERMINAL_PROMPT=0`、`TERM=xterm-256color`（替换而非追加：libc 的 getenv 先命中先生效的重复项）。测试：`web/lib/terminal/use-pty.test.ts` 4 例（连接中排队/按序逐帧、已打开零排队、重连退避中排队并 flush、`terminate` 丢弃）、e2e `90-terminal-input.spec.ts` 2 例（0ms 连发完整且 `EXIT=0`、CDP 把握手延迟 1.5s 时抢在 open 前输入仍完整执行）、`term/process_test.go` 3 例（覆盖而非重复、保留无关变量、TERM）、`manager_test.go` `TestGitLogReturnsToThePrompt`（真 PTY 里 `git log` 打印后下一条命令能跑，且没有 `(END)`） |
 | FR-10.2 多 tab（≥5，重命名/关闭） | DONE | `terminal-tabs.tsx`：可新增/切换/关闭（≥5，上限 8），每个 tab 一个 `TerminalPane`，`tab` id 就是服务端的 PTY key（`data-pty-tab`）；切走的 tab 只隐藏不卸载，shell 与滚动缓冲都留着。关闭时先发 `{type:"close"}` 让服务端 `Term.Close`（掉 socket 只是重连语义，见 FR-10.3），再移除标签；双击标签改名只改 `label`，id 不变，所以改名不会换 shell；关掉最后一个会新开一个。`workspace-panels.tsx` 的「在终端中打开」跟随当前标签（`paneRef` 指向 active）。测试：`e2e/tests/71-terminal-tabs.spec.ts`（加到 5 个 tab、5 个 pane 的 `data-pty-tab` 各不相同且 `data-pty-status` 全为 `open`；在第 5 个 tab 键入 `echo five > tab-five.txt`、第 1 个键入 `echo one > tab-one.txt`，两个文件都能从 Files API 读到；改名「构建」后 `t1` 仍 `open`；关闭 `t1` 后剩 4 个 tab/pane，文件仍在）。**实现坑**：`nextNumber.current++` 被 React Compiler 编译成前置自增，第一个 tab 的编号从 3 开始，改成显式 `const n = ref.current; ref.current = n + 1` |
-| FR-10.3 断线重连（offset + 60s 不丢） | DONE | `pty_handlers.go` `from_offset` + `pumpPTYToWS`；`term/ring.go` 2MB ring；`manager_test.go` `TestReadOffsetsAreStable`、`ring_test.go` 5 例 |
+| FR-10.3 断线重连（offset + 60s 不丢） | DONE | `pty_handlers.go` `from_offset` + `pumpPTYToWS`；`term/ring.go` 2MB ring；`manager_test.go` `TestReadOffsetsAreStable`、`ring_test.go` 5 例。**输出**的重放本来就按 offset 续传；本批补上**输入**在重连期间不丢：`use-pty.ts` 在 socket 非 OPEN 时排队，下一次 `onopen` 按序 flush（见 FR-10.1 行），单测覆盖「退避 500ms 后新 socket 收到重连期间键入的 4 个字符」。 |
 | FR-10.4 addon-fit + resize 同步 TIOCSWINSZ | DONE | `terminal-surface.tsx`（`AddonFit`）+ `use-pty.ts` 发 `{type:"resize"}` + `pty_handlers.go` `Term.Resize`；`manager_test.go` `TestResize` |
 | FR-10.5 复制粘贴/搜索/清屏/字号 | PARTIAL | `terminal-pane.tsx` `Toolbar`：搜索（`addon-search`）、清屏、字号 ±；无复制/粘贴按钮（仅 xterm 选择） |
 | FR-10.6 布局（右侧/底部/全屏/拖拽分割） | PARTIAL | 只有右侧面板内的 tab；`ResizablePanelGroup` 分的是会话流/检查器，不是把终端放到下方或全屏 |
@@ -1180,3 +1182,61 @@ Node 24 直接执行测试文件（`node x.test.js`，没有 `--test`）时默�
 - **父会话删除被拒绝**（有 lineage 分叉时 409）是刻意选择：宁可让用户先删分叉，也不静默丢掉分叉的历史。项目级删除仍级联整棵树。
 - **Node <24 的 TAP 路径不变**；spec parser 只覆盖 `node:test` 的 spec 形状，自定义 reporter 仍按未知格式诚实显示原文。
 - **合并后的 `seq` 是转录级**，不是分支行自己的行号；`status.last_seq` 仍是该进程自己的序号（当前前端不使用它做游标）。
+
+## 本批：终端输入的三个缺陷（FR-10.1 / FR-10.3 / 分叉对话框）
+
+验收证据：`e2e/.artifacts/reverify4/34-real-test-run.txt`（`node calc.test.js; echo EXIT=$?` 以 `t.js` 到达 bash，`EXIT=127`）、`15-terminal-ls.png`（`git log` 停在 `(END)`）、`23-fork-name-dialog.png`（「创建分支」灰着、界面不说为什么）。部署 `http://127.0.0.1:7722`（`pf-local`）。本批修的是「声称支持、实际会吞用户输入」，不改变任何 FR 状态：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。
+
+### 1. 丢字的根因：客户端在 socket 未 OPEN 时丢掉按键，不是合并、不是服务端 PTY
+
+三个候选逐个量过：
+
+- **客户端有没有合并/节流**：在页面里包住 `WebSocket.send`，socket 打开后输入 26 个字符 + Enter，记到 **27 个二进制帧**（一字符一帧），xterm 的 `onData` 没有 coalescing；`send` 路径上也没有 debounce/throttle。
+- **服务端 relay 会不会丢**：绕过客户端，用登录态页面直接打开 `/pty`，按 25 ms/char 逐字节发 26 帧，再用 0 ms 发同长度的 burst。两次 bash 都执行了命令（`FAST-ISO-5678`、`BURST-ISO-1234`，`RC=0`），`e2e/.artifacts/fix-term/server-isolation.json`。所以 PTY 读循环、`Term.Write`、ring 都不是丢字点。
+- **真正的丢弃点**：`web/lib/terminal/use-pty.ts` 的 `send`：`if (ws?.readyState !== WebSocket.OPEN) return;`。浏览器在 CONNECTING 状态调用 `send()` 会抛 `InvalidStateError`，旧代码于是选择静默丢掉——这就是每条命令丢「前缀」而不是整条的原因：能丢的只有「输入开始 → socket open」这一段，窗口结束后 socket 打开，剩下的字符照常到达。证据里的三处前缀缺口分别约 5 / 13 / 19 个字符；在 25 ms/char 下就是 125–475 ms 的量级，与「连接窗口有多长就丢多少个」的形状一致。
+
+把窗口做成确定性的：CDP `Network.emulateNetworkConditions` 把延迟设成 500 ms 时，同一页面的 WebSocket handshake 从 **3.1 ms** 变成 **519.6 ms**（`server-isolation.json` 的 `handshakeNormalMs` / `handshakeLatencyMs`）；设成 1.5 s 时，旧客户端在窗口内发出 **0 个帧**，终端里只剩提示符（见下面的 e2e fail-first）。
+
+**这不是与其他功能共享的 WebSocket 层**：`use-pty.ts` 是终端面板自己的 hook；浏览器 screencast、SSE 事件流、gate 的 WebSocket 都走别的路径，本批没有改它们。即便如此，完整 e2e（181 条）仍作为「其他功能没被带坏」的证明。
+
+### 2. 修法
+
+- **输入队列**：每次 `send` 作为一个独立 chunk 入队，`onopen` 时按原顺序**逐帧** flush（不合并、不拼接）；socket 已 OPEN 时仍然同步直发，不增加一次 round-trip，也不加 tick。断线重连（500 ms 退避）期间继续入队，下一次 open flush；`terminate()`、干净的 `close(1000)`、协议 `error`、以及组件卸载都会清空队列，避免把输入打进一个用户已经关掉的 shell。flush 中途抛错时把未发送的尾部按顺序放回队首。连接期间请求的 `resize` 只记最新一次，open 后补发（否则 shell 会用服务端默认列宽，长提示符与回显会错位）。
+- **PTY 环境无分页器**：`term/process.go` 新增 `terminalEnv()`，为 PTY 会话设置 `PAGER=cat`、`GIT_PAGER=cat`、`GIT_TERMINAL_PROMPT=0`、`TERM=xterm-256color`。它是**替换**而不是追加：`execve` 会把重复项原样传下去，而 libc 的 `getenv` 取第一个匹配，追加的 `PAGER=cat` 盖不住继承来的 `PAGER=less`。unix PTY 与 Windows 管道共用这一份环境。
+- **分叉对话框**：`fork-dialog.tsx` 在名称输入框下加一行「分支名称必填：它同时用作新分支的标签和 worktree 名，填写后「创建分支」才可用。」（`data-testid="fork-label-hint"`，并接到 `aria-describedby` / `aria-required`），禁用按钮补 `title="请先填写分支名称"`。按钮行为不变，只是不再「看起来坏了」。
+
+### 3. fail-first（旧代码实测，不是推断）
+
+- **单测**：把 `use-pty.ts` 换回改动前（`8fa5000^`）跑新测试 → `2 failed | 2 passed`；失败的两条收到的帧是 `[]`（排队与重连都没有 flush）。日志 `e2e/.artifacts/fix-term/fix1-unit-failfirst.log`。
+- **e2e**：旧前端 + 1.5 s 延迟 handshake，`typing before the socket opens is buffered, not dropped` 失败在 `Expected substring: "PRECONNECT-…-42"`，`Received string` 只有 `PS C:\…\repo> `（一个字符都没到 shell）；同一 spec 里「socket 已打开时的 0 ms burst」通过，说明失败只发生在连接窗口。日志 `fix1-e2e-failfirst.log`。
+- **部署（旧镜像）**：`fix-term-verify.mjs` 的旧镜像运行（`pre-fix-deployed.log`）——连接窗口内输入的整条命令没到 shell；`git log --oneline` 进入 `less`（帮助屏 + `(END)`），随后 `waitPrompt` 超时，因为终端被分页器占着，下一条命令根本进不去。
+- **FIX 2 的环境部分**：旧 env（只有 `TERM`/`PIFORGE_TERM`）跑 `TestTerminalEnvReplacesInheritedPager` → `PAGER = "less", want "cat"`、`GIT_PAGER = "less"`、`GIT_TERMINAL_PROMPT = "1"` 三条失败（`fix2-failfirst.log`）。Windows 的终端是管道，git 不会在非 TTY 上起分页器，所以这条的「真实分页器」证据在部署的 Linux PTY 上。
+- **FIX 3**：旧对话框跑新 e2e → `getByTestId("fork-label-hint")` `element(s) not found`（`fix3-e2e-failfirst.log`）。
+
+### 4. 部署实测（新镜像，真实 Linux PTY）
+
+- 镜像只用 `pwsh scripts/build-app-image.ps1` 重建：`sha256:e22828270617b079c77dac0487043dc5eae8060ec4d4d402c92501e66f1add69`。`pf-local` 用**同一个数据卷** `9ce20975339ab49b4b933f5a4b77acbb406eb4b426ba7ab79c3977ab15111f36` 重建：旧容器 `98abb92021ac…` → 新容器 `0fe80fa91b45…`，端口 7722→7700；`PIFORGE_DEFAULT_PROVIDER=volc`、`CapDrop=["CAP_DAC_OVERRIDE"]`；启动日志 `sandbox disk quota limit="2.0 GiB"`；`/healthz` 200。
+- `e2e/scripts/fix-term-verify.mjs` 对新部署**全部通过**：
+  - 0 ms burst 的 `echo AAAA-BBBB; echo EXIT=$?` 完整、`EXIT=0`；
+  - 1.5 s 延迟 handshake 下、open 之前输入的 `PRECONNECT-…` 完整执行且 `EXIT=0`（截图 `verify-2-preconnect.png`）；
+  - `git log --oneline` 打印两个 commit 后**回到提示符**，`echo AFTER-GIT-LOG` 执行（`verify-3-git-log.png`、`verify-4-git-log-after.png`）；
+  - 300→420 行的 `git diff` 不分页，`AFTER-GIT-DIFF` 执行（`verify-5-git-diff.png`）；
+  - 分叉对话框的必填提示可见、「创建分支」禁用中、填名后可用（`verify-6-fork-hint.png`）。
+  - 终端原文：`verify-git-log-paged.txt`、`verify-git-log-after.txt`、`verify-git-diff.txt`；机器可读结果 `verify-log.json`。
+- 探针建的 9 个 `fixterm-*` 项目已全部删除（DELETE 200/200/…）；部署上没有运行中的会话（7 个会话全部是 active/idle，无 agent 进程；`ps` 只有 `piforged` 本身）。
+
+### 5. 门禁
+
+- `go build ./...` 退出 0（`e2e/.artifacts/fix-term/go-build.log`）；`go vet ./...` 退出 0（`go-vet.log`）；`go test ./... -count=1` **35 个包全 ok、0 FAIL**、退出 0（`go-test.log`，含 `internal/term` 的 4 条新测试）。
+- `pnpm --dir web test -- --run`：**34 个文件 / 272 例通过**（`web-test.log`）；`pnpm --dir web exec next build` 退出 0（`web-build.log`）。
+- 完整 e2e：`pnpm --dir e2e test:fresh` → **181 passed（8.8 分钟）**，fresh 数据，`prepare.mjs` 重新编译了后端二进制（所以跑的是本批的 Go 代码）。181 = 原 178 + `90-terminal-input.spec.ts` 2 条 + `18-branching.spec.ts` 的 fork-hint 1 条。日志 `full-e2e-fresh.log`。
+- `pwsh scripts/deliver-check.ps1`：`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入（只在该进程环境里，未打印、未落盘），run `20261031-203352`，**119 条检查全部 PASS / 0 FAIL，`failure` 为 null**；drill 断言的镜像 id 就是部署的 `sha256:e2282827…`；同一份镜像的 drill UI 检查在真实 PTY 里 `echo ui-live > ui-live.txt` 并确认文件树无刷新出现，终端的输入与环境在这条路径上一起被验证；一次性容器 `pf-drill` 与 volume `pf-drill-data` 已删除，`pf-local` 容器 id 前后都是 `0fe80fa9…`。日志 `deliver-check.log`，summary `e2e/.artifacts/delivery-drill/20261031-203352/summary.json`。
+- 提交：`8fa5000`（输入队列 + 单测 + e2e + 两个测量探针）、`19a8d5d`（PTY 环境 + Go 测试）、`d23c2d0`（对话框 + e2e + 部署验收探针），本文件单独一笔。每笔都只 `git add`/`git commit -- <自己的路径>`，`git show --name-only` 已核对。
+
+### 6. 边界（明确没做的）
+
+- **队列只覆盖「open 之前」**：它不保证「send 之后连接立刻断」的字节到达 PTY——WebSocket 没有应用层 ack。那需要输入序号/重传协议，本批没做；服务端的 ring 仍只保证**输出**侧回放（FR-10.3 的既有语义）。
+- **队列没有大小上限**：连接长时间不恢复而用户持续输入时内存随输入增长；`terminate`/干净关闭/协议错误/卸载会清空，但没设阈值。任何「满了丢最旧/拒绝输入」都会再次变成「用户输入消失」，所以本批没有引入一个会静默丢字的阈值。
+- **分页器只修 host PTY**：`internal/term/remote.go` 的 AIO 命令会话没有 TTY 语义，PAGER 由容器镜像决定，本批没碰。
+- **用户显式选择仍生效**：在会话里自己 `export PAGER=less`（或 `git -c core.pager=less log`）仍会进分页器——那是用户的显式选择，不是默认环境。
+- **单测覆盖的是 hook**；xterm 的按键路径、真实 PTY 的集成由 e2e 与部署探针覆盖。
