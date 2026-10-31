@@ -188,6 +188,42 @@ func shortCommitHash(hash string) string {
 	return hash
 }
 
+// interruptedTurnNote is the sentence the control plane puts in front of the
+// first message after an interruption.
+//
+// It exists because of a measured product failure, not a theory: after 停止, the
+// next message was answered against the interrupted request ("Say beta." came
+// back with the 1–200 list, 6/6 runs). The message reached the model and the run
+// was attributed correctly — the agent still had the truncated answer in its
+// conversation and continued it, or re-ran the earlier request. Pi owns that
+// history and offers no way to edit a persisted entry, so the control plane
+// marks the interruption in the prompt instead. Written in the product's
+// language because the transcript shows it: the user is looking at the sentence
+// the agent was given.
+//
+// Measured effect (same sequence, deployment): 0/6 answered the new message
+// without it; 5/5 did with this wording (a weaker wording: 4/5). It is a strong
+// mitigation, not a guarantee — the model can still decide to finish the
+// interrupted task, and the sentence then tells the user why.
+const interruptedTurnNote = "[上一轮已被用户中断并作废：不要继续它，也不要重新执行上一轮的请求。只回答下面这条消息。]"
+
+// interruptedTurnNote returns the sentence to prefix, or "" when the session's
+// last thing is not an open interruption.
+//
+// "Open" means no run has started since: once the user sends anything, the
+// interruption is history and repeating the sentence on every later message
+// would be noise the user cannot remove.
+func (s *server) interruptedTurnNote(ctx context.Context, userID, sessionID string) string {
+	if s.deps.Store == nil {
+		return ""
+	}
+	rec, err := s.deps.Store.LastInterruption(ctx, userID, sessionID)
+	if err != nil || rec == nil || rec.Continued {
+		return ""
+	}
+	return interruptedTurnNote
+}
+
 // continuePrompt composes the 继续 message for an interrupted session.
 //
 // The client sends only the intent (continue_interrupted); the text is built

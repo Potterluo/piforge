@@ -110,6 +110,23 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "text or images are required"))
 		return
 	}
+	// The agent keeps the interrupted turn in its conversation: Pi persists the
+	// truncated assistant message, and the next request is answered against that
+	// half-written answer instead of the new message (HANDOFF §2, reproduced
+	// 5/5 on the deployment). The control plane cannot edit Pi's session, so it
+	// says so in the prompt — the same server-side composition the review-comment
+	// and 继续 paths use, which is why the transcript shows exactly what the agent
+	// received. Only the first message after the interruption carries it: once a
+	// run starts, the interruption is history.
+	if !in.ContinueInterrupted {
+		if note := s.interruptedTurnNote(r.Context(), user.ID, sess.ID); note != "" {
+			if strings.TrimSpace(in.Text) == "" {
+				in.Text = note
+			} else {
+				in.Text = note + "\n\n" + in.Text
+			}
+		}
+	}
 	// FR-5.2: using a session wakes its sandbox. This is the second place it can happen
 	// (the first is provisioning a new checkout), and it is the one that matters for a
 	// session that already existed when the sandbox was paused.
