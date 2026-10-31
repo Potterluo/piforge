@@ -31,6 +31,7 @@
 本批（fork 转录的截断 + Node 24 spec reporter）之后，FR 状态不变：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**（按表格行重数）。fork 不再复制父会话的事件，而是记录 `sessions.forked_at_seq`，读取时把父日志（cut 之前）与分支自己的事件合并成一条单调转录；那条把长会话截断在 1000 条的 `ListEvents` 复制路径已经删除。测试面板补上 Node 24 默认的 spec reporter（`ℹ pass N`），直接 `node x.test.js` 的输出不再记为未识别格式。证据见文末「本批：fork 转录的截断（lineage）+ Node 24 spec reporter」。
 
 本批（终端输入的三个缺陷）同样不改变任何 FR 状态：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。三处都是「实现声称支持、实际会丢用户输入」，不是缺功能：①**快速输入丢字**——`use-pty.ts` 在 socket 未 OPEN 时直接把按键丢掉（不是客户端合并、不是 PTY 读循环、也没有 debounce），量到「输入开始 → socket open」的窗口后按 `send` 逐条排队并在 open 时按序逐帧 flush；②**`git log` 进分页器**——PTY 环境没有 `GIT_PAGER`/`PAGER`，`less` 吃掉后续按键，现在 PTY 环境固定 `PAGER=cat`/`GIT_PAGER=cat`/`GIT_TERMINAL_PROMPT=0`；③**分叉对话框的「创建分支」无故禁用**——补上「分支名称必填」说明与按钮 `title`。根因测量、fail-first 与门禁见文末「本批：终端输入的三个缺陷」。
+本批（中断后下一条消息）不改变任何 FR 状态：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。它修的是 HANDOFF §2 那条「未核实」的报告，而且**不是**我们这一侧的交付/归属缺陷：探针证明 follow-up 以自己的 run 送达了模型、run id 是新的、transcript 归属正确；Pi 把被中断的半截回答留在会话里，模型于是继续/重做上一条请求。修法是在「中断后的第一条消息」前由服务端拼一句「上一轮已作废，只回答这条」——与行内评论、继续同一条 compose 原则，transcript 显示的就是 agent 收到的。实测 0/6 → 5/5（最终措辞两批共 10/10；旧措辞 4/5），是强缓解而非保证。报告里的 29 ms 没有复现（13 次中断里新 run 最短 1.4 s），证据与边界见文末「本批：中断后下一条消息被拿去回答上一条请求」。
 
 ---
 # PiForge 对照 PRD 的实现审计
@@ -1240,3 +1241,56 @@ Node 24 直接执行测试文件（`node x.test.js`，没有 `--test`）时默�
 - **分页器只修 host PTY**：`internal/term/remote.go` 的 AIO 命令会话没有 TTY 语义，PAGER 由容器镜像决定，本批没碰。
 - **用户显式选择仍生效**：在会话里自己 `export PAGER=less`（或 `git -c core.pager=less log`）仍会进分页器——那是用户的显式选择，不是默认环境。
 - **单测覆盖的是 hook**；xterm 的按键路径、真实 PTY 的集成由 e2e 与部署探针覆盖。
+
+## 本批：中断后下一条消息被拿去回答上一条请求（复现、定层、修法与边界）
+
+部署 `http://127.0.0.1:7722`（`pf-local`），账号 `dev@piforge.local`。本批不改变任何 FR 状态：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。它不是新功能，而是 HANDOFF §2 那条「未核实」的报告：停止后紧接着发的下一条消息，回答却关于上一条请求。
+
+### 1. 先复现：确定性，不是偶发
+
+探针 `e2e/scripts/fix-interrupt-context-probe.mjs`（原始数据 `e2e/.artifacts/fix-interrupt-context/`，每次运行一个 `run-N.json`）：建独立项目/会话 → 发「Count from 1 to 200…」→ 等到**正文在流式输出** → `POST /interrupt` → 立刻发「Say beta.」→ 记录 POST 回应、SSE 全量事件、`GET /entries` 与 agent 自己的 `/tmp/.piforge/sessions/<id>.jsonl`。
+
+- **修复前 6/6 复现**：`Say beta.` 的回答是 1–200 的列表，或「The user wants me to count…」这类续写。只有一次（中断落在 **工具调用** 阶段、被中断的 assistant 消息里没有正文）回答是 `beta`，机制相同：没有可续写的正文。
+- **UI 路径同样复现**：`fix-interrupt-context-ui.mjs` 用真 Chrome 点「停止」后立刻输入并回车，transcript 的最后一条 assistant 就是 1–200，最后还缀了一句 `beta`。
+
+### 2. 逐层排除：交付、归属、reducer 都不是原因
+
+同一次运行里三份证据互相独立：
+
+- **消息到达了模型**：agent 的 session 文件里 `user: "Say beta."` 就在那条被截断的 assistant 之后，且它后面那条 assistant 是该 run 自己生成的（流式 delta 完整）。
+- **没有旧 run 的影子**：`run.settled{aborted}` 之后是**新的** `run.started`（新 run id），POST 回 `disposition: "started"`；没有复用旧 run id，也没有「已加入队列」。
+- **不是 reducer 张冠李戴**：事件顺序（seq）与新 run id 一致，前端把回答画在新 turn 下；不是把上一轮的文本挂到了新 turn。
+
+也就是说：Pi 把被中断的 assistant 消息留在会话里，模型看到「计数请求 + 半截回答 + Say beta.」后选择继续/重做上一件事。**这一层不在我们这边**：Pi 的 session 是它自己的持久化历史，RPC 没有删除/改写 entry 的接口（`fork` 会新建分支，不能就地改）。
+
+### 3. 修法：服务端在「中断后的第一条消息」里说明中断
+
+`handlePostMessage` 在两种 compose 路径（行内评论、继续）之后，检查 `store.LastInterruption`：如果最近一次结局是中断、且之后没有 run 开始（`Continued=false`），就在消息前加一句
+`[上一轮已被用户中断并作废：不要继续它，也不要重新执行上一轮的请求。只回答下面这条消息。]`。
+它是**服务端拼装**，所以 transcript 显示的就是 agent 收到的字符串（与行内评论/继续同一条原则）；只加在中断后的**第一条**消息上，之后 `Continued=true`，不再重复。
+
+**效果（同一序列，部署实测）**：修复前 0/6；加这句后 **5/5**（旧措辞 4/5，两句叠加的一次 3/4——它是强缓解，不是数学保证；模型仍可能执意做完上一件事）。这才是诚实的边界：产品能保证的是「消息一定以自己的 run 送达、归属正确，并把中断告诉模型」，不能保证任意模型一定听从。
+
+### 4. 没复现的那一半：29 ms
+
+报告里「interrupt→continue 只用了 29 ms」没有复现：13 次中断里，中断后的新 run 最短 1.4 s（多数 2–5 s），被中断的 run 在**发下一条消息之前**就已经 settle（`run.settled` 的 seq 在前）。库里唯一一次 <1 s 的 run（7 ms）是 provider 不可用，它渲染成可见错误，不是静默。UI 里「settled 很快」的观感有个更简单的解释：SSE 200 ms 轮询下，上一轮 `run.settled` 可能在用户发消息之后才到达页面，看起来像新 run 立刻结束——事件日志里它是旧 run 的 settle。
+
+### 5. fail-first
+
+- **单测**：`httpapi/interrupt_note_test.go` 三条（拼接后的 prompt、存库消息与 prompt 一致、run 开始后不再重复、继续路径不重复加）。
+- **e2e**：`e2e/tests/91-interrupt-then-message.spec.ts`。去掉本批的 `handlePostMessage` 改动重编译后端后跑它 → 失败在 `Expected substring: "上一轮被用户中断"`（旧代码的 follow-up 是裸文本）；加回改动 → 通过。
+- **部署**：上面 6/6（旧镜像）与 5/5 + 5/5（两个修复后镜像）。
+
+### 6. 镜像与门禁
+
+- 镜像只用 `pwsh scripts/build-app-image.ps1`：`piforge:local` = `sha256:15eb2f9c14ad9fb62ba9051e6a7c958de3c4683ef265e4a296f80d830d74a6f4`。`pf-local` 用**同一个数据卷** `9ce20975339ab49b4b933f5a4b77acbb406eb4b426ba7ab79c3977ab15111f36` 重建，容器 `7dc14e4a7525…`，端口 7722→7700，`PIFORGE_DEFAULT_PROVIDER=volc`、`CapDrop=["CAP_DAC_OVERRIDE"]`、`RestartPolicy: "no"`、启动日志 `sandbox disk quota limit="2.0 GiB"`、`/healthz` 200。
+- 门禁：`go build ./...` / `go vet ./...` / `go test ./... -count=1` 全绿；`pnpm --dir web test -- --run` 34 文件 / 272 例；`pnpm --dir web exec next build` 退出 0；完整 e2e **182 passed**（含 preflight 守卫；chrome 项目 181 条）；`pwsh scripts/deliver-check.ps1`（`PIFORGE_DRILL_KEY` 取自 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY`，未打印、未落盘）run `20261031-215046`：**119 PASS / 0 FAIL，exit 0**，drill 断言的镜像就是部署的 `sha256:15eb2f9c14ad…`，演练前后 `pf-local` 容器 id 都是 `7dc14e4a7525…`，源 checkout 干净。
+- 探针建的项目/会话已全部 `DELETE`，部署上没有运行中的 agent（`pgrep -x pi` 为空）。
+
+### 7. 边界（明确没做的）
+
+- **模型可能不听话**：句子是提示，不是硬约束；实测 10/10（最终措辞）但一次旧措辞/叠加测试里仍有 1 次跑偏。要 100% 只能把上一轮请求从上下文里抹掉，那等于篡改用户自己的历史，没做。
+- **只覆盖第一条消息**：同一 run 里第二条消息仍可能接着上一条回答，那是正常对话，不是丢消息或错归属。
+- **不改 Pi 的 session**：曾试过删掉被截断的 assistant entry（`context_edit`/截断文件 + 重启进程），实测模型改为去补做那条没人回答的旧请求，更糟；所以最终没有做文件手术。
+
+

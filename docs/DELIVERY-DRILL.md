@@ -527,14 +527,22 @@ pwsh -NoProfile -File .\scripts\deliver-check.ps1
 
 ## 5. 新操作员仍需自己做的事（脚本不覆盖）
 
-1. **准备镜像。** `piforge:local` 必须已经存在。若自己构建，浏览器面板依赖
-   Chromium，而 Dockerfile 的 `INSTALL_CHROMIUM` 默认是 `false`：
+1. **准备镜像。** `piforge:local` 必须已经存在。**规范命令是脚本**（默认 `-Tag piforge:local`，
+   约 90 s，把控制面 + web 叠到已发布的基础镜像上，Chromium 在基础镜像里）：
+
+   ```powershell
+   pwsh scripts/build-app-image.ps1
+   ```
+
+   底层才是仓库根目录的完整构建（从源码装 node/pi/chromium，约 20 分钟；只有在基础镜像
+   不可用时才需要它，且必须显式开 Chromium）：
 
    ```powershell
    docker build --build-arg INSTALL_CHROMIUM=true -t piforge:local .
    ```
 
    没有 Chromium 时，服务本身可用，但浏览器面板会报 “unavailable”，本演练的截图断言会失败。
+   `docs/SANDBOX-DEPLOY.md` §1.4.1 与 `deploy/README.md` 指的是同一个脚本，只是 `-Tag` 不同。
 
 2. **选择服务商和模型。** 脚本把 `volc`、base URL、`deepseek-v4-flash` 作为参数默认值；
    换部署时要确认该 endpoint 真的提供这个 model id，并确认容器能直连（需要代理时设置
@@ -598,11 +606,15 @@ jest / vitest 等会建 run。演练因此在 prompt 里要求 agent 用 `npm te
 如果真实用户只让 agent 跑 `node --test`，测试面板会是空的——这是产品能力缺口，
 但不在本次“从零交付”阻塞范围内。
 
-### 6.4 种子密码会打印在容器日志里
+### 6.4 种子账号只写邮箱，不打印密码（首轮观察已修，见 §6.10）
 
-首次启动的日志会打印 admin/dev 的初始密码（只打印一次，这是产品设计）。
-`container.log` 里这些值已被脚本替换为 `<redacted>`；但操作员如果直接把
-`docker logs` 贴到工单/CI，会泄露初始密码。生产应在首次登录后立即改密。
+首轮（2026-10-30）的日志里出现过 admin/dev 的初始密码。**这一条已经修掉**：现在
+`logSeededAccounts` 只写 `created the first admin account email=…` /
+`created the demo account email=…`，密码来自 `PIFORGE_SEED_PASSWORD` /
+`PIFORGE_SEED_USER_PASSWORD`（留空则生成随机密码，同样不写日志）。断言在
+`cmd/piforged/seed_log_test.go`：日志含邮箱、不含两个密码值。
+所以 `docker logs` 可以直接贴进工单，不会泄露密码；生产仍应在首次登录后立即改密，
+因为默认值写在 compose/`docker run` 的环境里（`docker inspect` 可见）。
 
 ### 6.5 截图会弄脏 checkout
 

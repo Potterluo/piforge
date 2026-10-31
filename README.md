@@ -250,9 +250,17 @@ scoping, SSE replay, git status/diff/DAG/worktrees, the file tree and previews, 
 PTYs over a WebSocket relay, the model gateway with sealed keys, skills/MCP
 materialisation, and the sandbox browser.
 
-Test counts at the time of writing: 256 backend tests (including a real-Chrome
-integration test and a real-git repository), 108 frontend unit tests, and 81
-end-to-end tests against the real control plane in a real browser.
+Test counts, measured on 2026-10-31 against this tree: **734 Go test functions**
+(`cd backend && go test ./... -count=1`, every package ok, including a real-Chrome
+integration test and a real-git repository), **272 frontend unit tests in 34 files**
+(`pnpm --dir web test -- --run`), and **182 end-to-end tests in 93 files** against the real
+control plane in a real browser (`pnpm --dir e2e test --list`; one of the 182 is the
+pre-flight guard, and a full run passes 182/182 on one worker).
+
+Earlier revisions of this paragraph claimed 256 / 108 / 81, and `docs/DELIVERY-DRILL.md`
+§7 records 223 web and 164 e2e tests. Those are the counts of the runs they describe
+(2026-10-30), not of this tree; the numbers above are the ones to trust. The e2e total was
+181 until this tree added `e2e/tests/91-interrupt-then-message.spec.ts`.
 
 What is deliberately not here yet, and why:
 
@@ -273,3 +281,4 @@ What is deliberately not here yet, and why:
   `PUT /v1/skills/{id}/bundle`. A bundle that needs a compiled binary or nested
   directories can be uploaded through that endpoint directly, but the browser picker
   only sends flat text files.
+

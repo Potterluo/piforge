@@ -293,10 +293,16 @@ Engine 29.9.2，Linux 容器），包括第一次跑时坏掉的三处。
 
 ```powershell
 docker build -f deploy/Dockerfile.runner -t piforge/sandbox-runner:dev .
-pwsh scripts/build-app-image.ps1 -Tag piforge:verify      # 控制面镜像（约 90s，比完整 Dockerfile 快）
+pwsh scripts/build-app-image.ps1 -Tag piforge:verify      # 控制面镜像：规范命令就是脚本（约 90s，比完整 Dockerfile 快）
 docker compose -f docker-compose.yml -f docker-compose.runner.yml up -d
 docker compose -f docker-compose.yml -f docker-compose.runner.yml ps
 ```
+
+控制面镜像只有一个规范构建方式：`scripts/build-app-image.ps1`（`-Tag` 决定 tag）。
+底层的完整 `docker build --build-arg INSTALL_CHROMIUM=true -t <tag> .` 只在基础镜像
+不可用时才用；`DELIVERY-DRILL.md` §5.1 与 `deploy/README.md` 指向的是同一个脚本。
+注意 `-Tag` 会决定 compose 里的 `PIFORGE_IMAGE`：上面这次是 `piforge:verify`，
+而 `pf-local` 用的是 `piforge:local`，两者是同一脚本的不同 tag，不是两套构建。
 
 `.env`（compose 自动读取，已在 `.gitignore` 里；两个 `:?` 变量必须有值）：
 
@@ -954,10 +960,12 @@ Pod 没有"暂停"。三种候选，逐个排除：
 - 具体 CSI 的 detach/attach 与 VolumeSnapshot 耗时；
 - 每节点可挂载 PVC 数的上限（取决于实例类型与 CSI 驱动）；
 - 我们的 sandbox provider 在 K8s 下的真实冷启动时间（没有实测，只有上游的 42–50s）；
-- `docker-compose.runner.yml` 只做了 `docker compose config` 的合并校验：本轮端到端是在
-  Windows 上用两个本机进程跑的（runner 8111 + piforged 8112，见
-  `scripts/verify-runner-sandbox.ps1`），没有在 Linux 上真的 `compose up` 过；镜像构建
-  （`deploy/Dockerfile.runner`）也没有实际构建过。
+- `docker-compose.runner.yml` 的**Linux 宿主**部署：runner 镜像（`deploy/Dockerfile.runner`）
+  已经实际构建过，compose 也在 Docker Desktop 上跑起来过（§1.4.1 记录了那次的命令、`ps`
+  输出和修掉的五处故障）；没有一手证据的是 Linux 服务器上的同一套 compose（卷映射、
+  `volume-subpath` 与 Engine 版本），以及 runner 的端到端验证——那一轮是在 Windows 上
+  用两个本机进程跑的（runner 8111 + piforged 8112，见
+  `scripts/verify-runner-sandbox.ps1`）。
 
 ## 9. 来源
 

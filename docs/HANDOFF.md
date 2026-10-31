@@ -38,7 +38,16 @@ Shape of the system:
 ## Run it
 
 Build (the image is all-in-one: `piforged` plus the built Next app on 127.0.0.1:3100,
-proxied by the control plane — you do not run `pnpm dev` in this shape):
+proxied by the control plane — you do not run `pnpm dev` in this shape). The canonical
+command is the script; it cross-compiles the control plane, builds the web app and layers
+both on the published base image (~90 s, Chromium included):
+
+```powershell
+pwsh scripts/build-app-image.ps1            # -Tag defaults to piforge:local
+```
+
+The underlying from-scratch build (installs node/pi/Chromium, ~20 minutes; only needed
+when the base image is unavailable) is:
 
 ```powershell
 docker build --build-arg INSTALL_CHROMIUM=true -t piforge:local .
@@ -182,6 +191,19 @@ workspaces survive, but every agent process, PTY and Chromium is gone. Terminals
 to a *new* shell (scrollback replayed from the PTY ring buffer, not restored); sessions
 show the interrupted-run marker; `healthz` answers in 20 ms.
 
+To make it come back, change the policy on the running container (the container keeps its
+name, port mapping and the `piforge-data` volume):
+
+```powershell
+docker update --restart unless-stopped pf-local
+docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' pf-local   # -> unless-stopped
+```
+
+`docker update` rewrites the container's HostConfig; it does not need a restart, and
+`RestartPolicy: "no"` is what `docker run` defaults to, so nothing else sets it. The same
+value has to be passed as `--restart` on the `docker run` that recreates the container
+(see "Run it" above), or `docker update` after it.
+
 ## Use it
 
 Measured on this deployment, warm, single user, one browser tab:
@@ -274,17 +296,36 @@ Ordered roughly by how much they will hurt. Nothing here is softened.
    a tenant boundary, it protects against typos only. If a customer is told "code runs in
    an isolated sandbox", this deployment is not what that sentence describes; you need
    `-sandbox runner` (same host, real container boundary) or K8s + gVisor.
-2. **Interrupt, then continue immediately: the answer came back about the wrong
-   prompt.** Reproduced once, on purpose: send "Say alpha" (settles), send "Count from 1
-   to 200" and interrupt after 2 s, then immediately send "Say beta." The message is
-   accepted (200), the run settles in 3.9 s — and the assistant turn that follows
-   "Say beta." reads *"The user wants me to count from 1 to 200… Let me just output the
-   numbers"*. The next message after a pause ("Say gamma") answered correctly. In an
-   earlier run the same sequence settled in **29 ms**, far too fast for a model round. I
-   did not isolate whether the reply is the interrupted turn's tail being finalised or a
-   new turn fed the stale context, and I deleted the probe project before capturing the
-   raw entries for the 29 ms case. **Treat "interrupt then immediately send" as
-   unverified and reproduce it before trusting it in a demo.**
+2. **Interrupt, then send another message: the agent resumes the interrupted request.**
+   Verified on 2026-10-31, deterministically (6/6 runs; `e2e/scripts/fix-interrupt-context-probe.mjs`,
+   raw runs in `e2e/.artifacts/fix-interrupt-context/`). Send "Count from 1 to 200" and stop it
+   while prose is streaming, then send "Say beta.": the message is accepted (200), a *new*
+   run starts, and its answer is the 1–200 list (or prose about counting) because Pi keeps
+   the truncated assistant message in the conversation and the model continues it.
+   What the probe proved, layer by layer:
+   - the follow-up reached the model — the agent's own session file
+     (`/tmp/.piforge/sessions/<id>.jsonl`) contains it, followed by the answer that run
+     generated;
+   - the control plane injected no stale context and stamped no stale run id: `run.started`
+     is a fresh id after `run.settled{aborted}`, and the POST answered `disposition:
+     "started"`;
+   - the transcript attributed the answer to the new turn (event order, not UI confusion).
+   So the stale answer was a *conversation* failure, not a delivery or reducer one: the agent
+   was told "Say beta." with a half-written answer right above it and answered the old task.
+   The 29 ms settle did **not** reproduce: the shortest post-interrupt run in 13 runs was
+   2.5 s (new run) with the interrupted run settling before the follow-up was even sent; the
+   only sub-second run in the log is a provider failure that renders a visible error.
+   **Fixed in the control plane:** the first message after an interruption is composed with
+   `[上一轮已被用户中断并作废：不要继续它，也不要重新执行上一轮的请求。只回答下面这条消息。]` in
+   front, the same server-side composition the review-comment and 继续 paths use (the
+   transcript shows the composed text because that is what the agent got). With that
+   sentence the same sequence answers "beta" **5/5** on the rebuilt deployment; a weaker
+   wording scored 4/5. It is a prompt-level mitigation, not a guarantee — the model can
+   still choose to finish the interrupted task, and the sentence then makes that visible
+   instead of mysterious. The sentence is only on the first message after the stop; tests:
+   `httpapi/interrupt_note_test.go`, `e2e/tests/91-interrupt-then-message.spec.ts`.
+   Residual limit: a *second* message in the same run can still be answered against the
+   first one's context — that is ordinary conversation, not a lost or misattributed turn.
 3. **No microVM / no Kubernetes.** Firecracker, gVisor, Kata, E2B: design only. The K8s
    section of `SANDBOX-DEPLOY.md` has never been applied to a cluster (its own §8 says
    so), and the cold-start numbers there (42–50 s) are the upstream project's, not ours.
@@ -338,22 +379,32 @@ Ordered roughly by how much they will hurt. Nothing here is softened.
     no compaction/vacuum policy in the docs, and the WAL was 80 % of the database after a
     few hours of probe traffic. Expect growth with event volume (9604 events already) and
     back up the WAL too.
-17. **Documentation drift you will trip over** (not fixed, per instructions):
-    - `README.md` "Status" claims 256 backend / 108 web / 81 e2e tests; `DELIVERY-DRILL.md`
-      §7 reports 223 web tests and 164 e2e passes. One of them is stale.
-    - `DELIVERY-DRILL.md` §6.4 says first-boot logs print the seed passwords; §6.10 says
-      that was fixed and they no longer do. §6.4 is stale, and it is the paragraph an
-      operator reads first.
-    - `SANDBOX-DEPLOY.md` §8 says `deploy/Dockerfile.runner` "was never actually built"
-      and the runner compose was only config-validated, while §1.4.1 records building and
-      running it on Docker Desktop. Contradiction in the same file.
-    - `SANDBOX-DEPLOY.md` §1.4.1 builds the control plane with
-      `scripts/build-app-image.ps1 -Tag piforge:verify`; `DELIVERY-DRILL.md` §5.1 builds
-      it with `docker build --build-arg INSTALL_CHROMIUM=true -t piforge:local .`. Both
-      work, neither says which is canonical, and they produce differently-tagged images.
-    - The image running here (`sha256:e22828…`, built 2026-10-31T12:31:10Z) is **not**
-      the image the delivery drill documents (`sha256:2cdba2cd…`, 2026-10-30 16:58), so
-      the drill's 119 green assertions were not re-proven on this build.
-    - `README.md`'s local-run section (8080 + `pnpm dev` on 3000) never mentions that the
-      image serves everything on one port; someone following only the README will not
-      reproduce this deployment.
+17. **Documentation drift** — the four contradictions below were corrected on 2026-10-31;
+    what remains is listed after them:
+    - ~~`README.md` "Status" claims 256 backend / 108 web / 81 e2e tests; `DELIVERY-DRILL.md`
+      §7 reports 223 web tests and 164 e2e passes.~~ Fixed: README now records the counts
+      measured on 2026-10-31 (734 Go test functions, 272 web tests in 34 files, 181 e2e
+      tests) and says that §7's 223/164 belong to the 2026-10-30 run it describes.
+    - ~~`DELIVERY-DRILL.md` §6.4 says first-boot logs print the seed passwords; §6.10 says
+      that was fixed.~~ Fixed: §6.4 now says the log names the accounts and never the
+      passwords, names `PIFORGE_SEED_PASSWORD`/`PIFORGE_SEED_USER_PASSWORD`, and points at
+      `cmd/piforged/seed_log_test.go`.
+    - ~~`SANDBOX-DEPLOY.md` §8 says `deploy/Dockerfile.runner` "was never actually built",
+      while §1.4.1 records building and running it on Docker Desktop.~~ Fixed: §8 now says
+      the runner image *was* built and the compose *did* run on Docker Desktop, and that
+      what is unverified is the Linux host (volume mapping, `volume-subpath`, Engine) and
+      the runner's end-to-end path.
+    - ~~Two control-plane build commands, neither canonical.~~ Fixed: the canonical command
+      is `pwsh scripts/build-app-image.ps1` (`-Tag` decides the tag) in `DELIVERY-DRILL.md`
+      §5.1, `SANDBOX-DEPLOY.md` §1.4.1, `HANDOFF.md` "Run it" and `deploy/README.md`; the
+      full `docker build --build-arg INSTALL_CHROMIUM=true -t <tag> .` is named only as the
+      underlying from-scratch build.
+    - Still true: the image running here (`sha256:15eb2f9c14ad…`, tag `piforge:local`,
+      rebuilt 2026-10-31 after the interrupt fix) is **not** the image the delivery drill
+      documents (`sha256:2cdba2cd…`, 2026-10-30 16:58); the drill's 119 assertions *were*
+      re-run on the current build (`pwsh scripts/deliver-check.ps1`, run `20261031-215046`: 119 PASS / 0 FAIL, exit 0, on image `sha256:15eb2f9c14ad…`) but the drill
+      document itself still describes the older one.
+    - Still true: `README.md`'s local-run section (8080 + `pnpm dev` on 3000) never mentions
+      that the image serves everything on one port; someone following only the README will
+      not reproduce this deployment.
+
