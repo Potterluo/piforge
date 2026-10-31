@@ -196,29 +196,21 @@ func scanEvent(sc interface{ Scan(dest ...any) error }) (*contracts.Event, error
 // its context_tokens/context_window pair. It reports ok=false when the session
 // has no such event yet, which is the normal state before the first turn
 // settles.
+//
+// It reads the whole transcript, not the session's own log: a fresh fork has
+// inherited every event of its parent but written none, and a meter that drops
+// to zero the moment a branch is created is a number the agent does not agree
+// with (its Pi session was forked with the same context).
 func (s *Store) LastContextUsage(ctx context.Context, userID, sessionID string) (tokens, window int64, ok bool, err error) {
-	if _, err := s.Session(ctx, userID, sessionID); err != nil {
+	payload, found, err := s.lastMergedPayload(ctx, userID, sessionID, contracts.EvContextUsage)
+	if err != nil || !found {
 		return 0, 0, false, err
-	}
-	var payload sql.NullString
-	err = s.r.QueryRowContext(ctx,
-		`SELECT e.payload
-		   FROM events e
-		   JOIN sessions s ON s.id = e.session_id
-		  WHERE e.session_id = ? AND e.type = ? AND e.payload IS NOT NULL AND s.user_id = ?
-		  ORDER BY e.seq DESC LIMIT 1`,
-		sessionID, contracts.EvContextUsage, userID).Scan(&payload)
-	if errors.Is(err, sql.ErrNoRows) || !payload.Valid {
-		return 0, 0, false, nil
-	}
-	if err != nil {
-		return 0, 0, false, fmt.Errorf("store: last context usage for %q: %w", sessionID, err)
 	}
 	var body struct {
 		ContextTokens int64 `json:"context_tokens"`
 		ContextWindow int64 `json:"context_window"`
 	}
-	if err := json.Unmarshal([]byte(payload.String), &body); err != nil {
+	if err := json.Unmarshal([]byte(payload), &body); err != nil {
 		return 0, 0, false, nil
 	}
 	if body.ContextTokens == 0 && body.ContextWindow == 0 {

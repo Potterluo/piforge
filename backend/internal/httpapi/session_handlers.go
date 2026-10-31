@@ -134,6 +134,20 @@ func (s *server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	// Forks do not copy the transcript; they inherit this session's log up to
+	// their cut. Deleting it would silently empty every branch's history, which
+	// is the one thing the fork promise cannot do. Refuse and say why instead of
+	// leaving branches that look like they were never used.
+	forks, err := s.deps.Store.CountForkChildren(r.Context(), user.ID, sessionID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if forks > 0 {
+		s.fail(w, r, apiErr(contracts.ErrConflict,
+			"这个会话有 %d 个分叉，它们的历史直接继承自这里；先删除分叉，再删除它", forks))
+		return
+	}
 	if rt, err := s.requireRuntime(); err == nil {
 		stopCtx, cancel := detach(r.Context(), 10*time.Second)
 		_, _ = rt.Interrupt(stopCtx, sessionID)
@@ -455,6 +469,12 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Measure the parent's transcript before forking it. Pi forks the agent's
+	// session file and stops the parent's process, so this is the last moment the
+	// log is exactly what the user saw when they pressed 分叉. The branch will
+	// inherit everything up to this seq and nothing the parent writes later.
+	inheritedSeq := s.forkInheritedSeq(r.Context(), user.ID, parent.ID)
+
 	child, err := s.deps.Store.CreateSession(r.Context(), user.ID, store.NewSession{
 		ProjectID:   parent.ProjectID,
 		Kind:        contracts.KindBranch,
@@ -506,16 +526,21 @@ func (s *server) handleFork(w http.ResponseWriter, r *http.Request) {
 		startCancel()
 	}
 
-	// Copy the transcript only if the branch really has history in the agent. The
-	// check needs the branch process to exist, so it runs after the start.
-	// Forking at the *first* user message makes Pi create an empty session (its
-	// parent is null, so there is nothing to truncate to), and seeding the
-	// transcript for that case is exactly the fiction a user test caught: a branch
-	// that displayed the conversation while the model denied ever seeing it.
+	// The branch inherits the parent's transcript by reference, not by copy, so
+	// there is no page size to truncate it. The cut is recorded only if the
+	// branch really has history in the agent: forking at the *first* user message
+	// makes Pi create an empty session (its parent is null, so there is nothing
+	// to truncate to), and showing the parent's conversation to a model that
+	// never saw it is the fiction a user test caught.
 	if s.branchHasHistory(r, child.ID) {
-		if err := s.seedForkedHistory(context.WithoutCancel(r.Context()), user.ID, parent.ID, child.ID, in.EntryID); err != nil {
-			s.log.WarnContext(r.Context(), "could not copy history into the branch",
+		if err := s.recordForkLineage(context.WithoutCancel(r.Context()), user.ID, child.ID, inheritedSeq); err != nil {
+			s.log.WarnContext(r.Context(), "could not record the fork lineage",
 				"session", child.ID, "error", err.Error())
+		}
+		// The response must carry the cut the row now has, or a client cannot tell
+		// a lineage fork from a main session until it re-reads the row.
+		if updated, uerr := s.deps.Store.Session(context.WithoutCancel(r.Context()), user.ID, child.ID); uerr == nil {
+			child = updated
 		}
 	}
 
@@ -794,7 +819,9 @@ func deepestLeaf(tree []*contracts.TreeEntry) string {
 // forkPointsFromEvents reconstructs the forkable user messages from the persisted
 // log, for sessions whose agent is not running.
 func (s *server) forkPointsFromEvents(ctx context.Context, userID, sessionID string) ([]contracts.ForkPoint, error) {
-	events, err := s.deps.Store.ListEvents(ctx, userID, sessionID, 0, 500)
+	// The merged transcript: a branch's fork points include the messages it
+	// inherited, which is what the agent's forked session file contains too.
+	events, err := s.deps.Store.ListMergedEvents(ctx, userID, sessionID, 0, 500)
 	if err != nil {
 		return nil, err
 	}
@@ -839,7 +866,7 @@ func previewText(text string, limit int) string {
 // entryTimestamps maps entry ids to when they were recorded.
 func (s *server) entryTimestamps(ctx context.Context, userID, sessionID string) map[string]time.Time {
 	out := make(map[string]time.Time, 64)
-	events, err := s.deps.Store.ListEvents(ctx, userID, sessionID, 0, 500)
+	events, err := s.deps.Store.ListMergedEvents(ctx, userID, sessionID, 0, 500)
 	if err != nil {
 		return out
 	}

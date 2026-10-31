@@ -218,6 +218,13 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if err := addColumn(ctx, db, "sessions", "ephemeral", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
+	// The fork transcript cut (contracts.Session.ForkedAtSeq). A database created
+	// before this column has no lineage; its forks keep their copied events, and
+	// the transcript of a branch created from now on is merged from the parent's
+	// log instead of truncated at the copy's page size.
+	if err := addColumn(ctx, db, "sessions", "forked_at_seq", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("store: migrate: %w", err)
+	}
 	// Per-sandbox API keys (docs/SANDBOX.md). A row created before this column
 	// existed reads back empty, which the control plane treats as "recreate it or
 	// use the fixed override" rather than "call the sandbox unauthenticated".

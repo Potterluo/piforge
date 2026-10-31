@@ -37,17 +37,26 @@ func Parse(runner string, output string) Result {
 	case RunnerNPM, RunnerJest, RunnerVitest:
 		res = parseJS(out)
 		// `npm test` is usually a script, and a Node project's script is often
-		// `node --test`. The JS summary parser knows jest/vitest but not TAP, so
-		// the drill's exact case — an npm wrapper around Node's runner — stayed
-		// "unrecognized" even though the raw output said `# pass 2`. Fall back
-		// to the TAP parser only when the JS summary was not found.
+		// `node --test`. The JS summary parser knows jest/vitest but not TAP or
+		// the spec reporter, so the drill's exact case — an npm wrapper around
+		// Node's runner — stayed "unrecognized" even though the raw output said
+		// `# pass 2` (node 22, piped) or `ℹ pass 2` (node 24, spec).
 		if !res.Recognized {
 			if tap := parseTAP(out); tap.Recognized {
 				res = tap
+			} else if spec := parseSpec(out); spec.Recognized {
+				res = spec
 			}
 		}
 	case RunnerNode, RunnerTSX:
 		res = parseTAP(out)
+		if !res.Recognized {
+			// Node 24's default reporter is spec even when stdout is a pipe, so
+			// a direct `node x.test.js` prints `ℹ pass N`, not `# pass N`.
+			if spec := parseSpec(out); spec.Recognized {
+				res = spec
+			}
+		}
 	case RunnerCargo:
 		res = parseCargo(out)
 	case RunnerMaven:
@@ -84,8 +93,9 @@ func Parse(runner string, output string) Result {
 // in practice.
 func parseAny(out string) Result {
 	// TAP first: a make target or a wrapper script may run node --test, and no
-	// other family claims a `# pass N` summary.
-	for _, parser := range []func(string) Result{parseTAP, parseGo, parseCargo, parsePytest, parseJS, parseMaven, parseDotnet} {
+	// other family claims a `# pass N` summary. The spec reporter's `ℹ pass N`
+	// is just as unambiguous and comes right after it.
+	for _, parser := range []func(string) Result{parseTAP, parseSpec, parseGo, parseCargo, parsePytest, parseJS, parseMaven, parseDotnet} {
 		if res := parser(out); res.Recognized {
 			return res
 		}
@@ -104,9 +114,9 @@ func Complete(runner string, output string) bool {
 	case RunnerPytest:
 		return pytestBanner.MatchString(out) || pytestShort.MatchString(out)
 	case RunnerNPM, RunnerJest, RunnerVitest:
-		return jsComplete.MatchString(out)
+		return jsComplete.MatchString(out) || specComplete.MatchString(out)
 	case RunnerNode, RunnerTSX:
-		return tapSummaryComplete.MatchString(out)
+		return tapSummaryComplete.MatchString(out) || specComplete.MatchString(out)
 	case RunnerCargo:
 		return cargoResult.MatchString(out)
 	case RunnerMaven:
@@ -117,7 +127,7 @@ func Complete(runner string, output string) bool {
 		return goComplete.MatchString(out) || cargoResult.MatchString(out) ||
 			pytestBanner.MatchString(out) || jsComplete.MatchString(out) ||
 			mavenBuild.MatchString(out) || dotnetSummary.MatchString(out) ||
-			tapSummaryComplete.MatchString(out)
+			tapSummaryComplete.MatchString(out) || specComplete.MatchString(out)
 	}
 	return false
 }

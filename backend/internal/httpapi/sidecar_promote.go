@@ -111,26 +111,38 @@ func (s *server) handlePromoteSidecar(w http.ResponseWriter, r *http.Request) {
 
 // copyEvents duplicates one session's event log into another, renumbering the
 // sequence so the target's own log stays contiguous.
+//
+// It pages without a cap for the same reason the fork no longer copies at all:
+// one ListEvents call stops at 1000 events, and a clone or a promoted sidecar of
+// a long conversation used to be silently cut there. Clone (FR-2.7) and promote
+// (FR-4.7) both take this path, so both inherit the fix.
 func (s *server) copyEvents(ctx context.Context, userID, fromID, toID string) error {
-	events, err := s.deps.Store.ListEvents(ctx, userID, fromID, 0, 1000)
-	if err != nil {
-		return err
-	}
-	for _, event := range events {
-		copied := &contracts.Event{
-			SessionID: toID,
-			RunID:     event.RunID,
-			EntryID:   event.EntryID,
-			ParentID:  event.ParentID,
-			Type:      event.Type,
-			Payload:   event.Payload,
-			TS:        event.TS,
-		}
-		if _, err := s.deps.Store.AppendEvent(ctx, userID, copied); err != nil {
+	const page = 500
+	after := int64(0)
+	for {
+		events, err := s.deps.Store.ListEvents(ctx, userID, fromID, after, page)
+		if err != nil {
 			return err
 		}
+		for _, event := range events {
+			copied := &contracts.Event{
+				SessionID: toID,
+				RunID:     event.RunID,
+				EntryID:   event.EntryID,
+				ParentID:  event.ParentID,
+				Type:      event.Type,
+				Payload:   event.Payload,
+				TS:        event.TS,
+			}
+			if _, err := s.deps.Store.AppendEvent(ctx, userID, copied); err != nil {
+				return err
+			}
+		}
+		if len(events) < page {
+			return nil
+		}
+		after = events[len(events)-1].Seq
 	}
-	return nil
 }
 
 // waitUntilSettled polls the runtime until no turn is in flight, or the budget runs

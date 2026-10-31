@@ -640,6 +640,27 @@ func TestParseRealNodeTestRun(t *testing.T) {
 		t.Fatalf("real node --test failure location = %s:%d\n%s",
 			got.Failures[0].File, got.Failures[0].Line, out)
 	}
+
+	// The acceptance pass's agent did not pass `--test`: it ran the file
+	// directly. Node 24 prints the spec reporter for that (TAP on older nodes,
+	// when stdout is a pipe), and both shapes must be recorded with counts
+	// instead of 未识别格式.
+	for _, tc := range []struct {
+		file           string
+		passed, failed int
+	}{
+		{"pass.test.js", 1, 0},
+		{"fail.test.js", 0, 1},
+	} {
+		direct := exec.CommandContext(ctx, node, tc.file)
+		direct.Dir = dir
+		raw, _ := direct.CombinedOutput()
+		got := Parse(string(RunnerNode), string(raw))
+		if !got.Recognized || got.Total != 1 || got.Passed != tc.passed || got.Failed != tc.failed {
+			t.Fatalf("direct `node %s` = recognized:%v total:%d passed:%d failed:%d\n%s",
+				tc.file, got.Recognized, got.Total, got.Passed, got.Failed, raw)
+		}
+	}
 }
 
 func TestParseMakeWrapsTheUnderlyingRunner(t *testing.T) {
@@ -678,7 +699,11 @@ func TestComplete(t *testing.T) {
 		{RunnerVitest, "      Tests  2 passed (2)\n", true},
 		{RunnerNode, "# pass 2\n", true},
 		{RunnerNode, "1..2\n", false}, // a plan alone is not a finished run
+		{RunnerNode, "ℹ pass 2\n", true},
+		{RunnerNode, "ℹ fail 0\n", true},
 		{RunnerTSX, "# fail 0\n", true},
+		{RunnerTSX, "ℹ tests 2\n", true},
+		{RunnerNPM, "ℹ pass 2\nℹ fail 0\n", true},
 		{RunnerCargo, "test result: ok. 2 passed; 0 failed; 0 ignored; finished in 0.01s\n", true},
 		{RunnerMaven, "[INFO] BUILD SUCCESS\n", true},
 		{RunnerDotnet, "Passed!  - Failed: 0, Passed: 3, Skipped: 0, Total: 3, Duration: 8 ms - A.dll\n", true},

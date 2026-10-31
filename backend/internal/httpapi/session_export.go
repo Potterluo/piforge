@@ -62,14 +62,16 @@ func (s *server) handleExportSession(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(body))
 }
 
-// exportEvents pages through the whole log; a conversation can be longer than
-// one ListEvents call, and a silently truncated export is worse than none.
+// exportEvents pages through the whole transcript; a conversation can be longer
+// than one page, and a silently truncated export is worse than none. It reads
+// the merged view so exporting a fork keeps the history it inherited instead of
+// producing a file that starts mid-conversation.
 func (s *server) exportEvents(r *http.Request, userID, sessionID string) ([]*contracts.Event, error) {
 	const page = 500
 	all := make([]*contracts.Event, 0, page)
 	after := int64(0)
 	for {
-		batch, err := s.deps.Store.ListEvents(r.Context(), userID, sessionID, after, page)
+		batch, err := s.deps.Store.ListMergedEvents(r.Context(), userID, sessionID, after, page)
 		if err != nil {
 			return nil, err
 		}

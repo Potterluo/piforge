@@ -113,6 +113,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     root_id        TEXT REFERENCES sessions(id) ON DELETE SET NULL,
     parent_id      TEXT REFERENCES sessions(id) ON DELETE SET NULL,
     fork_entry_id  TEXT NOT NULL DEFAULT '',
+    -- The parent transcript seq this branch inherits through. A fork records a
+    -- cut instead of copying events: the transcript view merges the parent's log
+    -- up to forked_at_seq with the branch's own events. Zero means "not a fork".
+    -- Added to older databases by store.migrate.
+    forked_at_seq  INTEGER NOT NULL DEFAULT 0,
     label          TEXT NOT NULL DEFAULT '',
     title          TEXT NOT NULL DEFAULT '',
     status         TEXT NOT NULL DEFAULT 'active',

@@ -466,7 +466,9 @@ func (s *server) suggestedPRTitle(ctx context.Context, userID string, sess *cont
 // A failure is silent: the title is a convenience and the dialog still has an
 // input.
 func (s *server) firstUserText(ctx context.Context, userID, sessionID string) string {
-	events, err := s.deps.Store.ListEvents(ctx, userID, sessionID, 0, 200)
+	// Merged: a branch's first user turn usually lives in the transcript it
+	// inherited, and an empty PR title is a worse default than the real prompt.
+	events, err := s.deps.Store.ListMergedEvents(ctx, userID, sessionID, 0, 200)
 	if err != nil {
 		return ""
 	}

@@ -43,7 +43,7 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	minSeq, _, err := s.deps.Store.EventSeqRange(ctx, user.ID, sess.ID)
+	minSeq, _, err := s.deps.Store.MergedSeqRange(ctx, user.ID, sess.ID)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -78,7 +78,7 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		// Drain everything that is already durable, in bounded pages, before
 		// waiting again.
 		for {
-			events, err := s.deps.Store.ListEvents(ctx, user.ID, sess.ID, last, sseBatch)
+			events, err := s.deps.Store.ListMergedEvents(ctx, user.ID, sess.ID, last, sseBatch)
 			if err != nil {
 				// The client may have gone away, or the row may have been
 				// deleted mid-stream. Either way the stream is over.

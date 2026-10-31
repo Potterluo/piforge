@@ -94,3 +94,48 @@ func TestCloneKeepsTheWholeConversation(t *testing.T) {
 		t.Fatalf("cloning a sidecar = %d", rec.Code)
 	}
 }
+
+// The copy helper behind clone (and promote) used to read one ListEvents page,
+// which stops at 1000 events. A clone of a longer conversation was silently cut
+// there. It must copy every page now.
+func TestCloneCopiesPastTheOldPageCap(t *testing.T) {
+	env := newTestEnv(t)
+	user := env.mkUser("longclone@piforge.local", "pw", contracts.RoleUser)
+	c := env.login("longclone@piforge.local", "pw")
+	_, source := env.mkSessionFor(user.ID, "repo")
+	seedHundreds(t, env, user.ID, source.ID, "copy", 1200)
+	// The clone's fake agent must not replay the process-wide script into it;
+	// this test is about copyEvents, not the runtime.
+	env.runtime.script = nil
+
+	rec := env.doAuthed(http.MethodPost, "/v1/sessions/"+source.ID+"/clone", nil, c)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("clone: %d %s", rec.Code, rec.Body.String())
+	}
+	var cloned struct {
+		Session struct {
+			ID string `json:"id"`
+		} `json:"session"`
+	}
+	env.mustJSON(rec, &cloned)
+
+	after := int64(0)
+	total := 0
+	for {
+		batch, err := env.store.ListEvents(t.Context(), user.ID, cloned.Session.ID, after, 500)
+		if err != nil {
+			t.Fatalf("clone events: %v", err)
+		}
+		total += len(batch)
+		if len(batch) == 0 {
+			break
+		}
+		after = batch[len(batch)-1].Seq
+		if len(batch) < 500 {
+			break
+		}
+	}
+	if total != 1200 {
+		t.Fatalf("clone copied %d events, want 1200", total)
+	}
+}

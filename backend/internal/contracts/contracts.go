@@ -165,14 +165,21 @@ type Worktree struct {
 // Session is a conversation. Main sessions and branches own a worktree;
 // sidecars reference the same worktree as their main session.
 type Session struct {
-	ID            string        `json:"id"`
-	UserID        string        `json:"user_id"`
-	ProjectID     string        `json:"project_id"`
-	WorktreeID    string        `json:"worktree_id,omitempty"`
-	Kind          SessionKind   `json:"kind"`
-	RootID        string        `json:"root_id,omitempty"`
-	ParentID      string        `json:"parent_id,omitempty"`
-	ForkEntryID   string        `json:"fork_entry_id,omitempty"`
+	ID          string      `json:"id"`
+	UserID      string      `json:"user_id"`
+	ProjectID   string      `json:"project_id"`
+	WorktreeID  string      `json:"worktree_id,omitempty"`
+	Kind        SessionKind `json:"kind"`
+	RootID      string      `json:"root_id,omitempty"`
+	ParentID    string      `json:"parent_id,omitempty"`
+	ForkEntryID string      `json:"fork_entry_id,omitempty"`
+	// ForkedAtSeq is how much of the parent's transcript this branch inherits:
+	// the parent transcript's seq at the moment of the fork. The branch view
+	// concatenates the parent's events up to this seq with its own; nothing is
+	// copied, and events the parent writes later stay out because they are past
+	// the cut. Zero means "not a fork" (a main session, a sidecar, a promoted
+	// sidecar or a clone).
+	ForkedAtSeq   int64         `json:"forked_at_seq,omitempty"`
 	Label         string        `json:"label,omitempty"`
 	Title         string        `json:"title"`
 	Status        SessionStatus `json:"status"`

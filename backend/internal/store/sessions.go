@@ -15,7 +15,7 @@ import (
 // order. Nullable foreign keys are flattened to ” because contracts models
 // them as plain strings with omitempty.
 const sessionCols = `id, user_id, project_id, COALESCE(worktree_id, ''), kind,
-	COALESCE(root_id, ''), COALESCE(parent_id, ''), fork_entry_id, label, title,
+	COALESCE(root_id, ''), COALESCE(parent_id, ''), fork_entry_id, forked_at_seq, label, title,
 	status, model_ref, thinking_level, ephemeral, created_at, last_active_at`
 
 // NewSession is the input for CreateSession.
@@ -34,7 +34,10 @@ type NewSession struct {
 	// (sidecar).
 	ParentID string
 	// ForkEntryID is the Pi entry the branch was forked at.
-	ForkEntryID   string
+	ForkEntryID string
+	// ForkedAtSeq is the parent transcript seq the branch inherits through.
+	// Zero means the branch copies nothing (the normal create path).
+	ForkedAtSeq   int64
 	Label         string
 	Title         string
 	Status        contracts.SessionStatus
@@ -70,6 +73,9 @@ type SessionPatch struct {
 	ThinkingLevel *string
 	Status        *contracts.SessionStatus
 	WorktreeID    *string
+	// ForkedAtSeq records the parent transcript cut (see contracts.Session).
+	// It is set by the fork handler after the branch proves it has history.
+	ForkedAtSeq *int64
 }
 
 // statuses is the closed set of session statuses (contracts.SessionStatus).
@@ -112,11 +118,11 @@ func (s *Store) CreateSession(ctx context.Context, userID string, in NewSession)
 	now := s.now()
 	if _, err := s.w.ExecContext(ctx,
 		`INSERT INTO sessions (id, user_id, project_id, worktree_id, kind, root_id, parent_id,
-		                       fork_entry_id, label, title, status, model_ref, thinking_level,
-		                       ephemeral, config, created_at, last_active_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)`,
+		                       fork_entry_id, forked_at_seq, label, title, status, model_ref,
+		                       thinking_level, ephemeral, config, created_at, last_active_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)`,
 		id, userID, in.ProjectID, nullString(in.WorktreeID), string(kind), nullString(rootID),
-		nullString(in.ParentID), in.ForkEntryID, in.Label, in.Title, string(status),
+		nullString(in.ParentID), in.ForkEntryID, in.ForkedAtSeq, in.Label, in.Title, string(status),
 		in.ModelRef, in.ThinkingLevel, in.Ephemeral, formatTime(now), formatTime(now)); err != nil {
 		return nil, fmt.Errorf("store: create session: %w", err)
 	}
@@ -243,6 +249,10 @@ func (s *Store) UpdateSession(ctx context.Context, userID, sessionID string, p S
 		sets = append(sets, `worktree_id = ?`)
 		args = append(args, nullString(*p.WorktreeID))
 	}
+	if p.ForkedAtSeq != nil {
+		sets = append(sets, `forked_at_seq = ?`)
+		args = append(args, *p.ForkedAtSeq)
+	}
 	if p.Status != nil {
 		if !sessionStatuses[*p.Status] {
 			return nil, fmt.Errorf("store: update session: unknown status %q: %w", *p.Status, ErrInvalid)
@@ -289,7 +299,7 @@ func scanSession(sc interface{ Scan(dest ...any) error }) (*contracts.Session, e
 		lastActive string
 	)
 	if err := sc.Scan(&sess.ID, &sess.UserID, &sess.ProjectID, &sess.WorktreeID, &kind,
-		&sess.RootID, &sess.ParentID, &sess.ForkEntryID, &sess.Label, &sess.Title,
+		&sess.RootID, &sess.ParentID, &sess.ForkEntryID, &sess.ForkedAtSeq, &sess.Label, &sess.Title,
 		&status, &sess.ModelRef, &sess.ThinkingLevel, &sess.Ephemeral, &created, &lastActive); err != nil {
 		return nil, err
 	}
@@ -314,6 +324,23 @@ func (s *Store) DeleteSession(ctx context.Context, userID, sessionID string) err
 		return fmt.Errorf("store: delete session %q: %w", sessionID, err)
 	}
 	return requireOneRow(res, "store: delete session "+sessionID)
+}
+
+// CountForkChildren reports how many branches inherit their transcript from a
+// session (the forks with a recorded cut). Their history lives in this
+// session's event log, so deleting it would silently empty those branches; the
+// delete path refuses instead. A branch whose transcript was copied before the
+// lineage existed has forked_at_seq = 0 and does not count: its history is its
+// own.
+func (s *Store) CountForkChildren(ctx context.Context, userID, sessionID string) (int, error) {
+	var n int
+	if err := s.r.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sessions
+		  WHERE parent_id = ? AND user_id = ? AND forked_at_seq > 0`,
+		sessionID, userID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count forks of %q: %w", sessionID, err)
+	}
+	return n, nil
 }
 
 // SessionIDs lists every session id in the deployment.

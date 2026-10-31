@@ -104,6 +104,12 @@ export interface Session {
   root_id?: string;
   parent_id?: string;
   fork_entry_id?: string;
+  /**
+   * The parent transcript seq this fork inherits through (absent/0 = not a
+   * fork). The branch view is the parent's log up to this seq followed by its
+   * own events; nothing is copied.
+   */
+  forked_at_seq?: number;
   label?: string;
   title: string;
   status: SessionStatus;
@@ -146,8 +152,11 @@ export interface SessionStats {
 // ---------------------------------------------------------------------------
 
 /**
- * The normalized event envelope. `seq` is monotonic per session and doubles as
- * the SSE event id, so a reconnecting client replays from where it stopped.
+ * The normalized event envelope. `seq` is monotonic per transcript and doubles
+ * as the SSE event id, so a reconnecting client replays from where it stopped.
+ * For a fork the transcript is the parent's log up to `forked_at_seq` followed
+ * by the branch's own events, so the seqs are transcript-wide rather than the
+ * branch session's own row numbers.
  */
 export interface PfEvent {
   seq: number;
