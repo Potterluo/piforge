@@ -529,6 +529,26 @@ type sandboxStep struct {
 // called repeatedly and moving a HEAD the user is building on would be the worse
 // bug. A .git without a commit is not "ready": the empty commit is what worktrees
 // branch from, so a half-provisioned checkout is resumed instead of trusted.
+//
+// The last step opens the tree to the *other* writer. A container deployment has
+// two: `gem` (uid 1000, the sandbox user) owns the workspace because the sandbox
+// created it, and root in the control plane materialises skills/MCP config into it,
+// spawns the agent there and writes that agent's heartbeat marker into
+// `<pair>/.piforge/live/<session>`. A tree created 0755 by gem is not writable by a
+// control plane that dropped CAP_DAC_OVERRIDE (the documented compose does, so
+// `copy-ro` skills are real), and the session then dies on the first write:
+//
+//	provision: mount tooling: materialize: create skills root: mkdir
+//	/data/sandboxes/<user>/<project>/repo/.pi: permission denied
+//	liveness: create the marker directory ... mkdir .../.piforge: permission denied
+//
+// `chmod -R a+rwX` gives both identities the write bit the shared tree needs while
+// leaving ownership with gem, which is what the panel's git and shell rely on.
+// X (not x) keeps it from making plain files executable; directories get 0777 and
+// files 0666. The whole pair directory, not only `repo`: the marker and any later
+// tooling live beside the checkout, not inside it. It runs only when the checkout
+// is created, never on the ready path: a later pass would also loosen the 0444/0555
+// skill copies materialise wrote, and those are the read-only guarantee itself.
 func planCheckout(ready bool, repoURL, branch string) []sandboxStep {
 	if ready {
 		return nil
@@ -537,6 +557,7 @@ func planCheckout(ready bool, repoURL, branch string) []sandboxStep {
 	if branch == "" {
 		branch = DefaultInitialBranch
 	}
+	open := sandboxStep{name: "permissions", argv: []string{"chmod", "-R", "a+rwX", containerWorkspace}}
 	if url := strings.TrimSpace(repoURL); url != "" {
 		return []sandboxStep{
 			// "." because the checkout directory already exists (and must, so that
@@ -547,6 +568,7 @@ func planCheckout(ready bool, repoURL, branch string) []sandboxStep {
 				argv:     []string{"git", "checkout", "-q", branch},
 				fallback: []string{"git", "checkout", "-q", "-b", branch},
 			},
+			open,
 		}
 	}
 	return []sandboxStep{
@@ -558,6 +580,7 @@ func planCheckout(ready bool, repoURL, branch string) []sandboxStep {
 		{name: "init", argv: []string{"git", "config", "user.name", sandboxGitName}},
 		{name: "init", argv: []string{"git", "config", "user.email", sandboxGitEmail}},
 		{name: "commit", argv: []string{"git", "commit", "--allow-empty", "--no-gpg-sign", "-q", "-m", initialCommit}},
+		open,
 	}
 }
 
@@ -591,6 +614,11 @@ func planBranchWorktree(ready bool, repoDir, worktreeDir, branch string) ([]sand
 	return []sandboxStep{
 		{name: "check-ref-format", dir: repoDir, argv: []string{"git", "check-ref-format", "--branch", branch}},
 		{name: "worktree", dir: repoDir, argv: []string{"git", "worktree", "add", "-b", branch, "--", worktreeDir}},
+		// Same two writers as the main checkout (see planCheckout): gem owns the
+		// worktree, and the control plane materialises tooling into it as root with
+		// CAP_DAC_OVERRIDE dropped. Without the write bit for the second identity,
+		// a branch session fails provisioning on `mkdir <worktree>/.pi`.
+		{name: "permissions", dir: repoDir, argv: []string{"chmod", "-R", "a+rwX", worktreeDir}},
 	}, nil
 }
 
@@ -866,12 +894,19 @@ func runSandboxStep(ctx context.Context, shell checkoutShell, step sandboxStep) 
 // "detected dubious ownership", which turned every panel git view into a 500. The
 // path is exactly the directory this command was told to run in — a workspace the
 // sandbox owns — so trusting it is narrower than `safe.directory=*`.
+//
+// Only a git step gets the flag: a plan step is not necessarily git (the
+// `permissions` step runs chmod), and prefixing those turns the mode string into
+// `-c safe.directory=…`, which chmod rejects as an invalid mode.
 func checkoutCommand(argv []string, dir string) (string, error) {
 	if len(argv) == 0 {
 		return "", fmt.Errorf("sandbox: docker: checkout step has no command")
 	}
 	quoted := make([]string, 0, len(argv)+3)
-	quoted = append(quoted, aio.Quote(argv[0]), aio.Quote("-c"), aio.Quote("safe.directory="+dir))
+	quoted = append(quoted, aio.Quote(argv[0]))
+	if argv[0] == "git" {
+		quoted = append(quoted, aio.Quote("-c"), aio.Quote("safe.directory="+dir))
+	}
 	for _, arg := range argv[1:] {
 		quoted = append(quoted, aio.Quote(arg))
 	}

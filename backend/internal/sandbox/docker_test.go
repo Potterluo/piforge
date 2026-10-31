@@ -620,8 +620,8 @@ func TestDockerProviderCheckoutUsesTheSandboxAPI(t *testing.T) {
 			t.Fatalf("ensureCheckout: %v", err)
 		}
 		calls := shell.calls
-		if len(calls) != 6 {
-			t.Fatalf("ran %d commands, want the probe, mkdir and four checkout steps: %+v", len(calls), calls)
+		if len(calls) != 7 {
+			t.Fatalf("ran %d commands, want the probe, mkdir, four checkout steps and the permissions step: %+v", len(calls), calls)
 		}
 		if !strings.Contains(calls[0].command, "rev-parse --verify --quiet HEAD") || calls[0].cwd != containerWorkspace {
 			t.Fatalf("first command = %+v, want the readiness probe in /workspace", calls[0])
@@ -634,6 +634,9 @@ func TestDockerProviderCheckoutUsesTheSandboxAPI(t *testing.T) {
 			`'git' '-c' 'safe.directory=/workspace/repo' 'config' 'user.name' 'PiForge Sandbox'`,
 			`'git' '-c' 'safe.directory=/workspace/repo' 'config' 'user.email' 'sandbox@piforge.local'`,
 			`'git' '-c' 'safe.directory=/workspace/repo' 'commit' '--allow-empty' '--no-gpg-sign' '-q' '-m' 'piforge: initial commit'`,
+			// chmod is not git: the -c safe.directory prefix would be parsed as its
+			// mode, which the image's chmod rejects with "invalid mode".
+			`'chmod' '-R' 'a+rwX' '/workspace'`,
 		}
 		for i, command := range want {
 			call := calls[i+2]
@@ -734,8 +737,19 @@ func TestDockerProviderCheckoutCrossesTheSandboxAPI(t *testing.T) {
 
 // commands run inside the container as `gem` and a silently different list would
 // bring back either a missing repository (no commit to branch worktrees from) or a
-// root-owned one the sandbox user cannot stage in.
+// checkout only one of the two writers can write to.
+//
+// The last step is the second writer. The checkout belongs to gem, but the control
+// plane materialises tooling into it as root with CAP_DAC_OVERRIDE dropped (that
+// drop is what makes `copy-ro` skills true), so the tree has to carry the write bit
+// for both. Without it provisioning fails on the first write:
+//
+//	materialize: create skills root: mkdir .../repo/.pi: permission denied
+//
+// It must not appear on the ready path: re-running it would also loosen the
+// 0444/0555 copies materialise writes, which are the read-only guarantee itself.
 func TestPlanCheckout(t *testing.T) {
+	open := []string{"chmod", "-R", "a+rwX", "/workspace"}
 	tests := []struct {
 		name     string
 		ready    bool
@@ -759,8 +773,9 @@ func TestPlanCheckout(t *testing.T) {
 				{"git", "config", "user.name", "PiForge Sandbox"},
 				{"git", "config", "user.email", "sandbox@piforge.local"},
 				{"git", "commit", "--allow-empty", "--no-gpg-sign", "-q", "-m", "piforge: initial commit"},
+				open,
 			},
-			wantName: []string{"init", "init", "init", "commit"},
+			wantName: []string{"init", "init", "init", "commit", "permissions"},
 		},
 		{
 			name:   "the requested branch is the one initialized",
@@ -770,8 +785,9 @@ func TestPlanCheckout(t *testing.T) {
 				{"git", "config", "user.name", "PiForge Sandbox"},
 				{"git", "config", "user.email", "sandbox@piforge.local"},
 				{"git", "commit", "--allow-empty", "--no-gpg-sign", "-q", "-m", "piforge: initial commit"},
+				open,
 			},
-			wantName: []string{"init", "init", "init", "commit"},
+			wantName: []string{"init", "init", "init", "commit", "permissions"},
 		},
 		{
 			name:    "repo with url: clone, then checkout with a create fallback",
@@ -780,8 +796,9 @@ func TestPlanCheckout(t *testing.T) {
 			want: [][]string{
 				{"git", "clone", "--quiet", "--", "https://example.invalid/acme/widgets.git", "."},
 				{"git", "checkout", "-q", "develop"},
+				open,
 			},
-			wantName: []string{"clone", "checkout"},
+			wantName: []string{"clone", "checkout", "permissions"},
 			// Local's checkoutBranch creates a branch that does not exist yet rather
 			// than failing; the container does the same on the second attempt.
 			fallback: []string{"git", "checkout", "-q", "-b", "develop"},
@@ -1030,8 +1047,11 @@ func TestPlanBranchWorktree(t *testing.T) {
 			want: [][]string{
 				{"git", "check-ref-format", "--branch", "piforge/fix-cache"},
 				{"git", "worktree", "add", "-b", "piforge/fix-cache", "--", worktreeDir},
+				// The worktree has the same two writers as the main checkout, so it
+				// gets the same write bit for the control plane (see planCheckout).
+				{"chmod", "-R", "a+rwX", worktreeDir},
 			},
-			wantName: []string{"check-ref-format", "worktree"},
+			wantName: []string{"check-ref-format", "worktree", "permissions"},
 		},
 		{
 			name:        "the branch name is trimmed before it reaches git",
@@ -1040,8 +1060,9 @@ func TestPlanBranchWorktree(t *testing.T) {
 			want: [][]string{
 				{"git", "check-ref-format", "--branch", "piforge/fix-cache"},
 				{"git", "worktree", "add", "-b", "piforge/fix-cache", "--", worktreeDir},
+				{"chmod", "-R", "a+rwX", worktreeDir},
 			},
-			wantName: []string{"check-ref-format", "worktree"},
+			wantName: []string{"check-ref-format", "worktree", "permissions"},
 		},
 		{
 			name:        "an existing worktree is left exactly as it is",
@@ -1128,8 +1149,8 @@ func TestDockerProviderBranchWorktreeUsesTheSandboxAPI(t *testing.T) {
 			t.Fatalf("AddWorktree: %v", err)
 		}
 		calls := shell.calls
-		if len(calls) != 4 {
-			t.Fatalf("ran %d commands, want the liveness probe, the worktree probe and two worktree steps: %+v", len(calls), calls)
+		if len(calls) != 5 {
+			t.Fatalf("ran %d commands, want the liveness probe, the worktree probe, two worktree steps and the permissions step: %+v", len(calls), calls)
 		}
 		if calls[0].command != "echo piforge-api-ready" || calls[0].cwd != containerWorkspace {
 			t.Fatalf("first command = %+v, want the API liveness probe", calls[0])
@@ -1146,6 +1167,10 @@ func TestDockerProviderBranchWorktreeUsesTheSandboxAPI(t *testing.T) {
 			},
 			{
 				command: `'git' '-c' 'safe.directory=/workspace/repo' 'worktree' 'add' '-b' 'piforge/fix-cache' '--' '/workspace/worktrees/fix-cache'`,
+				cwd:     containerRepoDir,
+			},
+			{
+				command: `'chmod' '-R' 'a+rwX' '/workspace/worktrees/fix-cache'`,
 				cwd:     containerRepoDir,
 			},
 		}

@@ -698,14 +698,14 @@ func run() error {
 			Args: args,
 			// PI_CODING_AGENT_DIR is the authoritative pointer; the *_BASE_URL
 			// variables stay for clients that read them directly.
-			Env: []string{
+			Env: append([]string{
 				"PI_CODING_AGENT_DIR=" + res.Dir,
 				"ANTHROPIC_BASE_URL=" + gatewayURL,
 				"ANTHROPIC_API_KEY=" + token,
 				"OPENAI_BASE_URL=" + gatewayURL + "/v1",
 				"OPENAI_API_KEY=" + token,
 				"PIFORGE_GATEWAY_TOKEN=" + token,
-			},
+			}, agentGitEnv(opt.sandboxKind, spec.Worktree)...),
 		}
 	}
 
@@ -1216,6 +1216,62 @@ func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSp
 type agentSetup struct {
 	Env  []string
 	Args []string
+}
+
+// agentGitEnv tells the agent's own git that the checkout it works in belongs to
+// another account — but only for a container provider, where that is true.
+//
+// A container sandbox creates the checkout as its own user (`gem`, uid 1000) so
+// the panel's git and shell can write it. The agent process is a child of this
+// process and runs as root, and git 2.39 refuses to work in a repository owned by
+// somebody else:
+//
+//	fatal: detected dubious ownership in repository at '/data/sandboxes/.../repo'
+//
+// That refusal lands on the first command a coding task usually ends with
+// (`git add`/`git commit`), and no amount of file-mode work fixes it: the check is
+// about the owner, not the mode. The panel's git already carries
+// `-c safe.directory=<container path>` on every invocation (workspaceremote); this
+// is the same narrow grant for a process that cannot pass flags to the commands it
+// runs — GIT_CONFIG_* is inherited by every git the agent starts. The directories
+// named are the session's own checkout and, for a branch session, the main
+// checkout that holds its administrative files; never `safe.directory=*`.
+//
+// The local provider returns nothing: there the checkout is owned by the user this
+// process runs as, so there is no second account and no refusal to lift.
+func agentGitEnv(kind, worktree string) []string {
+	if kind == "local" {
+		return nil
+	}
+	dirs := agentCheckoutDirs(worktree)
+	if len(dirs) == 0 {
+		return nil
+	}
+	env := []string{fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(dirs))}
+	for i, dir := range dirs {
+		env = append(env,
+			fmt.Sprintf("GIT_CONFIG_KEY_%d=safe.directory", i),
+			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, dir),
+		)
+	}
+	return env
+}
+
+// agentCheckoutDirs is the set of directories git may have to be told about: the
+// worktree itself, plus the repository whose `.git/worktrees/<slug>` a linked
+// worktree points into.
+func agentCheckoutDirs(worktree string) []string {
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return nil
+	}
+	dirs := []string{worktree}
+	// <pair>/worktrees/<slug> is a linked worktree of <pair>/repo; its gitdir lives
+	// in the main checkout, which git checks for ownership as well.
+	if filepath.Base(filepath.Dir(worktree)) == "worktrees" {
+		dirs = append(dirs, filepath.Join(filepath.Dir(filepath.Dir(worktree)), "repo"))
+	}
+	return dirs
 }
 
 // piAPI maps a stored provider api onto the name Pi uses in models.json.
