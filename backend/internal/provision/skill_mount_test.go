@@ -195,3 +195,43 @@ func (e *env) project2() *contracts.Project {
 	}
 	return p
 }
+
+// A checkout can lose its projection without losing its row: a container
+// restart unmounts the bind mount and leaves an empty `.pi/skills`, and a
+// cleanup can delete the directory. The session is still usable, so the next
+// provisioning pass has to put the skills back — the early "already attached"
+// return used to skip the mount entirely, and such a session kept no skills
+// forever.
+func TestExistingWorktreeGetsItsSkillsBackWhenTheProjectionIsMissing(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	seedSkillRow(t, e, "review-1", "# Review\nRead the diff.\n")
+
+	project := e.project()
+	sess := e.session(project, contracts.KindMain, "main", "")
+	wt, err := e.svc.EnsureWorktree(ctx, e.user.ID, project, sess)
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+	mounted := filepath.Join(wt.Path, ".pi", "skills", "code-review", "SKILL.md")
+	if _, err := os.Stat(mounted); err != nil {
+		t.Fatalf("the first pass did not mount the skill: %v", err)
+	}
+
+	// Simulate the lost mount: the file is gone, the session row and worktree
+	// are not.
+	if err := os.Chmod(mounted, 0o644); err != nil {
+		t.Fatalf("chmod mounted skill: %v", err)
+	}
+	if err := os.Remove(mounted); err != nil {
+		t.Fatalf("remove mounted skill: %v", err)
+	}
+
+	if _, err := e.svc.EnsureWorktree(ctx, e.user.ID, project, sess); err != nil {
+		t.Fatalf("re-provision: %v", err)
+	}
+	body, err := os.ReadFile(mounted)
+	if err != nil || !strings.Contains(string(body), "Read the diff") {
+		t.Fatalf("the missing projection was not repaired: %q, %v", body, err)
+	}
+}

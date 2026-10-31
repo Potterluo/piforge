@@ -31,6 +31,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/gitx"
 	"github.com/piforge/piforge/backend/internal/materialize"
 	skillset "github.com/piforge/piforge/backend/internal/skills"
+	"github.com/piforge/piforge/backend/internal/skillsnap"
 	"github.com/piforge/piforge/backend/internal/store"
 )
 
@@ -109,10 +110,21 @@ func (s *Service) EnsureWorktree(
 		return nil, fmt.Errorf("provision: tenant mismatch")
 	}
 
-	// Already attached: nothing to do.
+	// Already attached: the checkout is the same, but the projection is
+	// re-run. It is idempotent (an existing mounted skill with the same row is
+	// kept, edits still do not reach a running session), and it repairs the one
+	// state a restart can leave behind: a checkout whose `.pi/skills` was a bind
+	// mount target before the container restarted is now an empty directory, so
+	// without this pass the agent would have no skills at all until the session
+	// was recreated. A failure is logged rather than fatal — the session and its
+	// files are usable, and the next pass tries again.
 	if sess.WorktreeID != "" {
 		wt, err := s.cfg.Store.Worktree(ctx, userID, sess.WorktreeID)
 		if err == nil {
+			if merr := s.mountTooling(ctx, userID, sess.ID, wt.Path); merr != nil {
+				slog.Warn("tooling refresh on an existing worktree failed",
+					"session", sess.ID, "error", merr)
+			}
 			return wt, nil
 		}
 		if !errors.Is(err, store.ErrNotFound) {
@@ -334,13 +346,22 @@ func (s *Service) mountTooling(ctx context.Context, userID, sessionID, root stri
 		// Still mount: an empty configuration must clear anything a previous
 		// pass wrote, or a removed MCP server keeps running.
 	}
+	// An empty SnapshotDir keeps materialize's own fallback
+	// (<worktree>/.pi/skill-snapshots), which is what a test or a hand-built
+	// configuration without a data directory needs.
+	snapshotDir := ""
+	if s.cfg.SnapshotDir != "" {
+		snapshotDir = skillsnap.Dir(s.cfg.SnapshotDir, sessionID)
+	}
 	result, err := materialize.Mount(root, skills, servers, materialize.Options{
 		SkillsDir: s.cfg.SkillsDir,
 		// One snapshot directory per session: the mounted tree is frozen, so a
 		// new session gets a new snapshot while a running one keeps its own.
 		// Sharing the snapshot with the bundle (or with another live session)
-		// would let an edit reach a session that already started.
-		SnapshotDir: filepath.Join(s.cfg.SnapshotDir, Slug(sessionID)),
+		// would let an edit reach a session that already started. The directory
+		// is named after the session id so the delete path (and the janitor's
+		// sweep) can map it back to a session without a second index.
+		SnapshotDir: snapshotDir,
 	})
 	if err != nil {
 		return fmt.Errorf("provision: mount tooling: %w", err)

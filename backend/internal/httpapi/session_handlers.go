@@ -12,6 +12,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/materialize"
+	"github.com/piforge/piforge/backend/internal/skillsnap"
 	"github.com/piforge/piforge/backend/internal/store"
 )
 
@@ -124,7 +125,8 @@ func (s *server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 // A running agent is stopped first: killing it afterwards would leave a child
 // writing into a row that no longer exists. The worktree stays on disk for the
 // provisioner to reclaim — deleting a directory under a live process is how
-// cleanup turns into corruption.
+// cleanup turns into corruption. The session's frozen skill snapshots are the
+// exception: nothing else will ever name them, so they go now (FR-14.2).
 func (s *server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	user := auth.MustUser(r.Context())
 	sessionID := pathID(r)
@@ -142,7 +144,36 @@ func (s *server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	s.removeSkillSnapshots(r.Context(), sessionID)
 	writeOK(w)
+}
+
+// removeSkillSnapshots reclaims the frozen skill trees of deleted sessions
+// (FR-14.2).
+//
+// It runs *after* the row is gone, and a failure is deliberately not fatal: the
+// snapshot is already unreachable, and the janitor sweeps any directory whose
+// session no longer exists. Logging the failure is what keeps "the delete said
+// 200 but the disk still has it" from being silent until the next pass.
+func (s *server) removeSkillSnapshots(ctx context.Context, sessionIDs ...string) {
+	if s.deps.SnapshotDir == "" {
+		return
+	}
+	for _, sessionID := range sessionIDs {
+		if sessionID == "" {
+			continue
+		}
+		freed, err := skillsnap.Remove(s.deps.SnapshotDir, sessionID, nil)
+		if err != nil {
+			s.log.WarnContext(ctx, "a deleted session's skill snapshot could not be removed; the janitor will retry",
+				"session", sessionID, "error", err.Error())
+			continue
+		}
+		if freed.Dirs > 0 {
+			s.log.InfoContext(ctx, "removed a deleted session's skill snapshots",
+				"session", sessionID, "count", freed.Dirs, "bytes", freed.Bytes)
+		}
+	}
 }
 
 // handlePatchSession renames, re-models or archives a session.

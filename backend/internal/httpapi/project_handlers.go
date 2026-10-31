@@ -361,10 +361,21 @@ func (s *server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The snapshot directories are keyed by session id and the cascade is about
+	// to remove the rows that name them, so they are read before the delete.
+	sessionIDs, err := s.deps.Store.SessionIDsForProject(r.Context(), user.ID, projectID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	if err := s.deps.Store.DeleteProject(r.Context(), user.ID, projectID); err != nil {
 		s.fail(w, r, err)
 		return
 	}
+	// FR-14.2: a project's sessions are gone with it, so every frozen skill tree
+	// they owned goes too — including branch sessions, which have their own
+	// snapshot because they have their own checkout.
+	s.removeSkillSnapshots(r.Context(), sessionIDs...)
 	writeJSON(w, http.StatusOK, okBody{OK: true})
 }
 

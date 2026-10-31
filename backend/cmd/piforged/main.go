@@ -271,6 +271,8 @@ func run() error {
 	// The cap is invisible otherwise: parallel runs are opt-in per user, and the
 	// only other place it surfaces is a refusal. Say it once at startup.
 	logger.Info("parallel branch limit", "branches", parallelLimit, "max", httpapi.MaxParallelLimit)
+
+
 	// A mixed deployment is allowed, never accidental. Saying it out loud is the
 	// difference between a bug report about "the panel shows the wrong file" and a
 	// log line that described the deployment before it did any work.
@@ -756,6 +758,9 @@ func run() error {
 	defer terminals.CloseAll()
 
 	// 6. Working directories.
+	// One path decides where a session's frozen skill tree lives, for the
+	// provisioner that writes it and the delete path that reclaims it.
+	skillSnapshotDir := filepath.Join(opt.dataDir, "skill-snapshots")
 	prov := provision.New(provision.Config{
 		Store:   st,
 		Sandbox: sb,
@@ -765,7 +770,7 @@ func run() error {
 		SkillsDir: filepath.Join(opt.dataDir, "skills"),
 		// Frozen skill snapshots live outside every checkout, so a bind mount's
 		// source has no second, agent-writable path (FR-14.2).
-		SnapshotDir: filepath.Join(opt.dataDir, "skill-snapshots"),
+		SnapshotDir: skillSnapshotDir,
 	})
 
 	// 6. Authentication.
@@ -789,6 +794,7 @@ func run() error {
 		Secrets:         box,
 		WebUpstream:     opt.webUpstream,
 		SkillsDir:       filepath.Join(opt.dataDir, "skills"),
+		SnapshotDir:     skillSnapshotDir,
 		ArtifactsDir:    filepath.Join(opt.dataDir, "artifacts"),
 		LLMGateway:      gateway,
 		Browser:         browsers,
@@ -858,19 +864,34 @@ func run() error {
 	// be destroyed, so new orphans should not appear; this pass is what cleans
 	// the ones older builds left behind (and any a crash between the two
 	// filesystem steps could produce). The layout is the local provider's, so a
-	// container provider gets no sweep.
-	if localSandboxRoot != "" && opt.sandboxSweep > 0 {
+	// container provider gets no sandbox sweep.
+	//
+	// The same pass sweeps FR-14.2's per-session skill snapshots: the delete
+	// handlers remove them eagerly, and this catches what a crash, an ephemeral
+	// session's expiry or an older build left behind. It runs for every provider
+	// because the snapshot root is the control plane's own data directory.
+	if opt.sandboxSweep > 0 {
 		orphans := janitor.New(janitor.Config{
-			Root:     localSandboxRoot,
-			Projects: st,
-			Logger:   logger,
-			Interval: opt.sandboxSweep,
+			Root:         localSandboxRoot,
+			Projects:     st,
+			SnapshotRoot: skillSnapshotDir,
+			Sessions:     st,
+			Logger:       logger,
+			Interval:     opt.sandboxSweep,
 		})
-		logger.Info("orphaned sandbox directories are swept",
-			"root", abs(localSandboxRoot), "interval", opt.sandboxSweep.String())
+		// Empty means this provider keeps no sandbox directories here; saying
+		// "the current directory" for it would read as if it did.
+		sandboxRootLabel := ""
+		if localSandboxRoot != "" {
+			sandboxRootLabel = abs(localSandboxRoot)
+		}
+		logger.Info("orphaned sandbox directories and skill snapshots are swept",
+			"sandbox_root", sandboxRootLabel,
+			"snapshot_root", abs(skillSnapshotDir),
+			"interval", opt.sandboxSweep.String())
 		go orphans.Start(ctx)
-	} else if localSandboxRoot != "" {
-		logger.Info("orphaned sandbox sweep disabled", "flag", "-sandbox-sweep=0")
+	} else {
+		logger.Info("janitor sweep disabled", "flag", "-sandbox-sweep=0")
 	}
 
 	// Scratch sessions (PRD FR-1.10) expire on their own: a quick question should

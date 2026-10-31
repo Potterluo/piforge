@@ -315,6 +315,61 @@ func (s *Store) DeleteSession(ctx context.Context, userID, sessionID string) err
 	return requireOneRow(res, "store: delete session "+sessionID)
 }
 
+// SessionIDs lists every session id in the deployment.
+//
+// It exists for the janitor's skill-snapshot sweep: one query for a whole pass,
+// so "does this snapshot still have a session?" is a set lookup instead of a
+// query per directory. Session ids are globally unique, so no user filter is
+// needed (and none would be correct: a snapshot's owner is its session id).
+func (s *Store) SessionIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.r.QueryContext(ctx, `SELECT id FROM sessions`)
+	if err != nil {
+		return nil, fmt.Errorf("store: session index: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0, 64)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: session index: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: session index: %w", err)
+	}
+	return ids, nil
+}
+
+// SessionIDsForProject lists every session of one project, branch and sidecar
+// included.
+//
+// A project delete cascades the rows, so the ids have to be read *before* it:
+// the snapshot directories on disk are keyed by session id, and after the
+// cascade there is nothing left to derive them from.
+func (s *Store) SessionIDsForProject(ctx context.Context, userID, projectID string) ([]string, error) {
+	rows, err := s.r.QueryContext(ctx,
+		`SELECT id FROM sessions WHERE project_id = ? AND user_id = ?`, projectID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("store: project session index: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0, 8)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: project session index: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: project session index: %w", err)
+	}
+	return ids, nil
+}
+
 // SessionAny returns a session without an ownership check.
 //
 // Only the support-access path uses it: the admin has already recorded why they

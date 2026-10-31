@@ -99,6 +99,11 @@ type Deps struct {
 	// SkillsDir is where uploaded skill bundles live, one directory per skill.
 	// Empty means uploads are refused with a typed error.
 	SkillsDir string
+	// SnapshotDir is where a session's frozen skill snapshots live
+	// (<dataDir>/skill-snapshots). Deleting a session or a project removes the
+	// matching directories; empty means this deployment never creates one (a
+	// copy mechanism writes no snapshot), so there is nothing to remove.
+	SnapshotDir string
 	// ArtifactsDir is the control plane's own artifacts root (for example
 	// <dataDir>/artifacts). Browser screenshots are written under
 	// <ArtifactsDir>/<session>/screenshots, never into the checkout: a capture
