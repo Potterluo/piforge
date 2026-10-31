@@ -1089,7 +1089,7 @@ docker exec -u gem <sandbox> grep -c VOLCE /workspace/.piforge/agents/*/models.j
 `^piforge-[0-9a-f]+$` 删）、卷 `piforge-ws-ba8b2e998f171d81` 与 `pf-drill-data`、网络
 `pf-drill-net`、三个 `*:agentdrill` 镜像。
 
-**仍然是默认关闭**：`-agent-in-sandbox` 默认关；打开时它现在也要求 `-sandbox-files remote`
+**当时仍然是默认关闭**（**阶段三已翻转**：docker/runner 下默认开，见 §1.4.5）：`-agent-in-sandbox` 当时默认关；打开时它现在也要求 `-sandbox-files remote`
 （工作区只剩容器里那一份，宿主面板没有东西可读），这是启动错误，不是静默耦合。
 阶段二明确**没有**做的部分（`worktrees.base_commit`、agent stderr 日志、marker 的 boot id、
 按容器 stage 运行时、回收快照、配额测量、容器内 `CloneSession`）都列在

@@ -280,9 +280,13 @@ that is what makes the panel evidence meaningful rather than incidental.
 `local` has one filesystem, one user and no container: the agent is this process's
 child, the in-process registry is the truth, and there is nothing to attach to. The flag
 is rejected unless the provider is `docker`/`runner`, `Dial` stays nil, `WrapArgv` still
-wraps the local spawn, and every existing test keeps running that path. This is also why
-the flag is off by default: the default deployment must not change behavior until the
-docker/runner path has been proven on a throwaway instance.
+wraps the local spawn, and every existing test keeps running that path. Stages 1 and 2
+kept the flag off by default for exactly that reason — the default deployment must not
+change behavior until the docker/runner path has been proven on a throwaway instance.
+**Stage 3 flips it, and only for the container providers**: `resolveAgentInSandbox` makes
+it on for `docker`/`runner` and off for `local`, so the local shape is not a special case
+that had to be re-tested — it is the one that never changed. `-sandbox` itself still
+defaults to `local`, which is what development uses.
 
 Stage 2 keeps that promise in the code, not only in the deployment: `DetachedWorkspace`
 is a `DockerConfig`/`RunnerConfig` field that only `-agent-in-sandbox` sets, the local
