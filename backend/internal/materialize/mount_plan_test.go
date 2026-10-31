@@ -10,21 +10,45 @@ import (
 	"github.com/piforge/piforge/backend/internal/contracts"
 )
 
-// FR-14.2: the mechanism is a platform decision, not a comment. Linux gets a
-// bind mount; every other platform degrades to a read-only per-skill copy and
-// says so.
-func TestPlatformMechanism(t *testing.T) {
-	cases := map[string]Mechanism{
-		"linux":   MechanismBindRO,
-		"windows": MechanismCopyRO,
-		"darwin":  MechanismCopyRO,
-		"freebsd": MechanismCopyRO,
-		"":        MechanismCopyRO,
+// FR-14.2: the mechanism is a platform-and-capability decision, not a comment.
+//
+// The order matters: a platform without bind mounts is copy-ro whatever the
+// capability set says, Linux with CAP_SYS_ADMIN is bind-ro, and Linux without it
+// is copy-ro — never the writable `copy`, which only a failed read-only probe
+// may produce. A read-only copy needs no capability; that is what makes the
+// default deployment correct without SYS_ADMIN.
+func TestMountPlanDecisionOrder(t *testing.T) {
+	cases := []struct {
+		name     string
+		goos     string
+		caps     Capabilities
+		want     Mechanism
+		canBind  bool
+	}{
+		{name: "linux with CAP_SYS_ADMIN", goos: "linux", caps: Capabilities{BindRO: true}, want: MechanismBindRO, canBind: true},
+		{name: "linux without CAP_SYS_ADMIN", goos: "linux", caps: Capabilities{}, want: MechanismCopyRO, canBind: false},
+		{name: "windows never binds", goos: "windows", caps: Capabilities{BindRO: true}, want: MechanismCopyRO, canBind: false},
+		{name: "darwin never binds", goos: "darwin", caps: Capabilities{BindRO: true}, want: MechanismCopyRO, canBind: false},
+		{name: "freebsd never binds", goos: "freebsd", caps: Capabilities{}, want: MechanismCopyRO, canBind: false},
+		{name: "unknown platform", goos: "", caps: Capabilities{BindRO: true}, want: MechanismCopyRO, canBind: false},
 	}
-	for goos, want := range cases {
-		if got := PlatformMechanism(goos); got != want {
-			t.Errorf("PlatformMechanism(%q) = %q, want %q", goos, got, want)
+	for _, tc := range cases {
+		plan := PlanFor(tc.goos, tc.caps)
+		if plan.Preferred != tc.want || plan.CanBind != tc.canBind {
+			t.Errorf("%s: PlanFor = %+v, want mechanism %q canBind %v",
+				tc.name, plan, tc.want, tc.canBind)
 		}
+	}
+}
+
+// The override keeps the decision testable on any machine: the same binary that
+// runs on Windows can assert what Linux would do.
+func TestPlatformPlanOverride(t *testing.T) {
+	if got := PlatformPlan("linux", Capabilities{BindRO: true}); got.Preferred != MechanismBindRO {
+		t.Fatalf("override plan = %+v, want bind-ro", got)
+	}
+	if got := PlatformPlan("linux", Capabilities{}); got.Preferred != MechanismCopyRO || got.CanBind {
+		t.Fatalf("no-capability override plan = %+v, want copy-ro without a bind attempt", got)
 	}
 }
 
@@ -104,6 +128,8 @@ func TestMountBindsAFrozenSnapshotNotTheBundle(t *testing.T) {
 		SkillsDir:   bundles,
 		SnapshotDir: snapshots,
 		Platform:    "linux",
+		// A host with the capability: the bind path is the one under test.
+		Capabilities: &Capabilities{BindRO: true},
 		BindMount: func(src, dst string) error {
 			calls = append(calls, [2]string{src, dst})
 			// A real bind makes the snapshot's files visible at dst; the fake
@@ -165,10 +191,11 @@ func TestMountDegradesWhenBindIsRefused(t *testing.T) {
 	result, err := Mount(root, []*contracts.Skill{
 		{ID: "skl_1", Name: "review", BundleKey: "review-1", Enabled: true},
 	}, nil, Options{
-		SkillsDir:   bundles,
-		SnapshotDir: filepath.Join(t.TempDir(), "snapshots"),
-		Platform:    "linux",
-		BindMount:   func(string, string) error { return os.ErrPermission },
+		SkillsDir:    bundles,
+		SnapshotDir:  filepath.Join(t.TempDir(), "snapshots"),
+		Platform:     "linux",
+		Capabilities: &Capabilities{BindRO: true},
+		BindMount:    func(string, string) error { return os.ErrPermission },
 	})
 	if err != nil {
 		t.Fatalf("Mount: %v", err)
@@ -182,6 +209,59 @@ func TestMountDegradesWhenBindIsRefused(t *testing.T) {
 	skillFile := filepath.Join(result.Mounted[0].Dir, "SKILL.md")
 	if err := os.WriteFile(skillFile, []byte("nope\n"), 0o644); err == nil {
 		t.Fatal("the fallback copy is writable")
+	}
+}
+
+// The default deployment: no CAP_SYS_ADMIN, so no bind is attempted and no
+// snapshot is created (there is nothing to share), and the mechanism is copy-ro
+// rather than the writable `copy`. The read-only bits have to hold for this
+// process; a root process that still carries CAP_DAC_OVERRIDE is the one case
+// where the probe may only report `copy`, and the test follows the probe rather
+// than the platform so it stays honest on such a host.
+func TestNoCapabilityIsAReadOnlyCopyWithoutASnapshot(t *testing.T) {
+	bundles := t.TempDir()
+	writeBundle(t, bundles, "review-1", "Review\n")
+	root := filepath.Join(t.TempDir(), "repo")
+	t.Cleanup(func() { _ = chmodTree(root, false) })
+	snapshots := filepath.Join(t.TempDir(), "snapshots")
+
+	binds := 0
+	result, err := Mount(root, []*contracts.Skill{
+		{ID: "skl_1", Name: "review", BundleKey: "review-1", Enabled: true},
+	}, nil, Options{
+		SkillsDir:    bundles,
+		SnapshotDir:  snapshots,
+		Platform:     "linux",
+		Capabilities: &Capabilities{BindRO: false},
+		BindMount: func(string, string) error {
+			binds++
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	if binds != 0 {
+		t.Fatalf("a bind was attempted without CAP_SYS_ADMIN (%d calls)", binds)
+	}
+	if _, serr := os.Stat(snapshots); !os.IsNotExist(serr) {
+		t.Fatalf("a snapshot directory was created although no mount could use it: %v", serr)
+	}
+	if len(result.Warnings) != 0 {
+		t.Fatalf("warnings = %v, want none: copy-ro is the correct answer here, not a degradation", result.Warnings)
+	}
+
+	mounted := result.Mounted[0]
+	want := string(MechanismCopyRO)
+	if mountedFileIsWritable(mounted.Dir) {
+		want = string(MechanismCopy)
+	}
+	if mounted.Mechanism != want {
+		t.Fatalf("mechanism = %q, want %q (writable=%v)", mounted.Mechanism, want, want == string(MechanismCopy))
+	}
+	// Whatever the probe said, the source bundle is not what the agent sees.
+	if filepath.Clean(mounted.Dir) == filepath.Clean(filepath.Join(bundles, "review-1")) {
+		t.Fatal("the worktree path is the bundle path")
 	}
 }
 

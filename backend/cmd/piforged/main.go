@@ -35,6 +35,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/bootstrap"
 	"github.com/piforge/piforge/backend/internal/browser"
+	"github.com/piforge/piforge/backend/internal/capabilities"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/crypto"
 	"github.com/piforge/piforge/backend/internal/fsx"
@@ -272,6 +273,27 @@ func run() error {
 	// only other place it surfaces is a refusal. Say it once at startup.
 	logger.Info("parallel branch limit", "branches", parallelLimit, "max", httpapi.MaxParallelLimit)
 
+	// FR-14.2 without CAP_SYS_ADMIN: the default mechanism is a read-only copy,
+	// and the one capability that can silently defeat it is CAP_DAC_OVERRIDE —
+	// a root process holding it ignores the 0444 that marks a copied skill
+	// read-only. It cannot be given up from inside the process (Linux lets a
+	// thread change only its own capability set, and Go runs goroutines on many
+	// threads), so the deployment drops it. Say which mechanism this deployment
+	// will therefore report, and what to do when it is the unwelcome answer.
+	switch {
+	case capabilities.HasSysAdmin():
+		logger.Info("skill mounts use read-only bind mounts",
+			"mechanism", "bind-ro",
+			"reason", "CAP_SYS_ADMIN is present: the kernel enforces the mount and sessions share one snapshot")
+	case capabilities.DACOverrideEffective():
+		logger.Warn("skill mounts will report copy, not copy-ro",
+			"reason", "this root process still carries CAP_DAC_OVERRIDE, so 0444 does not stop writes",
+			"fix", "start the container with --cap-drop=DAC_OVERRIDE (docker-compose.yml does this by default)")
+	default:
+		logger.Info("skill mounts use read-only copies",
+			"mechanism", "copy-ro",
+			"reason", "no CAP_SYS_ADMIN and no CAP_DAC_OVERRIDE: file modes are enforced by the platform")
+	}
 
 	// A mixed deployment is allowed, never accidental. Saying it out loud is the
 	// difference between a bug report about "the panel shows the wrong file" and a

@@ -149,6 +149,11 @@ type Options struct {
 	SnapshotDir string
 	// Platform overrides runtime.GOOS for tests of the mechanism decision.
 	Platform string
+	// Capabilities overrides the runtime capability probe. Nil probes this
+	// process, which is what a deployment gets: a container started without
+	// SYS_ADMIN reports copy-ro, one started with it reports bind-ro. Tests set
+	// it to exercise both without privileges.
+	Capabilities *Capabilities
 	// BindMount overrides the kernel bind mount. Nil uses the real one on
 	// Linux; tests use it to exercise the bind path without privileges.
 	BindMount func(source, target string) error
@@ -225,7 +230,7 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 	// The platform decision is made once per pass; a per-skill kernel refusal
 	// still degrades that skill to copy-ro and says so. The mount is never
 	// pointed at the live bundle: a running session keeps what it was given.
-	preferred := platformMechanism(opts.Platform)
+	plan := platformPlan(opts)
 	snapshots := snapshotRoot(root, opts)
 
 	for _, slug := range names {
@@ -267,7 +272,7 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 			continue
 		}
 
-		used, warning, err := installSkill(root, snapshots, target, entry.source, slug, preferred, opts)
+		used, warning, err := installSkill(root, snapshots, target, entry.source, slug, plan, opts)
 		if err != nil {
 			// A bundle that cannot be installed is not a transient condition:
 			// a symlink inside it, a full disk, or a denied write would keep
@@ -471,19 +476,29 @@ func isMountedSkill(target string) bool {
 	return err == nil
 }
 
+// platformPlan resolves the decision for this pass: the capability override when
+// a test (or an operator) provides one, otherwise the process's own set.
+func platformPlan(opts Options) Plan {
+	caps := ProbeCapabilities()
+	if opts.Capabilities != nil {
+		caps = *opts.Capabilities
+	}
+	return PlatformPlan(opts.Platform, caps)
+}
+
 // installSkill creates the mounted tree for one skill and reports the mechanism
 // that actually succeeded.
 //
-// The preferred mechanism is bind-ro on Linux: a snapshot is taken first, then
-// bind-mounted read-only, so the mount is both frozen and cheap. When the kernel
-// refuses (an unprivileged container without CAP_SYS_ADMIN is the common case),
-// the reason is returned as a warning and the skill degrades to a copy, whose
-// mechanism is probed rather than assumed (copy-ro when the read-only bits hold
-// for this process, copy when root can bypass them). The reverse never happens:
-// a platform without bind mounts does not pretend.
-func installSkill(root, snapshots, target, source, slug string, preferred Mechanism, opts Options) (string, string, error) {
+// bind-ro is tried first when the process may bind: a snapshot is taken first,
+// then bind-mounted read-only, so the mount is both frozen and cheap. Everywhere
+// else — another platform, or Linux without CAP_SYS_ADMIN — the tree is a
+// read-only copy, which needs no capability. The copy's read-only promise is
+// probed rather than assumed (copy-ro when the bits hold for this process, copy
+// when root can still bypass them); the reverse never happens: a platform
+// without bind mounts does not pretend.
+func installSkill(root, snapshots, target, source, slug string, plan Plan, opts Options) (string, string, error) {
 	warning := ""
-	if preferred == MechanismBindRO {
+	if plan.CanBind {
 		snapshot := filepath.Join(snapshots, slug)
 		if err := ensureSnapshot(snapshot, source, opts); err != nil {
 			warning = fmt.Sprintf("could not take a mount snapshot (%v); copying instead", err)
@@ -498,6 +513,10 @@ func installSkill(root, snapshots, target, source, slug string, preferred Mechan
 			if err := bind(snapshot, target); err == nil {
 				return string(MechanismBindRO), "", nil
 			} else {
+				// The capability was there but the kernel still said no (a
+				// seccomp profile, an AppArmor rule, a filesystem that refuses
+				// mounts). The copy below is still read-only where this process
+				// honours the bits, and the warning names what happened.
 				warning = fmt.Sprintf("bind mount refused (%v); using a read-only copy", err)
 			}
 		}
@@ -508,10 +527,10 @@ func installSkill(root, snapshots, target, source, slug string, preferred Mechan
 	// Permission bits are not a guarantee: root ignores them. Probe by opening
 	// the mounted SKILL.md for writing (without truncating). If it opens, the
 	// tree is a frozen copy but not a read-only one, and the mechanism has to
-	// say so — a deployment without mount capability would otherwise report a
-	// guarantee it does not have.
+	// say so — a process that still carries CAP_DAC_OVERRIDE would otherwise
+	// report a guarantee it does not have.
 	if mountedFileIsWritable(target) {
-		return string(MechanismCopy), "the mounted copy is writable by this process (root without CAP_SYS_ADMIN); the tree is frozen but not read-only", nil
+		return string(MechanismCopy), "the mounted copy is writable by this process (root without CAP_SYS_ADMIN and with CAP_DAC_OVERRIDE); the tree is frozen but not read-only", nil
 	}
 	return string(MechanismCopyRO), warning, nil
 }

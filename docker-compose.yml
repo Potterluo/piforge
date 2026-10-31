@@ -47,6 +47,22 @@ services:
       PIFORGE_DEFAULT_PROVIDER: ${PIFORGE_DEFAULT_PROVIDER:-shared-anthropic}
     volumes:
       - piforge-data:/data
+    # Two deliberate capability decisions (FR-14.2):
+    #
+    #   * SYS_ADMIN is NOT added. It is optional, not required: without it a
+    #     session's skills are read-only copies (`copy-ro`). Adding it would
+    #     upgrade the mechanism to read-only bind mounts (`bind-ro`), where the
+    #     kernel enforces read-only and sessions share one frozen snapshot
+    #     instead of each holding a copy. A broad capability weakens the
+    #     container boundary, so it is not the default.
+    #   * DAC_OVERRIDE is dropped. The control plane runs as root, and root with
+    #     CAP_DAC_OVERRIDE ignores the 0444 that makes a copied skill read-only.
+    #     Dropping it is what makes `copy-ro` true instead of aspirational; it
+    #     costs nothing because every file the control plane writes is its own.
+    #     Without this line the product still works but reports `copy`, not
+    #     `copy-ro`, rather than claiming a guarantee it does not have.
+    cap_drop:
+      - DAC_OVERRIDE
     # The control plane spawns shells and chromium; give it room for both.
     shm_size: "1gb"
     restart: unless-stopped

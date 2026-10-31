@@ -66,25 +66,28 @@ export function SessionSkillsSection({ sessionId }: { sessionId: string }) {
                   v{record.version || "0.0.0"}
                 </Badge>
                 {(() => {
-                  // FR-14.2: say which mechanism is actually in use. A Windows
-                  // deployment is a read-only copy; calling it a bind mount would
-                  // be a claim the platform cannot keep.
+                  // FR-14.2: say which mechanism is actually in use, in one
+                  // sentence a screen reader and a hover both get. The three
+                  // differences are real: a bind mount refuses every write, a
+                  // read-only copy refuses overwriting an existing file but the
+                  // agent can still create a new one in the directory (a copy is
+                  // not a mount), and a frozen-but-writable copy is not read-only
+                  // at all.
                   const slug = record.mounted_path.split("/").filter(Boolean).pop() ?? "";
                   const mechanism = query.data?.mechanisms?.[slug];
                   if (!mechanism) return null;
                   const copy = {
                     "bind-ro": {
                       label: "只读挂载",
-                      title: "只读 bind mount：内核拒绝写入，多个会话可共享同一份快照",
+                      title: "只读挂载：agent 无法改写技能",
                     },
                     "copy-ro": {
                       label: "只读副本",
-                      title: "只读副本：每个工作区一份，文件标记为只读（平台不提供 bind mount）",
+                      title: "只读副本：agent 无法覆盖，但可新建文件",
                     },
                     copy: {
                       label: "副本（未只读）",
-                      title:
-                        "冻结副本，但当前进程能绕过只读位（Linux root 且无 CAP_SYS_ADMIN）；写入不会影响其他会话，但这棵树不是只读的",
+                      title: "冻结副本（未只读）：当前进程能绕过只读位；写入不会影响其他会话，但这棵树不是只读的",
                     },
                   }[mechanism] ?? { label: mechanism, title: mechanism };
                   return (
@@ -94,6 +97,7 @@ export function SessionSkillsSection({ sessionId }: { sessionId: string }) {
                       data-testid="session-skill-mechanism"
                       data-mechanism={mechanism}
                       title={copy.title}
+                      aria-label={copy.title}
                     >
                       {copy.label}
                     </Badge>

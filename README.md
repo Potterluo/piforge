@@ -193,6 +193,21 @@ config shrinks. Anything it writes goes into `.git/info/exclude`, never
 `.gitignore` — mounted tooling is not the user's change and must not appear in
 their diff.
 
+**A skill tree is frozen per session, and read-only without extra capabilities.**
+The mechanism is decided at runtime and named in the UI: a read-only bind mount
+(`bind-ro`) when `CAP_SYS_ADMIN` is available, otherwise a read-only copy
+(`copy-ro`). `copy-ro` needs no capability — the files are 0444/0555, and Windows
+maps that to `FILE_ATTRIBUTE_READONLY` — but the image runs as root, and root
+ignores those bits through `CAP_DAC_OVERRIDE`. The deployment therefore drops
+that one capability (`cap_drop: [DAC_OVERRIDE]`, which costs nothing: every file
+the control plane writes is its own); without the drop the product still starts,
+but reports `copy` (frozen, writable) instead of pretending. `SYS_ADMIN` is
+optional: it upgrades the mechanism (the kernel enforces the mount, and many
+sessions can share one snapshot instead of each holding a copy), not the
+correctness. A session's snapshot lives under `<data>/skill-snapshots/<session>`
+and is deleted with its session or project; the janitor sweeps the ones a crash
+leaves behind.
+
 **One Chrome per sandbox, watched over CDP.** The profile lives in the sandbox root
 (so deleting a sandbox deletes the cookies) and outside the checkout (so it never
 shows up in `git status`). Frames come down as binary JPEG on the same WebSocket

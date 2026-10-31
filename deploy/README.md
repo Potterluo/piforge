@@ -63,6 +63,7 @@ script moves the file aside for the duration of the build.
 
 ```bash
 docker run -d --init -p 7700:7700 \
+  --cap-drop DAC_OVERRIDE \
   -e PIFORGE_SEED_EMAIL=admin@piforge.local \
   -e PIFORGE_SEED_PASSWORD=change-me \
   -e PIFORGE_MASTER_KEY="$(openssl rand -base64 32)" \
@@ -72,6 +73,18 @@ docker run -d --init -p 7700:7700 \
 
 `-e HTTPS_PROXY=...` is needed when the container cannot reach the model endpoint
 directly; the model gateway runs inside the container and inherits it.
+
+**Do not add `--cap-add SYS_ADMIN`, and do keep `--cap-drop DAC_OVERRIDE`.**
+Skills are projected into a session as a read-only copy (`copy-ro`) by default.
+Copying marks the files 0444/0555, and dropping `CAP_DAC_OVERRIDE` is what makes
+those bits hold for the root user the image runs as; every file the control plane
+writes is its own, so the capability buys nothing. `SYS_ADMIN` only upgrades the
+mechanism to a read-only bind mount (`bind-ro`): the kernel enforces it and
+sessions share one frozen snapshot instead of each holding a copy. It changes the
+mechanism, not whether the tree is read-only, and a broad capability weakens the
+container boundary. The badge in the session's info sheet names what is actually
+in effect (「只读挂载」 vs 「只读副本」). Without the `cap_drop` the product still
+starts, but reports `copy` (frozen but writable) instead of pretending.
 
 ## Two containers: moving the Docker socket out of the control plane
 

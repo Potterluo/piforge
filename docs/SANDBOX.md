@@ -521,3 +521,56 @@ workspaceremote 的单测覆盖，PNG 和文本都能原样取回。
 1. **agent-sandbox 的 warm pool 是真的**（claim p50 92ms vs 冷启 42–50s），但它没有放每沙箱凭据的位置，模板默认也只允许 router 入站、阻断内网与集群 DNS——用了它，凭据与网络策略都得自己补。
 2. **BoxLite 的隔离是真的**（libkrun + KVM），但本地 serve 不发布端口、无 CDP、文件只有 tar，且 `apps/` 是 AGPL-3.0（不可碰）。它替代不了面板沙箱。
 3. **Genet 唯一值得抄的是顺序**：先固化、后释放（已落进 `internal/reaper`）。它的 `nerdctl commit` 当 Pause 对我们是有害的——工作区在 bind mount 里，不在容器可写层。
+
+## Skill 的只读机制：SYS_ADMIN 是加速项，不是前提
+
+FR-14.2 要把用户配置的 skill 以**只读**方式放进每个会话的 checkout。实现按运行时能力
+选机制，并把实际用的那个名字记进 `.pi/mounted.json`、由 API 和 UI 一起报出来：
+
+| 机制 | 什么时候用 | 谁在拒绝写入 | 代价 |
+|---|---|---|---|
+| `bind-ro` | Linux 且进程的 `CapEff` 有 `CAP_SYS_ADMIN` | 内核（bind mount + remount `MS_RDONLY`） | 每个会话一份快照，但多个会话可共用 |
+| `copy-ro` | **默认**：Windows/macOS，以及没有 `CAP_SYS_ADMIN` 的 Linux | 权限位（文件 0444、目录 0555）；Windows 是 `FILE_ATTRIBUTE_READONLY` | 每个 worktree 一份副本，大 skill 集会重复占盘 |
+| `copy` | 只有在 copy-ro 也拦不住时（root 仍持有 `CAP_DAC_OVERRIDE` 的进程） | 没人拦：树是冻结的，但不是只读的 | 必须在 UI 与台账里写明 |
+
+决策顺序写死在 `internal/materialize/mount_plan.go` 的 `PlanFor`：**绝不是**先试 mount
+失败再降级成「能写也说自己只读」。`copy` 不是计划，它是 copy 之后用「以写方式打开
+`SKILL.md`」探测出来的结果；只有探测到真能写才会记 `copy` 并附 warning。
+
+### 为什么默认不需要 SYS_ADMIN
+
+`copy-ro` 不需要任何 capability。镜像里的控制面以 root 运行，而 root 默认带
+`CAP_DAC_OVERRIDE`，会忽略 0444——所以**默认部署把它丢掉**（compose 的
+`cap_drop: [DAC_OVERRIDE]`，等价于 `docker run --cap-drop DAC_OVERRIDE`）。这不是加权限，
+而是减权限；控制面写的每个文件都是它自己的，按属主权限就够，所以丢掉它没有代价，却让
+`copy-ro` 从「声称」变成「事实」。为什么不在进程里自己丢：Linux 只允许线程改**自己**的
+capability 集（对别的 tid 调 `capset` 返回 EPERM），而 Go 的 goroutine 跑在多条 OS 线程上，
+进程内丢只能覆盖一条线程——那样的「只读」取决于调度，不能写进台账。
+
+有 `SYS_ADMIN` 时用 bind-ro，内核已经用挂载保证只读，`DAC_OVERRIDE` 是否被丢都不影响结论。
+
+因此 `docker-compose.yml` / `deploy/README.md` 的默认部署**不加** `--cap-add SYS_ADMIN`，
+并且**丢** `DAC_OVERRIDE`。加 `SYS_ADMIN` 是可选的升级：内核强制、会话共享快照；不加也不
+影响「agent 改不了已有 skill 文件」这个正确性结论。忘了丢 `DAC_OVERRIDE` 时产品照常启动，
+但机制会诚实报 `copy`（冻结但可写）并在启动日志里点名该加 `--cap-drop`。两者的差别是
+真实的，UI 徽章的 tooltip 各写一句：
+
+- 「只读挂载：agent 无法改写技能」
+- 「只读副本：agent 无法覆盖，但可新建文件」（副本不是挂载，不假装）
+
+验证：`materialize/mount_plan_test.go` 的判定表（有/无 capability、非 Linux 平台一律
+copy-ro）、`provision/skill_mount_test.go` 走 sandbox 的 Exec 路径写被拒、部署探针在**没有**
+`SYS_ADMIN` 的容器上应报 `copy-ro` 且 API 写入被拒（`e2e/scripts/no-cap-skill-probe.mjs`）。
+
+### 快照的生命周期
+
+`bind-ro` 的挂载源是 `<data>/skill-snapshots/<session>`（会话 id 直接作目录名，旧版本是
+它的 slug；清扫两种都认）。它不属于任何 checkout，所以：
+
+- 删会话 → 删该目录；删项目 → 删该项目**所有**会话的目录（分支会话有自己的 worktree，
+  因此也有自己的快照）；
+- janitor 在启动时与每个 `-sandbox-sweep` 周期扫一遍「目录名像会话、但数据库里没有这个
+  会话」的快照，删除前先 `umount(MNT_DETACH)`（还在被挂载时不 detach 会 EBUSY）；单个失败
+  只记 warn 并等下一轮，不中断整轮；
+- 日志一行给出数量与字节数：`janitor: removed orphaned skill snapshots count=… bytes=… freed=…`；
+- 会话清理是尽力而为：删行之后删目录，失败留给 janitor（会话行已经没了，目录一定成孤儿）。

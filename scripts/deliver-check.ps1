@@ -405,6 +405,14 @@ try {
         "run", "-d",
         "--name", $ContainerName,
         "-p", "${Port}:7700",
+        # The same capability decision as the default deployment (FR-14.2): no
+        # SYS_ADMIN (a bind mount is an upgrade, not a requirement), and
+        # DAC_OVERRIDE dropped so a read-only skill copy is enforced even though
+        # the control plane runs as root. None of the drill's checks mount a
+        # skill, so this is about proving the shipped shape starts and works —
+        # a drill that needed a capability the product no longer asks for would
+        # be testing a deployment nobody runs.
+        "--cap-drop", "DAC_OVERRIDE",
         "-v", "${VolumeName}:/data",
         "-e", "PIFORGE_SEED_EMAIL=$SeedAdminEmail",
         "-e", "PIFORGE_SEED_PASSWORD=$SeedAdminPassword",
