@@ -1067,7 +1067,7 @@ UI：徽章的 `title` 与 `aria-label` 各一句可访问说明，区别是真�
 - `pnpm --dir web test -- --run`：**31 个文件 / 256 例通过**（`web-test.log`）。
 - `pnpm --dir web exec next build`：退出 0（`web-build.log`）。
 - 完整 e2e：**174 passed**（原 173 + 新 `85-recovery.spec.ts`，同一份 `.data`；`e2e-full.log`）。
-- `pwsh scripts/deliver-check.ps1`：`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入（未打印、未落盘），**119 条 `[PASS]` / 0 FAIL**，`pf-local` 全程未被触碰；`deliver-check.log`。
+- `pwsh scripts/deliver-check.ps1`：`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入（只在本进程环境里，未打印、未落盘），run `20261031-170720`，**119 条 `[PASS]` / 0 FAIL**（`summary.json` 的 `checks` 长度 119、`failure` 为 null）；drill 镜像 id 与部署的同一个 `sha256:32d0cc88…`；`pf-local` 全程未被触碰（前后容器 id 都是 `88707cf4…`，`/healthz` 200），drill 容器/卷已删除，source checkout 干净；`deliver-check.log`。
 - 证据目录：`e2e/.artifacts/fix-recovery/`（`fail-first-go.log`、`go-unit-pass.log`、`fail-first-e2e.log`、`e2e-pass.log`、`e2e-full.log`、`web-test.log`、`web-build.log`、`go-build.log`、`go-vet.log`、`go-test.log`、`build-image.log`、`deploy.log`、`startup.log`、`probe.json`、`probe-console.log`、`01-stop-marker.png`、`02-stop-continued-turn.png`、`03-restart-marker.png`、`deliver-check.log`）。
 
 ### 8. 边界（明确没做的）
