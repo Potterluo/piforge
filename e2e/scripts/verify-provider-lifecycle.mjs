@@ -42,6 +42,16 @@ const shot = async (name) => {
   evidence.screenshots.push(name);
 };
 
+/** State-changing API calls need the double-submit CSRF header (as the UI does). */
+const csrf = async () =>
+  (await context.cookies()).find((cookie) => cookie.name === "pf_csrf")?.value ?? "";
+const api = async (method, route, data) =>
+  page.request.fetch(`${base}${route}`, {
+    method,
+    headers: { "X-PF-CSRF": await csrf() },
+    data,
+  });
+
 try {
   await page.goto(`${base}/login`);
   await page.getByTestId("login-email").fill(DEV.email);
@@ -52,24 +62,28 @@ try {
 
   // Create the dying provider, a project and a session pinned to it.
   const providerName = `accept3-ui-${stamp}`;
-  const created = await page.request.post(`${base}/v1/providers`, {
-    data: {
-      name: providerName,
-      api: "openai-compat",
-      base_url: "https://example.invalid/v1",
-      api_key: "sk-ui-probe-not-real",
-      models: [{ id: "ui-probe-model" }],
-    },
+  const created = await api("POST", "/v1/providers", {
+    name: providerName,
+    api: "openai-compat",
+    base_url: "https://example.invalid/v1",
+    api_key: "sk-ui-probe-not-real",
+    models: [{ id: "ui-probe-model" }],
   });
-  const providerId = (await created.json()).provider.id;
+  const createdBody = await created.json();
+  if (!createdBody?.provider?.id) {
+    throw new Error(`create provider failed: ${created.status()} ${JSON.stringify(createdBody)}`);
+  }
+  const providerId = createdBody.provider.id;
   step("create provider", { status: created.status(), name: providerName });
 
-  const projectRes = await page.request.post(`${base}/v1/projects`, {
-    data: { name: `accept3-ui-${stamp}`, repo_url: "" },
+  const projectRes = await api("POST", "/v1/projects", {
+    name: `accept3-ui-${stamp}`,
+    repo_url: "",
   });
   const projectId = (await projectRes.json()).project.id;
-  const sessionRes = await page.request.post(`${base}/v1/projects/${projectId}/sessions`, {
-    data: { title: "provider deleted under me", model_ref: `${providerName}/ui-probe-model` },
+  const sessionRes = await api("POST", `/v1/projects/${projectId}/sessions`, {
+    title: "provider deleted under me",
+    model_ref: `${providerName}/ui-probe-model`,
   });
   const sessionId = (await sessionRes.json()).session.id;
   step("create session", { status: sessionRes.status(), projectId, sessionId });
@@ -79,7 +93,7 @@ try {
   await shot("01-session-before-delete.png");
 
   // The provider disappears under the open session, as in the acceptance run.
-  const removed = await page.request.delete(`${base}/v1/providers/${providerId}`);
+  const removed = await api("DELETE", `/v1/providers/${providerId}`);
   step("delete provider", { status: removed.status() });
 
   // The header must not keep showing a dead model as if it worked, and must
@@ -105,9 +119,15 @@ try {
   await shot("03-fallback-toast.png");
 
   await page.getByTestId("turn-user").first().waitFor({ timeout: 40_000 });
-  await page.getByTestId("run-state").and(page.locator('[data-state="settled"]')).waitFor({
-    timeout: 120_000,
-  });
+  // `run-state` is a hidden marker span, so wait for its attribute rather than
+  // for visibility (the same signal the e2e suite reads).
+  await page.waitForFunction(
+    () =>
+      document.querySelector('[data-testid="run-state"]')?.getAttribute("data-state") ===
+      "settled",
+    undefined,
+    { timeout: 180_000 },
+  );
   const metaAfter = (await page.getByTestId("session-meta").textContent()) ?? "";
   step("header after the run", { text: metaAfter, has_unknown: /unknown/i.test(metaAfter) });
   await shot("04-session-recovered.png");
@@ -132,7 +152,7 @@ try {
 
   // FIX 3 / compare: the explanation is on the page, and the main session still
   // reports 0 files (correct, now explained).
-  const clone = await page.request.post(`${base}/v1/sessions/${sessionId}/clone`, { data: {} });
+  const clone = await api("POST", `/v1/sessions/${sessionId}/clone`, {});
   const cloneId = (await clone.json()).session.id;
   await page.goto(`${base}/p/${projectId}/compare?ids=${sessionId},${cloneId}`);
   const explainer = page.getByTestId("compare-explainer");
@@ -151,9 +171,9 @@ try {
   await page.keyboard.press("Escape");
 
   // Cleanup: this probe owns the sessions and the project.
-  await page.request.delete(`${base}/v1/sessions/${cloneId}`);
-  await page.request.delete(`${base}/v1/sessions/${sessionId}`);
-  await page.request.delete(`${base}/v1/projects/${projectId}`);
+  await api("DELETE", `/v1/sessions/${cloneId}`);
+  await api("DELETE", `/v1/sessions/${sessionId}`);
+  await api("DELETE", `/v1/projects/${projectId}`);
   step("cleanup", { ok: true });
 
   evidence.console = log.slice(0, 50);
