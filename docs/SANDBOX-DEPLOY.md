@@ -702,7 +702,9 @@ marker 是**死掉的 launcher 最后一次心跳**，所以 2 分钟 TTL 到期
 
 1. **agent 在控制面容器里执行，不在沙箱里。**（**2026-10-31 部分成立**：这一节描述的是默认
    行为；`-agent-in-sandbox` 下 `pi` 已经在沙箱里跑，`/data` 也读不到了，证据与代价见 §1.4.3。
-   默认仍然是"控制面里执行"，因为这个 flag 还没经过阶段二/三。）上面的 `ps`、pi 的 cwd
+   **2026-11-01 起更进一步**：同一个 flag 下控制面也不再挂工作区，技能投影与分支 worktree 全部经
+   沙箱 API，见 §1.4.4。默认仍然是"控制面里执行"，因为存活（阶段三）还没做，flag 默认关闭。）
+   上面的 `ps`、pi 的 cwd
    （`/data/sandboxes/<u>/<p>/repo`）、以及 marker 位置（`<pair>/.piforge/live/…`，由控制面
    写、经沙箱 API 读）都是同一条事实。后果：
    - **"agent 代码在沙箱里跑"这句话，对本地实现不成立**——沙箱是**工作区**边界（文件、终端、
@@ -912,8 +914,9 @@ after :  ps 里没有 agent-launcher，也没有 pi；/workspace/.piforge/live �
 
 **仍然不是默认**：`-agent-in-sandbox` 默认关闭。它要求沙箱镜像里有 `pi` 和
 `/opt/piforge/piforged`（否则启动失败，不会静默退回控制面），要求控制面能按名字访问
-gateway，而且上面第 7 条的代价还在。阶段二/三/四（`materialize` 走文件 API、脱离共享卷、
-常驻 supervisor、K8s 的 `pods/exec`）见 `docs/EXECUTION-BOUNDARY.md` §10。
+gateway，而且上面第 7 条的代价还在。阶段三/四（常驻 supervisor、控制面重连、MCP 凭据代理、
+K8s 的 `pods/exec`）见 `docs/EXECUTION-BOUNDARY.md` §10。阶段二（`materialize` 走文件 API、
+脱离共享卷）已经做完，见下面的 §1.4.4。
 
 上面第 1–6 条的证据来自第一次演练（`de5061b` / `e30cbb5` / `3661297`）。此后代码又加了两处
 防御性改动（fork 把 Pi 报回的**容器路径**原样接受；`models.json` 不存在时按本地同样的
