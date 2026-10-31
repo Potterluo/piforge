@@ -1328,3 +1328,46 @@ TCP 连接，重启即 EOF，`pi` 退出、marker 被 launcher 删除，于是�
 `pnpm --dir web test -- --run` 272/272、e2e 182/182、`deliver-check.ps1 -Image
 piforge:agent-drill` 119 PASS（run `20261031-235815`）。清理：两个服务容器、四个
 `piforge-*` 沙箱、卷 `pf-drill-data`、网络 `pf-drill-net`、三个镜像已删。
+
+
+## 本批：工作区不再经过共享卷（stage 2，`-agent-in-sandbox`，默认关闭）
+
+`docs/EXECUTION-BOUNDARY.md` 阶段二。上一批（阶段一）留下的原话是：`materialize`/`provision`
+仍写共享卷，所以控制面仍必须挂载工作区。这一批把那一半搬走：**控制面完全不挂工作区**。
+
+**改了什么**（按用户可见的顺序）：
+
+1. **沙箱的 workspace 变成它自己的卷**。`piforge-ws-<pair hash>`，只挂在沙箱的 `/workspace`；
+   `docker inspect` 里控制面只有状态卷、runner 只有 docker socket，挂这块卷的只有沙箱自己。
+   挂载形状从**容器自己的记录**里认（卷名 = 容器名的 hash、无 subpath），不是从 flag 认，
+   所以重启后的控制面和无状态 runner 对同一个容器得到同一个答案。
+2. **沙箱行记录"工作区在哪"**：`sandboxes.workspace` = `host` | `api`，`root_dir` 在 detached
+   形状下是容器路径 `/workspace`。之后每一次写都读这一列，而不是读一个内存里的 flag。
+3. **投影只有一份实现，两棵树**。`materialize.FileSystem` 抽出 `MkdirAll/WriteFile/ReadFile/
+   Lookup/List/RemoveAll/MakeReadOnly/MakeWritable/CanBind`；`Mount`（宿主）与 `MountFS`（沙箱
+   文件 API）共用冻结规则、manifest、git exclude、digest 框架。provision 与 tooling 面板都经
+   `WorkspaceFiles` 问沙箱，宿主路径不再出现。
+4. **分支 worktree 的路径就是容器路径**（`/workspace/worktrees/<slug>`），面板/终端/git 用同
+   一条字符串；`git worktree list` 在沙箱里能看到它，`.git` 文件里是容器路径。
+5. **两个 workaround 按同一个位判断去留**：`planCheckout` 的 `chmod -R a+rwX` 和 git 的
+   `safe.directory` 在 detached 形状里**不再注入**（只有一个写者、树本来就是 gem 的），在共享卷
+   形状里**照旧注入**（那里确实有第二个写者，即 root 控制面）。没有"顺手放宽"。
+
+**没有做的（写在 `EXECUTION-BOUNDARY.md` §10.1，不藏）**：`worktrees.base_commit` 在 detached
+形状下为空（读 HEAD 需要容器里的 git，runner 没有 exec 端点）；agent stderr 仍进 runner 日志而
+不是 Logs 面板；marker 仍带 pid 不带 boot id；回收快照与磁盘配额测不到只有容器能打开的工作区
+（两者都是 fail-safe：快照失败就不回收，测不到就不拒绝）；容器内的 `CloneSession` 仍未搬。
+`-agent-in-sandbox` 现在也要求 `-sandbox-files remote`（否则面板没有东西可读），是启动错误。
+
+**验证**：7723 一次性 runner 实例，**不设 `SANDBOX_WORKSPACE_VOLUME`**、runner 不挂 `/data`
+（`pf-local` 未动，前后 `7dc14e4a7525…`、`/healthz` 200）。控制面 `mounts: [volume pf-drill-data
+-> /data]`、`ls /data` 里连 `sandboxes/` 都没有；沙箱 `mounts: [volume piforge-ws-ba8b2e998f171d81
+-> /workspace]`，全机只有它挂这块卷。同一条 prompt 17 s 完成并提交 `ae151cc`（作者
+`PiForge Sandbox|sandbox@piforge.local`）；技能树 `dr-xr-xr-x`/`-r--r--r--`，以 gem 写
+`Permission denied`（覆盖与新建都被拒），`/v1/sessions/<sid>/skills` 的 mechanisms 与
+`.pi/mounted.json` 都是三份 `copy-ro`；分支会话 `git worktree list` 显示
+`/workspace/worktrees/asnbxt4n`；文件面板/测试面板（npm test 3/3）/行内评论（19 ms 接受，提交
+`8bf6b63`）照常；沙箱里 `cat /data/piforge.db` 仍是 `No such file or directory`，env 与
+`models.json` 的 provider key 命中数 0。门禁：`go build/vet/test` 全绿、`pnpm --dir web test --
+--run` 272/272、e2e 182/182、`deliver-check.ps1` 119 PASS。清理：两个服务容器、`piforge-*` 沙箱、
+卷 `piforge-ws-*` 与 `pf-drill-data`、网络 `pf-drill-net`、三个镜像已删。

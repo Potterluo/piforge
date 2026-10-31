@@ -155,18 +155,19 @@ services:
 
 | 方法 | 路径 | 请求体 | 响应 | 对应 `SandboxProvider` |
 |---|---|---|---|---|
-| POST | `/v1/sandboxes` | `{user_id, project_id, image, repo_url, branch, api_port, api_key, cpus, memory, network}` | `200` + record；同名容器已存在则复用 | `Ensure` |
+| POST | `/v1/sandboxes` | `{user_id, project_id, image, repo_url, branch, api_port, api_key, cpus, memory, network, detached_workspace}` | `200` + record；同名容器已存在则复用 | `Ensure` |
 | GET | `/v1/sandboxes/{id}` | — | `200` + record | `Get` |
 | POST | `/v1/sandboxes/{id}/pause` | — | `204` | `Pause` |
 | POST | `/v1/sandboxes/{id}/resume` | — | `200` + record | `Resume` |
 | DELETE | `/v1/sandboxes/{id}` | — | `204`（删容器，**不删工作区**） | `Destroy` |
 | POST | `/v1/sandboxes/{id}/worktrees` | `{repo_dir, path, branch}`（可选 `api_key`） | `204` | `AddWorktree` |
 
-record 是 `{id, state, root_dir, container_path_root, endpoint, api_key?}`：`id` 仍然是
+record 是 `{id, state, root_dir, container_path_root, workspace, endpoint, api_key?}`：`id` 仍然是
 `piforge-<sha256(user/project) 前 8 字节>`，`root_dir` 是共享卷上
-`<SANDBOX_DATA_ROOT>/<user>/<project>`，`container_path_root` 是 `/workspace`（控制面据此
-校验两侧对挂载点的一致理解），`endpoint` 是控制面可达的沙箱 API 地址，`api_key` **只在
-create 的响应里出现一次**（见下）。
+`<SANDBOX_DATA_ROOT>/<user>/<project>`（`detached_workspace=1` 时是容器路径 `/workspace`），
+`container_path_root` 是 `/workspace`（控制面据此校验两侧对挂载点的一致理解），
+`workspace` 是 `host` 或 `api`（阶段二：`api` 表示控制面只能经文件 API 访问工作区），
+`endpoint` 是控制面可达的沙箱 API 地址，`api_key` **只在 create 的响应里出现一次**（见下）。
 
 **没有第七个端点？2026-10-31 起有一个**：`POST /v1/sandboxes/{id}/attach`
 （`{argv, dir, env, user}` → 一条 hijack 的双向字节流）。它不是给用户用的 shell：它是
@@ -266,6 +267,10 @@ volumes:
    宿主路径完全不出现在这条链路上；Linux 宿主和 Docker Desktop 上是同一份配置。
    代价是一个硬性版本要求：**Engine ≥ 25（API 1.45）才有 `volume-subpath`**，更老的引擎
    会在 `docker run` 时直接报错（不是静默降级）。
+   **阶段二之后这一条不是唯一形状**：`-agent-in-sandbox` 打开时沙箱挂的是它**自己的**卷
+   `piforge-ws-<pair hash>`（无 subpath），控制面根本不挂工作区，于是
+   `SANDBOX_WORKSPACE_VOLUME` / `SANDBOX_WORKSPACE_VOLUME_ROOT` 都不再需要（§1.4.4）。
+   两个形状不能同时要求：`DetachedWorkspace` 与 `WorkspaceVolume` 在构造时互斥。
 3. **不发布沙箱端口**。`SANDBOX_CONTAINER_ENDPOINT=1` 让 runner 返回
    `http://piforge-<hash8>:8080`（容器名 + Docker DNS），控制面加入 `piforge-sandboxes`
    就能连。runner 也必须在这个网络上：它自己做 checkout 时要访问这个地址。这一条同时
@@ -917,6 +922,176 @@ gateway，而且上面第 7 条的代价还在。阶段二/三/四（`materializ
 `cat /data/piforge.db` 仍是 `No such file or directory`，一条真实任务 10 s 完成并提交
 `34f92a6`（作者 `PiForge Sandbox|sandbox@piforge.local`）。写完这段后实例再次删除。
 
+### 1.4.4 阶段二：工作区不再经过共享卷（`-agent-in-sandbox`，2026-11-01）
+
+§1.4.3 的"仍然为真"第一条是：`materialize`/`provision` 仍写共享卷，所以控制面仍必须挂载
+工作区。这一轮把那一半搬走了。设计仍是 `docs/EXECUTION-BOUNDARY.md`，这里是**落地的那一步**
+与原始证据。
+
+**形状变了一件事**：沙箱不再从控制面的数据卷里取工作区，而是挂**自己的**卷
+`piforge-ws-<pair hash>`；控制面既没有 `--mount` 也没有 `-v`，`/data` 里连 `sandboxes/`
+目录都不再有（`Ensure` 在 detached 模式下不再 `MkdirAll`）。控制面能做的只有三件事：
+经沙箱 API 写文件、经 runner 建/删容器、看自己的状态卷。
+
+**代码上的三个接缝**（每个都能单独测）：
+
+1. `contracts.WorkspaceMode`（`host` | `api`）落在 `sandboxes.workspace` 列上。它由建挂载的
+   provider 写、由之后所有碰这棵树的人读，重启后仍然成立 —— 比"内存里比一个 flag"可靠。
+2. `materialize.FileSystem`（`internal/materialize/fs.go`）：`Join/IsAbs/Abs/MkdirAll/
+   WriteFile/ReadFile/Lookup/List/RemoveAll/MakeReadOnly/MakeWritable/CanBind`。主机实现就是
+   原来的 `os.*`；沙箱实现（`materialize.SandboxFS`）是文件 API。`Mount` 与 `MountFS` 共用
+   全部规则（冻结、manifest、git exclude、digest 的框架），所以只有一份投影逻辑。
+3. `provision.Config.WorkspaceFiles` + `httpapi` 经 `contracts.Workspace` 读 manifest：
+   打不开的树就问沙箱，不问宿主。
+
+**挂载形状从容器自己的记录里认**，不是从 flag 认：`/workspace` 是名为
+`piforge-ws-<容器名 hash>` 且没有 subpath 的卷，就是 detached。所以重启后的控制面、无状态的
+runner 对一个自己不记得创建过的容器，得到同一个答案。
+
+#### 实测（Windows 11 / Docker Desktop，7723，一次性实例）
+
+与 §1.4.3 的区别只有一个：**不设 `SANDBOX_WORKSPACE_VOLUME`**，runner 不挂 `/data`：
+
+```powershell
+docker network create pf-drill-net; docker volume create pf-drill-data   # 只为控制面状态
+docker run -d --name pf-drill-runner --network pf-drill-net `
+  -e "RUNNER_TOKEN=$tok" -e SANDBOX_RUNNER_ADDR=0.0.0.0:7801 `
+  -e SANDBOX_DATA_ROOT=/data/sandboxes -e SANDBOX_NETWORK=pf-drill-net `
+  -e SANDBOX_CONTAINER_ENDPOINT=1 -e "SANDBOX_IMAGE=piforge/sandbox-agent:agentdrill" `
+  -v /var/run/docker.sock:/var/run/docker.sock piforge/sandbox-runner:agentdrill
+  # ↑ 没有 -e SANDBOX_WORKSPACE_VOLUME / -v pf-drill-data:/data
+docker run -d --name pf-drill-control --network pf-drill-net -p 7723:7700 `
+  -v pf-drill-data:/data --cap-drop DAC_OVERRIDE -e PIFORGE_AGENT_IN_SANDBOX=1 `
+  … piforge:agent-drill
+```
+
+**1. 控制面不挂工作区（`docker inspect`，本轮的核心证据）：**
+
+```
+docker inspect pf-drill-control  ->  mounts: [volume pf-drill-data -> /data]
+docker inspect pf-drill-runner   ->  mounts: [bind /var/run/docker.sock -> /var/run/docker.sock]
+docker inspect piforge-ba8b2e998f171d81
+                                 ->  mounts: [volume piforge-ws-ba8b2e998f171d81 -> /workspace]
+docker volume ls | grep piforge-ws  ->  piforge-ws-ba8b2e998f171d81
+# 谁挂了这块工作区卷：
+docker ps | foreach { mounts -match 'piforge-ws' }  ->  只有 piforge-ba8b2e998f171d81
+```
+
+控制面的 `/data` 里**没有** `sandboxes/`：`ls /data` → `master.key pi-agents piforge.db
+piforge.db-shm piforge.db-wal secret.key skills`。也就是说整个部署里没有任何进程还在
+"往工作区的宿主路径写"，因为那个路径不存在了。
+
+**2. 同一条 prompt 仍然跑完并提交（提交在沙箱里）：**
+
+```
+POST /v1/sessions/<sid>/messages -> accepted（1010 ms）
+run.started -> run.settled       -> 17 s
+docker exec -u gem <sandbox> sh -lc 'cd /workspace/repo && git log --format="%h %an|%ae %s" -2'
+ae151cc PiForge Sandbox|sandbox@piforge.local Add script printing first 10 primes with tests
+bd2f398 PiForge Sandbox|sandbox@piforge.local piforge: initial commit
+git status --porcelain -> 空
+ls -la /workspace/repo -> primes.js、package.json、test/、.pi/（全部 gem:gem）
+```
+
+**3. 技能树是只读的，机制说真话：**
+
+```
+docker exec -u gem <sandbox> ls -la /workspace/repo/.pi/skills
+dr-xr-xr-x 2 gem gem code-review / explain-codebase / test-gap
+-r--r--r-- 1 gem gem …/code-review/SKILL.md 等
+cat /workspace/repo/.pi/mounted.json
+  "mechanisms": {"code-review":"copy-ro","explain-codebase":"copy-ro","test-gap":"copy-ro"}
+
+# 以 agent 的身份尝试写入：
+echo tampered >> …/code-review/SKILL.md  -> sh: cannot create …: Permission denied (exit 2)
+touch …/code-review/extra.md             -> touch: cannot touch …: Permission denied (exit 1)
+head -2 …/code-review/SKILL.md           -> 内容未变（--- / name: code-review）
+GET /v1/sessions/<sid>/skills           -> mechanisms 与 manifest 一致：三份 copy-ro
+```
+
+机制为什么是 `copy-ro` 而不是 `bind-ro`：**bind mount 的命名空间在容器里**，控制面能碰到的
+只有文件 API，没有地方可挂。只读的保证是模式位（0444/0555），而这正是 `copy-ro` 在宿主上
+本来就表示的东西；探针也搬到了沙箱里跑（`test -w`，以 agent 的账号回答），所以徽章说的是
+那个账号的事实，不是控制面进程的事实。前端徽章的文案也按这个事实改了：旧文案说"可新建
+文件"，而这次连新建都被拒绝，说少了也是不准确。
+
+**4. 分支会话的 worktree 整个经沙箱 API 建成：**
+
+```
+docker exec -u gem <sandbox> git -C /workspace/repo worktree list
+/workspace/repo                ae151cc [main]
+/workspace/worktrees/asnbxt4n  ae151cc [piforge/asnbxt4n]
+cat /workspace/worktrees/asnbxt4n/.git
+gitdir: /workspace/repo/.git/worktrees/asnbxt4n      # 容器路径，没有宿主路径
+ls /workspace/worktrees/asnbxt4n/.pi/skills          # 技能同样投影进了分支 worktree
+```
+
+`provision` 这一侧把 `wt.Path` 记成 `/workspace/worktrees/<slug>`（容器路径），面板、终端、
+git 都按同一条路径问沙箱；面板侧不再需要 `ContainerPath` 做翻译，因为两边命名一致。
+
+**5. 面板 / 测试面板 / 行内评论照常（同一实例，同一个会话）：**
+
+```
+GET  /files/tree                     -> test/primes.test.js、package.json、primes.js、panel-note.md
+GET  /files?path=primes.js           -> 200，620 字节，binary=false
+PUT  /files?path=panel-note.md       -> 200
+POST /git/stage + /git/commit        -> 200，1dd4ba8 "panel: a note from the changes panel"
+GET  …/test-runs                     -> npm test，passed 3/3，source=agent，
+                                        command="cd /workspace/repo && node primes.js && npm test 2>&1"
+POST /messages {review_comment:{path,line,body}} -> 19 ms 接受；agent 改注释并提交
+                                        8bf6b63 "Clarify primes.js doc comment (质数) and keep it brief"
+```
+
+**6. 沙箱里仍然没有 `/data`，也没有 provider key：**
+
+```
+docker exec -u gem <sandbox> sh -lc 'ls /data; cat /data/piforge.db; ls /data/sandboxes'
+ls: cannot access '/data': No such file or directory
+cat: /data/piforge.db: No such file or directory
+ls: cannot access '/data/sandboxes': No such file or directory
+docker exec -u gem <sandbox> env | grep -c VOLCE                                   -> 0
+docker exec -u gem <sandbox> grep -c VOLCE /workspace/.piforge/agents/*/models.json -> 0
+```
+
+**7. 谁写、谁所有（这一轮"要不要保留 chmod a+rwX"的答案）：**
+
+```
+/workspace/repo/.pi           drwxr-xr-x gem gem
+/workspace/repo/primes.js     -rw-r--r-- gem gem
+/workspace/worktrees/<slug>   drwxrwxrwx gem gem      # git 建目录时的 umask，gem 所有
+```
+
+只有一个写者（gem，经沙箱 API），所以 `planCheckout` 的 `chmod -R a+rwX` 与 git 的
+`safe.directory` 在 detached 形状里**都不再注入**：前者本来是给"控制面以 root 写进同一棵树"
+用的，后者本来是给"bind mount 让树看起来属于别人"用的。两者都按 `DetachedWorkspace` 这一个
+位判断，而不是删掉 —— 共享卷形状（`-sandbox local`、不加 flag 的 docker/runner）仍然需要它们，
+那里确实还有第二个写者。
+
+**8. 重启控制面：agent 仍会死**（阶段二没有改这个，见 §1.4.3 第 7 条和
+`docs/EXECUTION-BOUNDARY.md` §6；存活是阶段三）。这一轮没有重测这一条，因为它与阶段一
+同一条通道，代码路径未变。
+
+#### 本轮的门禁与清理
+
+| 门 | 结果 |
+|---|---|
+| `go build ./...` / `go vet ./...` | 干净 |
+| `go test ./... -count=1` | 全部包 ok（新增：`materialize` 的 `MountFS`/`SandboxFS`/`DigestFS` 用例、`provision` 的 detached 两例、`sandbox` 的 volume/safe.directory/mode 用例、`cmd/piforged` 的 `validateAgentWorkspace`） |
+| `pnpm --dir web test -- --run` | **272 / 272**（34 文件） |
+| `pnpm --dir e2e test` | **182 / 182 passed** |
+| `pwsh scripts/deliver-check.ps1` | **119 / 119 PASS** |
+
+`pf-local`（7722）前后同一个容器 id `7dc14e4a7525…`、`/healthz` 200。一次性实例已删：
+`pf-drill-control`、`pf-drill-runner`、`piforge-ba8b2e998f171d81`（只按
+`^piforge-[0-9a-f]+$` 删）、卷 `piforge-ws-ba8b2e998f171d81` 与 `pf-drill-data`、网络
+`pf-drill-net`、三个 `*:agentdrill` 镜像。
+
+**仍然是默认关闭**：`-agent-in-sandbox` 默认关；打开时它现在也要求 `-sandbox-files remote`
+（工作区只剩容器里那一份，宿主面板没有东西可读），这是启动错误，不是静默耦合。
+阶段二明确**没有**做的部分（`worktrees.base_commit`、agent stderr 日志、marker 的 boot id、
+按容器 stage 运行时、回收快照、配额测量、容器内 `CloneSession`）都列在
+`docs/EXECUTION-BOUNDARY.md` §10.1，写明了原因和修法。
+
 为什么选它（对照 §1.1–§1.3 的另外三条路）：
 
 - 控制面不再需要 root，runner 是唯一持有 socket 的进程，而它的接口面是**六个动作**，
@@ -937,9 +1112,9 @@ gateway，而且上面第 7 条的代价还在。阶段二/三/四（`materializ
 | 事件 | 会发生什么 | 缓解 |
 |---|---|---|
 | **控制面重启** | 沙箱容器还在（`--restart unless-stopped`）。容器名由 `(user, project)` 派生，`docker inspect` 能找回；端口由 `docker port` 重读，`sandbox_files.go` 的客户端缓存 30s 过期后自愈。runner 模式下端点由 runner 的 `GET /v1/sandboxes/{id}` 重问，同样自愈 | 已经是现状，没问题。但**沙箱里的进程**（Chromium、AIO 的 shell 会话）在 daemon 重启时全丢，终端会断 |
-| **daemon 在远程机器** | `-v` 的源路径在 daemon 主机解析（Docker 文档原话：bind mount "created to the Docker daemon host"，[Bind mounts](https://docs.docker.com/engine/storage/bind-mounts/)）。`-v` 会**静默创建一个空目录**，于是容器看到空 `/workspace`，控制面往自己磁盘写，两边都不报错。`workspaceMount` 比较的是字符串，两台机器上的 `/data/sandboxes/u/p` 完全相同，比较通过 —— 检测不到 | runner 与 daemon 同机；compose 叠加层让沙箱直接挂**卷+子路径**（`SANDBOX_WORKSPACE_VOLUME`，§1.4 第 2 条），宿主路径根本不进这条链路，daemon 在哪台机器上都不影响。控制面仍在 `Ensure` 时把 runner 报的 `root_dir` 与自己算的路径比一次并 WARN —— 但注意它比的是**字符串**：bind 形态下"两边名字相同、实际是两棵树"这件事它看不出来（§1.4.1 第 2 条就是这么坏的）。跨机器时不要靠 SSH 建目录 |
+| **daemon 在远程机器** | `-v` 的源路径在 daemon 主机解析（Docker 文档原话：bind mount "created to the Docker daemon host"，[Bind mounts](https://docs.docker.com/engine/storage/bind-mounts/)）。`-v` 会**静默创建一个空目录**，于是容器看到空 `/workspace`，控制面往自己磁盘写，两边都不报错。`workspaceMount` 比较的是字符串，两台机器上的 `/data/sandboxes/u/p` 完全相同，比较通过 —— 检测不到 | runner 与 daemon 同机；compose 叠加层让沙箱直接挂**卷+子路径**（`SANDBOX_WORKSPACE_VOLUME`，§1.4 第 2 条），宿主路径根本不进这条链路，daemon 在哪台机器上都不影响。控制面仍在 `Ensure` 时把 runner 报的 `root_dir` 与自己算的路径比一次并 WARN —— 但注意它比的是**字符串**：bind 形态下"两边名字相同、实际是两棵树"这件事它看不出来（§1.4.1 第 2 条就是这么坏的）。跨机器时不要靠 SSH 建目录。**阶段二之后这条缺陷类型不再适用于 detached 形状**：那里根本没有宿主路径可解析错（`docker inspect` 只看到沙箱自己的卷） |
 | **控制面在容器里，沙箱也在容器里** | `127.0.0.1:<published>` 是控制面自己的 loopback，连不上沙箱。`-sandbox docker` 仍然发布 `127.0.0.1:<port>` 并从 `docker port` 读回 | **已解决**：`SANDBOX_CONTAINER_ENDPOINT=1` 让 runner 不发布端口、返回 `http://piforge-<hash8>:8080`（Docker 内建 DNS），控制面与 runner 都加入 `piforge-sandboxes`。**这一步同时去掉了宿主上的 8080 暴露面** |
-| **`docker compose down`** | 沙箱容器不是 compose 管的，不会跟着删；runner 停掉也不删容器（无状态）。`down -v` 会尝试删卷，但只要还有**任意**一个 `piforge-*` 容器（包括 `Created`/`Exited`）挂着它，就只打印 `Volume piforge-data Resource is still in use` 并继续，退出码仍是 0（§1.4.1 实测） | 清理顺序：先 `docker rm -f piforge-*`（只删你认识的），再 `docker compose ... down -v`，然后确认 `docker volume ls` 里没有 `piforge-data`。runner 尚未实现按 label 对账（`POST` 只会建/复用，不会回收孤儿）；`Ensure` 现在会在 `docker run` 失败时删掉自己半创建的对象，但已经存在的孤儿仍要手工清 |
+| **`docker compose down`** | 沙箱容器不是 compose 管的，不会跟着删；runner 停掉也不删容器（无状态）。`down -v` 会尝试删卷，但只要还有**任意**一个 `piforge-*` 容器（包括 `Created`/`Exited`）挂着它，就只打印 `Volume piforge-data Resource is still in use` 并继续，退出码仍是 0（§1.4.1 实测） | 清理顺序：先 `docker rm -f piforge-*`（只删你认识的），再 `docker compose ... down -v`，然后确认 `docker volume ls` 里没有 `piforge-data`。runner 尚未实现按 label 对账（`POST` 只会建/复用，不会回收孤儿）；`Ensure` 现在会在 `docker run` 失败时删掉自己半创建的对象，但已经存在的孤儿仍要手工清。**阶段二多了一种要清的对象**：`docker volume ls --filter name=piforge-ws-`，每个 detached 沙箱一块，`Destroy` 同样刻意不删它（工作区里是别人未提交的工作） |
 | **网络回连** | 沙箱里的 agent 要访问模型网关（控制面），`127.0.0.1` 在沙箱里不是控制面 | 沙箱加入 `sandbox-control` 网络，网关地址用服务名；`gateway-url` 已经是可配置项。现在的 compose 把沙箱放在 `piforge-sandboxes`，**还没有**把它接到网关；多服务部署时要把 `-gateway-url` 指到控制面的服务名并把两个网络连通 |
 | **镜像里没有 docker CLI** | `NewDocker` 直接返回 `sandbox: docker: the docker CLI is not on PATH` | 要么加 CLI，要么走 runner。`-sandbox runner` 已经让这条路在 compose 里跑起来：CLI 只在 runner 镜像里（`deploy/Dockerfile.runner`） |
 

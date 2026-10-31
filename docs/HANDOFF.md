@@ -264,22 +264,27 @@ Seams, in the order they will bite:
   sandbox's own `/v1/shell/exec` (files, git, terminal), which is why the runner does
   not implement exec. Two gaps a new provider must fill: `Capabilities()` (can this
   provider pause? is the endpoint proxied?) and `Purge()` (delete the workspace; today
-  nothing deletes data). `Sandbox.RootDir` is a *host path* and `provision`/`materialize`
-  depend on it — any provider without a host-visible workspace (K8s, E2B) has to move
-  `AddWorktree` and `materialize.Mount` onto a workspace client first. Container/Pod
-  names should keep the `sha256(user+"/"+project)[:8]` derivation so all three providers
-  agree.
+  nothing deletes data). `Sandbox.RootDir` is where the workspace *is* and
+  `Sandbox.Workspace` says how this process can reach it (`host` = a directory it can
+  open, `api` = only through the sandbox, stage 2). A provider whose workspace is not a
+  host path (K8s, E2B) has to implement `WorkspaceFiles` (provision/materialize) or the
+  projection refuses to run — that is the seam that used to be missing and is now the
+  contract. Container/Pod names should keep the `sha256(user+"/"+project)[:8]`
+  derivation so all three providers agree.
 - **Forge dialects**: `PUT /v1/projects/{id}/forge` + `/git/pr` are the whole surface;
   the GitHub-shaped calls are `GET/POST /repos/{owner}/{repo}/pulls`, token only in
   `Authorization: Bearer`, filtered by `head`/`base`. A second dialect (GitLab/Gitea)
   means another `kind` and another create/find pair, not a new flow.
 - **Skills materialisation**: three mechanisms chosen at runtime and named in the UI —
   `bind-ro` (needs `CAP_SYS_ADMIN`), `copy-ro` (0444/0555; needs `DAC_OVERRIDE` dropped),
-  `copy` (frozen but writable). The output is `.pi/skills/<slug>/SKILL.md` +
-  `.mcp.json` in the checkout, idempotent, removed when the config shrinks, and always
-  written into `.git/info/exclude` — never `.gitignore`, or tooling shows up in the
-  user's diff. Snapshots live under `<data>/skill-snapshots/<session>` and die with the
-  session.
+  `copy` (frozen but writable). The projection writes through `materialize.FileSystem`:
+  the control plane's disk when the workspace is a directory it can open, and the
+  sandbox's file API when it is not (`SandboxFS`, stage 2 — the only mechanism there is
+  `copy-ro`, because a bind mount lives in the container's namespace). The output is
+  `.pi/skills/<slug>/SKILL.md` in the checkout, idempotent, removed when the config
+  shrinks, and always written into `.git/info/exclude` — never `.gitignore`, or tooling
+  shows up in the user's diff. Snapshots live under `<data>/skill-snapshots/<session>` and
+  die with the session (host-only: they exist to be a bind source).
 - **Test detection** (`internal/testrun`): recognises `npm test`, `pnpm test`, jest,
   vitest, `node --test`, `tsx --test`, parses TAP when present, and deliberately keeps
   counts unknown when the output only has `# pass`/`# fail`. Adding a runner means a
@@ -346,6 +351,30 @@ Ordered roughly by how much they will hurt. Nothing here is softened.
    **`materialize`/`provision` still write through the shared volume**, so the workspace
    mount is still a hard requirement for the control plane (stage 2). MCP configuration is
    deliberately not staged into the sandbox until there is a credential broker.
+
+   **Stage 2 is now done too, behind the same flag (2026-11-01).** The control plane no
+   longer mounts the workspace at all: each sandbox gets a volume of its own
+   (`piforge-ws-<pair hash>`), the sandbox row records `workspace=api` with
+   `root_dir=/workspace`, and the skill projection, the branch worktree and the file panel
+   all go through the sandbox's own API (`materialize.MountFS` + `materialize.SandboxFS`).
+   Proven on a throwaway 7723 runner deployment with `SANDBOX_WORKSPACE_VOLUME` unset:
+   `docker inspect` shows the control plane with only its state volume
+   (`pf-drill-data -> /data`), the runner with only the docker socket, and the sandbox
+   with `piforge-ws-… -> /workspace` — nobody else mounts it, and `/data/sandboxes` does
+   not exist in the control plane any more. The same prompt settled in 17 s with commit
+   `ae151cc` inside the sandbox; the skill tree is `dr-xr-xr-x`/`-r--r--r--` and a write as
+   `gem` is `Permission denied`; a branch session's `git worktree list` inside the sandbox
+   shows `/workspace/worktrees/<slug>`; file panel, tests panel (3/3) and inline review
+   still work; `cat /data/piforge.db` inside the sandbox still fails. `docs/SANDBOX-DEPLOY.md`
+   §1.4.4 has the commands and the raw output. Two workarounds were **removed** rather than
+   kept "just in case": the checkout no longer runs `chmod -R a+rwX` and git is no longer
+   told `safe.directory`, because a detached workspace has exactly one writer (the sandbox
+   user). The shared-volume shape still injects both, because it still has two writers.
+   Still not true after stage 2: the agent dies with a control-plane restart (stage 3), its
+   stderr goes to the runner's log rather than the Logs panel, the marker carries no boot
+   id, the idle-reclaim snapshot and the disk-quota measurement cannot read a workspace
+   they cannot open (both fail safe and are named in `EXECUTION-BOUNDARY.md` §10.1), and
+   MCP is still deliberately absent under the flag.
 2. **Interrupt, then send another message: the agent resumes the interrupted request.**
    Verified on 2026-10-31, deterministically (6/6 runs; `e2e/scripts/fix-interrupt-context-probe.mjs`,
    raw runs in `e2e/.artifacts/fix-interrupt-context/`). Send "Count from 1 to 200" and stop it

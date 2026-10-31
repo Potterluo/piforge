@@ -16,8 +16,8 @@ read `/data`: the SQLite database, `master.key`, `skills/`, and every other tena
 `/data/sandboxes/<user>/<project>`.
 
 This document is the design for closing that gap for the `docker` and `runner`
-providers. It is written before the code, and it is deliberately staged: stage 1 is
-implemented, stages 2–4 are not, and each stage names the test that accepts it.
+providers. It is written before the code, and it is deliberately staged: stages 1 and 2
+are implemented, stages 3–4 are not, and each stage names the test that accepts it.
 
 ## 1. The two things that have to move
 
@@ -75,14 +75,14 @@ which is what the marker's semantics require.
 
 ## 3. `materialize` and `provision` leave the shared volume
 
-`provision` currently does two host-side things that assume the control plane's
+`provision` used to do two host-side things that assumed the control plane's
 filesystem *is* the sandbox's: `git worktree add` and `materialize.Mount` (skills,
-`.mcp.json`). Both become sandbox API calls:
+`.mcp.json`). Both are now sandbox API calls (stage 2, implemented):
 
 - **checkout / worktree**: already partly true — `sandbox.Docker.ensureCheckout` and
   `AddWorktree` run `git` through the sandbox's `/v1/shell/exec` and the runner's
-  `…/worktrees`. The remaining host-side `gitx` calls in `provision.go` move behind the
-  same interface (`contracts.WorktreeSandbox`), so no branch logic reads the host.
+  `…/worktrees`. The remaining host-side `gitx` calls in `provision.go` moved behind
+  the same interface (`contracts.WorktreeSandbox`), so no branch logic reads the host.
 - **materialize**: `materialize.Mount` writes a skill tree into the checkout and then
   makes it read-only (`bind-ro`/`copy-ro`). Over the API that is: `PUT /v1/file/write`
   per file (or one tar stream, see below), then one `chmod -R a-w` through
@@ -98,6 +98,42 @@ The acceptance test for stage 2 is not "the files appeared": it is **the host
 workspace is not required at all** — run with the runner's data root on a volume the
 control plane never mounts (`SANDBOX_WORKSPACE_VOLUME` unset, `docker run --volumes-from`
 the sandbox only) and complete one prompt + one commit.
+
+### 3.1 What stage 2 actually did (and how)
+
+The shape that made this tractable: **the projection is the same code, and only the
+tree it writes into differs.**
+
+| Piece | Before (stage 1) | After (stage 2) |
+|---|---|---|
+| Where the workspace lives | shared volume mounted by the control plane, the runner and the sandbox | a `piforge-ws-<pair hash>` volume that **only** the sandbox mounts |
+| What the sandbox row says | `root_dir` = the host path `/data/sandboxes/<u>/<p>` | `workspace=api`, `root_dir` = `/workspace` (the container path) |
+| Skill projection | `materialize.Mount` on the host path | `materialize.MountFS(materialize.SandboxFS…)` through `PUT /v1/file/write` + `chmod` |
+| Read-only mechanism | `copy-ro` on the host (`bind-ro` where SYS_ADMIN exists) | `copy-ro` via the API; the probe runs *in the sandbox* as the agent's account |
+| Branch worktree | `git worktree add` inside the container, host path recorded | same command, and the path it is given is the container path (`/workspace/worktrees/<slug>`) |
+| `chmod -R a+rwX` | needed (two writers: root here, gem there) | **dropped for a detached workspace** (one writer: gem, through its own API) |
+| `safe.directory` | needed (bind mount owned by another account) | **dropped for a detached workspace** (the tree is gem's) |
+| `SANDBOX_WORKSPACE_VOLUME` | required by the compose overlay | **not needed with `-agent-in-sandbox`**; still the right setting for a deployment that shares one volume |
+
+Three seams carry it, each small and independently testable:
+
+1. `contracts.WorkspaceMode` on the sandbox row (`host` | `api`). It is written by the
+   provider that created the mount and read by everything that later touches the tree.
+   It survives a restart, which a flag comparison in memory would not.
+2. `materialize.FileSystem` (`internal/materialize/fs.go`): `Join/IsAbs/Abs/MkdirAll/
+   WriteFile/ReadFile/Lookup/List/RemoveAll/MakeReadOnly/MakeWritable/CanBind`. The host
+   implementation is the old `os.*` code; the sandbox implementation
+   (`materialize.SandboxFS`) is the file API. `Mount` and `MountFS` share every rule —
+   freeze, manifest, git exclude, digest framing — so there is one projection, not two.
+3. `provision.Config.WorkspaceFiles` + `httpapi` reading the manifest through
+   `contracts.Workspace`: the provisioner and the tooling panel ask the sandbox, not the
+   host, for a workspace they cannot open.
+
+The container mount is verified from the container's own record, not from a flag: if
+`/workspace` is a volume named `piforge-ws-<hash of the container>` with no subpath, the
+workspace is detached. That is why a restarted control plane and the stateless runner
+reach the same answer about a container neither of them remembers creating.
+
 
 ## 4. `models.json` — the provider key stays out, absolutely
 
@@ -140,10 +176,12 @@ writes it — the supervisor now runs in the sandbox — and nothing else:
   plane". With the agent in the sandbox the process really can outlive the restart —
   provided the RPC channel outlives it too, which stage 1's direct pipe does **not**
   (§6, and the measured restart test in `docs/SANDBOX-DEPLOY.md` §1.4.3).
-- stage 2 makes the marker carry the sandbox-side pid *and* a boot id, so a probe on a
-  restarted container cannot read a marker written by a previous boot as proof of life.
+- stage 2 shifted the marker's *home*: it stayed at `/workspace/.piforge/live/<sid>`,
+  but the workspace is now a volume only the sandbox mounts, so the writer and the reader
+  are the only two parties that touch it. The marker still carries a pid and not a boot
+  id — §10.1 item 3.
 
-## 6. What still breaks, and the honest stage-1 answer
+## 6. What still breaks, and the honest answer
 
 Stage 1's channel is a TCP connection owned by the control plane. When the control
 plane is restarted:
@@ -152,36 +190,37 @@ plane is restarted:
   removes the marker → the next reconciliation answers "dead" and marks the run
   interrupted;
 
-so **the agent does not survive a control-plane restart in stage 1**, and the restart
-test asserts exactly that (plus: it dies for a stated reason, not silently). Survival is
-stage 3: the sandbox-side supervisor owns a Unix socket in `/workspace/.piforge/run/`,
-survives the control plane, and the control plane reattaches to it by writing a
-`connect` frame. Buffering a disconnected run is explicitly *not* promised — PRD §7.4.5
-forbids replaying a run whose control plane died.
+so **the agent does not survive a control-plane restart in stages 1 and 2**, and the
+restart test asserts exactly that (plus: it dies for a stated reason, not silently).
+Survival is stage 3: the sandbox-side supervisor owns a Unix socket in
+`/workspace/.piforge/run/`, survives the control plane, and the control plane
+reattaches to it by writing a `connect` frame. Buffering a disconnected run is
+explicitly *not* promised — PRD §7.4.5 forbids replaying a run whose control plane died.
 
-The other stage-1 gap: the agent's stderr goes to the runner's log, not to the
-session's Logs panel (`Bridge.StderrTail` is fed only by a locally spawned child).
-Stage 2 redirects it to `/workspace/.piforge/logs/<session>.log` and tails it through
-the file API.
+The other stage-1 gap is still open in stage 2 (it is `§10.1` item 2): the agent's
+stderr goes to the runner's log, not to the session's Logs panel
+(`Bridge.StderrTail` is fed only by a locally spawned child). The plan is unchanged —
+write `/workspace/.piforge/logs/<session>.log` and tail it through the file API.
 
 Two smaller ones, both consequences of the session file living in the workspace:
 
-- **Fork works, clone does not.** A fork adopts the path Pi reports (now a container
-  path) and `Dial` accepts it as-is; the control plane does no host-side `mkdir` on it.
+- **Fork works, clone does not.** A fork adopts the path Pi reports (a container path)
+  and `Dial` accepts it as-is; the control plane does no host-side `mkdir` on it.
   `CloneSession` copies the JSONL *on the host*, from a container path that does not
   exist there — it fails with a readable error instead of corrupting anything. Stage 2
-  moves both through the file API.
-- **`Status.session_file` reports the container path** (`/workspace/.piforge/…`). It is
-  informational and correct for the process that owns it, but it is not a path the
-  operator can `ls` from the host.
+  did **not** move this through the file API; it is remaining work (§10.1).
+- **`Status.session_file` reports the container path** (`/workspace/.piforge/…`). With a
+  detached workspace that is now the only path there is: it is informational and correct
+  for the process that owns it, but it is not a path the operator can `ls` from the host.
 
 ## 7. What does not change: the panels
 
 Terminal, browser, file tree, panel git, tests panel, inline review — all of them talk
 to the sandbox's HTTP API and already run inside the container. They are the control for
-this change: they must behave identically before and after, and the stage-1 drill
-exercises the same panel surface as §1.4.2 (branch/status/diff/stage/commit, inline
-comment, test run) to prove it.
+this change: they must behave identically before and after, and the drills exercise the
+same panel surface as §1.4.2 (branch/status/diff/stage/commit, inline comment, test run)
+to prove it. Stage 2 exercised the same surface again with no workspace mount at all —
+that is what makes the panel evidence meaningful rather than incidental.
 
 ## 8. `-sandbox local` is untouched
 
@@ -192,7 +231,14 @@ wraps the local spawn, and every existing test keeps running that path. This is 
 the flag is off by default: the default deployment must not change behavior until the
 docker/runner path has been proven on a throwaway instance.
 
-## 9. What stage 1 costs, stated plainly
+Stage 2 keeps that promise in the code, not only in the deployment: `DetachedWorkspace`
+is a `DockerConfig`/`RunnerConfig` field that only `-agent-in-sandbox` sets, the local
+provider never sees it, and `materialize.Mount` (the host path) is still what runs for
+`local` and for a shared volume. The flag also gained one requirement — with it on, the
+file panel must be remote, because there is no host tree left to read (a startup error,
+not a silent coupling).
+
+## 9. What it costs, stated plainly
 
 - **A seventh runner endpoint.** §1.4 says "no exec, no file endpoint" and this adds
   exec. The narrowness that mattered was *authority over the daemon*, which the runner
@@ -202,19 +248,70 @@ docker/runner path has been proven on a throwaway instance.
   (7801 is internal-only, bearer token), not the endpoint's shape.
 - **The agent's cwd is a different string.** `spec.Worktree` is a host path; the agent's
   is `/workspace/…`. `pi.RuntimeConfig.AgentWorktree` makes the translation explicit in
-  one place instead of leaking `/data/...` into the session file header.
+  one place instead of leaking `/data/...` into the session file header. Stage 2 makes
+  the container string the *only* one for a detached sandbox — the worktree row says
+  `/workspace/...` too — so the translation is now an identity in that case, which is
+  why `workspaceMode` is stored rather than re-derived.
 - **Custom sandbox image.** The agent runtime must be *in* the sandbox image
   (`deploy/Dockerfile.sandbox-agent`), not uploaded per session. An image without `pi`
   fails loudly at launch, never falls back to running beside the control plane.
+- **Stage 2 costs an HTTP request per projected file.** A skill bundle is a handful of
+  small files written once per provisioning pass; the alternative (a tar upload) is one
+  request but needs a `tar` round trip in the sandbox and a version marker to be safe
+  against a partial extract. Per-file was chosen because a half-written skill tree is
+  visible (`ReadFS` reports what is there) while a half-extracted tar is not.
+- **The workspace volume is now unmanaged by the control plane.** `Destroy` still keeps
+  it (that was already true for the shared volume), but nothing lists it, and a
+  deployment that deletes sandboxes by hand has one more object to look for:
+  `docker volume ls --filter name=piforge-ws-`.
 
 ## 10. Staged migration
 
 | Stage | Content | Flag | Acceptance test |
 |---|---|---|---|
-| 1 | `pi` runs inside the sandbox via `docker exec` over the runner's attach endpoint; model config through the file API; heartbeat inside; provider key still only in the control plane | `-agent-in-sandbox` (env `PIFORGE_AGENT_IN_SANDBOX`), default **off** | On a throwaway deployment: `ps -ef` **inside** the sandbox contains `pi` and `ps -ef` in the control plane does not; `cat /data/piforge.db` fails inside the sandbox; one real prompt commits in the sandbox worktree; panels/tests/inline review work; restart kills the agent for the stated reason |
-| 2 | `materialize` + `provision` through the sandbox file API; agent runtime staged once per container; stderr to a sandbox log; marker carries pid+bootid | same flag | The same prompt completes with **no host mount of the workspace** in the control plane; a skill bundle is read-only inside the sandbox; `git worktree add` for a branch session happens entirely through the API |
+| 1 | `pi` runs inside the sandbox via `docker exec` over the runner's attach endpoint; model config through the file API; heartbeat inside; provider key still only in the control plane | `-agent-in-sandbox` (env `PIFORGE_AGENT_IN_SANDBOX`), default **off** | On a throwaway deployment: `ps -ef` **inside** the sandbox contains `pi` and `ps -ef` in the control plane does not; `cat /data/piforge.db` fails inside the sandbox; one real prompt commits in the sandbox worktree; panels/tests/inline review work; restart kills the agent for the stated reason. **Done** (`docs/SANDBOX-DEPLOY.md` §1.4.3). |
+| 2 | `materialize` + `provision` through the sandbox file API; the workspace is a volume of the sandbox's own; `chmod a+rwX` and `safe.directory` dropped where one writer owns the tree | same flag | The same prompt completes with **no host mount of the workspace** in the control plane; a skill bundle is read-only inside the sandbox; `git worktree add` for a branch session happens entirely through the API. **Done** (`docs/SANDBOX-DEPLOY.md` §1.4.4). |
 | 3 | Detached supervisor: agent survives a control-plane restart, control plane reattaches; MCP credential broker; `pods/exec`-shaped provider for K8s | flag **on by default** for docker/runner | Restart the control plane mid-run: the same `pi` pid answers `get_state` after reattach; the run settles instead of interrupted; a run whose control plane is gone for longer than TTL is honestly interrupted (no replay) |
 | 4 | Remove the flag; delete the in-process host spawn for container providers; `sandbox.Docker.Attach` becomes the only path | — | Full gates (Go, web, e2e, delivery drill) green with the flag gone, and `ps` proofs hold on a Linux host, not only Docker Desktop |
 
-Stages 2–4 are not implemented. What *is* implemented is stage 1, and
-`docs/SANDBOX-DEPLOY.md` §1.4.3 records it with raw `ps`/`cat`/commit output.
+Stages 1 and 2 are implemented; 3 and 4 are not. `docs/SANDBOX-DEPLOY.md` §1.4.3 and
+§1.4.4 record them with raw `ps`/`mount`/`chmod`/commit output.
+
+### 10.1 Stage 2's remaining work (named, not hidden)
+
+These are the pieces stage 2 did **not** move off the host path. Each one is a
+deliberate exception, not an oversight:
+
+1. **`worktrees.base_commit` is empty for a detached workspace.** Reading `HEAD` is a
+   `git rev-parse` on a path the control plane cannot open, and the runner exposes no
+   exec for it. The column is informational (nothing branches on it); the panel's diffs
+   come from the container's own git. Fix: return `HEAD` in the `…/worktrees` response,
+   or let the provider answer a `head` question through the API it already uses.
+2. **Agent stderr still goes to the runner's log**, not to the session's Logs panel
+   (`Bridge.StderrTail` is fed only by a locally spawned child). §6's plan — write
+   `/workspace/.piforge/logs/<session>.log` and tail it through the file API — is
+   unchanged and still open.
+3. **The marker carries a pid, not a boot id.** §5's stage-2 item. A probe on a
+   restarted container can still read a marker written by a previous boot as proof of
+   life. The window is the marker TTL (2 min).
+4. **The agent runtime is in the image, not staged per container** (`deploy/Dockerfile.sandbox-agent`).
+   §3's `stageAgentRuntime` tar upload is unnecessary while the image carries `pi`, and an
+   image without it fails loudly at launch. If a deployment ever needs an image it does
+   not control, that upload is still the way.
+5. **The idle-reclaim snapshot cannot index a detached workspace.** `snapshot.Take`
+   walks `RootDir` on the host; a container path is not walkable, so the take fails and
+   the reaper leaves both the row and the container alone (its documented rule). Reclaim
+   therefore does not run for these sandboxes until the index is built through the API.
+6. **The disk-quota measurement reads 0 for a detached workspace** for the same reason
+   (`runtimedirs.Measure` on a host path). Enforcement never refuses a run it cannot
+   measure, which is the safe direction, but the number is not true. Fix: a `du`-shaped
+   question through the sandbox API.
+7. **`models.json` staging still reads the host copy** under `<dataDir>/pi-agents` and
+   writes it into the sandbox. That file is deployment state (it holds only the gateway
+   URL and a per-session token), not workspace, so it stays on the state volume by
+   design — but it does mean a control plane that loses its data volume cannot
+   reconstruct a running session's model configuration.
+8. **`-agent-in-sandbox` is still off by default, and it now also requires
+   `-sandbox-files remote`** (the file panel has no host tree to read). That is a
+   startup check, not a silent coupling.
+
