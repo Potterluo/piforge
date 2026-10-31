@@ -721,6 +721,21 @@ marker 是**死掉的 launcher 最后一次心跳**，所以 2 分钟 TTL 到期
    runner 的 7801 没有 TLS，只应在内网。
 5. **密钥轮换**：resume 不换 key，也没有轮换接口（§1.4 第 6 条）；这一轮没有改变它。
 
+#### 本轮的验收（同一棵树）
+
+| 门 | 结果 |
+|---|---|
+| `go build ./...` / `go vet ./...` | 干净（含 `gofmt -l` 无输出） |
+| `go test ./... -count=1` | 全部包 ok（含 `internal/sandbox` 的真镜像生命周期测试，12.6 s） |
+| `pnpm --dir web test -- --run` | **272 / 272**（34 个文件） |
+| `pnpm --dir e2e test` | **182 / 182 passed (8.7m)** |
+| `pwsh scripts/deliver-check.ps1`（`PIFORGE_DRILL_KEY` 来自 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY`，未打印未落盘） | run `20261031-225546`：**119 PASS / 0 FAIL**，`failure` 为空，111.5 s |
+
+注意最后一条的适用范围：drill 用的是 `piforge:local`（本轮修复没打进这个 tag），它走的是
+`-sandbox local` 放置，**不覆盖**本轮改动的 docker/runner 路径；runner 路径的覆盖是本节前面
+那些手工证据 + `internal/sandbox` 的单元/真镜像测试。`pf-local` 在 drill 前后同一个 id
+（`7dc14e4a7525…`），drill 自己的一次性容器与卷已删。
+
 清理（本轮的实例已按这段删掉）：`docker rm -f pf-drill-control pf-drill-runner`、删掉本轮
 `piforge-*` 沙箱、`docker volume rm pf-drill-data`、`docker network rm pf-drill-net`。
 `pf-local` 的前后指纹：容器 `7dc14e4a7525…`、`/healthz` 200，未变。
