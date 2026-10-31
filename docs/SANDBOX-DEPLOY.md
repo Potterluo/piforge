@@ -898,6 +898,12 @@ after :  ps 里没有 agent-launcher，也没有 pi；/workspace/.piforge/live �
 存亡的 supervisor**，控制面重连它——那是设计里的阶段三，本轮没做。诚实地说：这一轮把
 **执行边界**换掉了（agent 读不到 `/data`），**没有**换掉"agent 与控制面同生共死"。
 
+`pf-local`（7722）前后同一个容器 id `7dc14e4a7525…`、`/healthz` 200。本轮的一次性
+实例已删：`pf-stage3-control` / `pf-stage3-runner`、compose 的 `piforge` 三件
+（`docker compose -f docker-compose.runner.yml down -v`）、`^piforge-[0-9a-f]+$` 沙箱、
+卷 `pf-stage3-data` / `pf-stage3-compose-data` / `piforge-ws-*`、网络 `pf-stage3-net` /
+`piforge-sandboxes` / `piforge_default` / `piforge_sandbox-control`、三个 `*:stage3` 镜像。
+（顺带删掉了一个 3 天前 Exited 的 `docker run --name piforge` 残留容器，它占着 compose 的容器名。）
 #### 本轮的门禁与清理
 
 | 门 | 结果 |
@@ -1272,7 +1278,14 @@ docker exec piforge ls /data -> gateway.key master.key pi-agents piforge.db … 
 
 #### 本轮的门禁与清理
 
-见 `docs/SANDBOX-DEPLOY.md` 文末的"本轮的验收"表（同一棵树：Go/web/e2e/delivery drill）。
+| 门 | 结果 |
+|---|---|
+| `go build ./...` / `go vet ./...` | 干净 |
+| `go test ./... -count=1` | 全部包 ok（新增 `internal/agentsupervisor` 的 6 个用例：两轮以上 RPC 往返、客户端离开后 agent 继续、补发窗口按整条记录裁剪、stderr 进日志；`internal/httpapi` 的 MCP broker 两例；`internal/sandboxrunner` 的 reattach 三例；`cmd/piforged` 的默认判定） |
+| `pnpm --dir web test -- --run` | **272 / 272**（34 文件） |
+| `pnpm --dir web exec next build` | 通过 |
+| `pnpm --dir e2e test` | **182 / 182 passed（8.7m）**，exit 0 |
+| `pwsh scripts/deliver-check.ps1 -Image piforge:stage3` | run `20261101-021859`：**119 PASS / 0 FAIL**，`failure` 为空，102.3 s，镜像 `sha256:06fc3a61…`（本仓库这一棵树的构建；drill 用 local 放置，默认翻转不影响它） |
 
 **仍然是明确没做的**（`docs/EXECUTION-BOUNDARY.md` §10.1 逐条写明原因）：
 
