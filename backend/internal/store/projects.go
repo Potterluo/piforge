@@ -400,6 +400,53 @@ func (s *Store) SandboxForProject(ctx context.Context, userID, projectID string)
 	return sb, nil
 }
 
+// SandboxIDs lists every sandbox id in the deployment. The janitor uses it to
+// decide whether a directory under <data>/snapshots still has an owner; one
+// query per pass, not one per directory.
+func (s *Store) SandboxIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.r.QueryContext(ctx, `SELECT id FROM sandboxes`)
+	if err != nil {
+		return nil, fmt.Errorf("store: sandbox index: %w", err)
+	}
+	defer rows.Close()
+	ids := make([]string, 0, 16)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: sandbox index: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: sandbox index: %w", err)
+	}
+	return ids, nil
+}
+
+// SandboxIDsForProject lists the sandboxes a project owns. A project normally
+// has one, but the rows are the source of truth and a delete has to reclaim
+// every snapshot directory they name.
+func (s *Store) SandboxIDsForProject(ctx context.Context, userID, projectID string) ([]string, error) {
+	rows, err := s.r.QueryContext(ctx,
+		`SELECT id FROM sandboxes WHERE project_id = ? AND user_id = ?`, projectID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("store: project sandbox index: %w", err)
+	}
+	defer rows.Close()
+	ids := make([]string, 0, 2)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: project sandbox index: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: project sandbox index: %w", err)
+	}
+	return ids, nil
+}
+
 // UpdateSandboxState records a state-machine transition (PRD FR-5.1) and
 // refreshes last_active_at.
 func (s *Store) UpdateSandboxState(ctx context.Context, userID, sandboxID string, state contracts.SandboxState, message string) error {

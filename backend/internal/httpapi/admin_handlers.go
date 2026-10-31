@@ -4,9 +4,11 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/runtimedirs"
 	"github.com/piforge/piforge/backend/internal/store"
 )
 
@@ -199,6 +201,15 @@ func (s *server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		browserIdleTimeout = s.deps.Browser.IdleTimeout().String()
 	}
 
+	// Per-directory disk usage for the runtime inventory. This is the answer to
+	// "is something growing without an owner?" that does not require shelling
+	// into the container; the janitor's own log says what it reclaimed.
+	storage := s.storageUsage()
+	var storageBytes int64
+	for _, u := range storage {
+		storageBytes += u.Bytes
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"users":          stats.Users,
 		"users_active":   stats.UsersActive,
@@ -221,5 +232,30 @@ func (s *server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		// to" has to have an answer that does not involve reading the flag.
 		"parallel_limit":     s.parallelLimit(),
 		"parallel_limit_max": MaxParallelLimit,
+		// The runtime directory lifecycle: one row per directory the server
+		// creates under -data, with direct-entry count and recursive bytes.
+		"storage":             storage,
+		"storage_total_bytes": storageBytes,
 	})
+}
+
+// storageUsage returns the cached per-directory scan. The admin page polls every
+// 15 seconds; walking every checkout that often would make an idle screen a disk
+// scan, so the result is reused for a minute. A test can pin Now to control it.
+func (s *server) storageUsage() []runtimedirs.Usage {
+	if strings.TrimSpace(s.deps.DataDir) == "" {
+		return []runtimedirs.Usage{}
+	}
+	s.storageMu.Lock()
+	defer s.storageMu.Unlock()
+	if s.storage != nil && s.now().Sub(s.storageAt) < time.Minute {
+		out := make([]runtimedirs.Usage, len(s.storage))
+		copy(out, s.storage)
+		return out
+	}
+	s.storage = runtimedirs.MeasureAll(s.deps.DataDir, runtimedirs.DefaultMaxFiles)
+	s.storageAt = s.now()
+	out := make([]runtimedirs.Usage, len(s.storage))
+	copy(out, s.storage)
+	return out
 }

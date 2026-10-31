@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Boxes, Cpu, GitBranch, Globe, MessagesSquare, Server, Users } from "lucide-react";
+import { Activity, Boxes, Cpu, GitBranch, Globe, HardDrive, MessagesSquare, Server, Users } from "lucide-react";
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Item, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "@/components/ui/item";
@@ -152,6 +152,35 @@ export default function AdminStatusPage() {
             </CardContent>
           </Card>
 
+          <Card data-testid="stat-storage">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-1.5 text-sm">
+                <HardDrive className="size-4" />
+                运行时目录
+              </CardTitle>
+              <CardDescription>
+                数据目录下每个由服务端创建的目录：直接子项数 / 递归字节。目录有主就有删除路径，删不掉时由 janitor
+                兜底；这里看到的是它清扫的对象，共 {formatBytes(data.storage_total_bytes)}。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-1">
+              {data.storage.map((row) => (
+                <div
+                  key={row.name}
+                  data-testid={`stat-storage-${row.name}`}
+                  className="flex items-baseline justify-between gap-3 border-b border-border/60 py-1.5 text-xs last:border-0"
+                >
+                  <span className="font-mono text-[11px]">{row.name}/</span>
+                  <span className="flex items-baseline gap-2 text-right text-muted-foreground">
+                    <span className="tabular-nums">{row.entries.toLocaleString("zh-CN")} 项</span>
+                    <span className="tabular-nums">{formatBytes(row.bytes)}</span>
+                    {row.truncated ? <span className="text-amber-600">（已达扫描上限）</span> : null}
+                  </span>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+
           <p className="text-[11px] text-muted-foreground">
             事件记录共 {data.events.toLocaleString("zh-CN")} 条。事件是会话的追加日志，删会话会一并删除。
           </p>
@@ -159,6 +188,19 @@ export default function AdminStatusPage() {
       ) : null}
     </div>
   );
+}
+
+/** Bytes the way an operator reads them: no decimal for B/KiB, one above. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(1)} ${units[unit]}`;
 }
 
 function Stat({

@@ -31,7 +31,7 @@
 - 审计方法：先读 `docs/STATUS-AUDIT.md`（`06b61a3`）的每条判定，再逐条重读 `backend/internal/httpapi/router.go` 的路由表、各 handler、`web/components/**` 与 `e2e/tests/*.spec.ts`；以「实现 + 断言了用户可见结果的测试名」为准，不采信命名与注释。
 - 状态口径：**DONE** 必须点名一条断言用户可见承诺的测试或 e2e 路径；**PARTIAL** 必须写清缺什么；**MISSING** 是无实现。
 - 本版把 `06b61a3` 之后的修复接进台账：`f766651`（FR-2.5 / FR-2.6）、`bd85ade`（FR-2.7）、`9c4ab0b`（FR-11.8）、`717f7cb`（FR-12.5），以及浏览器启动按沙箱单飞与 profile 僵尸锁恢复（FR-11.1）。本批补上 FR-12.6（一键开 PR）并把 FR-8.8 从 PARTIAL 移到 DONE——开 PR 是那一条里唯一缺的能力。
-- 计数：**126 条 FR，DONE 67 / PARTIAL 43 / MISSING 15 / 不做 1**（`be01575` 时是 52 / 54；FR-1.9 与 FR-9.2 补证据后为 54 / 52 / 19，FR-3.3 从 MISSING 移入 DONE，FR-14.4、FR-6.6、FR-10.2、FR-11.2、FR-12.4、FR-14.1、FR-12.1 与 FR-12.2 从 PARTIAL 移入 DONE，FR-16.3 从 MISSING 移入 DONE，FR-12.3 从 MISSING 移入 DONE，FR-12.6 从 MISSING 移入 DONE，FR-8.8 从 PARTIAL 移入 DONE；旧值 37 / 50 / 39 是 `2e5f206` 时代的，且 FR-12.5 等行早已过期）。另有 5 条非 FR 交付能力（见文末「交付能力」），均 DONE；**整表 131 行 = DONE 72 / PARTIAL 43 / MISSING 15 / 不做 1**（本批新增「会话在 provider 变更后自动恢复」一条，126 条 FR 的状态未变）。这两个数是从本文件的表格行重新数出来的，不是从旧表头抄的；上一版表头的 64 / 44 / 17 与上一批自己记的 65 / 44 / 16 已经不一致，本批按实际行重数并改正。
+- 计数（按本文件表格行重数，不是抄旧表头）：**126 条 FR = DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**（`be01575` 时是 52 / 54；此后 FR-1.9、FR-9.2、FR-3.3、FR-14.4、FR-6.6、FR-10.2、FR-11.2、FR-12.4、FR-14.1、FR-12.1、FR-12.2、FR-16.3、FR-12.3、FR-12.6、FR-8.8、FR-11.3 逐一移入 DONE）。另有 6 条非 FR 交付能力（见「交付能力（非 FR，单独计）」），均 DONE；**整表 132 行 = DONE 74 / PARTIAL 42 / MISSING 15 / 不做 1**。本批（运行时目录生命周期）不改变任何 FR 状态，只新增一条非 FR 行。
 
 > 说明：PRD 中没有「部署」类 FR（§12 是里程碑，`deploy/` 是 Dockerfile.app / Dockerfile.offline / Dockerfile.runner / k8s.yaml / entrypoint.sh，属交付物而非需求行），因此下面没有部署行。`sandbox-runner`（把 Docker CLI 从控制面移出去）同样是交付物而非 FR：它没有改变任何一条 FR 的状态，证据见 `docs/SANDBOX-DEPLOY.md` §1.4 与 `scripts/verify-runner-sandbox.ps1`。
 >
@@ -177,8 +177,9 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 | 惰性浏览器面板 + 空闲停止（host placement，`15b995c`） | DONE | `workspace-panels.tsx` 只在浏览器面板可见时挂载它；`browser.Manager` 的 idle reaper 在无 viewer 附着 `PIFORGE_BROWSER_IDLE_TIMEOUT` 后 stop 该 sandbox 浏览器；`GET /v1/admin/status` 暴露 `browser_running` / `browser_idle_timeout`。测试：`browser/idle_test.go` 4 例、`67-browser-lazy.spec.ts` 断言「打开会话不启动、选中面板才启动、切走后停止」；部署实测选中前 `docker exec pf-local pgrep chrome` 为空，选中后才出现 |
 | 项目删除：先停进程、重试销毁，失败则拒绝并保留项目；清扫历史孤儿目录（本次修复） | DONE | `handleDeleteProject` 的顺序改为「停进程 → 重试销毁 → 删行」：`stopProjectProcesses` 先关该沙箱的浏览器、`Runtime.Stop` 每个会话的 agent、`Term.CloseSandbox` 每个 worktree 的终端（`TermManager` 新增该方法），再 `destroySandbox` 以 150ms 递增退避重试 6 次；仍失败返回 409 并**保留项目**（文案「沙箱目录删不掉，项目已保留…」），不再像旧代码那样记一条 warn 后照删项目行。历史遗留由 `internal/janitor` 处理：启动即扫一轮、之后每 `-sandbox-sweep`（默认 10m，0 关闭，仅本地 provider）扫一次，删除 `sandboxes/<user>/<project>` 中没有 projects 行的目录及其 `_state/<user>/<project>.json`，只认 `usr_*`/`prj_*` 形状的目录名。测试：`project_delete_test.go`（注入 destroy 失败 → 409 + 项目仍在 + 至少重试 2 次；释放后重试 → 行与目录都消失；终端先关后销毁的顺序）、`janitor_test.go` 5 例、`61-project-lifecycle.spec.ts`（UI 删除后**真实路径**消失；用 PowerShell `FileShare.None` 真锁住 checkout → UI 报「沙箱目录删不掉 / 项目已保留」且项目仍在，释放后重试两者都消失）、`e2e/scripts/fix-orphans-repro.ps1`（Windows 复现/验证脚本）。旧代码实测：删除返回 200、项目行消失、`sandboxes/<user>/<project>` 留盘，日志 `delete project: sandbox destroy failed ... unlinkat ...\repo\held-by-a-process.txt: The process cannot access the file...`（`e2e/.artifacts/fix-orphans/fail-first.log`） |
 | ⌘K 命令面板的默认选中 / Enter（PRD §10.1-5、§13「全部交互可键盘到达」；PRD 没有对应 FR 行） | DONE | 旧实现把选择交给 cmdk 1.1.1，它按行的 `value` 字符串认选中行。会话行的 label 在 projects 查询返回后才从「项目」变成真实项目名，`value` 随之变化，存储的选中值不再匹配任何行：`[cmdk-item][aria-selected="true"]` 实测 0，而 cmdk 的 Enter 只会向选中行派发，于是「输入 → 回车」什么都不发生。现在面板自己管理选择：行有稳定 id（`session:<id>` 等），active 行由可见列表**推导**（当前 id 不在了就选第一行），`aria-selected`、`aria-activedescendant`、`role=listbox/option`、`aria-controls/expanded` 同源；↑↓/Home/End/Enter 由面板处理。列表仍在加载时按 Enter **忽略而不是排队**：结果随时可能变化，排队的 Enter 会执行用户没看见的行；面板保持打开，行出现后下一次 Enter 生效。测试：`web/components/shell/command-palette.test.tsx` 4 例（异步落定后第一行默认选中且 Enter 进入会话、label 变化不丢选择、加载中 Enter 无效、↑↓ 仍可用）、`e2e/tests/60-session-search.spec.ts` 的「Ctrl+K → 输入 → Enter 直接打开」（旧代码在保留新 spec、去掉 ArrowDown 后必失败）与「列表仍在加载时 Enter 被忽略，随后生效」；部署实例探针 `e2e/scripts/fix-palette-shadow-probe.mjs` 旧构建 `selected=0`、URL 未变。 |
+| 运行时目录生命周期：`<dataDir>` 下每个目录都有 owner、删除路径与 janitor 兜底 | DONE | 见「本批：运行时目录生命周期」。`backend/internal/runtimedirs` 是唯一清单（sandboxes / pi-agents / skill-snapshots / snapshots / artifacts / skills，外加 piforge.db、master.key、secret.key 三个部署文件）；`TestEveryInventoryEntryHasALifecycle` 逐行要求 creator/owner/delete path/fallback，`TestEveryDataDirLiteralIsInTheInventory` 扫描 `filepath.Join(dataDir, …)`，新目录没有生命周期会失败。删会话级联 pi-agents + artifacts + skill-snapshots；删项目级联所有子会话的同三类目录与每个 sandbox 的 `snapshots/<sbx>`；janitor 每类一条 count/bytes 日志，单个失败不中断、索引读不到拒扫。`GET /v1/admin/status` 的 `storage` 块与 admin 页面按目录报告 entries/bytes。测试：`runtime_dirs_test.go` 4 例、`janitor_test.go` 新增 4 例（含 live-owner fixture 与索引失败）、`runtimedirs` 4 例；部署探针 `e2e/scripts/dirlifecycle-probe.mjs` 旧镜像留下两个目录、新镜像 10s 内清零，设计见 `e2e/.artifacts/fix-dirlifecycle/`。 |
 
-计数：上面 126 条 FR 是 **DONE 67 / PARTIAL 43 / MISSING 15 / 不做 1**（本批按表格行逐行重数；旧段里的 62 / 46 / 17 已与表格不一致）；加上这五条（均 DONE）后整表 131 行 = **DONE 72 / PARTIAL 43 / MISSING 15 / 不做 1**。本批 FR-11.3 由 PARTIAL 转 DONE（租约 + 拒绝 + UI + 测试），FR-14.2 仍是 PARTIAL（Windows 是只读副本；Linux 无 mount 能力时是冻结但可写的 `copy`），所以现在是 **DONE 73 / PARTIAL 42 / MISSING 15 / 不做 1 = 131**。本批（FR-14.2 的快照回收 + 无 SYS_ADMIN 的只读）不改变任何 FR 状态：FR-14.2 仍是 PARTIAL（Windows 仍没有目录级不可变，且 copy-ro 不阻止在目录里新建文件），所以 126 条 FR 与 131 行整表的计数都不变。
+计数：上面 126 条 FR 是 **DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**（按表格行逐行重数）；加上六条非 FR 交付能力（均 DONE）后整表 132 行 = **DONE 74 / PARTIAL 42 / MISSING 15 / 不做 1**。本批（运行时目录生命周期）不改变任何 FR 状态，新增第六行非 FR；FR-14.2 仍是 PARTIAL（Windows 仍没有目录级不可变，且 copy-ro 不阻止在目录里新建文件）。
 
 **明确边界：远端 / AIO 沙箱里的浏览器仍不会在空闲时被停止。** `15b995c` 的 idle 策略只在 host placement 生效：控制面直接持有 Chrome 进程，`browser.Manager` 能 stop 它。远端 / AIO 模式下 Chrome 跑在沙箱里，控制面断开 CDP 只意味着没人看了，进程仍在沙箱里；`PIFORGE_BROWSER_IDLE_TIMEOUT` 不会杀它，也没有 runner 侧的空闲回收。要覆盖这条路径，需要沙箱 provider 按「无 viewer」自行 stop 浏览器（或 runner 提供 idle 端点），目前没有实现，也没有测试。
 
@@ -698,3 +699,47 @@ UI：徽章的 `title` 与 `aria-label` 各一句可访问说明，区别是真�
 - **无 SYS_ADMIN 的部署探针**（`no-cap-probe.log` / `no-cap-skill-probe.json`）：`CapAdd=null`、`CapDrop=["CAP_DAC_OVERRIDE"]`；`piforged` 的 `CapEff=0xa80425f9`（bit21=0、bit1=0）；机制 `copy-ro`；PUT 既有 `SKILL.md` **500** 且读回的内容未变；该会话**没有**快照目录；UI 徽章 `data-mechanism=copy-ro`、文字「只读副本」、`title`/`aria-label` 都是「只读副本：agent 无法覆盖，但可新建文件」。同一镜像加 `--cap-add SYS_ADMIN` 的容器启动日志是 `mechanism=bind-ro`——升级路径仍然工作。
 - `pwsh scripts/deliver-check.ps1`（`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入，未打印、未落盘）：run `20261031-141029`，**119 条 `[PASS]` / 0 条 FAIL**，`failure` 为 null；源树干净（运行时 HEAD 即当时提交，工作树无未提交改动），一次性容器 `pf-drill` / volume `pf-drill-data` 已删除，`pf-local` 全程未被触碰（id 前后都是 `382e46da…`），数据卷仍是 `9ce20975…`。演练容器现在与默认部署同形：无 `SYS_ADMIN`、`--cap-drop DAC_OVERRIDE`；**没有任何一条检查依赖 bind-ro**（演练不创建 skill，因而不挂载），所以不需要把任何断言放宽成「只读强制、机制已报告」。
 - 证据目录：`e2e/.artifacts/fix-gc/`（截图 `nocap-mechanism-copy-ro.png`、`gc-before-session-delete.png`、`gc-after-session-delete.png`、`gc-after-project-delete.png`；日志与 JSON 同上）。
+
+## 本批：运行时目录生命周期（inventory / 级联 / janitor / 可见性）
+
+### 清单与判定
+
+`backend/internal/runtimedirs` 是唯一的表；`TestEveryInventoryEntryHasALifecycle` 逐行断言 creator / owner / 删除路径 / 兜底，`TestEveryDataDirLiteralIsInTheInventory` 扫描后端源码里的 `filepath.Join(dataDir, "…")`，所以「新加一个目录但没写生命周期」会先红在测试里。判定是 `Owner`（deployment / session / project / sandbox / skill），不是注释。
+
+| 目录 | 创建者 | 删除路径 | 兜底 | 当前状态 |
+|---|---|---|---|---|
+| `sandboxes/` | `sandbox.Manager.Ensure`（本地 provider，`usr_*/prj_*`） | 删项目：停进程 → 重试 Destroy → 失败则 409 保留项目 | janitor 按 `projects` 行清扫，连同 `_state/<usr>/<prj>.json` | DONE；部署启动扫描 0 残留 |
+| `pi-agents/` | agent 启动时 `pimodel.Write` / `WriteMCP` | 删会话 / 删项目（全部子会话） | janitor 按 `sessions` 行清扫 | **本批修复**；部署旧卷一次清掉 13 个（含探针 1 个） |
+| `skill-snapshots/` | `provision` / `skillsnap`（FR-14.2） | 删会话 / 删项目 | janitor 按 `sessions` 行，双布局识别 | 已有；本批并入同一套 sweep |
+| `snapshots/` | `snapshot.Writer.Take`（空闲回收前清单） | 删项目：按 `sandboxes` 行删 `snapshots/<sbx>` | janitor 按 `sandboxes` 行清扫 | **本批修复**（此前只增不减） |
+| `artifacts/` | `saveScreenshot`（FR-11.8） | 删会话 / 删项目 | janitor 按 `sessions` 行清扫 | **本批修复**；旧卷上的探针目录在删会话后仍在，新镜像 10s 内清零 |
+| `skills/` | `writeSkillBundle`、种子、导入 | `DELETE /v1/skills/{id}`（共享需管理员） | janitor 按 `skills` 行清扫；`skl_*.tmp` 无行即回收 | 本批补 janitor；旧卷 3 个均有行，未动 |
+| `piforge.db`（+ WAL/SHM） | `store.Open` | 不删（部署状态） | 无；WAL 由 SQLite checkpoint 限制 | 部署文件，明确不做清扫 |
+| `master.key` / `secret.key` | `crypto.NewFromEnv` / `secretBoxFor` | 不删（删了已存密钥不可读） | 无；属于部署备份 | 部署文件，明确不做清扫 |
+
+### 部署实测（同一数据卷 `9ce20975…`）
+
+旧镜像（`739a9117…`）上先跑 fail-first（`probe-before.json`）：建会话 → 发消息 → `pi-agents/<ses>` 出现（models.json / mcp.json / auth.json / models-store.json）；打开浏览器标签到 `/login` → 截图 201 → `artifacts/<ses>/screenshots/*.png` 出现；`DELETE /v1/sessions/{id}` 返回 200 后 10s 两个目录都还在，`GET /v1/admin/status` 没有 `storage` 字段。
+
+新镜像（`cb8002bf…`，`pwsh scripts/build-app-image.ps1`）用同一卷重启后，janitor 启动即扫：
+
+- `pi-agents` 17 → 5（`count=13 bytes=520546`；12 个历史孤儿 + 探针目录），`artifacts` 1 → 0（`count=1 bytes=25507`）。
+- 新建会话后：`pi-agents` 5→6（470497 B）、`artifacts` 0→1（37795 B）；`DELETE` 会话 200 后 **<10s** 两处都回到 6→5、1→0（`probe-after.json`，`session_dirs_gone_within_10s` 两个 true）。
+- admin 页面能看到 `storage` 块（`after-admin-status.png`）：`artifacts {entries:1,files:1,bytes:25507}`、`pi-agents {entries:6,files:24,bytes:441825}`、`sandboxes {entries:2,files:419,bytes:3228315}`、`skills {entries:3,files:3,bytes:1698}` 等；`storage_total_bytes` 是所有行之和。
+- 手工孤儿（每类一个，3s 清扫周期）：`pi-agents/ses_01MJANITOR…`、`artifacts/ses_01MJANITOR…`、`skill-snapshots/ses_01MJANITOR…`、`snapshots/sbx_01MJANITOR…`、`skills/skl_01MJANITOR….tmp`、`sandboxes/usr_01MJANITOR…/prj_…` 全部在下一轮消失；日志分别为 `count=1 bytes=7`（skills 为 `count=2 bytes=14`，含 `.tmp`）。同时放的 live-owner fixture（活会话的 pi-agents/artifacts、活 sandbox 的 snapshots、活 skill 的 skills）全部保留。
+
+### 边界（仍然无界的部分）
+
+- `piforge.db` 与 SQLite `-wal`：行数由产品语义约束（删会话/项目会级联），但库文件本身不会自动收缩；WAL 由 checkpoint 限制，不是 janitor 的对象。
+- `snapshots/` 在一个 sandbox 行存活期间可以按回收次数累积多个时间戳目录；它们有 owner（sandbox 行）与删除路径（删项目/该行消失），但没有按时间/份数的上限。
+- `sandboxes/` 的大小由用户仓库决定，生命周期有 owner，体积没有上限（FR-5.8 的配额仍缺）。
+- `skills/` 的目录生命周期已闭合，但一个 skill 的 bundle 可以很大（上传有 8MB 请求上限，展开后的总量没有单独配额）。
+- `master.key` / `secret.key` 是故意不回收的部署文件；删它们不是清理，是让已存密钥不可读。
+
+### 门禁（本批）
+
+- `go build ./...` / `go vet ./...`：0；`go test ./... -count=1`：全部包 ok（`go-test.log`）。
+- `pnpm --dir web test -- --run`：**31 个文件 / 251 例通过**；`pnpm --dir web exec next build`：通过（`web-test.log`、`web-build.log`）。
+- 完整 e2e（同一份 `.data`）：**173 passed**（日志 `e2e-full.log`）。本批只改了 `15-quick-open-status.spec.ts` 的既有断言（storage 块可见），没有新增用例，所以仍是 173。
+- 镜像只用 `scripts/build-app-image.ps1`；`pf-local` 始终用卷 `9ce20975…`，`CapDrop=["CAP_DAC_OVERRIDE"]`、`CapAdd=null`、端口 7722→7700、`PIFORGE_DEFAULT_PROVIDER=volc`（`deploy-before.log` / `deploy-final.log`）。
+- `pwsh scripts/deliver-check.ps1`（key 来自 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY`，未打印）：119 条 `[PASS]` / 0 FAIL（`deliver-check.log`）。

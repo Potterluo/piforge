@@ -472,6 +472,28 @@ func (s *Store) DeleteSkill(ctx context.Context, userID, skillID string) error {
 	return requireOneRow(res, "store: delete skill "+skillID)
 }
 
+// SkillIDs lists every skill id in the deployment, shared and private. The
+// janitor uses it to decide whether a bundle directory still has an owner.
+func (s *Store) SkillIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.r.QueryContext(ctx, `SELECT id FROM skills`)
+	if err != nil {
+		return nil, fmt.Errorf("store: skill index: %w", err)
+	}
+	defer rows.Close()
+	ids := make([]string, 0, 16)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: skill index: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: skill index: %w", err)
+	}
+	return ids, nil
+}
+
 // ListSkills lists the caller's own skills plus the shared ones (PRD §5.8).
 func (s *Store) ListSkills(ctx context.Context, userID string) ([]*contracts.Skill, error) {
 	rows, err := s.r.QueryContext(ctx,

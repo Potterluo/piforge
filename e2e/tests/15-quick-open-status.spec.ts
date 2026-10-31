@@ -74,6 +74,12 @@ test.describe("runtime status", () => {
     }, { timeout: 20_000 }).toBe(1);
     await expect(page.getByTestId("stat-sandboxes")).toBeVisible();
     await expect(page.getByTestId("stat-agents")).toBeVisible();
+    // The runtime-directory block is the operator's view of <dataDir>: one row
+    // per directory the server creates, with entries and bytes. It is the same
+    // inventory the janitor sweeps, so a missing row is a lifecycle gap.
+    await expect(page.getByTestId("stat-storage")).toBeVisible();
+    await expect(page.getByTestId("stat-storage-pi-agents")).toBeVisible();
+    await expect(page.getByTestId("stat-storage-artifacts")).toBeVisible();
 
     await page.request.post("/v1/auth/logout", {
       headers: { "X-PF-CSRF": (await page.context().cookies()).find((c) => c.name === "pf_csrf")?.value ?? "" },

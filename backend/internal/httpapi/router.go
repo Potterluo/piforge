@@ -33,6 +33,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/crypto"
 	"github.com/piforge/piforge/backend/internal/fsx"
+	"github.com/piforge/piforge/backend/internal/runtimedirs"
 	"github.com/piforge/piforge/backend/internal/store"
 )
 
@@ -104,6 +105,19 @@ type Deps struct {
 	// matching directories; empty means this deployment never creates one (a
 	// copy mechanism writes no snapshot), so there is nothing to remove.
 	SnapshotDir string
+	// AgentDir is where per-session agent configuration lives
+	// (<dataDir>/pi-agents/<session>/models.json and mcp.json). Deleting a
+	// session or a project removes the matching directory; empty means this
+	// deployment was not wired for the cascade (hand-built test dependencies).
+	AgentDir string
+	// SandboxSnapshotDir is the idle reaper's manifest root
+	// (<dataDir>/snapshots/<sandbox>/<timestamp>/manifest.json). A project
+	// delete removes the directories of the sandboxes it owned.
+	SandboxSnapshotDir string
+	// DataDir is the deployment's data directory. It is what
+	// GET /v1/admin/status measures per runtime directory; empty reports an
+	// empty storage block rather than scanning the process's working directory.
+	DataDir string
 	// ArtifactsDir is the control plane's own artifacts root (for example
 	// <dataDir>/artifacts). Browser screenshots are written under
 	// <ArtifactsDir>/<session>/screenshots, never into the checkout: a capture
@@ -174,6 +188,12 @@ type server struct {
 	// leases makes takeover exclusive per sandbox (FR-11.3). In memory: a
 	// restart means nobody is holding the wheel, which is the honest state.
 	leases *browserlease.Manager
+	// storage caches the per-directory usage scan for the admin page. The page
+	// polls every 15s; walking every sandbox on each poll would make an idle
+	// screen a disk scan. The scan is cheap enough once a minute.
+	storageMu sync.Mutex
+	storageAt time.Time
+	storage   []runtimedirs.Usage
 }
 
 // NewRouter builds the complete HTTP handler, including the recover middleware.

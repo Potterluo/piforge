@@ -144,8 +144,44 @@ func (s *server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	s.removeSkillSnapshots(r.Context(), sessionID)
+	s.removeSessionDirs(r.Context(), sessionID)
 	writeOK(w)
+}
+
+// removeSessionDirs reclaims every directory keyed by a session id: the frozen
+// skill tree (FR-14.2), the agent configuration (models.json / mcp.json) and the
+// browser screenshots. It runs *after* the rows are gone, and a failure is
+// deliberately not fatal: the directory is already unreachable, and the janitor
+// sweeps any directory whose session no longer exists. Logging the failure is
+// what keeps "the delete said 200 but the disk still has it" from being silent
+// until the next pass.
+func (s *server) removeSessionDirs(ctx context.Context, sessionIDs ...string) {
+	s.removeSkillSnapshots(ctx, sessionIDs...)
+	for _, sessionID := range sessionIDs {
+		if sessionID == "" {
+			continue
+		}
+		s.removeOwnedDir(ctx, s.deps.AgentDir, sessionID, "agent configuration")
+		s.removeOwnedDir(ctx, s.deps.ArtifactsDir, sessionID, "artifacts")
+	}
+}
+
+// removeOwnedDir removes one <root>/<name> directory and logs what went. Empty
+// root means this deployment was not wired for that path.
+func (s *server) removeOwnedDir(ctx context.Context, root, name, what string) {
+	if strings.TrimSpace(root) == "" || name == "" {
+		return
+	}
+	freed, err := skillsnap.RemoveNamed(root, name, nil)
+	if err != nil {
+		s.log.WarnContext(ctx, "a deleted session's "+what+" could not be removed; the janitor will retry",
+			"session", name, "dir", what, "error", err.Error())
+		return
+	}
+	if freed.Dirs > 0 {
+		s.log.InfoContext(ctx, "removed a deleted session's "+what,
+			"session", name, "count", freed.Dirs, "bytes", freed.Bytes)
+	}
 }
 
 // removeSkillSnapshots reclaims the frozen skill trees of deleted sessions

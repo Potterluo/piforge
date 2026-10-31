@@ -565,6 +565,27 @@ export interface DeploymentStatus {
   browser_sandboxes: string[];
   /** The effective idle policy, e.g. "1m0s". */
   browser_idle_after: string;
+  /**
+   * One row per directory the server creates under its data directory, with
+   * direct-entry count and recursive bytes. This is the runtime directory
+   * lifecycle made visible: growth shows up here before it fills the volume.
+   */
+  storage: StorageUsage[];
+  /** Sum of every row's bytes. */
+  storage_total_bytes: number;
+}
+
+/** One runtime directory's footprint (see backend/internal/runtimedirs). */
+export interface StorageUsage {
+  name: string;
+  /** Direct children (sessions, projects, skills). */
+  entries: number;
+  /** Regular files below the directory. */
+  files: number;
+  /** Their total size. */
+  bytes: number;
+  /** The walk hit its cap; `files`/`bytes` are lower bounds. */
+  truncated?: boolean;
 }
 /**
  * One recorded admin read of a session (PRD FR-16.8). The owner sees these; they

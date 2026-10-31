@@ -138,6 +138,19 @@ func RemoveDir(root, name string, unmount func(string) error) (Freed, error) {
 	if !IsSessionDir(name) {
 		return Freed{}, fmt.Errorf("skillsnap: %q is not a session snapshot directory", name)
 	}
+	return RemoveNamed(root, name, unmount)
+}
+
+// RemoveNamed is the same removal without the session-name check, for the other
+// directories a session owns (<data>/pi-agents/<session> and
+// <data>/artifacts/<session>) and for the sandbox/skill sweeps. The caller has
+// already matched the name against its own pattern; keeping the mount detach and
+// the read-only retry in one place is what makes every sweep behave the same way
+// when a live process still holds a file.
+func RemoveNamed(root, name string, unmount func(string) error) (Freed, error) {
+	if name == "" || name == "." || name == ".." || name != filepath.Base(name) {
+		return Freed{}, fmt.Errorf("skillsnap: %q is not a safe directory name", name)
+	}
 	dir := filepath.Join(root, name)
 	info, err := os.Lstat(dir)
 	if err != nil {

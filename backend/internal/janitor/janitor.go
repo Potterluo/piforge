@@ -1,24 +1,27 @@
 // Package janitor removes things the control plane left behind.
 //
-// It has two jobs, both decided by the filesystem and the database rather than
-// by a queue:
-//
-//   - a sandbox directory with no project row is an orphan. Deleting the project
-//     row used to leave one on disk whenever the destroy failed (on Windows a
-//     running agent, a terminal or the sandbox browser holds a file inside the
-//     checkout, and `os.RemoveAll` cannot delete it). The repair for that path is
-//     "refuse the delete and keep the project" (see httpapi.handleDeleteProject);
-//     this package is the other half — it cleans the directories older builds
-//     already orphaned, and any a crash between the two filesystem operations
-//     could produce.
-//   - a skill snapshot directory with no session row is an orphan (FR-14.2). The
-//     snapshot freezes a session's skill tree, so it belongs to that session; the
-//     delete handler removes it eagerly, and this sweep is what catches the ones
-//     a crash, an ephemeral-session expiry or an older build left behind.
+// Every directory the server creates under <dataDir> has an owner row and an
+// eager delete path; this package is the fallback for the case where that path
+// failed or never ran. The inventory is internal/runtimedirs, and the test in
+// that package fails when a directory is added without one.
 //
 // The criterion is deliberately "no row names it": a crash at any point is still
 // recoverable by the next pass and there is no bookkeeping that can itself go
-// stale.
+// stale. The sweeps are:
+//
+//   - <sandboxes>/<usr>/<prj> with no projects row (the destroy-failed case);
+//   - <pi-agents>/<session> with no sessions row (models.json / mcp.json);
+//   - <artifacts>/<session> with no sessions row (browser screenshots);
+//   - <skill-snapshots>/<session> with no session (FR-14.2 frozen trees);
+//   - <snapshots>/<sandbox> with no sandboxes row (the idle reaper's manifests);
+//   - <skills>/<skl_…> with no skills row, including a stale skl_*.tmp staging
+//     directory left by an interrupted bundle upload.
+//
+// A removal that fails (a live process holds a file, a mount is still attached)
+// is logged and retried on the next pass; it never aborts the rest of the pass.
+// An index that cannot be read aborts that half instead of sweeping against an
+// empty set: "the store did not answer" must never become "everything on disk is
+// garbage".
 package janitor
 
 import (
@@ -29,6 +32,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/skillsnap"
@@ -46,6 +50,11 @@ const stateDirName = "_state"
 var (
 	userDirPattern    = regexp.MustCompile(`^usr_[A-Za-z0-9]+$`)
 	projectDirPattern = regexp.MustCompile(`^prj_[A-Za-z0-9]+$`)
+	// sandboxDirPattern is a sandboxes row id (the snapshot root's child), and
+	// skillDirPattern is a skills row id. The optional .tmp suffix is the
+	// staging directory writeSkillBundle renames into place.
+	sandboxDirPattern = regexp.MustCompile(`^sbx_[A-Za-z0-9]+$`)
+	skillDirPattern   = regexp.MustCompile(`^skl_[A-Za-z0-9]+(?:\.tmp)?$`)
 )
 
 // Projects is what the janitor asks the store about sandboxes. It returns every
@@ -54,16 +63,29 @@ type Projects interface {
 	ProjectIndex(ctx context.Context) (map[string]string, error)
 }
 
-// Sessions is what the janitor asks the store about skill snapshots. It returns
-// every live session id; one query for a pass, so a snapshot with no session is
-// visible without a query per directory.
+// Sessions is what the janitor asks the store about per-session directories. It
+// returns every live session id; one query for a pass, so a directory with no
+// session is visible without a query per directory.
 type Sessions interface {
 	SessionIDs(ctx context.Context) ([]string, error)
 }
 
+// Sandboxes is what the janitor asks the store about the snapshot root. The
+// directories there are keyed by sandbox id, not by project: the idle reaper
+// destroys a sandbox while its project stays.
+type Sandboxes interface {
+	SandboxIDs(ctx context.Context) ([]string, error)
+}
+
+// Skills is what the janitor asks the store about bundle directories. Shared
+// and private rows both count; only "no row at all" is an orphan.
+type Skills interface {
+	SkillIDs(ctx context.Context) ([]string, error)
+}
+
 // Config wires a Janitor. A pass runs only for the halves that are configured:
-// a deployment with a container provider has no sandbox directories here, and a
-// deployment that never mounts skills has no snapshots.
+// a deployment with a container provider has no sandbox directories here, a
+// deployment that never took a screenshot has no artifacts, and so on.
 type Config struct {
 	// Root is the local sandbox provider's root (…/sandboxes). Empty disables
 	// the sandbox half of the pass: there is nothing safe to scan.
@@ -71,18 +93,34 @@ type Config struct {
 	// Projects is required for the sandbox half. Nil disables it.
 	Projects Projects
 	// SnapshotRoot is where FR-14.2's per-session skill snapshots live
-	// (…/skill-snapshots). Empty disables the snapshot half.
+	// (…/skill-snapshots). Empty disables that half.
 	SnapshotRoot string
-	// Sessions is required for the snapshot half. Nil disables it.
+	// AgentRoot is …/pi-agents, one directory per session.
+	AgentRoot string
+	// ArtifactsRoot is …/artifacts, one directory per session.
+	ArtifactsRoot string
+	// SnapshotsRoot is …/snapshots, one directory per sandbox.
+	SnapshotsRoot string
+	// SkillsRoot is …/skills, one directory per skill.
+	SkillsRoot string
+	// Sessions is required for the session-keyed halves. Nil disables them.
 	Sessions Sessions
-	// Unmount detaches a snapshot that is still bind-mounted; nil uses the
+	// Sandboxes is required for the sandbox-snapshot half. Nil disables it.
+	Sandboxes Sandboxes
+	// Skills is required for the skill-bundle half. Nil disables it.
+	Skills Skills
+	// Unmount detaches a directory that is still bind-mounted; nil uses the
 	// platform's lazy detach. Tests use it to observe the order.
 	Unmount func(string) error
-	// RemoveSnapshot is the removal itself; nil uses skillsnap.RemoveDir. A
-	// test uses it to make one removal fail and assert the sweep keeps going
-	// and retries on the next pass.
+	// RemoveSnapshot is the skill-snapshot removal itself; nil uses
+	// skillsnap.RemoveDir. A test uses it to make one removal fail and assert
+	// the sweep keeps going and retries on the next pass.
 	RemoveSnapshot func(root, name string, unmount func(string) error) (skillsnap.Freed, error)
-	Logger         *slog.Logger
+	// RemoveTree is the removal used by the other roots; nil uses
+	// skillsnap.RemoveNamed (detach, RemoveAll, one writable retry). Tests use
+	// it the same way as RemoveSnapshot.
+	RemoveTree func(root, name string, unmount func(string) error) (skillsnap.Freed, error)
+	Logger     *slog.Logger
 	// Interval is how often Start runs after its first immediate pass. Defaults
 	// to ten minutes.
 	Interval time.Duration
@@ -95,15 +133,24 @@ type Config struct {
 type Result struct {
 	RemovedDirs  int
 	RemovedState int
-	// RemovedSnapshots is how many session snapshot directories went.
+	// RemovedSnapshots is how many session skill-snapshot directories went.
 	RemovedSnapshots int
 	// SnapshotBytes is the size of the files they held, so the log can say how
 	// much disk the sweep reclaimed instead of only how many directories.
 	SnapshotBytes int64
-	Failures      int
+	// The other owned roots. Each pair is count and bytes for the same reason.
+	RemovedAgents        int
+	AgentBytes           int64
+	RemovedArtifacts     int
+	ArtifactBytes        int64
+	RemovedSandboxShots  int
+	SandboxSnapshotBytes int64
+	RemovedSkillBundles  int
+	SkillBytes           int64
+	Failures             int
 }
 
-// Janitor sweeps orphaned sandbox directories and skill snapshots.
+// Janitor sweeps every orphaned directory in the runtime inventory.
 type Janitor struct {
 	cfg Config
 }
@@ -119,13 +166,20 @@ func New(cfg Config) *Janitor {
 	if cfg.RemoveSnapshot == nil {
 		cfg.RemoveSnapshot = skillsnap.RemoveDir
 	}
+	if cfg.RemoveTree == nil {
+		cfg.RemoveTree = skillsnap.RemoveNamed
+	}
 	return &Janitor{cfg: cfg}
 }
 
 // enabled reports whether this pass has anything to do.
 func (j *Janitor) enabled() bool {
 	return (j.cfg.Root != "" && j.cfg.Projects != nil) ||
-		(j.cfg.SnapshotRoot != "" && j.cfg.Sessions != nil)
+		(j.cfg.SnapshotRoot != "" && j.cfg.Sessions != nil) ||
+		(j.cfg.AgentRoot != "" && j.cfg.Sessions != nil) ||
+		(j.cfg.ArtifactsRoot != "" && j.cfg.Sessions != nil) ||
+		(j.cfg.SnapshotsRoot != "" && j.cfg.Sandboxes != nil) ||
+		(j.cfg.SkillsRoot != "" && j.cfg.Skills != nil)
 }
 
 // Start runs one pass immediately and then on every tick until ctx is done.
@@ -174,8 +228,18 @@ func (j *Janitor) RunOnce(ctx context.Context) (Result, error) {
 			return res, err
 		}
 	}
-	if j.cfg.SnapshotRoot != "" && j.cfg.Sessions != nil {
-		if err := j.sweepSnapshots(ctx, &res); err != nil {
+	if j.cfg.Sessions != nil && (j.cfg.SnapshotRoot != "" || j.cfg.AgentRoot != "" || j.cfg.ArtifactsRoot != "") {
+		if err := j.sweepSessionDirs(ctx, &res); err != nil {
+			return res, err
+		}
+	}
+	if j.cfg.SnapshotsRoot != "" && j.cfg.Sandboxes != nil {
+		if err := j.sweepSandboxSnapshots(ctx, &res); err != nil {
+			return res, err
+		}
+	}
+	if j.cfg.SkillsRoot != "" && j.cfg.Skills != nil {
+		if err := j.sweepSkillBundles(ctx, &res); err != nil {
 			return res, err
 		}
 	}
@@ -247,13 +311,12 @@ func (j *Janitor) sweepSandboxes(ctx context.Context, res *Result) error {
 	return nil
 }
 
-// sweepSnapshots is the skill-snapshot half (FR-14.2): every session snapshot
-// directory whose session no longer exists.
-//
-// The live set is read first, and a failure to read it aborts this half instead
-// of sweeping against an empty set: "the store did not answer" must never become
-// "every snapshot is garbage".
-func (j *Janitor) sweepSnapshots(ctx context.Context, res *Result) error {
+// sweepSessionDirs sweeps every directory keyed by session id: the frozen skill
+// snapshots (FR-14.2), the agent configuration (models.json / mcp.json) and the
+// browser screenshots. The live set is read once for all three, and a failure to
+// read it aborts the whole half instead of sweeping against an empty set: "the
+// store did not answer" must never become "every session is gone".
+func (j *Janitor) sweepSessionDirs(ctx context.Context, res *Result) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -262,45 +325,132 @@ func (j *Janitor) sweepSnapshots(ctx context.Context, res *Result) error {
 		return fmt.Errorf("janitor: session index: %w", err)
 	}
 	live := skillsnap.LiveNames(ids)
+	isSessionDir := func(name string) bool { return skillsnap.IsSessionDir(name) }
+	isLive := func(name string) bool { return live[name] }
 
-	entries, err := os.ReadDir(j.cfg.SnapshotRoot)
+	if j.cfg.SnapshotRoot != "" {
+		if err := j.sweepOwned(ctx, "skill-snapshots", "orphaned skill snapshots",
+			j.cfg.SnapshotRoot, isSessionDir, isLive, j.cfg.RemoveSnapshot,
+			&res.RemovedSnapshots, &res.SnapshotBytes, res); err != nil {
+			return err
+		}
+	}
+	if j.cfg.AgentRoot != "" {
+		if err := j.sweepOwned(ctx, "pi-agents", "orphaned agent directories",
+			j.cfg.AgentRoot, isSessionDir, isLive, j.cfg.RemoveTree,
+			&res.RemovedAgents, &res.AgentBytes, res); err != nil {
+			return err
+		}
+	}
+	if j.cfg.ArtifactsRoot != "" {
+		if err := j.sweepOwned(ctx, "artifacts", "orphaned artifact directories",
+			j.cfg.ArtifactsRoot, isSessionDir, isLive, j.cfg.RemoveTree,
+			&res.RemovedArtifacts, &res.ArtifactBytes, res); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sweepSandboxSnapshots reclaims <data>/snapshots/<sandbox> when the sandboxes
+// row is gone. A sandbox is destroyed by the idle reaper while its project
+// stays, so this cannot be keyed by project.
+func (j *Janitor) sweepSandboxSnapshots(ctx context.Context, res *Result) error {
+	ids, err := j.cfg.Sandboxes.SandboxIDs(ctx)
+	if err != nil {
+		return fmt.Errorf("janitor: sandbox index: %w", err)
+	}
+	live := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		live[id] = true
+	}
+	return j.sweepOwned(ctx, "snapshots", "orphaned sandbox snapshots",
+		j.cfg.SnapshotsRoot,
+		func(name string) bool { return sandboxDirPattern.MatchString(name) },
+		func(name string) bool { return live[name] },
+		j.cfg.RemoveTree, &res.RemovedSandboxShots, &res.SandboxSnapshotBytes, res)
+}
+
+// sweepSkillBundles reclaims <data>/skills/<skl_…> when the skills row is gone,
+// and the skl_*.tmp staging directory an interrupted upload can leave behind
+// (its row exists only after the rename, so a staging directory has no owner by
+// construction).
+func (j *Janitor) sweepSkillBundles(ctx context.Context, res *Result) error {
+	ids, err := j.cfg.Skills.SkillIDs(ctx)
+	if err != nil {
+		return fmt.Errorf("janitor: skill index: %w", err)
+	}
+	live := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		live[id] = true
+	}
+	return j.sweepOwned(ctx, "skills", "orphaned skill bundles",
+		j.cfg.SkillsRoot,
+		func(name string) bool { return skillDirPattern.MatchString(name) },
+		func(name string) bool {
+			return live[name] || live[strings.TrimSuffix(name, ".tmp")]
+		},
+		j.cfg.RemoveTree, &res.RemovedSkillBundles, &res.SkillBytes, res)
+}
+
+// sweepOwned is the one sweep every owned root shares.
+//
+// It only touches directories whose name matches the caller's pattern, so an
+// operator's hand-made directory is never removed. A removal failure (a live
+// process, a mount) increments Failures and is retried on the next pass; it does
+// not stop the rest of the root. The log line reports count and bytes, which is
+// what makes growth and reclamation visible without a shell.
+func (j *Janitor) sweepOwned(
+	ctx context.Context,
+	key, noun, root string,
+	owned func(string) bool,
+	live func(string) bool,
+	remove func(root, name string, unmount func(string) error) (skillsnap.Freed, error),
+	count *int,
+	bytes *int64,
+	res *Result,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("janitor: read %s: %w", j.cfg.SnapshotRoot, err)
+		return fmt.Errorf("janitor: read %s: %w", root, err)
 	}
-
 	for _, entry := range entries {
-		if !entry.IsDir() || !skillsnap.IsSessionDir(entry.Name()) {
+		if !entry.IsDir() || !owned(entry.Name()) {
 			continue
 		}
 		name := entry.Name()
-		if live[name] {
+		if live(name) {
 			continue
 		}
 		if j.cfg.DryRun {
-			j.cfg.Logger.Info("janitor: would remove an orphaned skill snapshot", "snapshot", name)
-			res.RemovedSnapshots++
+			j.cfg.Logger.Info("janitor: would remove a directory with no owner",
+				"dir", key, "name", name)
+			*count++
 			continue
 		}
-		freed, rerr := j.cfg.RemoveSnapshot(j.cfg.SnapshotRoot, name, j.cfg.Unmount)
+		freed, rerr := remove(root, name, j.cfg.Unmount)
 		if rerr != nil {
-			// One stuck snapshot must not stop the rest of the pass, and the
-			// next tick tries it again: the criterion is still "no session
-			// names it", so nothing has to be remembered.
 			res.Failures++
-			j.cfg.Logger.Warn("janitor: an orphaned skill snapshot could not be removed; will retry",
-				"snapshot", name, "error", rerr.Error())
+			j.cfg.Logger.Warn("janitor: a directory with no owner could not be removed; will retry",
+				"dir", key, "name", name, "error", rerr.Error())
 			continue
 		}
-		res.RemovedSnapshots += freed.Dirs
-		res.SnapshotBytes += freed.Bytes
+		*count += freed.Dirs
+		*bytes += freed.Bytes
 	}
-
-	if res.RemovedSnapshots > 0 {
-		j.cfg.Logger.Info("janitor: removed orphaned skill snapshots",
-			"count", res.RemovedSnapshots, "bytes", res.SnapshotBytes, "freed", humanBytes(res.SnapshotBytes))
+	if *count > 0 {
+		verb := "removed"
+		if j.cfg.DryRun {
+			verb = "would remove"
+		}
+		j.cfg.Logger.Info("janitor: "+verb+" "+noun,
+			"count", *count, "bytes", *bytes, "freed", humanBytes(*bytes))
 	}
 	return nil
 }

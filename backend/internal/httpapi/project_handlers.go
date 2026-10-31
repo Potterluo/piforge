@@ -13,6 +13,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/skillsnap"
 	"github.com/piforge/piforge/backend/internal/store"
 )
 
@@ -362,8 +363,16 @@ func (s *server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// The snapshot directories are keyed by session id and the cascade is about
-	// to remove the rows that name them, so they are read before the delete.
+	// to remove the rows that name them, so they are read before the delete. The
+	// idle reaper's manifest root is keyed by sandbox id, so those ids are read
+	// here too: a sandbox row cascades with the project, and after the delete
+	// nothing in the database would name the directory.
 	sessionIDs, err := s.deps.Store.SessionIDsForProject(r.Context(), user.ID, projectID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	sandboxIDs, err := s.deps.Store.SandboxIDsForProject(r.Context(), user.ID, projectID)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -372,11 +381,38 @@ func (s *server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	// FR-14.2: a project's sessions are gone with it, so every frozen skill tree
+	// FR-14.2 and the runtime directory inventory: a project's sessions are gone
+	// with it, so every frozen skill tree, agent directory and artifact directory
 	// they owned goes too — including branch sessions, which have their own
 	// snapshot because they have their own checkout.
-	s.removeSkillSnapshots(r.Context(), sessionIDs...)
+	s.removeSessionDirs(r.Context(), sessionIDs...)
+	s.removeSandboxSnapshots(r.Context(), sandboxIDs...)
 	writeJSON(w, http.StatusOK, okBody{OK: true})
+}
+
+// removeSandboxSnapshots reclaims the idle reaper's manifest directories for the
+// sandboxes a deleted project owned. A failure is logged and left to the
+// janitor, which sweeps a directory whose sandbox id has no row.
+func (s *server) removeSandboxSnapshots(ctx context.Context, sandboxIDs ...string) {
+	root := s.deps.SandboxSnapshotDir
+	if strings.TrimSpace(root) == "" {
+		return
+	}
+	for _, id := range sandboxIDs {
+		if id == "" {
+			continue
+		}
+		freed, err := skillsnap.RemoveNamed(root, id, nil)
+		if err != nil {
+			s.log.WarnContext(ctx, "a deleted project's sandbox snapshots could not be removed; the janitor will retry",
+				"sandbox", id, "error", err.Error())
+			continue
+		}
+		if freed.Dirs > 0 {
+			s.log.InfoContext(ctx, "removed a deleted project's sandbox snapshots",
+				"sandbox", id, "count", freed.Dirs, "bytes", freed.Bytes)
+		}
+	}
 }
 
 // stopProjectProcesses ends everything that can hold a file inside the project's

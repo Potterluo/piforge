@@ -806,26 +806,29 @@ func run() error {
 
 	// 7. HTTP.
 	handler := httpapi.NewRouter(httpapi.Deps{
-		Store:           st,
-		Auth:            authn,
-		Runtime:         rt,
-		Workspace:       files,
-		DefaultProvider: opt.defaultProvider,
-		ParallelLimit:   parallelLimit,
-		Sandbox:         sb,
-		Secrets:         box,
-		WebUpstream:     opt.webUpstream,
-		SkillsDir:       filepath.Join(opt.dataDir, "skills"),
-		SnapshotDir:     skillSnapshotDir,
-		ArtifactsDir:    filepath.Join(opt.dataDir, "artifacts"),
-		LLMGateway:      gateway,
-		Browser:         browsers,
-		Term:            termAdapter{m: terminals},
-		Provisioner:     prov,
-		SetupDefaults:   setupDefaults,
+		Store:              st,
+		Auth:               authn,
+		Runtime:            rt,
+		Workspace:          files,
+		DefaultProvider:    opt.defaultProvider,
+		ParallelLimit:      parallelLimit,
+		Sandbox:            sb,
+		Secrets:            box,
+		WebUpstream:        opt.webUpstream,
+		SkillsDir:          filepath.Join(opt.dataDir, "skills"),
+		SnapshotDir:        skillSnapshotDir,
+		AgentDir:           filepath.Join(opt.dataDir, "pi-agents"),
+		ArtifactsDir:       filepath.Join(opt.dataDir, "artifacts"),
+		SandboxSnapshotDir: filepath.Join(opt.dataDir, "snapshots"),
+		DataDir:            abs(opt.dataDir),
+		LLMGateway:         gateway,
+		Browser:            browsers,
+		Term:               termAdapter{m: terminals},
+		Provisioner:        prov,
+		SetupDefaults:      setupDefaults,
 		BrowserTakeoverTTL: opt.browserTakeoverTTL,
-		Now:             time.Now,
-		Logger:          logger,
+		Now:                time.Now,
+		Logger:             logger,
 	})
 
 	srv := &http.Server{
@@ -894,12 +897,18 @@ func run() error {
 	// because the snapshot root is the control plane's own data directory.
 	if opt.sandboxSweep > 0 {
 		orphans := janitor.New(janitor.Config{
-			Root:         localSandboxRoot,
-			Projects:     st,
-			SnapshotRoot: skillSnapshotDir,
-			Sessions:     st,
-			Logger:       logger,
-			Interval:     opt.sandboxSweep,
+			Root:          localSandboxRoot,
+			Projects:      st,
+			SnapshotRoot:  skillSnapshotDir,
+			AgentRoot:     filepath.Join(opt.dataDir, "pi-agents"),
+			ArtifactsRoot: filepath.Join(opt.dataDir, "artifacts"),
+			SnapshotsRoot: filepath.Join(opt.dataDir, "snapshots"),
+			SkillsRoot:    filepath.Join(opt.dataDir, "skills"),
+			Sessions:      st,
+			Sandboxes:     st,
+			Skills:        st,
+			Logger:        logger,
+			Interval:      opt.sandboxSweep,
 		})
 		// Empty means this provider keeps no sandbox directories here; saying
 		// "the current directory" for it would read as if it did.
@@ -907,9 +916,13 @@ func run() error {
 		if localSandboxRoot != "" {
 			sandboxRootLabel = abs(localSandboxRoot)
 		}
-		logger.Info("orphaned sandbox directories and skill snapshots are swept",
+		logger.Info("orphaned runtime directories are swept",
 			"sandbox_root", sandboxRootLabel,
-			"snapshot_root", abs(skillSnapshotDir),
+			"skill_snapshot_root", abs(skillSnapshotDir),
+			"agents_root", abs(filepath.Join(opt.dataDir, "pi-agents")),
+			"artifacts_root", abs(filepath.Join(opt.dataDir, "artifacts")),
+			"sandbox_snapshot_root", abs(filepath.Join(opt.dataDir, "snapshots")),
+			"skills_root", abs(filepath.Join(opt.dataDir, "skills")),
 			"interval", opt.sandboxSweep.String())
 		go orphans.Start(ctx)
 	} else {
