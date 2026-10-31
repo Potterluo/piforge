@@ -89,6 +89,9 @@ type options struct {
 	// browserIdleTimeout stops a sandbox browser that no viewer has been
 	// attached to for this long. Zero uses the manager's 60s default.
 	browserIdleTimeout time.Duration
+	// browserTakeoverTTL is how long a browser takeover lease survives without
+	// a heartbeat (FR-11.3). Zero uses the httpapi default.
+	browserTakeoverTTL time.Duration
 	// agentIdleTTL is how long an agent process may sit unused before it is stopped.
 	agentIdleTTL time.Duration
 	// sandboxIdlePause / sandboxReclaimAfter are the two FR-5.3 thresholds.
@@ -213,6 +216,8 @@ func run() error {
 		"proxy the sandbox browser should use (host:port)")
 	flag.DurationVar(&opt.browserIdleTimeout, "browser-idle-timeout", envDuration("PIFORGE_BROWSER_IDLE_TIMEOUT", browser.DefaultIdleTimeout),
 		"stop a sandbox browser after this long with no viewer attached (0: 60s default, negative disables)")
+	flag.DurationVar(&opt.browserTakeoverTTL, "browser-takeover-ttl", envDuration("PIFORGE_BROWSER_TAKEOVER_TTL", 45*time.Second),
+		"how long a browser takeover lease lives without a heartbeat (FR-11.3)")
 	flag.StringVar(&opt.isolation, "isolation", envOr("PIFORGE_ISOLATION", "none"),
 		"process jail for agent processes: none|bubblewrap|firejail")
 	flag.StringVar(&opt.isolationBinary, "isolation-binary", envOr("PIFORGE_ISOLATION_BINARY", ""),
@@ -787,6 +792,7 @@ func run() error {
 		Term:            termAdapter{m: terminals},
 		Provisioner:     prov,
 		SetupDefaults:   setupDefaults,
+		BrowserTakeoverTTL: opt.browserTakeoverTTL,
 		Now:             time.Now,
 		Logger:          logger,
 	})

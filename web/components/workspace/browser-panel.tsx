@@ -81,37 +81,40 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
   const [painted, setPainted] = React.useState(false);
   // FR-11.2/11.4: observation by default. The server enforces this too — the panel only
   // decides what it offers, not what is allowed.
-  const [takeover, setTakeover] = React.useState(false);
-  // A disabled feature is not a broken socket: say which one it is instead of
-  // looping 连接中 → 已断开 → 重新连接 forever.
+  //
+  // FR-11.3: the mode is not private state any more. A takeover is a lease on the
+  // sandbox browser, and somebody else may hold it, release it, or let it expire;
+  // the panel polls so it can say 「正在被 X 控制」 instead of silently fighting.
+  const queryClient = useQueryClient();
   const browserEnabled = useFeature("browser");
-  React.useEffect(() => {
-    let cancelled = false;
-    void api.browser
-      .mode(sessionId)
-      .then((result) => {
-        if (!cancelled) setTakeover(result.mode === "takeover");
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionId]);
+  const modeQuery = useQuery({
+    queryKey: ["browser-mode", sessionId],
+    queryFn: () => api.browser.mode(sessionId),
+    enabled: browserEnabled,
+    refetchInterval: 3_000,
+  });
+  const takeover = modeQuery.data?.mode === "takeover";
+  const holder = modeQuery.data?.holder;
+  const otherHolder = holder && !holder.owned_by_me ? holder : null;
+  const leaseTtl = modeQuery.data?.ttl_seconds ?? 45;
 
   const setMode = React.useCallback(
     async (next: "observe" | "takeover") => {
       try {
         const result = await api.browser.setMode(sessionId, next);
-        setTakeover(result.mode === "takeover");
+        queryClient.setQueryData(["browser-mode", sessionId], result);
         // Saying it out loud matters: a click that does nothing in observe mode looks
         // like a broken panel, and the reason is not visible anywhere else.
         if (next === "takeover") toast.success("你正在控制浏览器", { description: "agent 的浏览器操作已暂停。" });
         else toast.info("已切回观察模式", { description: "点击与键盘不再发送到页面。" });
       } catch (error) {
-        toast.error("切换失败", { description: humanizeError(error) });
+        // A refusal to take over is `browser_busy`: the server's message already
+        // names the holder and the remaining seconds, so it is shown as-is.
+        toast.error(next === "takeover" ? "无法接管" : "切换失败", { description: humanizeError(error) });
+        void queryClient.invalidateQueries({ queryKey: ["browser-mode", sessionId] });
       }
     },
-    [sessionId],
+    [sessionId, queryClient],
   );
   const [error, setError] = React.useState<string | null>(null);
   const [meta, setMeta] = React.useState<FrameMeta | null>(null);
@@ -177,6 +180,12 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
           } else if (message.type === "error") {
             setError(humanizeError(message.message, "浏览器不可用"));
             setStatus("error");
+          } else if (message.type === "lease") {
+            // The server is authoritative about who holds the takeover. If our
+            // heartbeat was refused, the lease was lost (expired, released by
+            // another tab, or never ours) — refetch instead of believing we
+            // still control the page.
+            void queryClient.invalidateQueries({ queryKey: ["browser-mode", sessionId] });
           }
         } catch {
           // A non-JSON text frame carries nothing we can use.
@@ -212,12 +221,26 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
       socket.close(1000, "unmount");
       socketRef.current = null;
     };
-  }, [sessionId, generation, browserEnabled, tabId]);
+  }, [sessionId, generation, browserEnabled, tabId, queryClient]);
 
   const send = React.useCallback((payload: unknown) => {
     const socket = socketRef.current;
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
   }, []);
+
+  // FR-11.3: while we hold the takeover, say so periodically. The lease expires
+  // on its own, so a closed tab (no heartbeats) frees the browser for somebody
+  // else instead of locking it forever. The interval is derived from the
+  // server's TTL — a fixed one would either churn or expire early depending on
+  // how the deployment configured it.
+  React.useEffect(() => {
+    if (!takeover || !holder?.owned_by_me) return;
+    const beatMs = Math.max(2_000, Math.min(30_000, (leaseTtl * 1000) / 3));
+    const beat = () => send({ type: "heartbeat" });
+    beat();
+    const timer = window.setInterval(beat, beatMs);
+    return () => window.clearInterval(timer);
+  }, [takeover, holder?.owned_by_me, leaseTtl, send]);
 
   // The sandbox renders at the size the viewer shows, not at a fixed window size:
   // collapsing the sidebar or resizing the window must reflow the page, otherwise
@@ -333,7 +356,6 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
     }
   };
 
-  const queryClient = useQueryClient();
   const openTabMutation = useMutation({
     // 新标签页 is a blank page, not a copy of the current one: sending `url` here
     // made the plus button open the same site twice and left the blank-page
@@ -473,10 +495,13 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
           variant={takeover ? "default" : "outline"}
           data-testid="browser-mode"
           aria-pressed={takeover}
+          disabled={!live || Boolean(otherHolder)}
           title={
-            takeover
-              ? "你正在控制页面；agent 的浏览器操作会被打断"
-              : "只观察：点击与键盘不会发到页面"
+            otherHolder
+              ? `正在被 ${otherHolder.user_name} 控制，剩余 ${otherHolder.remaining_seconds} 秒`
+              : takeover
+                ? "你正在控制页面；agent 的浏览器操作会被打断"
+                : "只观察：点击与键盘不会发到页面"
           }
           className="text-[10px]"
           onClick={() => {
@@ -495,6 +520,18 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
         >
           {takeover ? "控制中" : "观察"}
         </Button>
+        {otherHolder ? (
+          // FR-11.3: the panel says who holds the browser instead of letting two
+          // people type into one page and wonder which click landed.
+          <Badge
+            variant="outline"
+            className="text-[10px]"
+            data-testid="browser-holder"
+            title={`剩余 ${otherHolder.remaining_seconds} 秒；切回观察或等待超时后释放`}
+          >
+            正在被 {otherHolder.user_name} 控制
+          </Badge>
+        ) : null}
         <Badge
           variant={live ? "secondary" : "outline"}
           className="text-[10px]"

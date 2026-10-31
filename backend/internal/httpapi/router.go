@@ -29,6 +29,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/bootstrap"
 	"github.com/piforge/piforge/backend/internal/browser"
+	"github.com/piforge/piforge/backend/internal/browserlease"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/crypto"
 	"github.com/piforge/piforge/backend/internal/fsx"
@@ -133,6 +134,11 @@ type Deps struct {
 	// PIFORGE_BOOTSTRAP_PROVIDER. It is non-secret by construction (name,
 	// endpoint, model) and empty unless the operator set the variable.
 	SetupDefaults bootstrap.Defaults
+	// BrowserTakeoverTTL is how long a takeover lease lives without a
+	// heartbeat (FR-11.3). Zero uses the default. A closed panel stops
+	// heartbeating, so this is also how long a crashed viewer can keep the
+	// browser before somebody else may take it.
+	BrowserTakeoverTTL time.Duration
 	// Now defaults to time.Now.
 	Now func() time.Time
 	// Logger defaults to slog.Default().
@@ -160,6 +166,9 @@ type server struct {
 	// session's Workspace: in a remote-placement deployment that interface
 	// speaks to the sandbox, and artifacts belong to the control plane.
 	artifacts *fsx.Service
+	// leases makes takeover exclusive per sandbox (FR-11.3). In memory: a
+	// restart means nobody is holding the wheel, which is the honest state.
+	leases *browserlease.Manager
 }
 
 // NewRouter builds the complete HTTP handler, including the recover middleware.
@@ -182,7 +191,7 @@ func newServer(d Deps) *server {
 	if d.Logger == nil {
 		d.Logger = slog.Default()
 	}
-	return &server{
+	s := &server{
 		deps:         d,
 		log:          d.Logger,
 		now:          d.Now,
@@ -193,6 +202,8 @@ func newServer(d Deps) *server {
 		// pretend a checkout exists under the data directory.
 		artifacts: fsx.New(fsx.Config{}),
 	}
+	s.leases = browserlease.New(d.BrowserTakeoverTTL, s.now)
+	return s
 }
 
 // routes registers every endpoint. Route-level middleware is attached here so

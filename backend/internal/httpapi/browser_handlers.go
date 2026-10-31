@@ -68,6 +68,13 @@ func (s *server) handleSessionBrowser(w http.ResponseWriter, r *http.Request) {
 	// sandbox share one Chrome, which is the point of the granularity choice.
 	sandboxID := worktree.SandboxID
 
+	// The lease is keyed by the sandbox for the same reason (FR-11.3): the page
+	// two sessions of one project see is one page, so the right to type into it
+	// is one right. Resolved here, once per socket, instead of on every
+	// keystroke.
+	scope := "sandbox:" + sandboxID
+	owner := browserOwner(user, sess)
+
 	// The profile lives in the sandbox root, one level above the checkout. It
 	// must not be inside the repository: a Chrome profile is thousands of files
 	// and would show up as the user's untracked work on every page load.
@@ -180,17 +187,43 @@ func (s *server) handleSessionBrowser(w http.ResponseWriter, r *http.Request) {
 			}
 		case "input":
 			if cmd.Input != nil {
-				// FR-11.2 / FR-11.4: observation is the default, and input is dropped
-				// rather than queued. A viewer who clicks in a read-only panel should see
-				// nothing happen — with the mode switch right there saying why.
+				// FR-11.2 / FR-11.3 / FR-11.4: observation is the default, and input
+				// is dropped rather than queued. A viewer who clicks in a read-only
+				// panel should see nothing happen — with the mode switch right there
+				// saying why. The lease is checked too: a takeover whose TTL elapsed
+				// (or that was taken by another session) is not control, even if this
+				// session's mode entry still says takeover.
 				if browserModeOf(sess.ID) != browserModeTakeover {
 					s.log.DebugContext(ctx, "browser input ignored in observe mode",
 						"session", sess.ID)
 					break
 				}
+				held, ok := s.leases.Holder(scope)
+				if !ok || !held.Owner.Same(owner) {
+					s.log.DebugContext(ctx, "browser input ignored: the takeover lease is not ours",
+						"session", sess.ID, "scope", scope)
+					break
+				}
 				if err := session.TabDispatch(ctx, tabID, *cmd.Input); err != nil {
 					s.log.DebugContext(ctx, "browser input failed", "error", err.Error())
 				}
+			}
+		case "heartbeat":
+			// The panel says "still here" while it holds the lease, which is what
+			// keeps a live takeover alive and lets a closed one expire (FR-11.3).
+			// A heartbeat never grants control: a refused client must not be able to
+			// poll its way in.
+			if lease, renewed := s.leases.Renew(scope, owner); renewed {
+				_ = conn.Write(ctx, websocket.MessageText, mustJSON(map[string]any{
+					"type":               "lease",
+					"owned":              true,
+					"expires_in_seconds": int(lease.Remaining(s.now()).Round(time.Second) / time.Second),
+				}))
+			} else {
+				_ = conn.Write(ctx, websocket.MessageText, mustJSON(map[string]any{
+					"type":  "lease",
+					"owned": false,
+				}))
 			}
 		case "resize":
 			// A viewer that cannot see the whole page is worse than a small one:

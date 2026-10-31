@@ -215,11 +215,32 @@ export interface SendMessageInput {
   };
 }
 
+/**
+ * Who is driving the sandbox browser (FR-11.3).
+ *
+ * `holder` is present whenever somebody — possibly the caller — holds the
+ * takeover lease. `owned_by_me` is what lets two tabs of one session agree
+ * instead of each guessing from its own click.
+ */
+export interface BrowserMode {
+  mode: "observe" | "takeover";
+  /** How long a takeover survives without a heartbeat. */
+  ttl_seconds?: number;
+  holder?: {
+    user_id: string;
+    user_name: string;
+    session_id: string;
+    session_label?: string;
+    owned_by_me: boolean;
+    remaining_seconds: number;
+    expires_at: string;
+  };
+}
+
 export const browser = {
-  mode: (sessionId: string) =>
-    request<{ mode: string }>(`/v1/sessions/${sessionId}/browser/mode`),
+  mode: (sessionId: string) => request<BrowserMode>(`/v1/sessions/${sessionId}/browser/mode`),
   setMode: (sessionId: string, mode: "observe" | "takeover") =>
-    request<{ mode: string }>(`/v1/sessions/${sessionId}/browser/mode`, {
+    request<BrowserMode>(`/v1/sessions/${sessionId}/browser/mode`, {
       method: "POST",
       body: { mode },
     }),

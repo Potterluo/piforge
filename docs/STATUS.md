@@ -119,7 +119,7 @@
 | FR-10.8 与 agent 共享文件系统 | DONE | 终端 cwd 取自 `worktreeRoot(sess)`，与 agent 的 `spec.Worktree` 同目录（`pty_handlers.go` vs `runtime.go spawn` `cfg.Dir`）；`03-workspace.spec.ts` |
 | FR-11.1 画面投屏（screencast → WS → canvas） | DONE | `browser.go` `Screencast`/`Page.startScreencast` + `browser_handlers.go` + `browser-panel.tsx` canvas；`08-browser.spec.ts`、`browser_test.go` `TestScreencastForwardsFramesAndAcks`。并发打开面板的启动竞态由 `be01575` 修掉（每 sandbox 单飞、失败返回 typed `LaunchError`、devtools 断线视为死会话）：`TestConcurrentEnsureLaunchesASandboxOnce`、`TestTwoSandboxesLaunchInParallel`、`TestRealChromeConcurrentEnsureSharesOneBrowser`；部署实测同 tick 打开两个面板 socket 都拿到同一个 pid。**面板生命周期（`15b995c`）**：会话页不再挂载浏览器面板，只有选中「浏览器」面板（或把它放进第二窗格）才连接 screencast，服务端因此不会在打开会话时启动 Chrome；最后一个 viewer 离开后，`Manager.StartIdleReaper` 在 `PIFORGE_BROWSER_IDLE_TIMEOUT`（默认 60s）后停止该 sandbox 的浏览器，`Len()` / `SandboxIDs()` 归零，管理页 `browser_running` / `browser_idle_timeout` 可读。测试：`idle_test.go` `TestIdlePolicyStopsOnlyUnwatchedBrowsers`、`TestIdlePolicyStopsABrowserThatWasNeverWatched`、`TestConcurrentAcquireLaunchesOneBrowserPerSandbox`，e2e `67-browser-lazy.spec.ts` 断言「打开会话 20s 内没有浏览器进程，选中面板后才启动，切走后 60s（套件里 3s）内停止」。**边界**：这条 idle 策略只覆盖 host placement；远端 / AIO 沙箱里的 Chrome 仍不会因空闲被停止（见文末「交付能力」）。 |
 | FR-11.2 观察模式（默认不可输入） | DONE | 默认 `observe` 成立；`browser_handlers.go` 在非 takeover 时对 `input` 命令直接 `break`（服务端判定，不靠面板自觉）。**本批补上断言**：e2e `72-observe-input.spec.ts` 起一个页面，把「最后收到的事件」写进 `document.title`，再从 `GET …/browser/tabs` 读回标题——不是读面板自己的模式按钮。observe 下点 canvas、按键后标题仍为 `observe-target`（等 1.5s 再断言，给错误转发的输入足够时间到达）；切到 takeover 后同一套点击/按键分别变成 `clicked` / `key-b`。旧代码没有行为差异可失败（守卫比测试早），所以用变异证明测试有效：删掉服务端 `browserModeOf(...) != takeover` 守卫后，同一条 spec 失败在 `Expected "observe-target" / Received "key-z"`（`e2e/.artifacts/partial-batch2/fr-11.2-mutation-fail.log`）。部署截图 `fr-11.2-observe-click-dropped.png`（观察，标题未变）与 `fr-11.2-takeover-click-delivered.png`（控制中，标题 `clicked`） |
-| FR-11.3 接管模式（输入 + 暂停 agent 浏览器工具） | PARTIAL | 输入注入可用（`Session.TabDispatch` → `Input.dispatch*`，`browser_test.go`）；没有「接管时拦截 `mcp__playwright__*`」的浏览器锁 |
+| FR-11.3 接管模式（输入 + 暂停 agent 浏览器工具） | DONE | 接管现在是**独占租约**（`internal/browserlease`）：作用域是**沙箱**（一个沙箱一个 Chrome，两个会话看的是同一页），owner = 用户 + 会话，TTL 45s（`-browser-takeover-ttl` / `PIFORGE_BROWSER_TAKEOVER_TTL`），面板在接管期间按 TTL/3 发 `{"type":"heartbeat"}` 续租。第二个接管返回 **409 `browser_busy`**，消息与 details 写明持有人与剩余秒数（`holder` / `holder_session_id` / `remaining_seconds`）；`GET …/browser/mode` 在旧字段 `mode` 之外返回 `holder{owned_by_me, remaining_seconds}` 与 `ttl_seconds`。释放三条路：切回 observe 立即 release；断线后 TTL 过期（`Manager.Holder` 惰性清理，`effectiveBrowserMode` 把过期接管读成 observe）；「观察」按钮本身就是显式释放。**输入门禁同时查 mode 与租约**：过期或别人的租约即使还留着 takeover 字样，输入也照丢。UI：别人的租约显示「正在被 X 控制」（`browser-holder`，title 带剩余秒数）、接管按钮禁用；失败 toast 用服务端中文消息。测试：`browserlease/lease_test.go` 5 例（grant/refuse/expire/heartbeat/release，fake clock）、`httpapi/browser_takeover_test.go` 2 例（同沙箱两个会话：第一个 200、第二个 409 + 持有人 + 释放后成功；fake clock 过期后旧会话读回 observe 且第二个可接管）、e2e `83-browser-takeover.spec.ts`（第二个浏览器上下文看到「正在被 …」、API 409 `browser_busy`、释放后成功接管）。截图 `fr-11.3-controlling.png`、`fr-11.3-busy.png`、`fr-11.3-swapped.png`。**边界**：仓库里没有 Playwright MCP（FR-11.6 MISSING），没有 `mcp__playwright__*` 可拦；接管时仍照旧中断当前 run，锁覆盖的是「人和人」以及「人 vs 已经在跑的工具」。 |
 | FR-11.4 模式互斥 + 「谁在控制」标识 + 确认 | DONE | `GET/POST …/browser/mode`；进入 takeover 前弹确认（说明会中断 agent），确认后中断当前运行；面板按钮显示「观察 / 控制中」；`browser_mode_test.go`、`43-browser-mode.spec.ts` |
 | FR-11.5 地址栏 + 前进/后退/刷新 + 端口快捷入口 | PARTIAL | `browser-panel.tsx` 有 URL `Input` 与刷新/导航；无前进/后退，无端口列表下拉 |
 | FR-11.6 agent 侧通过 Playwright MCP 驱动同一 chromium | MISSING | 无 Playwright MCP 预设或 CDP 端点下发（`materialize.mcpEntry` 只写用户自己填的 command/url） |
@@ -178,13 +178,13 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 | 项目删除：先停进程、重试销毁，失败则拒绝并保留项目；清扫历史孤儿目录（本次修复） | DONE | `handleDeleteProject` 的顺序改为「停进程 → 重试销毁 → 删行」：`stopProjectProcesses` 先关该沙箱的浏览器、`Runtime.Stop` 每个会话的 agent、`Term.CloseSandbox` 每个 worktree 的终端（`TermManager` 新增该方法），再 `destroySandbox` 以 150ms 递增退避重试 6 次；仍失败返回 409 并**保留项目**（文案「沙箱目录删不掉，项目已保留…」），不再像旧代码那样记一条 warn 后照删项目行。历史遗留由 `internal/janitor` 处理：启动即扫一轮、之后每 `-sandbox-sweep`（默认 10m，0 关闭，仅本地 provider）扫一次，删除 `sandboxes/<user>/<project>` 中没有 projects 行的目录及其 `_state/<user>/<project>.json`，只认 `usr_*`/`prj_*` 形状的目录名。测试：`project_delete_test.go`（注入 destroy 失败 → 409 + 项目仍在 + 至少重试 2 次；释放后重试 → 行与目录都消失；终端先关后销毁的顺序）、`janitor_test.go` 5 例、`61-project-lifecycle.spec.ts`（UI 删除后**真实路径**消失；用 PowerShell `FileShare.None` 真锁住 checkout → UI 报「沙箱目录删不掉 / 项目已保留」且项目仍在，释放后重试两者都消失）、`e2e/scripts/fix-orphans-repro.ps1`（Windows 复现/验证脚本）。旧代码实测：删除返回 200、项目行消失、`sandboxes/<user>/<project>` 留盘，日志 `delete project: sandbox destroy failed ... unlinkat ...\repo\held-by-a-process.txt: The process cannot access the file...`（`e2e/.artifacts/fix-orphans/fail-first.log`） |
 | ⌘K 命令面板的默认选中 / Enter（PRD §10.1-5、§13「全部交互可键盘到达」；PRD 没有对应 FR 行） | DONE | 旧实现把选择交给 cmdk 1.1.1，它按行的 `value` 字符串认选中行。会话行的 label 在 projects 查询返回后才从「项目」变成真实项目名，`value` 随之变化，存储的选中值不再匹配任何行：`[cmdk-item][aria-selected="true"]` 实测 0，而 cmdk 的 Enter 只会向选中行派发，于是「输入 → 回车」什么都不发生。现在面板自己管理选择：行有稳定 id（`session:<id>` 等），active 行由可见列表**推导**（当前 id 不在了就选第一行），`aria-selected`、`aria-activedescendant`、`role=listbox/option`、`aria-controls/expanded` 同源；↑↓/Home/End/Enter 由面板处理。列表仍在加载时按 Enter **忽略而不是排队**：结果随时可能变化，排队的 Enter 会执行用户没看见的行；面板保持打开，行出现后下一次 Enter 生效。测试：`web/components/shell/command-palette.test.tsx` 4 例（异步落定后第一行默认选中且 Enter 进入会话、label 变化不丢选择、加载中 Enter 无效、↑↓ 仍可用）、`e2e/tests/60-session-search.spec.ts` 的「Ctrl+K → 输入 → Enter 直接打开」（旧代码在保留新 spec、去掉 ArrowDown 后必失败）与「列表仍在加载时 Enter 被忽略，随后生效」；部署实例探针 `e2e/scripts/fix-palette-shadow-probe.mjs` 旧构建 `selected=0`、URL 未变。 |
 
-计数：上面 126 条 FR 是 **DONE 67 / PARTIAL 43 / MISSING 15 / 不做 1**（本批按表格行逐行重数；旧段里的 62 / 46 / 17 已与表格不一致）；加上这五条（均 DONE）后整表 131 行 = **DONE 72 / PARTIAL 43 / MISSING 15 / 不做 1**。
+计数：上面 126 条 FR 是 **DONE 67 / PARTIAL 43 / MISSING 15 / 不做 1**（本批按表格行逐行重数；旧段里的 62 / 46 / 17 已与表格不一致）；加上这五条（均 DONE）后整表 131 行 = **DONE 72 / PARTIAL 43 / MISSING 15 / 不做 1**。本批 FR-11.3 由 PARTIAL 转 DONE（租约 + 拒绝 + UI + 测试），FR-14.2 仍是 PARTIAL（Windows 是只读副本；Linux 无 mount 能力时是冻结但可写的 `copy`），所以现在是 **DONE 73 / PARTIAL 42 / MISSING 15 / 不做 1 = 131**。
 
 **明确边界：远端 / AIO 沙箱里的浏览器仍不会在空闲时被停止。** `15b995c` 的 idle 策略只在 host placement 生效：控制面直接持有 Chrome 进程，`browser.Manager` 能 stop 它。远端 / AIO 模式下 Chrome 跑在沙箱里，控制面断开 CDP 只意味着没人看了，进程仍在沙箱里；`PIFORGE_BROWSER_IDLE_TIMEOUT` 不会杀它，也没有 runner 侧的空闲回收。要覆盖这条路径，需要沙箱 provider 按「无 viewer」自行 stop 浏览器（或 runner 提供 idle 端点），目前没有实现，也没有测试。
 
 ## 最影响用户的缺口（按「用户多久会撞上」排序）
 
-1. **FR-11.3 接管时没有浏览器锁**——输入注入可用，但没有在接管时拦下 `mcp__playwright__*`；人和 agent 仍可能同时操作同一页。（FR-11.2 的「观察下输入被丢弃」已在本批补上端到端断言，见文末。）
+1. **FR-11.6 agent 侧浏览器工具**——接管锁已经有了（FR-11.3 DONE：租约 + `browser_busy` + 「正在被 X 控制」），但仍没有 Playwright MCP，agent 没有浏览器工具可被挂起；要做的是 MCP 预设（FR-15.7）与接管时的工具拦截。
 2. **FR-15.x MCP 只到一半**——没有 OAuth 代办（15.3）、没有连接状态徽章（15.5）、没有一键导入 mcpServers JSON（15.6）、没有内置预设（15.7）、没有工具列表/逐个禁用（15.8）。
 3. **FR-5.8 / 16.4 / 16.6 运维面缺失**——资源护栏只有 docker provider 的启动参数，没有管理入口；镜像管理、护栏配置都没有端点或页面。
 4. **FR-9.6 多路跟随**——跟随终端没有「每分支一个跟随 tab」（单路跟随已修，见文末）；终端本体已有多 tab（FR-10.2 本轮补齐）。
@@ -307,7 +307,7 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 
 ## 仍是 PARTIAL 的相邻项（本批未动）
 
-- **FR-11.3**：输入注入可用，但接管时没有拦下 agent 的 `mcp__playwright__*`，人和 agent 仍可能同抢一页；需要浏览器锁，不是补一条测试。
+- **FR-11.6**：接管锁与输入门禁已由 FR-11.3 补齐；仍未解决的是 agent 侧——没有 Playwright MCP 预设，所以没有 `mcp__playwright__*` 可以在接管时挂起。这是 FR-11.6/15.7 的范围，不是补一条测试。
 - **FR-12.1 的「本轮」**：工作区 / 已暂存 / 分支 vs 基准 / 提交范围 四个作用域都已可用并有测试；PRD 原文的「本轮」仍没有入口——它要回答「这一轮 agent 改了什么」，得从 run 的 tool events 里反推改动集合，不是加一个 tab，本批没有半做。
 - **FR-12.1 的输入方式**：提交范围靠手输 `from`/`to`（默认 `HEAD~1..HEAD`），没有提交选择器；历史作用域不能逐 hunk 操作（显示 `git-hunk-readonly`），这是刻意的。
 - **FR-12.4 的边界**：风险只覆盖台账点名的 lockfile 与 CI 两类（按已知文件名/目录）；二进制与 >4MB 文件的未跟踪行数记 0。这两点是刻意的，不假装覆盖任意 `*.lock` 或大文件。
@@ -607,4 +607,34 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 - `PATCH /v1/providers/{id}` 打在共享行上仍是 403 `forbidden`（store 明确拒绝用户编辑共享配置）。它不是「不存在」，但也不在本批的 404 混淆里；没有改成 `shared_provider`。
 - 确认框不要求输入 provider 名（不是 GitHub 式二次输入）：本批要求是「显式确认 + 说清后果」，两步输入更适合不可恢复的批量操作。
 - `/v1/providers` 创建与共享同名的 provider 仍返回 409 `conflict`（阴影规则的另一半），未改。
+
+## 本批 FR-11.3：接管浏览器是一把独占租约
+
+### 缺什么
+
+`/v1/sessions/{id}/browser/mode` 只是内存里每个会话一个字符串：谁最后 POST，谁就是 `takeover`。浏览器属于**沙箱**（一个沙箱一个 Chrome），所以同一项目的两个会话看到的是同一页，两个标签页可以同时「接管」，输入门禁只看自己会话的字符串，于是两边都往同一页打字，谁也说不清哪一下是谁的。
+
+### 改法
+
+- 新包 `internal/browserlease`：`Claim` / `Renew` / `Release` / `Holder`，作用域是**沙箱**（`browserScope`：会话 → worktree → sandbox id；没有 checkout 时退回会话 id），owner = 用户 + 会话，TTL 45s（`-browser-takeover-ttl` / `PIFORGE_BROWSER_TAKEOVER_TTL`）。时钟是注入的，测试用 fake clock 而不是 sleep。
+- 第二个接管：**409 `browser_busy`**。消息「浏览器正在被 <持有人> 控制，剩余 N 秒」，details 给 `holder` / `holder_user_id` / `holder_session_id` / `holder_session` / `remaining_seconds` / `expires_at`。持有人是同一个人同一会话时是续租，不是冲突。
+- 释放：① 切回 observe → `Release`，立即生效；② 面板断线（不再发心跳）→ TTL 到期；③ 「观察」按钮本身就是显式释放。`effectiveBrowserMode` 在读取时把过期租约读成 observe，`Holder` 惰性删除过期项。
+- 心跳：面板在接管期间每 `ttl/3`（2–30s 之间）发 `{"type":"heartbeat"}`；服务端只给 owner 续租，非 owner 的心跳返回 `owned:false`，**心跳永远不是接管**。
+- 输入门禁：`input` 同时检查会话 mode 与租约（`held.Owner.Same(owner)`）。过期或别人的租约即使字符串还写着 takeover，输入照丢。
+- UI：`browser-panel.tsx` 把 mode 改成 3s 轮询的 query；别人的租约显示「正在被 X 控制」徽章（`browser-holder`，title 带剩余秒数），接管按钮禁用；接管失败用服务端的中文消息（`humanizeError` 对含中文的消息原样透出）。
+- 兼容：`GET/POST /browser/mode` 的旧字段 `mode` 不变，只是多了 `holder` 与 `ttl_seconds`；观察模式、单用户接管、`43-browser-mode.spec.ts` 全部照旧。
+
+### 测试与失败优先
+
+- `browserlease/lease_test.go` 5 例：grant + 拒绝并命名持有人与剩余时间、过期后释放、心跳只给 owner、显式释放只允许 owner、持有人文案。
+- `httpapi/browser_takeover_test.go` 2 例：同一沙箱两个会话（第二个会话挂在第一个的 worktree 上）→ 第一个 200、第二个 409 + details 持有人与剩余秒数、切回 observe 后第二个成功；fake clock 过期后旧会话读回 `observe`、`holder` 消失、第二个可接管。
+- e2e `83-browser-takeover.spec.ts`：两个浏览器上下文（同一个人的两个会话，同一项目 = 同一沙箱）。第二个面板出现「正在被 … 控制」且按钮禁用；API 409 `browser_busy` 且 `holder_session_id` 指向第一个；释放后第二个的真实 UI 接管成功。截图 `fr-11.3-controlling.png`、`fr-11.3-busy.png`、`fr-11.3-swapped.png`。
+- **fail-first**：把 `Claim` 里的 holder 判断改成 `if false && …`（= 旧行为：后到者直接赢），`TestClaimIsExclusiveAndNamesTheHolder` 失败在「a second session took over a browser somebody else is driving」，`TestBrowserTakeoverIsExclusiveAndReleases` 失败在「second takeover: **200**」并打印了第二个会话的 `owned_by_me:true`。日志 `e2e/.artifacts/partial-batch3/fr-11.3-fail-first-lease.log`。恢复后两处都过。
+
+### 边界
+
+- 仓库里没有 Playwright MCP（FR-11.6 MISSING），所以没有 `mcp__playwright__*` 可以在接管时挂起。接管仍会中断当前 run；这把锁覆盖「人和人」以及「人 vs 已经在跑的工具」，不覆盖一个不存在的 agent 浏览器工具。
+- 租约在内存里：控制面重启后没人持有是正确语义，不落库。
+- 同一个用户、同一个会话的两个标签页是**同一个 owner**（任务定义的 owner 就是 user+session），因此它们不会互相拒绝；跨会话、跨用户才是被拒绝的一方。
+
 

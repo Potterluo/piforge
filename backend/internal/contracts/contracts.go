@@ -866,6 +866,11 @@ const (
 	ErrForbidden        = "forbidden"
 	ErrNotFound         = "not_found"
 	ErrSessionBusy      = "session_busy"
+	// ErrBrowserBusy means another principal (user + session) holds the
+	// sandbox browser's takeover lease (FR-11.3). The details name the holder
+	// and the remaining time, because "busy" without a who or how long is not
+	// something a user can act on.
+	ErrBrowserBusy = "browser_busy"
 	ErrNeedFullResync   = "need_full_resync"
 	ErrBranchConflict   = "branch_conflict"
 	ErrFileTooLarge     = "file_too_large"

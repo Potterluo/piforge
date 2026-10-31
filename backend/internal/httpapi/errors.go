@@ -32,6 +32,7 @@ var statusByCode = map[string]int{
 	contracts.ErrForbidden:        403,
 	contracts.ErrNotFound:         404,
 	contracts.ErrSessionBusy:      409,
+	contracts.ErrBrowserBusy:      409,
 	contracts.ErrNeedFullResync:   409,
 	contracts.ErrBranchConflict:   409,
 	contracts.ErrConflict:         409,
