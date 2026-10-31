@@ -26,20 +26,24 @@ const maxBodyBytes = 12 << 20 // 12 MiB
 // HTTP status (PRD §9.7). Keeping it in one place is what lets the frontend
 // rely on the pairing.
 var statusByCode = map[string]int{
-	contracts.ErrInvalidArgument:  400,
-	contracts.ErrNoModel:          400,
-	contracts.ErrUnauthenticated:  401,
-	contracts.ErrForbidden:        403,
-	contracts.ErrNotFound:         404,
-	contracts.ErrSessionBusy:      409,
-	contracts.ErrBrowserBusy:      409,
-	contracts.ErrNeedFullResync:   409,
-	contracts.ErrBranchConflict:   409,
-	contracts.ErrConflict:         409,
-	contracts.ErrSharedProvider:   409,
-	contracts.ErrFileTooLarge:     413,
-	contracts.ErrSandboxUnavail:   422, // 422 is the PRD's default for this code
-	contracts.ErrSandboxPaused:    423,
+	contracts.ErrInvalidArgument: 400,
+	contracts.ErrNoModel:         400,
+	contracts.ErrUnauthenticated: 401,
+	contracts.ErrForbidden:       403,
+	contracts.ErrNotFound:        404,
+	contracts.ErrSessionBusy:     409,
+	contracts.ErrBrowserBusy:     409,
+	contracts.ErrNeedFullResync:  409,
+	contracts.ErrBranchConflict:  409,
+	contracts.ErrConflict:        409,
+	contracts.ErrSharedProvider:  409,
+	contracts.ErrFileTooLarge:    413,
+	contracts.ErrSandboxUnavail:  422, // 422 is the PRD's default for this code
+	contracts.ErrSandboxPaused:   423,
+	// The sandbox checkout is over its disk budget (FR-5.8). 507 is the status
+	// for "insufficient storage" and the only one that does not read as "retry
+	// and it will work": nothing changes until something is deleted.
+	contracts.ErrSandboxDiskQuota: 507,
 	contracts.ErrRateLimited:      429,
 	contracts.ErrUpstreamOverload: 503,
 	// A forge that answered 5xx or could not be reached is a bad gateway from

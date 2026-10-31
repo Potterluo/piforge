@@ -861,21 +861,26 @@ const (
 	// ErrNoModel means the session has no usable model: no provider resolved, or
 	// the provider lists no models. It is its own code because the remedy lives in
 	// a specific place in the UI, and "internal error" sent users there blind.
-	ErrNoModel          = "no_model"
-	ErrUnauthenticated  = "unauthenticated"
-	ErrForbidden        = "forbidden"
-	ErrNotFound         = "not_found"
-	ErrSessionBusy      = "session_busy"
+	ErrNoModel         = "no_model"
+	ErrUnauthenticated = "unauthenticated"
+	ErrForbidden       = "forbidden"
+	ErrNotFound        = "not_found"
+	ErrSessionBusy     = "session_busy"
 	// ErrBrowserBusy means another principal (user + session) holds the
 	// sandbox browser's takeover lease (FR-11.3). The details name the holder
 	// and the remaining time, because "busy" without a who or how long is not
 	// something a user can act on.
-	ErrBrowserBusy = "browser_busy"
-	ErrNeedFullResync   = "need_full_resync"
-	ErrBranchConflict   = "branch_conflict"
-	ErrFileTooLarge     = "file_too_large"
-	ErrSandboxUnavail   = "sandbox_unavailable"
-	ErrSandboxPaused    = "sandbox_paused"
+	ErrBrowserBusy    = "browser_busy"
+	ErrNeedFullResync = "need_full_resync"
+	ErrBranchConflict = "branch_conflict"
+	ErrFileTooLarge   = "file_too_large"
+	ErrSandboxUnavail = "sandbox_unavailable"
+	ErrSandboxPaused  = "sandbox_paused"
+	// ErrSandboxDiskQuota means the session's sandbox checkout is over its disk
+	// budget (FR-5.8). It is its own code because the remedy is "delete something
+	// in the workspace", not "retry" and not "the server is broken"; the message
+	// names the limit and the current usage.
+	ErrSandboxDiskQuota = "sandbox_disk_quota"
 	ErrRateLimited      = "rate_limited"
 	ErrUpstreamOverload = "upstream_overloaded"
 	ErrConflict         = "conflict"

@@ -24,6 +24,22 @@ const (
 	maxSkillPathLen    = 200
 )
 
+// DefaultSkillMaxBytes bounds the total a single import may expand on disk
+// (FR-5.8). The per-bundle cap above is four megabytes; this is the ceiling for
+// one archive's expansion across every skill it contains, and it is what stops an
+// archive bomb instead of trusting the sizes a zip header claims.
+// cmd/piforged fills Deps.SkillMaxBytes from -skill-max-bytes /
+// PIFORGE_SKILL_MAX_BYTES; 32 MiB is the deployment default.
+const DefaultSkillMaxBytes int64 = 32 << 20
+
+// skillMaxBytes is the effective cap for this server.
+func (s *server) skillMaxBytes() int64 {
+	if s != nil && s.deps.SkillMaxBytes > 0 {
+		return s.deps.SkillMaxBytes
+	}
+	return DefaultSkillMaxBytes
+}
+
 type skillFile struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`

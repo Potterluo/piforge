@@ -31,7 +31,7 @@
 - 审计方法：先读 `docs/STATUS-AUDIT.md`（`06b61a3`）的每条判定，再逐条重读 `backend/internal/httpapi/router.go` 的路由表、各 handler、`web/components/**` 与 `e2e/tests/*.spec.ts`；以「实现 + 断言了用户可见结果的测试名」为准，不采信命名与注释。
 - 状态口径：**DONE** 必须点名一条断言用户可见承诺的测试或 e2e 路径；**PARTIAL** 必须写清缺什么；**MISSING** 是无实现。
 - 本版把 `06b61a3` 之后的修复接进台账：`f766651`（FR-2.5 / FR-2.6）、`bd85ade`（FR-2.7）、`9c4ab0b`（FR-11.8）、`717f7cb`（FR-12.5），以及浏览器启动按沙箱单飞与 profile 僵尸锁恢复（FR-11.1）。本批补上 FR-12.6（一键开 PR）并把 FR-8.8 从 PARTIAL 移到 DONE——开 PR 是那一条里唯一缺的能力。
-- 计数（按本文件表格行重数，不是抄旧表头）：**126 条 FR = DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**（`be01575` 时是 52 / 54；此后 FR-1.9、FR-9.2、FR-3.3、FR-14.4、FR-6.6、FR-10.2、FR-11.2、FR-12.4、FR-14.1、FR-12.1、FR-12.2、FR-16.3、FR-12.3、FR-12.6、FR-8.8、FR-11.3 逐一移入 DONE）。另有 6 条非 FR 交付能力（见「交付能力（非 FR，单独计）」），均 DONE；**整表 132 行 = DONE 74 / PARTIAL 42 / MISSING 15 / 不做 1**。本批（运行时目录生命周期）不改变任何 FR 状态，只新增一条非 FR 行。
+- 计数（按本文件表格行重数，不是抄旧表头）：**126 条 FR = DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**（`be01575` 时是 52 / 54；此后 FR-1.9、FR-9.2、FR-3.3、FR-14.4、FR-6.6、FR-10.2、FR-11.2、FR-12.4、FR-14.1、FR-12.1、FR-12.2、FR-16.3、FR-12.3、FR-12.6、FR-8.8、FR-11.3 逐一移入 DONE）。另有 7 条非 FR 交付能力（见「交付能力（非 FR，单独计）」），均 DONE；**整表 133 行 = DONE 75 / PARTIAL 42 / MISSING 15 / 不做 1**。本批（快照行生命周期 + 沙箱磁盘配额）不改变任何 FR 状态，只新增一条非 FR 行。
 
 > 说明：PRD 中没有「部署」类 FR（§12 是里程碑，`deploy/` 是 Dockerfile.app / Dockerfile.offline / Dockerfile.runner / k8s.yaml / entrypoint.sh，属交付物而非需求行），因此下面没有部署行。`sandbox-runner`（把 Docker CLI 从控制面移出去）同样是交付物而非 FR：它没有改变任何一条 FR 的状态，证据见 `docs/SANDBOX-DEPLOY.md` §1.4 与 `scripts/verify-runner-sandbox.ps1`。
 >
@@ -76,7 +76,7 @@
 | FR-5.5 依赖缓存共享 | MISSING | `GOMODCACHE`/`_cacache`/`CARGO_HOME` 全仓库零命中 |
 | FR-5.6 快照（fs / fs+mem，仅工具边界） | PARTIAL | 只有数据层：`store/resources.go` `CreateSnapshot`/`ListSnapshots` + `store_test.go`；没有任何生产者、没有工具边界钩子、无 HTTP、`sandbox.Pause` 不快照 |
 | FR-5.7 空闲回收 | DONE | `Runtime.ReapIdle` + `StartIdleReaper`（`PIFORGE_AGENT_IDLE_TTL`，默认 30 分钟）；有 run 在跑时不回收；`TestReapIdleStopsUnusedAgentsOnly`；e2e 用 45s TTL |
-| FR-5.8 资源护栏（并发/CPU/内存/磁盘） | PARTIAL（容器 provider 有限制参数，本地 provider 没有） | `-sandbox docker -sandbox-cpus/-sandbox-memory`；`docs/SANDBOX.md`。本地 provider 仍无任何限制 |
+| FR-5.8 资源护栏（并发/CPU/内存/磁盘） | PARTIAL（磁盘预算已按沙箱落地；CPU/内存仍只有容器 provider 的启动参数） | **磁盘**：`-sandbox-disk-quota` / `PIFORGE_SANDBOX_DISK_QUOTA`（字节，默认 2 GiB，0 关闭）是每个沙箱 checkout 的预算，`internal/diskquota` 做 du 式遍历并缓存给管理页；发送消息前测量，超预算则**停止这次运行**（507 `sandbox_disk_quota`），中文文案写明上限、当前用量和该删什么（node_modules / 构建产物 / 大文件），并往会话事件里写一条 `platform.error`（转录与通知路径可见）；`GET /v1/admin/status` 新增 `sandbox_usage`（每个沙箱的 bytes / quota / over）与 `sandbox_disk_quota`，admin 页面在「运行时目录」卡片里逐个沙箱显示用量与百分比。**技能展开**：`-skill-max-bytes` / `PIFORGE_SKILL_MAX_BYTES`（默认 32 MiB）在一次导入的**实际解压字节**上生效，超过即整包拒绝（临时目录删掉，不写任何 skill 行）。**仍是 PARTIAL 的原因**：配额是「每次运行前」测量（周期性的、不是每次写入），所以单个 turn 可以超一次再被下一轮拦住；本地 provider 没有 CPU/内存限制，也没有把配额做成容器级 limit；`sandbox_usage` 的遍历有文件数上限（截断时 bytes 是下界，仍按「下界超了就是超了」判定）。见文末「本批：快照行生命周期 + 沙箱磁盘配额」。 |
 | FR-5.9 手动暂停/唤醒/快照/重建 | PARTIAL（暂停/唤醒/状态有，快照与重建没有） | `GET …/sandbox`、`POST …/sandbox/pause`、`POST …/sandbox/resume`；暂停会停掉该沙箱上的 agent；会话页有状态 chip 与「唤醒」 |
 | FR-5.10 沙箱日志（启动 / 镜像构建） | PARTIAL | `handleSessionLogs`（代码注释标 FR-5.10）返回的是 **agent stderr 尾巴**（`contracts.LogSource`），不是容器启动或镜像构建日志；`22-logs.spec.ts` 通过 |
 | FR-6.1 虚拟化文件树（展开/折叠/搜索/新建/改名/删除） | PARTIAL | `file-tree.tsx` + `file-tree-canvas.tsx`（`react-arborist` `Tree`，懒加载 `files/tree?depth=`，客户端按名过滤，下载/删除）；**新建文件有两个入口**：空态按钮 `file-create`，以及树头部始终可用的 `file-create-header`（验收 pass 3：树非空时找不到新建入口，只能改用终端）；**无重命名**；测试：`03-workspace.spec.ts`、`smoke.test.tsx`、`e2e/tests/11-files.spec.ts` 的「the tree header creates a file when the tree already has files」（树非空时点头部按钮 → 填路径 → 文件真的出现在 Files API 的 tree 里；旧前端没有 `file-create-header`，见 `e2e/.artifacts/fix-provider-lifecycle/fail-first-fix3.log`） |
@@ -178,8 +178,9 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 | 项目删除：先停进程、重试销毁，失败则拒绝并保留项目；清扫历史孤儿目录（本次修复） | DONE | `handleDeleteProject` 的顺序改为「停进程 → 重试销毁 → 删行」：`stopProjectProcesses` 先关该沙箱的浏览器、`Runtime.Stop` 每个会话的 agent、`Term.CloseSandbox` 每个 worktree 的终端（`TermManager` 新增该方法），再 `destroySandbox` 以 150ms 递增退避重试 6 次；仍失败返回 409 并**保留项目**（文案「沙箱目录删不掉，项目已保留…」），不再像旧代码那样记一条 warn 后照删项目行。历史遗留由 `internal/janitor` 处理：启动即扫一轮、之后每 `-sandbox-sweep`（默认 10m，0 关闭，仅本地 provider）扫一次，删除 `sandboxes/<user>/<project>` 中没有 projects 行的目录及其 `_state/<user>/<project>.json`，只认 `usr_*`/`prj_*` 形状的目录名。测试：`project_delete_test.go`（注入 destroy 失败 → 409 + 项目仍在 + 至少重试 2 次；释放后重试 → 行与目录都消失；终端先关后销毁的顺序）、`janitor_test.go` 5 例、`61-project-lifecycle.spec.ts`（UI 删除后**真实路径**消失；用 PowerShell `FileShare.None` 真锁住 checkout → UI 报「沙箱目录删不掉 / 项目已保留」且项目仍在，释放后重试两者都消失）、`e2e/scripts/fix-orphans-repro.ps1`（Windows 复现/验证脚本）。旧代码实测：删除返回 200、项目行消失、`sandboxes/<user>/<project>` 留盘，日志 `delete project: sandbox destroy failed ... unlinkat ...\repo\held-by-a-process.txt: The process cannot access the file...`（`e2e/.artifacts/fix-orphans/fail-first.log`） |
 | ⌘K 命令面板的默认选中 / Enter（PRD §10.1-5、§13「全部交互可键盘到达」；PRD 没有对应 FR 行） | DONE | 旧实现把选择交给 cmdk 1.1.1，它按行的 `value` 字符串认选中行。会话行的 label 在 projects 查询返回后才从「项目」变成真实项目名，`value` 随之变化，存储的选中值不再匹配任何行：`[cmdk-item][aria-selected="true"]` 实测 0，而 cmdk 的 Enter 只会向选中行派发，于是「输入 → 回车」什么都不发生。现在面板自己管理选择：行有稳定 id（`session:<id>` 等），active 行由可见列表**推导**（当前 id 不在了就选第一行），`aria-selected`、`aria-activedescendant`、`role=listbox/option`、`aria-controls/expanded` 同源；↑↓/Home/End/Enter 由面板处理。列表仍在加载时按 Enter **忽略而不是排队**：结果随时可能变化，排队的 Enter 会执行用户没看见的行；面板保持打开，行出现后下一次 Enter 生效。测试：`web/components/shell/command-palette.test.tsx` 4 例（异步落定后第一行默认选中且 Enter 进入会话、label 变化不丢选择、加载中 Enter 无效、↑↓ 仍可用）、`e2e/tests/60-session-search.spec.ts` 的「Ctrl+K → 输入 → Enter 直接打开」（旧代码在保留新 spec、去掉 ArrowDown 后必失败）与「列表仍在加载时 Enter 被忽略，随后生效」；部署实例探针 `e2e/scripts/fix-palette-shadow-probe.mjs` 旧构建 `selected=0`、URL 未变。 |
 | 运行时目录生命周期：`<dataDir>` 下每个目录都有 owner、删除路径与 janitor 兜底 | DONE | 见「本批：运行时目录生命周期」。`backend/internal/runtimedirs` 是唯一清单（sandboxes / pi-agents / skill-snapshots / snapshots / artifacts / skills，外加 piforge.db、master.key、secret.key 三个部署文件）；`TestEveryInventoryEntryHasALifecycle` 逐行要求 creator/owner/delete path/fallback，`TestEveryDataDirLiteralIsInTheInventory` 扫描 `filepath.Join(dataDir, …)`，新目录没有生命周期会失败。删会话级联 pi-agents + artifacts + skill-snapshots；删项目级联所有子会话的同三类目录与每个 sandbox 的 `snapshots/<sbx>`；janitor 每类一条 count/bytes 日志，单个失败不中断、索引读不到拒扫。`GET /v1/admin/status` 的 `storage` 块与 admin 页面按目录报告 entries/bytes。测试：`runtime_dirs_test.go` 4 例、`janitor_test.go` 新增 4 例（含 live-owner fixture 与索引失败）、`runtimedirs` 4 例；部署探针 `e2e/scripts/dirlifecycle-probe.mjs` 旧镜像留下两个目录、新镜像 10s 内清零，设计见 `e2e/.artifacts/fix-dirlifecycle/`。 |
+| 快照记录（`snapshots` 表行）的生命周期：外键级联 + janitor 行清扫 + 迁移 | DONE | 见「本批：快照行生命周期 + 沙箱磁盘配额」。`snapshots.sandbox_id` 现在是 `REFERENCES sandboxes(id) ON DELETE CASCADE` 的真外键（删项目 → 级联 sandboxes → 行随目录一起消失）；老库在 `store.Open` 时幂等重建（一个事务里建新表、原样拷贝每一行、改名，外键校验在拷贝期间关闭，所以「sandbox 已经没了」的历史行留给 janitor 而不是迁移删掉）；janitor 每轮读 `SnapshotIndex`（一条查询、covering index `snapshots_sweep`），只删「manifest 目录不存在」或「sandbox 行不存在」的行，目录和 sandbox 都活着的一行不碰、没有 blob_key 的行不猜也不删；`DeleteSnapshots` 分批删。另外修掉让删除根本走不到级联的那个缺陷：sandbox 被空闲回收后再删项目会 409（provider 已经不认这个 id），现在 `sandbox.ErrNotFound` 视为「已经销毁」。 |
 
-计数：上面 126 条 FR 是 **DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**（按表格行逐行重数）；加上六条非 FR 交付能力（均 DONE）后整表 132 行 = **DONE 74 / PARTIAL 42 / MISSING 15 / 不做 1**。本批（运行时目录生命周期）不改变任何 FR 状态，新增第六行非 FR；FR-14.2 仍是 PARTIAL（Windows 仍没有目录级不可变，且 copy-ro 不阻止在目录里新建文件）。
+计数：上面 126 条 FR 是 **DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**（按表格行逐行重数）；加上七条非 FR 交付能力（均 DONE）后整表 **133 行 = DONE 75 / PARTIAL 42 / MISSING 15 / 不做 1**。本批（快照行生命周期 + 沙箱磁盘配额）不改变任何 FR 状态（FR-5.8 仍是 PARTIAL：配额按运行边界周期性测量，且本地 provider 仍无 CPU/内存限制），新增第七行非 FR；FR-14.2 仍是 PARTIAL（Windows 仍没有目录级不可变，且 copy-ro 不阻止在目录里新建文件）。
 
 **明确边界：远端 / AIO 沙箱里的浏览器仍不会在空闲时被停止。** `15b995c` 的 idle 策略只在 host placement 生效：控制面直接持有 Chrome 进程，`browser.Manager` 能 stop 它。远端 / AIO 模式下 Chrome 跑在沙箱里，控制面断开 CDP 只意味着没人看了，进程仍在沙箱里；`PIFORGE_BROWSER_IDLE_TIMEOUT` 不会杀它，也没有 runner 侧的空闲回收。要覆盖这条路径，需要沙箱 provider 按「无 viewer」自行 stop 浏览器（或 runner 提供 idle 端点），目前没有实现，也没有测试。
 
@@ -731,9 +732,9 @@ UI：徽章的 `title` 与 `aria-label` 各一句可访问说明，区别是真�
 ### 边界（仍然无界的部分）
 
 - `piforge.db` 与 SQLite `-wal`：行数由产品语义约束（删会话/项目会级联），但库文件本身不会自动收缩；WAL 由 checkpoint 限制，不是 janitor 的对象。
-- `snapshots/` 在一个 sandbox 行存活期间可以按回收次数累积多个时间戳目录；它们有 owner（sandbox 行）与删除路径（删项目/该行消失），但没有按时间/份数的上限。
-- `sandboxes/` 的大小由用户仓库决定，生命周期有 owner，体积没有上限（FR-5.8 的配额仍缺）。
-- `skills/` 的目录生命周期已闭合，但一个 skill 的 bundle 可以很大（上传有 8MB 请求上限，展开后的总量没有单独配额）。
+- `snapshots/` 在一个 sandbox 行存活期间可以按回收次数累积多个时间戳目录；它们有 owner（sandbox 行）与删除路径（删项目/该行消失），但没有按时间/份数的上限。**本批补的是同一类里的另一面**：`snapshots` 的**行**原来没有生命周期（删项目后永远留着、拖慢查询），现在有外键级联 + janitor 行清扫；目录本身的份数上限仍未做。
+- `sandboxes/` 的大小现在有每沙箱预算（`-sandbox-disk-quota`，默认 2 GiB，0 关闭），但它是**每次运行前**测量：一个 turn 可以超一次再被下一轮拦住，不是每次写入都拦；本地 provider 仍没有 CPU/内存限制。
+- `skills/` 的目录生命周期已闭合；单个 skill 的 bundle 有 4 MiB / 64 文件上限，上传 zip 有 8 MiB / 256 条目上限，一次导入的**实际展开总量**现在有 32 MiB 上限（`-skill-max-bytes` 可调），超过整包拒绝、不留半成品。
 - `master.key` / `secret.key` 是故意不回收的部署文件；删它们不是清理，是让已存密钥不可读。
 
 ### 门禁（本批）
@@ -743,3 +744,73 @@ UI：徽章的 `title` 与 `aria-label` 各一句可访问说明，区别是真�
 - 完整 e2e（同一份 `.data`）：**173 passed**（日志 `e2e-full.log`）。本批只改了 `15-quick-open-status.spec.ts` 的既有断言（storage 块可见），没有新增用例，所以仍是 173。
 - 镜像只用 `scripts/build-app-image.ps1`；`pf-local` 始终用卷 `9ce20975…`，`CapDrop=["CAP_DAC_OVERRIDE"]`、`CapAdd=null`、端口 7722→7700、`PIFORGE_DEFAULT_PROVIDER=volc`（`deploy-before.log` / `deploy-final.log`）。
 - `pwsh scripts/deliver-check.ps1`（key 来自 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY`，未打印）：119 条 `[PASS]` / 0 FAIL（`deliver-check.log`）。
+
+## 本批：快照行生命周期 + 沙箱磁盘配额（FR-5.8）
+
+两件事都来自「运行时目录生命周期」审计里「仍然无界的部分」：目录有了 owner、删除路径和 janitor，但 `snapshots` 的**行**没有；沙箱的体积也没有上限。目录闭环了，数据没有。
+
+### 1. 快照行（`snapshots`）的生命周期
+
+**缺陷**：`snapshots.sandbox_id` 是裸 `TEXT`，没有外键；删项目、删 sandbox 都不动这些行。每次空闲回收写一行，行只增不减，表越大 `ListSnapshots` 越慢——审计里的原话是「目录闭环了，行没有」。
+
+**改法**：
+
+- `schema.sql` 的 `snapshots.sandbox_id` 现在是 `REFERENCES sandboxes(id) ON DELETE CASCADE`。外键就是行的删除路径：删项目 → 级联 `sandboxes` → 行随 sandbox 一起消失，不需要每个删除路径都记得再删一次。
+- **迁移（已存在的部署）**：`store.Open` 里的 `ensureSnapshotOwnership` 先读 `PRAGMA foreign_key_list(snapshots)`；没有这条外键就重建表——一个事务里「新表带外键 → 原样拷贝每一行 → DROP 旧表 → 改名 → 重建索引」，拷贝期间 `PRAGMA foreign_keys=OFF`（必须在事务外设置，SQLite 在事务内忽略它）。这样「sandbox 已经没了」的历史行不会被迁移拒绝，也不会被迁移**悄悄删掉**：那是 janitor 的判断题。
+- **索引**：新增 `snapshots_sweep (sandbox_id, id, blob_key)`，是给清扫用的 covering index——janitor 每轮那条 `SnapshotIndex` 只读索引、不读表；原来的 `snapshots_sandbox (sandbox_id, created_at DESC)` 继续服务 `ListSnapshots`。
+- **janitor 行清扫**（在同一轮的目录清扫之后）：`SnapshotIndex` 一次拿到所有行、`SandboxIDs` 一次拿到活沙箱，**只删**「manifest 目录不存在」或「sandbox 行不存在」的行。目录还在且 sandbox 还活着的行绝不删；没有 `blob_key` 的行不猜（只在 sandbox 没了时删）；索引读不到就整段中止（「store 没回答」不是「所有行都是垃圾」）。删除走 `DeleteSnapshots`，按 400 个 id 一批。
+- **顺带发现并修掉的前提缺陷**：sandbox 被空闲回收后 provider 已经不认这个 id，`destroySandbox` 把它当失败 → 删项目永远 409 → 级联根本走不到，行也就永远留着。现在 `sandbox.ErrNotFound` 视为「已经销毁」，删项目返回 200（`TestDeleteProjectSucceedsWhenTheSandboxWasAlreadyReclaimed`）。
+
+**测试**：`store/snapshot_ownership_test.go` 三例——删项目后行没了；外键 CASCADE 在直接删 sandbox 行时也生效；**老库迁移**（手写一个没有外键、含两行的数据库，一行的 sandbox 还在、一行已经没了：`Open` 后两行都在、外键出现、删项目只删活着的那行、第二次 `Open` 幂等）。`janitor/snapshot_rows_test.go` 5 例——删掉目录没了的行和 owner 没了的行、保留两者都在的行、没有 `blob_key` 不猜、索引失败拒扫、dry-run、没有 sandbox 索引时不扫。`httpapi/sandbox_snapshots_test.go` 的 `TestDeleteProjectRemovesItsSnapshotRowsOverHTTP` 走用户路径。
+
+**fail-first**：新的 store 测试跑在 `a11991b` 上三条全红（行还在 / 没有 CASCADE / 迁移后仍无外键）；janitor 测试在旧代码上编译不过（`undefined: store.SnapshotRef`）。`e2e/.artifacts/fix-rows-quota/fail-first-go.log`。
+
+**部署实测（同一数据卷 `9ce20975…`）**：
+
+- 旧镜像 `sha256:cb8002bf…`（容器 `1d834988…`，为让 reaper 尽快回收另加 `-sandbox-idle-pause=5s -sandbox-reclaim-after=2s -sandbox-reap-interval=2s`）：建项目 + 会话 → 一次真实回合 → reaper 写下 `sbx_a905ab51…/2026…/manifest.json` 并记一行；`GET …/sandbox/snapshots` 列出 1 行、库里 1 行；`DELETE /v1/projects/{id}` → **409**（`sandbox: not found`，provider 已回收），行仍在（`probe-rows-before.json`）。
+- 新镜像 `sha256:5bc1692a…`（`scripts/build-app-image.ps1`，同一卷）：同样的流程 → 行 `snp_01M68C67…` / `sbx_6a87f62c…` 在、接口列出 1、库里 1；`DELETE` → **200**，库里 **0**（`probe-rows-after.json`）。
+- **janitor**：把其中一行的 manifest 目录手工删掉（`/data/snapshots/sbx_27ec4bd61f23c53d/…`），保留它的 sandbox 行，然后用默认参数重启：启动日志 `janitor: removed snapshot rows with no directory or owning sandbox count=1`，行数 8 → 7，其余 6 行（目录和 sandbox 都还在）没有被碰（`janitor-orphan-row.log`）。
+- **迁移**：部署库是修复前建的；重启后 `PRAGMA foreign_key_list(snapshots)` 有 `sandboxes / sandbox_id / CASCADE`，`snapshots_sandbox` 与 `snapshots_sweep` 都在（`deployed-schema.log`）。
+
+### 2. 沙箱磁盘配额（FR-5.8）
+
+**设计（最小可用版）**：
+
+- `-sandbox-disk-quota` / `PIFORGE_SANDBOX_DISK_QUOTA`，单位字节，默认 2 GiB，**0 关闭**。`internal/diskquota.Guardian` 对一个 sandbox root 做 du 式遍历，复用 `runtimedirs.Measure`（管理页和拒绝用的是同一个数）；`Measure` 在每次运行前新鲜测量，`Cached` 给管理页复用 60 秒——页面 15 秒轮询不该变成磁盘扫描。
+- **超预算就停这次运行**：`POST /v1/sessions/{id}/messages` 在 provisioning 之后、启动 agent 之前检查；超过则返回 **507 `sandbox_disk_quota`**，中文文案（实测原文）：
+  `沙箱磁盘用量已达到 6.0 MiB，超过配额 5.0 MiB（沙箱目录 /data/sandboxes/<usr>/<prj>）：本次运行已停止，没有启动 agent。请删除不需要的文件（node_modules、构建产物、下载的仓库或大文件）后重试，或请管理员调整 -sandbox-disk-quota / PIFORGE_SANDBOX_DISK_QUOTA。`
+  `details` 带 `used_bytes` / `limit_bytes` 和可读的 `used` / `limit`。同时往会话事件里追加一条 `platform.error`（payload 带 code、两个字节数和同一条消息），所以转录与通知路径看得到，SSE 开着时也会推过去。
+- **管理页看得到**：`GET /v1/admin/status` 新增 `sandbox_usage`（每个沙箱的 bytes / files / quota / over / measured_at）与 `sandbox_disk_quota`；admin 的「运行时目录」卡片下面逐个沙箱显示「用量 / 配额 · 百分比」，≥80% 琥珀色、超了红色并写「已超出」。
+- **技能展开上限**：`-skill-max-bytes` / `PIFORGE_SKILL_MAX_BYTES`，默认 32 MiB，0 拒绝启动。zip 导入先看声明的解压总量，再按**实际读写的字节**计数（头里的数字是攻击者输入）；超过就整包拒绝、临时目录删掉、不写任何 skill 行。每个 skill 仍有 4 MiB / 64 文件、上传 zip 8 MiB / 256 条目的旧上限。
+
+**测试**：`diskquota/diskquota_test.go` 7 例（未超 / 超了 / 关闭、缓存 TTL、缺失目录、Forget、nil guardian）；`httpapi/sandbox_quota_test.go` 4 例（超配额 → 507 + 文案 + 事件 + runtime 没收到 prompt；未超 → 200；关闭 → 200；admin status 每个沙箱一行、超了 `over=true`）；`httpapi/skill_import_cap_test.go` 3 例（handler 级拒绝且不留行/目录、函数级拒绝不写文件、默认值可被 Deps 覆盖）。
+
+**fail-first（部署）**：旧镜像没有这个开关——同一个 6.4 MiB checkout 上 `POST /messages` 直接 **200**，run 照常开始（`probe-quota-before.json`）。
+
+**部署实测**（同一卷，`PIFORGE_EXTRA_ARGS=-sandbox-disk-quota=5242880`）：
+
+- `dd` 6 MiB 进 `repo/probe-big.bin`，`du -sb` = 6,408,517 B；
+- `POST /messages` → **507**，`code=sandbox_disk_quota`，消息原文见上（`probe-quota-after.json`）；
+- 会话事件里出现 `platform.error` 且 payload 含 `sandbox_disk_quota`；会话页把这条消息内联显示（`quota-after-session-error.png`）；
+- 管理页：`sandbox_usage` 行 `bytes=6,318,405 quota=5,242,880 over=true`，页面显示 `6.0 MiB / 5.0 MiB · 121% · 已超出`（`quota-after-admin-quota.png`），`sandbox_disk_quota=5242880`；
+- **恢复默认**：同一卷用默认参数重启，启动日志 `sandbox disk quota limit="2.0 GiB" bytes=2147483648 skill_import_max="32.0 MiB"`，`GET /v1/admin/status` 的 `sandbox_disk_quota=2147483648`（`cleanup.log`、`deploy-final.log`）；
+- **技能 cap（部署）**：43,782 字节的 zip（声明解压 40,000,000 字节）→ **400** `invalid_argument`，消息「技能包展开后超过上限（32.0 MiB）：压缩包声明解压后为 38.1 MiB，没有导入任何文件…」；`/data/skills` 前后都是 3 个目录（`probe-skill-cap.json`）。
+
+### 边界（本批没有做的）
+
+- 配额是**周期性**的（每个 turn 开始前测量 + 管理页 60 秒缓存），不是每次写入都拦：一次 `npm install` 可以冲过一次预算，下一轮才被拦住。要更严需要沙箱内的文件系统配额或卷配额，本地 provider 没有。
+- 本地 provider 仍没有 CPU / 内存限制（容器 provider 的 `-sandbox-cpus/-sandbox-memory` 不变）；配额也没有变成容器级 limit。
+- 测量依据是 `sandboxes.root_dir`；sandbox 行还在、目录已经没了的情况按 0 字节处理，不会因此拒绝运行。
+- 遍历有 `MaxFiles`（20 万）上限，截断时 bytes 是下界；下界超了仍然算超，下界没超但已截断时不保证没超。
+- 迁移在拷贝期间关闭外键校验（事务外设 pragma），这是 SQLite 重建表的常规做法；`piforged` 在 `Open` 完成前不开始服务，所以没有并发写。
+- 快照行的「份数上限」仍未做：行会随回收次数增长，直到项目/沙箱被删。本批只保证它们不再无主。
+- 部署上还留了一个旧镜像探针留下的项目（`probe-quota-before-…`）：旧镜像在回合进行中被重启，`sessions.status` 停在 `running` 而没有对应进程，项目删除仍被「还有 1 个会话正在运行」拒绝。这是重启后的状态核对问题（与本批无关），已在报告里点名，没有在部署上手工改库。
+
+### 门禁（本批）
+
+- `go build ./...`：0；`go vet ./...`：0；`go test ./... -count=1`：全部包 ok，退出 0（新增 `diskquota` 7 例、`store/snapshot_ownership_test.go` 3 例、`janitor/snapshot_rows_test.go` 5 例、`httpapi/sandbox_quota_test.go` 4 例、`skill_import_cap_test.go` 3 例、`project_delete_gone_test.go` 1 例、`TestDeleteProjectRemovesItsSnapshotRowsOverHTTP`）。日志：`e2e/.artifacts/fix-rows-quota/gates-go*.log`。
+- `pnpm --dir web test -- --run`：**31 个文件 / 251 例通过**；`pnpm --dir web exec next build`：退出 0（`gates-web-test.log`、`gates-web-build.log`）。
+- 完整 e2e（同一份 `.data`）：**173 passed / 8.3m**（`e2e-full.log`）。本批没有新增 e2e 用例（快照行与配额都在 Go 测试和部署探针里验，e2e 仍由 `84-skill-mount`、`61-project-lifecycle` 等覆盖不回归）。
+- 镜像只用 `scripts/build-app-image.ps1` 重建：`sha256:5bc1692ac16c8b1feb09dad624cfd34a65fe0180be8c2bf5c1a849f9a526ec8d`；`pf-local` 始终用**同一个数据卷** `9ce20975…`，`CapDrop=["CAP_DAC_OVERRIDE"]`、`CapAdd=null`、端口 7722→7700、`PIFORGE_DEFAULT_PROVIDER=volc`（`deploy-before.log` / `deploy-after.log` / `deploy-quota5mib.log` / `deploy-final.log`）。最终容器 `7c2c1c33…`，配额已恢复默认 2 GiB。
+- `pwsh scripts/deliver-check.ps1`（`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入，未打印、未落盘）：run `20261031-151551`，**119 条 `[PASS]` / 0 条 FAIL**，`failure` 为 null；镜像 id 与部署的同一个；一次性容器 `pf-drill` / volume `pf-drill-data` 已删除，`pf-local` 全程未被触碰（前后容器 id 都是 `7c2c1c33…`），drill 的「source checkout is clean」守卫通过。日志：`deliver-check.log`；summary：`e2e/.artifacts/delivery-drill/20261031-151551/summary.json`。
+- 证据目录：`e2e/.artifacts/fix-rows-quota/`（`probe-rows-before.json`、`probe-rows-after.json`、`janitor-orphan-row.log`、`deployed-schema.log`、`probe-quota-before.json`、`probe-quota-after.json`、`probe-skill-cap.json`、`fail-first-go.log`；截图 `quota-after-session-error.png`、`quota-after-admin-quota.png`、`rows-before-admin-storage.png`、`rows-after-admin-storage.png`）。

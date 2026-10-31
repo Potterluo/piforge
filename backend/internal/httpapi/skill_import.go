@@ -16,6 +16,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/diskquota"
 )
 
 // Importing skills from a repository (PRD FR-14.x).
@@ -261,7 +262,7 @@ func (s *server) handleImportSkillsZip(w http.ResponseWriter, r *http.Request) {
 	}
 	defer os.RemoveAll(dir)
 
-	if err := extractSkillZip(data, dir); err != nil {
+	if err := extractSkillZipWithin(data, dir, s.skillMaxBytes()); err != nil {
 		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "%s", err.Error()))
 		return
 	}
@@ -289,6 +290,24 @@ func (s *server) handleImportSkillsZip(w http.ResponseWriter, r *http.Request) {
 // archive is rejected as a whole rather than skipping the bad entry, because a
 // half-imported collection is harder to reason about than a refusal.
 func extractSkillZip(data []byte, dst string) error {
+	return extractSkillZipWithin(data, dst, DefaultSkillMaxBytes)
+}
+
+// extractSkillZipWithin is extractSkillZip with an explicit total-expansion cap.
+//
+// The cap is the archive-bomb guard (FR-5.8). A zip's header sizes are attacker
+// input too: an entry can declare 1 KiB and stream a gigabyte, so the limit is
+// enforced against the bytes actually read and written as well as against the
+// declared total. The cap is a configuration (-skill-max-bytes /
+// PIFORGE_SKILL_MAX_BYTES) because "how big may a curated collection be" is a
+// deployment's judgement, not a constant.
+//
+// Nothing is left behind on refusal: the caller removes the staging directory it
+// passed in, and no skill row is written until this returns nil.
+func extractSkillZipWithin(data []byte, dst string, maxBytes int64) error {
+	if maxBytes <= 0 {
+		maxBytes = DefaultSkillMaxBytes
+	}
 	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return fmt.Errorf("不是有效的 zip：%v", err)
@@ -297,7 +316,19 @@ func extractSkillZip(data []byte, dst string) error {
 		return fmt.Errorf("zip 里的文件过多（上限 %d）", skillZipMaxEntries)
 	}
 
-	total := 0
+	// Refuse on the declared total first: a bomb with honest headers never has to
+	// be expanded to be refused.
+	var declared int64
+	for _, entry := range reader.File {
+		declared += int64(entry.UncompressedSize64)
+	}
+	if declared > maxBytes {
+		return fmt.Errorf(
+			"技能包展开后超过上限（%s）：压缩包声明解压后为 %s，没有导入任何文件。请拆分技能，或请管理员调整 -skill-max-bytes / PIFORGE_SKILL_MAX_BYTES",
+			diskquota.HumanBytes(maxBytes), diskquota.HumanBytes(declared))
+	}
+
+	total := int64(0)
 	for _, entry := range reader.File {
 		name := strings.ReplaceAll(entry.Name, "\\", "/")
 		if entry.FileInfo().IsDir() || strings.HasSuffix(name, "/") {
@@ -324,10 +355,6 @@ func extractSkillZip(data []byte, dst string) error {
 		if entry.UncompressedSize64 > maxSkillFileBytes {
 			return fmt.Errorf("%s is larger than %d bytes", rel, maxSkillFileBytes)
 		}
-		total += int(entry.UncompressedSize64)
-		if total > skillImportMaxBytes {
-			return fmt.Errorf("这个 zip 超过了单次导入上限（4 MB）")
-		}
 
 		opened, oerr := entry.Open()
 		if oerr != nil {
@@ -343,6 +370,14 @@ func extractSkillZip(data []byte, dst string) error {
 		}
 		if len(body) > maxSkillFileBytes {
 			return fmt.Errorf("%s is larger than %d bytes", rel, maxSkillFileBytes)
+		}
+		// The declared sizes are not trusted: this is the number that decides, and
+		// it is checked before the bytes are written.
+		total += int64(len(body))
+		if total > maxBytes {
+			return fmt.Errorf(
+				"技能包展开后超过上限（%s）：已展开 %s 时停止，没有导入任何文件。请拆分技能，或请管理员调整 -skill-max-bytes / PIFORGE_SKILL_MAX_BYTES",
+				diskquota.HumanBytes(maxBytes), diskquota.HumanBytes(total))
 		}
 
 		target := filepath.Join(dst, filepath.FromSlash(rel))

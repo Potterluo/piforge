@@ -38,6 +38,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/capabilities"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/crypto"
+	"github.com/piforge/piforge/backend/internal/diskquota"
 	"github.com/piforge/piforge/backend/internal/fsx"
 	"github.com/piforge/piforge/backend/internal/gitx"
 	"github.com/piforge/piforge/backend/internal/httpapi"
@@ -134,6 +135,11 @@ type options struct {
 	// parallelLimit caps how many branches of one session run at once (FR-3.3).
 	// It is validated before anything is created; see resolveParallelLimit.
 	parallelLimit int
+	// sandboxDiskQuota is the per-sandbox disk budget in bytes (FR-5.8). Zero
+	// disables enforcement; the admin report still measures.
+	sandboxDiskQuota int64
+	// skillMaxBytes caps the total a single skill import may expand (FR-5.8).
+	skillMaxBytes int64
 }
 
 // defineParallelLimit registers the FR-3.3 knob on fs. It lives in one function so
@@ -158,6 +164,40 @@ func resolveParallelLimit(fs *flag.FlagSet, value *int) (int, error) {
 	return httpapi.ResolveParallelLimit(*value, setByFlag, os.Getenv("PIFORGE_PARALLEL_LIMIT"))
 }
 
+// resolveByteBudget resolves a byte-valued budget from the flag, the environment
+// or the value the flag was registered with.
+//
+// It is deliberately stricter than envInt: a budget of 0 means "disabled" and is
+// a real setting, so it must not be silently replaced by the default, and a typo
+// in the environment and a negative number are startup errors. An operator who
+// configured a ceiling has to be able to trust that the deployment runs with it.
+func resolveByteBudget(fs *flag.FlagSet, name, envKey string, value int64, allowZero bool) (int64, error) {
+	setByFlag := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			setByFlag = true
+		}
+	})
+	raw := ""
+	if !setByFlag {
+		raw = strings.TrimSpace(os.Getenv(envKey))
+	}
+	if raw != "" {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("%s=%q is not a number of bytes", envKey, raw)
+		}
+		value = n
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("%s must not be negative (0 disables)", name)
+	}
+	if value == 0 && !allowZero {
+		return 0, fmt.Errorf("%s must be positive", name)
+	}
+	return value, nil
+}
+
 func run() error {
 	var opt options
 	flag.StringVar(&opt.addr, "addr", envOr("PIFORGE_ADDR", "127.0.0.1:8080"), "listen address")
@@ -177,6 +217,15 @@ func run() error {
 	flag.StringVar(&opt.defaultProvider, "default-provider", envOr("PIFORGE_DEFAULT_PROVIDER", "shared-anthropic"),
 		"provider used when a session has no model_ref")
 	defineParallelLimit(flag.CommandLine, &opt.parallelLimit)
+	// FR-5.8: the two resource guards. Bytes rather than a human size so the
+	// value the server compares against is the value the operator wrote; the
+	// help text says what the default is in human terms.
+	flag.Int64Var(&opt.sandboxDiskQuota, "sandbox-disk-quota",
+		diskquota.DefaultQuotaBytes,
+		"per-sandbox disk budget in bytes, measured on the checkout; 0 disables (env PIFORGE_SANDBOX_DISK_QUOTA, default 2 GiB)")
+	flag.Int64Var(&opt.skillMaxBytes, "skill-max-bytes",
+		httpapi.DefaultSkillMaxBytes,
+		"total bytes one skill import may expand on disk; 0 is refused (env PIFORGE_SKILL_MAX_BYTES, default 32 MiB)")
 	flag.DurationVar(&opt.agentIdleTTL, "agent-idle-ttl", envDuration("PIFORGE_AGENT_IDLE_TTL", 30*time.Minute),
 		"stop an agent process after it has been idle this long")
 	flag.DurationVar(&opt.sandboxIdlePause, "sandbox-idle-pause", envDuration("PIFORGE_SANDBOX_IDLE_PAUSE", 30*time.Minute),
@@ -232,6 +281,16 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("invalid parallel limit: %w", err)
 	}
+	// FR-5.8: both budgets are validated before anything is created, for the same
+	// reason the parallel limit is.
+	if opt.sandboxDiskQuota, err = resolveByteBudget(flag.CommandLine, "sandbox-disk-quota",
+		"PIFORGE_SANDBOX_DISK_QUOTA", opt.sandboxDiskQuota, true); err != nil {
+		return fmt.Errorf("invalid sandbox disk quota: %w", err)
+	}
+	if opt.skillMaxBytes, err = resolveByteBudget(flag.CommandLine, "skill-max-bytes",
+		"PIFORGE_SKILL_MAX_BYTES", opt.skillMaxBytes, false); err != nil {
+		return fmt.Errorf("invalid skill size cap: %w", err)
+	}
 
 	// Normalise the provider name before anything compares it: placement resolution
 	// ignores case, and the wiring below does not, so "-sandbox Docker" must mean
@@ -272,6 +331,16 @@ func run() error {
 	// The cap is invisible otherwise: parallel runs are opt-in per user, and the
 	// only other place it surfaces is a refusal. Say it once at startup.
 	logger.Info("parallel branch limit", "branches", parallelLimit, "max", httpapi.MaxParallelLimit)
+	// The disk budget is the other invisible guard: it only speaks when it refuses
+	// a run, and an operator reading a 507 needs to know what the deployment's
+	// value is without guessing at the default.
+	quotaLabel := diskquota.HumanBytes(opt.sandboxDiskQuota)
+	if opt.sandboxDiskQuota == 0 {
+		quotaLabel = "disabled"
+	}
+	logger.Info("sandbox disk quota",
+		"limit", quotaLabel, "bytes", opt.sandboxDiskQuota,
+		"skill_import_max", diskquota.HumanBytes(opt.skillMaxBytes), "skill_import_bytes", opt.skillMaxBytes)
 
 	// FR-14.2 without CAP_SYS_ADMIN: the default mechanism is a read-only copy,
 	// and the one capability that can silently defeat it is CAP_DAC_OVERRIDE —
@@ -812,6 +881,8 @@ func run() error {
 		Workspace:          files,
 		DefaultProvider:    opt.defaultProvider,
 		ParallelLimit:      parallelLimit,
+		SandboxDiskQuota:   opt.sandboxDiskQuota,
+		SkillMaxBytes:      opt.skillMaxBytes,
 		Sandbox:            sb,
 		Secrets:            box,
 		WebUpstream:        opt.webUpstream,

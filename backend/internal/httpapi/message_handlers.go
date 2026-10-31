@@ -168,6 +168,15 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	// after a model switch loses the skill grant the first one had.
 	spec := s.sessionSpec(user.ID, sess)
 
+	// FR-5.8: a checkout over its disk budget must stop here, before an agent
+	// process starts working in it. The measurement is a du-style walk of the
+	// sandbox root (cheap and periodic), not per-write accounting; the refusal
+	// names the budget, the current usage and what to delete.
+	if quotaErr := s.enforceSandboxQuota(r.Context(), user.ID, sess); quotaErr != nil {
+		s.fail(w, r, quotaErr)
+		return
+	}
+
 	// The composer's model picker writes the session row; a live process keeps
 	// the model it resolved at startup, so the two have to be reconciled before
 	// the next turn or the picker is decoration (QA-14, MAJOR).

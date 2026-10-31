@@ -209,6 +209,10 @@ func (s *server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 	for _, u := range storage {
 		storageBytes += u.Bytes
 	}
+	// FR-5.8 made visible: every sandbox's measured checkout next to the budget it
+	// is measured against. "Who is close" is the question the runtime-directory
+	// block cannot answer by itself — it reports the sandboxes root as one number.
+	sandboxUsage := s.sandboxUsage(r.Context())
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"users":          stats.Users,
@@ -236,6 +240,10 @@ func (s *server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		// creates under -data, with direct-entry count and recursive bytes.
 		"storage":             storage,
 		"storage_total_bytes": storageBytes,
+		// Per-sandbox usage against -sandbox-disk-quota (0 = enforcement off, the
+		// measurement is still reported so an operator can size a budget).
+		"sandbox_usage":      sandboxUsage,
+		"sandbox_disk_quota": s.diskQuota.Limit(),
 	})
 }
 

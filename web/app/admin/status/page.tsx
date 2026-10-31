@@ -178,6 +178,49 @@ export default function AdminStatusPage() {
                   </span>
                 </div>
               ))}
+              {/* FR-5.8: the directory block says how big the sandboxes root is;
+                  this says which sandbox is close to its budget. A deployment that
+                  turned enforcement off still reports the measurement. */}
+              {data.sandbox_usage.length > 0 ? (
+                <div className="mt-2 flex flex-col gap-1" data-testid="stat-storage-quotas">
+                  <p className="text-[11px] text-muted-foreground">
+                    每个沙箱的磁盘用量 / 配额
+                    {data.sandbox_disk_quota > 0
+                      ? `（配额 ${formatBytes(data.sandbox_disk_quota)}，来自 -sandbox-disk-quota）`
+                      : "（配额未启用，仅显示用量）"}
+                  </p>
+                  {data.sandbox_usage.map((row) => {
+                    const percent =
+                      row.quota_bytes > 0 ? Math.round((row.bytes / row.quota_bytes) * 100) : null;
+                    const near = percent !== null && percent >= 80;
+                    return (
+                      <div
+                        key={row.sandbox_id}
+                        data-testid={`stat-sandbox-${row.sandbox_id}`}
+                        data-over={row.over ? "true" : "false"}
+                        className="flex items-baseline justify-between gap-3 border-b border-border/60 py-1 text-[11px] last:border-0"
+                      >
+                        <span className="truncate font-mono text-[10px]" title={`${row.user_id} / ${row.project_id}`}>
+                          {row.sandbox_id}
+                        </span>
+                        <span
+                          className={`flex items-baseline gap-2 text-right tabular-nums ${
+                            row.over ? "text-destructive" : near ? "text-amber-600" : "text-muted-foreground"
+                          }`}
+                        >
+                          <span>{formatBytes(row.bytes)}</span>
+                          {row.quota_bytes > 0 ? (
+                            <span>
+                              / {formatBytes(row.quota_bytes)} · {percent}%
+                            </span>
+                          ) : null}
+                          {row.over ? <span>已超出</span> : near ? <span>接近上限</span> : null}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
             </CardContent>
           </Card>
 

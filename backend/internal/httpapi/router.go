@@ -32,6 +32,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/browserlease"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/crypto"
+	"github.com/piforge/piforge/backend/internal/diskquota"
 	"github.com/piforge/piforge/backend/internal/fsx"
 	"github.com/piforge/piforge/backend/internal/runtimedirs"
 	"github.com/piforge/piforge/backend/internal/store"
@@ -91,6 +92,14 @@ type Deps struct {
 	// refuses to start outside 1..MaxParallelLimit; the zero fallback only serves
 	// hand-built test dependencies.
 	ParallelLimit int
+	// SandboxDiskQuota is the per-sandbox disk budget in bytes (FR-5.8), from
+	// -sandbox-disk-quota / PIFORGE_SANDBOX_DISK_QUOTA. Zero disables enforcement
+	// (the admin report still measures). A run whose sandbox root is over it is
+	// refused before an agent starts.
+	SandboxDiskQuota int64
+	// DiskQuotaReportTTL is how long the admin screen may reuse a measurement.
+	// Zero uses diskquota.DefaultReportTTL.
+	DiskQuotaReportTTL time.Duration
 
 	// DefaultProvider is the provider a session falls back to when it pins no
 	// model. The runtime resolves it the same way, so the explanation of a failed
@@ -100,6 +109,11 @@ type Deps struct {
 	// SkillsDir is where uploaded skill bundles live, one directory per skill.
 	// Empty means uploads are refused with a typed error.
 	SkillsDir string
+	// SkillMaxBytes caps the total bytes one skill import may expand on disk
+	// (FR-5.8), from -skill-max-bytes / PIFORGE_SKILL_MAX_BYTES. Zero uses
+	// DefaultSkillMaxBytes; an archive that would exceed it is refused whole,
+	// before a skill row exists.
+	SkillMaxBytes int64
 	// SnapshotDir is where a session's frozen skill snapshots live
 	// (<dataDir>/skill-snapshots). Deleting a session or a project removes the
 	// matching directories; empty means this deployment never creates one (a
@@ -194,6 +208,9 @@ type server struct {
 	storageMu sync.Mutex
 	storageAt time.Time
 	storage   []runtimedirs.Usage
+	// diskQuota measures sandboxes against the FR-5.8 budget and caches the
+	// reports the admin screen reads.
+	diskQuota *diskquota.Guardian
 }
 
 // NewRouter builds the complete HTTP handler, including the recover middleware.
@@ -227,6 +244,14 @@ func newServer(d Deps) *server {
 		// pretend a checkout exists under the data directory.
 		artifacts: fsx.New(fsx.Config{}),
 	}
+	// FR-5.8: the budget is configuration (cmd/piforged resolves the flag), and
+	// the guardian is the one place that measures. A test server leaves it at the
+	// zero value, which is disabled.
+	s.diskQuota = diskquota.New(diskquota.Config{
+		QuotaBytes: d.SandboxDiskQuota,
+		ReportTTL:  d.DiskQuotaReportTTL,
+		Now:        s.now,
+	})
 	s.leases = browserlease.New(d.BrowserTakeoverTTL, s.now)
 	return s
 }

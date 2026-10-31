@@ -573,6 +573,31 @@ export interface DeploymentStatus {
   storage: StorageUsage[];
   /** Sum of every row's bytes. */
   storage_total_bytes: number;
+  /**
+   * One row per sandbox: its measured checkout and the budget it is measured
+   * against (FR-5.8). "Who is close" is not answerable from the directory block,
+   * which reports the whole sandboxes root as one number.
+   */
+  sandbox_usage: SandboxUsage[];
+  /** The effective per-sandbox disk budget in bytes; 0 means enforcement is off. */
+  sandbox_disk_quota: number;
+}
+
+/** One sandbox's footprint against the disk budget (GET /v1/admin/status). */
+export interface SandboxUsage {
+  sandbox_id: string;
+  user_id: string;
+  project_id: string;
+  /** Recursive bytes below the sandbox root. */
+  bytes: number;
+  files: number;
+  /** The budget this was measured against; 0 when enforcement is disabled. */
+  quota_bytes: number;
+  /** bytes > quota_bytes (a positive quota). */
+  over: boolean;
+  /** The walk hit its file cap; `bytes` is a lower bound. */
+  truncated?: boolean;
+  measured_at: string;
 }
 
 /** One runtime directory's footprint (see backend/internal/runtimedirs). */
