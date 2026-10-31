@@ -763,6 +763,9 @@ func run() error {
 		// Uploaded bundles live here; without it provisioning would mount
 		// nothing and every skill would silently be metadata only.
 		SkillsDir: filepath.Join(opt.dataDir, "skills"),
+		// Frozen skill snapshots live outside every checkout, so a bind mount's
+		// source has no second, agent-writable path (FR-14.2).
+		SnapshotDir: filepath.Join(opt.dataDir, "skill-snapshots"),
 	})
 
 	// 6. Authentication.

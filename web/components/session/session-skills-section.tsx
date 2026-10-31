@@ -65,6 +65,40 @@ export function SessionSkillsSection({ sessionId }: { sessionId: string }) {
                 <Badge variant="outline" className="font-mono text-[10px]">
                   v{record.version || "0.0.0"}
                 </Badge>
+                {(() => {
+                  // FR-14.2: say which mechanism is actually in use. A Windows
+                  // deployment is a read-only copy; calling it a bind mount would
+                  // be a claim the platform cannot keep.
+                  const slug = record.mounted_path.split("/").filter(Boolean).pop() ?? "";
+                  const mechanism = query.data?.mechanisms?.[slug];
+                  if (!mechanism) return null;
+                  const copy = {
+                    "bind-ro": {
+                      label: "只读挂载",
+                      title: "只读 bind mount：内核拒绝写入，多个会话可共享同一份快照",
+                    },
+                    "copy-ro": {
+                      label: "只读副本",
+                      title: "只读副本：每个工作区一份，文件标记为只读（平台不提供 bind mount）",
+                    },
+                    copy: {
+                      label: "副本（未只读）",
+                      title:
+                        "冻结副本，但当前进程能绕过只读位（Linux root 且无 CAP_SYS_ADMIN）；写入不会影响其他会话，但这棵树不是只读的",
+                    },
+                  }[mechanism] ?? { label: mechanism, title: mechanism };
+                  return (
+                    <Badge
+                      variant="secondary"
+                      className="text-[10px]"
+                      data-testid="session-skill-mechanism"
+                      data-mechanism={mechanism}
+                      title={copy.title}
+                    >
+                      {copy.label}
+                    </Badge>
+                  );
+                })()}
                 <span
                   className="font-mono text-[10px] text-muted-foreground"
                   title={record.content_hash}

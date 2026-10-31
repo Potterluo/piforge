@@ -47,6 +47,12 @@ type Config struct {
 	// bundle_key. Empty means skills are configured but cannot be mounted, which
 	// is reported per skill rather than failing the session.
 	SkillsDir string
+	// SnapshotDir is where a bind mount's frozen copy of each skill is written,
+	// one directory per session (FR-14.2). It must be outside the checkout in a
+	// deployment: a snapshot the agent can reach through a second path would
+	// defeat the read-only mount. Empty lets materialize use
+	// <worktree>/.pi/skill-snapshots, which is git-excluded.
+	SnapshotDir string
 	// WorktreePath overrides where a worktree is placed. The default is
 	// <sandbox root>/wt/<slug>, which keeps every checkout of one sandbox
 	// under a single directory that is trivial to snapshot.
@@ -328,12 +334,24 @@ func (s *Service) mountTooling(ctx context.Context, userID, sessionID, root stri
 		// Still mount: an empty configuration must clear anything a previous
 		// pass wrote, or a removed MCP server keeps running.
 	}
-	result, err := materialize.Mount(root, skills, servers, materialize.Options{SkillsDir: s.cfg.SkillsDir})
+	result, err := materialize.Mount(root, skills, servers, materialize.Options{
+		SkillsDir: s.cfg.SkillsDir,
+		// One snapshot directory per session: the mounted tree is frozen, so a
+		// new session gets a new snapshot while a running one keeps its own.
+		// Sharing the snapshot with the bundle (or with another live session)
+		// would let an edit reach a session that already started.
+		SnapshotDir: filepath.Join(s.cfg.SnapshotDir, Slug(sessionID)),
+	})
 	if err != nil {
 		return fmt.Errorf("provision: mount tooling: %w", err)
 	}
 	for name, reason := range result.Skipped {
 		slog.Warn("skill not mounted", "skill", name, "reason", reason)
+	}
+	for _, warning := range result.Warnings {
+		// A degraded mechanism is not a failure, but it is not silent either:
+		// the operator asked for a mount and this host could only copy.
+		slog.Warn("skill mount degraded", "session", sessionID, "detail", warning)
 	}
 
 	if sessionID != "" && len(result.Mounted) > 0 {

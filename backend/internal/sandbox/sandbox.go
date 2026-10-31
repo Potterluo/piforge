@@ -56,6 +56,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -452,7 +453,7 @@ func (l *Local) Destroy(ctx context.Context, sandboxID string) error {
 	if realDir == realRoot || !isInside(realRoot, realDir) {
 		return fmt.Errorf("%w: %q", ErrDestroyRefused, dir)
 	}
-	if err := os.RemoveAll(realDir); err != nil {
+	if err := removeTreeWritable(realDir); err != nil {
 		return fmt.Errorf("sandbox: destroy %s: %w", dir, err)
 	}
 	// Best effort: drop the now-empty per-user directory.
@@ -462,6 +463,39 @@ func (l *Local) Destroy(ctx context.Context, sandboxID string) error {
 	}
 	l.forget(sandboxID)
 	return nil
+}
+
+// removeTreeWritable deletes a sandbox directory whose contents may be
+// read-only.
+//
+// Mounted skills are made read-only (FR-14.2), and on Windows a read-only file
+// cannot be deleted: `os.RemoveAll` would leave the sandbox half-deleted and the
+// project undeletable. Clearing the read-only bits first is what keeps "delete
+// this project" working after skills are mounted. Errors on individual entries
+// are ignored because a missing file is success here; the final RemoveAll
+// reports anything that is genuinely stuck.
+func removeTreeWritable(root string) error {
+	// A read-only bind mount makes its mount point busy; detach first or the
+	// delete fails with EBUSY and the project is left undeletable (FR-14.2).
+	unmountSkills(root)
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink == 0 {
+			_ = os.Chmod(p, 0o644)
+		}
+		return nil
+	})
+	// Directories can be read-only too (0555 blocks removing children on Unix).
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
+		}
+		_ = os.Chmod(p, 0o755)
+		return nil
+	})
+	return os.RemoveAll(root)
 }
 
 // checkoutBranch switches to branch, creating it when it does not exist.

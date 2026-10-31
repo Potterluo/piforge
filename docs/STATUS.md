@@ -143,7 +143,7 @@
 | FR-13.8 用量显示（token + 估算成本） | PARTIAL | `SessionStats.TokensIn/Out/CostUSD` + `ContextMeter`；无测试断言成本显示 |
 | FR-13.9 用户 API Key（pf_…） | DONE | `api_key_handlers.go` + `api_keys.go` + Bearer 分支（`router.go` `authed`/`mutatingBearer`）；`24-api-keys.spec.ts`、`api_keys_test.go` |
 | FR-14.1 两层作用域（admin 共享 + 用户私有，同名覆盖） | DONE | 两种作用域都能创建（`POST /v1/skills` 的 `scope`；非管理员建共享 403），共享行对每个用户可见且不可改。**本批补齐「同名覆盖」并把它定义成规则**（`backend/internal/skills/resolve.go`）：① 停用的行既不挂载也不遮蔽（停用 = 没配置）；② 同名时 `user` 作用域覆盖 `admin`；③ 同作用域多版本取最高版本（数字比较），再按创建时间、id 兜底；④ 名字 trim + 小写比较，因为挂载目录是 `materialize` 的小写 slug。结果：`provision.mountTooling` 只把生效行交给 `materialize.Mount`，停用私有行后共享行重新生效（回退，不是消失）；`product` 侧 `materialize.Mount` 也保留「同名目录 private 优先」的兜底，防调用方绕过解析器。API `GET /v1/skills` 给每行加 `effective`（每调用者计算，不落库）。会话记录：`session_skills` 由生效行生成，绝不因 SQL 排序/遍历顺序而记错（FR-14.5）。UI：设置页同名两行不再无法区分——生效行「生效中」，被遮蔽的共享行「已被同名私有 Skill 覆盖」并解释「停用会回退」，停用的私有行显示「使用共享版本 vX」；`/` 面板按名字只列生效行（一条 `/skill:name`），私有覆盖时标注「覆盖同名共享 Skill」。测试：`skills/resolve_test.go` 5 例（private 覆盖 shared 且与顺序无关、停用回退、两个用户各自解析、2.10.0 > 2.9.0、大小写同名）、`provision_test.go` `TestMountUsesThePrivateSkillAndFallsBackWhenDisabled`（真的读 `.pi/skills/review/SKILL.md` 与 `session_skills`，再停用私有行后读回共享内容）、`materialize_test.go` `TestMountPrefersThePrivateBundleWhenTwoScopesShareAName`（两种传入顺序）、`e2e/tests/75-skill-shadow.spec.ts`（fresh 用户建同名私有 → 设置页徽章、`/` 面板只有生效行、新会话挂载私有 bundle 且记录 private id；停用后新会话挂载共享 bundle 且记录 shared id、列表说明回退）。**旧行为**：挂载选私有只是 `ListSkills` 的 `ORDER BY scope` + map 覆盖的副作用，没有规则、没有 `effective`、UI 两行完全相同、`/` 面板同时列两行且版本对不上；部署实例实测 `effective` 缺失、两行无任何提示（`e2e/.artifacts/fix-palette-shadow/probe-log.json` 旧构建 8/18 失败）。 |
-| FR-14.2 挂载到 worktree（只读 bind mount + content_hash） | PARTIAL | `materialize.Mount` 把 bundle **复制**到 `.pi/skills/<slug>`（不是 `.agents/skills/`、不是只读 bind mount）；`content_hash` 只存 DB，目录里没有；`materialize_test.go` |
+| FR-14.2 挂载到 worktree（只读 bind mount + content_hash） | PARTIAL | 机制按平台显式选择并记录（`materialize/mount_plan.go`）：Linux → **只读 bind mount**（先把 bundle 复制成**该会话的快照**，再把快照 bind 到 `.pi/skills/<slug>` 并 remount `MS_RDONLY`；快照在 `<data>/skill-snapshots/<session>`，不在 checkout 里）；Windows 或非 root 的无能力进程 → **每 skill 只读副本**（`copy-ro`：文件 0444、目录 0555；Windows 上映射为 `FILE_ATTRIBUTE_READONLY`，覆盖/删除被拒，但同账号仍可在目录里新建文件——这是 copy 不是 mount，台账不假装）；Linux root 且没有 `CAP_SYS_ADMIN` → **冻结副本 `copy`**（`CAP_DAC_OVERRIDE` 让 0444 对 root 无效，实测能写，因此不叫只读）。挂载树**冻结**：同一条 skill 行再次 provision 不重写（编辑不追进已启动的会话，FR-14.5 的记录才是事实），换行（停用私有 → 共享回退）会重装；新会话拿到新内容。机制写进 `.pi/mounted.json` 的 `mechanisms` / `skill_ids`，`GET …/tooling` 与 `GET …/sessions/{id}/skills` 透出，Skill 记录里显示「只读挂载 / 只读副本 / 副本（未只读）」徽章。**陈旧挂载不阻塞 provision**：先 `umount(MNT_DETACH)`（普通目录 EINVAL，忽略），再清只读位后重试删除；仍失败按 skill 记 skipped/warning，不让整个会话失败。`sandbox.Destroy` 与 janitor 删除前也清只读位（否则 Windows 上挂载过 skill 的项目删不掉）。测试：`materialize/mount_plan_test.go`（平台判定表、copy-ro 写入被拒且源不变、bind 源是快照而不是 bundle、bind 被拒 → copy-ro + warning、陈旧只读目录仍能重装）、`provision/skill_mount_test.go`（挂载路径 ≠ 源路径且只读；编辑后同会话不变、新会话变；**从 sandbox 的 Exec 路径**写 skill 被拒且源 bundle 未变）、e2e `84-skill-mount.spec.ts`（API 报机制、写被拒且内容不变、UI 徽章、编辑不追进旧会话而新会话是新内容）。**部署实测**：容器默认 caps 下 `mount --bind` 返回 `permission denied`，此时探针报 `copy`（root 能绕过 0444，UI 显示「副本（未只读）」——不把权限位当只读）；`pf-local` 以 `--cap-add SYS_ADMIN` 重启后同一探针报 `bind-ro`，`findmnt` 为 `ro`，容器内 root 写入被内核拒绝（`Read-only file system`）。bind 需要该能力，无能力的部署会诚实地降级，不夸大。 |
 | FR-14.3 Skill 中心（浏览/搜索/详情/SKILL.md 渲染） | PARTIAL | `web/app/settings/skills/page.tsx`：列表/新建/删除/上传（含 `SKILL.md` 文本域）；无搜索框、无详情页（不渲染文件树与脚本预览） |
 | FR-14.4 一键安装（Git URL / zip）+ 可禁用 | DONE | `POST /v1/skills/import` 克隆仓库、按含 SKILL.md 的目录逐个导入、只取该目录下文件、4 MB 上限；`skill_import_test.go`、`38-skill-import.spec.ts`。**zip 与「可禁用」本轮补齐**：`POST /v1/skills/import/zip`（multipart `file`，8 MB 请求上限，`archive/zip` 解到临时目录后走同一个 `findSkills`；`../`、绝对路径、符号链接条目整包拒绝，解压总量 4 MB）；`PATCH /v1/skills/{id}` 改 `enabled`（共享 Skill 仅管理员）；`provision.mountTooling` 只投影 `Enabled` 的 Skill，停用后新建会话真的不挂载。UI：设置 → Skill 中心「导入 Skill」对话框有 zip 选择与「上传 zip」，每行有启用开关。测试：`e2e/tests/69-skill-zip.spec.ts` 三例（设置页上传 zip → 列表出现 pdf-tools/review 且描述正确、bundle 只含 `SKILL.md`+`scripts/split.py`、启用时新会话挂载两者、停用后新会话只挂 review；`../escape` 整包 400 且不留半成品；无 SKILL.md 的包 404）；`skill_zip_test.go` 5 例（解压+findSkills、路径穿越、绝对路径/符号链接、超大条目、非 zip）。旧代码：该路由返回 `no route for POST /v1/skills/import/zip`，设置页没有 `skill-import-zip`。**本次修复（导入重启用）**：替换一个**已停用** Skill 的 bundle 时同时把它重新启用，并在响应里回报 `enabled` / `reenabled`，UI 的 toast 写明「之前是停用状态，已重新启用」——旧行为是内容被替换、行仍是 `enabled=0`、界面报成功而新会话什么都不挂载（导出 `e2e/.artifacts/fix-orphans/fix2-fail-first.log`：旧代码 `Enabled:false Reenabled:false`）。同一次改动让导入**不覆盖**同名共享 Skill（`SkillEditable` 先判权限再写文件，返回 `skipped` + 原因），此前普通用户导入同名共享 Skill 会先把磁盘上的共享 bundle 换掉、再因 `UpdateSkillBundle` 失败被标记跳过。测试：`skill_import_reenable_test.go`（停用 → 导入同名 → 响应 `enabled=true, reenabled=true` → 行一致 → 新会话真的挂载新内容）、`69-skill-zip.spec.ts` 补了「再次导入后重新启用并在新会话里挂载」；`e2e/tests/38-skill-import.spec.ts` 与 69 的旧注释（「导入不会重新启用」）已改 |
 | FR-14.5 会话记录所用 skill@version | DONE | 挂载时把 `skill_id/name/version + 内容 sha256 + mounted_path` 写进 `session_skills`（`store/session_skills.go`，`ON CONFLICT DO NOTHING` ⇒ 写一次即事实，之后编辑 Skill 不改写）；hash 由 `materialize.Digest` 对挂载目录「路径+内容」排序计算，与上传路径的 hash 同算法；`GET /v1/sessions/{id}/skills`；日志/信息抽屉新增只读「本会话使用的 Skill」；侧车复制父会话记录；`TestDigestIsContentAddressed`、`TestSessionSkillRecordIsWriteOnce`、`SessionSkillsEndpoint`、`63-skill-version.spec.ts`。**额外修复**：Pi 只在信任项目后才加载 `.pi/skills`，此前 agent 实际从未被告知挂载的 skill；现在启动参数显式带 `--skill <worktree>/.pi/skills`（`sessionSpec.SkillsDir`），容器实测系统提示词含 `<skills>` 列表且模型按 skill 作答 |
@@ -189,7 +189,7 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 3. **FR-5.8 / 16.4 / 16.6 运维面缺失**——资源护栏只有 docker provider 的启动参数，没有管理入口；镜像管理、护栏配置都没有端点或页面。
 4. **FR-9.6 多路跟随**——跟随终端没有「每分支一个跟随 tab」（单路跟随已修，见文末）；终端本体已有多 tab（FR-10.2 本轮补齐）。
 5. **FR-12.3 / 12.6**——diff 里不能写行内评论转成 steer；没有一键开 PR。（FR-12.1 的四个作用域与 FR-12.2 的逐 hunk UI 本批补齐；「本轮」仍没有入口，见文末。）
-6. **FR-2.4 / 8.8 / 14.2 / 16.3**——删除分支不清理 worktree（`RemoveWorktree` 无调用者）；没有开 PR；skill 是复制到 `.pi/skills` 而不是只读 bind mount；没有 admin 共享 skill 的写入口。
+6. **FR-2.4 / 8.8 / 16.3**——删除分支不清理 worktree（`RemoveWorktree` 无调用者）；没有开 PR；skill 已按平台只读挂载或只读副本（bind-ro 只在有权限的 Linux 上），但没有 admin 共享 skill 的写入口。
 7. **FR-5.3 快照只能看不能恢复**——清单索引在，但没有 restore-from-snapshot；docker 的回收未实跑；状态条也没有倒计时（FR-5.1）。
 
 ## 本次复核改了什么
@@ -608,6 +608,7 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 - 确认框不要求输入 provider 名（不是 GitHub 式二次输入）：本批要求是「显式确认 + 说清后果」，两步输入更适合不可恢复的批量操作。
 - `/v1/providers` 创建与共享同名的 provider 仍返回 409 `conflict`（阴影规则的另一半），未改。
 
+
 ## 本批 FR-11.3：接管浏览器是一把独占租约
 
 ### 缺什么
@@ -638,3 +639,46 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 - 同一个用户、同一个会话的两个标签页是**同一个 owner**（任务定义的 owner 就是 user+session），因此它们不会互相拒绝；跨会话、跨用户才是被拒绝的一方。
 
 
+## 本批 FR-14.2：按平台的只读挂载，冻结在当前会话
+
+### 缺什么
+
+`materialize.Mount` 把 bundle **复制**到 `.pi/skills/<slug>`，不设只读位，而且每次 provision 都重写。结果是：① 编辑 Skill 会悄悄改掉已启动会话正在读的指令（与 FR-14.5 的「记录是事实」矛盾）；② agent 可以改写自己的 Skill；③ 台账承诺的只读 bind mount 根本没发生，也没有任何地方说明实际用的是什么机制。
+
+### 改法（机制是显式的，不是口头的）
+
+- `internal/materialize/mount_plan.go`：`Mechanism` = `bind-ro` | `copy-ro` | `copy`；`PlatformMechanism(linux)=bind-ro`，其他平台 `copy-ro`。实现分文件：`bind_linux.go`（`mount --bind` + remount `MS_RDONLY|MS_REC`，失败先 `MNT_DETACH` 再回退）与 `bind_other.go`（明确返回「此平台没有 bind mount」）。
+- **bind 的源是快照，不是 bundle**：`<data>/skill-snapshots/<session>/<slug>` 先由 bundle 复制一次，之后 bind 到 `.pi/skills/<slug>`。快照在 checkout 之外（`provision.Config.SnapshotDir`），agent 没有第二条可写路径；同一个快照也不再被刷新。快照放在 checkout 内只是 `SnapshotDir` 为空时的回退，并且同样被 git exclude。
+- **copy-ro**：每个 worktree 一份副本，文件 0444、目录 0555。Windows 上 Go 把写位映射成 `FILE_ATTRIBUTE_READONLY`：覆盖/删除被拒；同账号仍可在目录里新建文件，**这是副本不是挂载，台账按 copy-ro 记**。Linux 上如果是 root 且没有 `CAP_SYS_ADMIN`，0444 会被 `CAP_DAC_OVERRIDE` 绕过；挂载后探测一次 `SKILL.md` 能否以写打开，能打开就记 `copy`（冻结但非只读，UI 写「副本（未只读）」），不冒充 copy-ro。
+- **冻结语义**：manifest 记 `skill_ids`（slug → skill 行 id）与 `mechanisms`。同一行再次 provision → 保留原挂载，不重写、不重 bind；不同行赢得同名（停用私有 → 共享回退，FR-14.1）→ 重装。新会话 → 新 worktree → 新快照/副本，因此新内容只到新会话。
+- **陈旧挂载不阻塞 provision**：先 `umount(MNT_DETACH)`（普通目录返回 EINVAL，忽略），`RemoveAll` 失败再清只读位重试一次；仍失败按 skill 记 skipped/warning，会话继续。`sandbox.Destroy` 与 janitor 在删目录前也清只读位——否则 Windows 上「挂载过 Skill 的项目」会删不掉（回归 FR「项目删除」）。
+- **可见性**：`.pi/mounted.json` 的 `mechanisms` / `skill_ids` 由 `GET …/tooling` 与 `GET …/sessions/{id}/skills` 透出；信息抽屉的每个 Skill 行显示「只读挂载 / 只读副本」徽章（`session-skill-mechanism`，`data-mechanism`）。
+- **content_hash 的位置没有变**：仍由 `materialize.Digest` 对挂载产物计算并写进 `session_skills`（FR-14.5），没有在 `.pi/skills/<slug>` 里放标记文件——只读挂载/只读副本上写不了，而这个 hash 的事实位置本来就是会话记录。台账若要求目录里带 hash，这一半仍未做。
+
+### 测试与失败优先
+
+- `materialize/mount_plan_test.go`：平台判定表（linux → bind-ro，windows/darwin/freebsd → copy-ro）；copy-ro 的挂载路径 ≠ 源路径、写入被拒、源不变、编辑不追进已启动会话、新会话拿到新内容；bind 路径用注入的 `BindMount` 断言**源是快照**且再次 provision 不重绑；bind 被拒 → copy-ro + warning；陈旧只读目录能被清掉并重装。
+- `materialize/bind_linux_test.go`：真实 `mount --bind` + 只读校验（无权限时 skip，并在输出里说明原因）。
+- `provision/skill_mount_test.go`：真实 store + local sandbox + git。挂载路径 ≠ 源路径、写被拒、源不变；编辑后同一会话重新 provision 不变、新会话是新内容；**从 sandbox 的 `Exec` 路径**（agent shell 用的同一条路）写 `.pi/skills/...` 被拒，读仍然可用。
+- e2e `84-skill-mount.spec.ts`：API 报告的机制与 `/skills` 一致；UI 徽章；写入被拒且内容不变；编辑后旧会话仍是旧内容、新会话是新内容。
+- **fail-first（两次变异）**：① 让 `copyReadOnly` 不设只读位（= 旧行为）→ `TestMountCopiesReadOnlyOffTheSourcePath` 失败在「a skill copied for the agent was writable」，`TestSandboxExecCannotWriteTheMountedSkill` 失败在「the sandbox wrote the mounted skill」；② 让冻结判断失效（每次都重装）→ `TestEditingASkillDoesNotReachARunningSessionButANewOneGetsIt` 失败在「an edit reached a running session: "…Version two…"」。日志：`e2e/.artifacts/partial-batch3/fr-14.2-fail-first-readonly.log`、`fr-14.2-fail-first-freeze.log`。恢复后全绿。
+
+### 边界（不夸大成 bind mount）
+
+- 部署容器 `pf-local` 的 `CapEff` 没有 `CAP_SYS_ADMIN`：`mount --bind` 实测返回 `permission denied`，因此**这台机器的部署实例用 copy-ro**，每个 worktree 一份副本（大 Skill 集仍会被复制，这是没有挂载的代价）。`docker inspect`/探针给出的 `mechanisms` 会写 `copy-ro`，UI 徽章也写「只读副本」。
+- Windows 的 copy-ro 只挡住覆盖/删除已有文件；在目录里新建文件仍可能，靠的是 write 位而非内核挂载。目录 0555 在 Unix 上连新建也挡住，Windows 不保证。
+- 快照目录按会话累积，删除会话时不会回收；它只在 bind 可用的 Linux 上产生，且是只读源。这是已知的清理缺口，不影响正确性。
+
+
+## 本批门禁（FR-11.3 + FR-14.2）
+
+- `go build ./...`：0；`go vet ./...`：0；`go test ./... -count=1`：全部包 ok（日志 `e2e/.artifacts/partial-batch3/go-gates.log`）。
+- `pnpm --dir web test -- --run`：**31 个文件 / 251 例通过**；`pnpm --dir web exec next build`：通过（`web-test.log`、`web-build.log`）。
+- 完整 e2e（复用同一份 `.data`，未 `test:fresh`）：**173 passed / 7.6m**。上一批是 171；本批新增 `83-browser-takeover.spec.ts` 1 例与 `84-skill-mount.spec.ts` 1 例，按 `--list` 实数 173。日志 `e2e/.artifacts/partial-batch3/full-e2e-final.log`。
+- 镜像与部署：`pwsh scripts/build-app-image.ps1` 重建 `piforge:local`（最终 `sha256:868501e0…`）；`pf-local` 用**同一个数据卷** `9ce20975339ab4…` 重建（旧容器 `aaaf4fdd…`，最终容器 `342be884…`，端口仍是 7722→7700），环境仍是四个 seed 账号、`PIFORGE_DEFAULT_PROVIDER=volc`。**新增 `--cap-add SYS_ADMIN`**：这是 `mount --bind` 的前提；没有它时实现不会假装只读（机制=`copy`，见上），而不是拒绝启动。`volc` provider 重启后仍 `enabled=true` / `has_key=true`（探针里 `GET /v1/providers` 未改动它）。
+- 部署探针 `node e2e/scripts/fr113-fr142-probe.mjs`（真实 UI + API，**不读任何密钥**，只建会话不发消息）：FR-11.3 第一个接管 200、第二个 **409 `browser_busy`**（`holder` = `Dev User`、`holder_session_id`、`remaining_seconds`=45）、第二个面板「正在被 Dev User 控制」且按钮禁用、切回观察后第二个接管 200；FR-14.2 机制 `bind-ro`、UI 徽章「只读挂载」、写入 **500** 且内容不变、编辑 Skill 不追进运行中的会话、新会话读到 PROBE-TWO。证据 `probe.json`、`probe-run-bind.log`，截图 `fr-11.3-controlling.png` / `fr-11.3-busy.png` / `fr-11.3-swapped.png` / `fr-14.2-mechanism-bind-ro.png`。
+- 同一个探针在**没有** `SYS_ADMIN` 的容器上（同一镜像）：机制 `copy`、UI「副本（未只读）」、写入 200 并改变了内容——这正是「不要在没有挂载能力时声称只读」的实测证据（`probe-nocap.json`、`probe-run-nocap.log`）。
+- 容器内（root，不是控制面）写挂载点：`overwrite_exit=2` / `create_exit=1`，两条都是 `Read-only file system`，`SKILL.md` 前两行未变；`findmnt -T …/.pi/skills/code-review` 显示 `ro,relatime`，源是 `/data/docker/volumes/9ce209…/_data/skill-snapshots/ses-…/code-review`（`container-write-proof.log`）。
+- Linux 真实 bind 测试（交叉编译的测试二进制，在一次性特权容器里跑；不碰部署卷）：`TestRealBindMountIsReadOnly` **PASS**；同一二进制在无 `SYS_ADMIN` 的容器里 **SKIP**，理由 `bind mount: operation not permitted`（`linux-bind-test.log`、`linux-bind-test-nocap.log`）。
+- 挂载过 Skill 的项目删除：修复前（旧镜像）DELETE 返回 **409**（`bind mount` 让 `.pi/skills` 的挂载点 busy，`RemoveAll` EBUSY）；`sandbox.removeTreeWritable` 先 `unmountSkills` 后同一请求返回 **200**；`TestDestroyDetachesMountedSkills` 在特权容器里 **PASS**（`linux-destroy-test.log`）。
+- `pwsh scripts/deliver-check.ps1`（`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入，未打印、未落盘）：run `20261031-133148`，**119 条 `[PASS]` / 0 条 FAIL**，`failure` 为 null；源树干净（提交 `0708002`），一次性容器 `pf-drill` / volume `pf-drill-data` 已删除，`pf-local` 全程未被触碰（id 前后都是 `342be884…`），数据卷仍是 `9ce20975…`。日志：`e2e/.artifacts/partial-batch3/deliver-check.log`；summary：`e2e/.artifacts/delivery-drill/20261031-133148/summary.json`。

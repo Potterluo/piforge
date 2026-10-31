@@ -68,6 +68,11 @@ func (s *server) handleSessionTooling(w http.ResponseWriter, r *http.Request) {
 // browser can render "none" without a null check.
 type sessionSkillsResponse struct {
 	Skills []*contracts.SessionSkill `json:"skills"`
+	// Mechanisms is how each mounted skill was installed (FR-14.2), keyed by
+	// directory slug. It comes from the worktree's mount manifest rather than
+	// the record: the record says *what* was mounted, this says *how*, and a
+	// Windows deployment is a read-only copy, not a bind mount.
+	Mechanisms map[string]string `json:"mechanisms,omitempty"`
 }
 
 // handleSessionSkills lists the skill versions materialised for a session.
@@ -86,5 +91,11 @@ func (s *server) handleSessionSkills(w http.ResponseWriter, r *http.Request) {
 	if list == nil {
 		list = []*contracts.SessionSkill{}
 	}
-	writeJSON(w, http.StatusOK, sessionSkillsResponse{Skills: list})
+	resp := sessionSkillsResponse{Skills: list}
+	if sess.WorktreeID != "" {
+		if root, rerr := s.worktreeRoot(r.Context(), user.ID, sess); rerr == nil {
+			resp.Mechanisms = materialize.Read(root).Mechanisms
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

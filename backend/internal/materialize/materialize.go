@@ -33,6 +33,10 @@ const (
 	MCPConfig   = ".mcp.json"
 	manifestRel = ".pi/mounted.json"
 	mcpKey      = "mcpServers"
+	// snapshotRel is the fallback location for frozen bind-mount sources when
+	// Options.SnapshotDir is empty. A deployment passes a directory outside the
+	// checkout so the snapshot has no second, writable path.
+	snapshotRel = ".pi/skill-snapshots"
 )
 
 // Bundle is a skill's content on disk.
@@ -48,6 +52,11 @@ type Bundle struct {
 type wantedSkill struct {
 	name   string
 	source string
+	// id is the skill row this bundle came from. It is how a later pass tells
+	// "the same skill was edited" (keep the frozen mount) from "a different row
+	// now wins this name" (re-install, e.g. the shared fallback after a private
+	// skill is disabled, FR-14.1).
+	id string
 	// scope is carried so a same-name collision between a private and a shared
 	// row is resolved by the two-scope rule instead of by slice order. Callers
 	// are expected to pass an already-resolved list (provision.mountTooling uses
@@ -68,6 +77,15 @@ type Manifest struct {
 	Skills     []string `json:"skills"`
 	MCPServers []string `json:"mcp_servers"`
 	MCPWritten bool     `json:"mcp_written"`
+	// Mechanisms records how each mounted skill was installed: "bind-ro" or
+	// "copy-ro" (FR-14.2). It is part of the manifest because "is it a real
+	// mount?" is a question an operator asks, and the answer differs per
+	// platform and even per fallback on one host.
+	Mechanisms map[string]string `json:"mechanisms,omitempty"`
+	// SkillIDs records which skill row produced each mount. A later pass uses it
+	// to distinguish an edited bundle (same row: keep the frozen copy) from a
+	// different row winning the same name (re-install).
+	SkillIDs map[string]string `json:"skill_ids,omitempty"`
 }
 
 func (m Manifest) normalized() Manifest {
@@ -76,6 +94,12 @@ func (m Manifest) normalized() Manifest {
 	}
 	if m.MCPServers == nil {
 		m.MCPServers = []string{}
+	}
+	if m.Mechanisms == nil {
+		m.Mechanisms = map[string]string{}
+	}
+	if m.SkillIDs == nil {
+		m.SkillIDs = map[string]string{}
 	}
 	return m
 }
@@ -89,6 +113,8 @@ type MountedSkill struct {
 	Name string
 	// Dir is the absolute directory inside the worktree that holds SKILL.md.
 	Dir string
+	// Mechanism is how that directory came to exist: "bind-ro" or "copy-ro".
+	Mechanism string
 }
 
 // Result reports the outcome of a mount.
@@ -100,6 +126,10 @@ type Result struct {
 	Mounted []MountedSkill
 	// Skipped lists skills whose content was missing, with the reason.
 	Skipped map[string]string
+	// Warnings are non-fatal degradations, such as a bind mount the kernel
+	// refused and the copy that replaced it. Provisioning continues; the
+	// mechanism is still reported honestly.
+	Warnings []string
 	// MCPServers are the server names written to the config.
 	MCPServers []string
 	// MCPPath is the config file's path, empty when nothing was written.
@@ -113,6 +143,17 @@ type Options struct {
 	// than mounted as an empty stub: an instruction-free skill is worse than a
 	// missing one, because the agent will try to use it.
 	SkillsDir string
+	// SnapshotDir is where a bind mount's frozen copy lives. It is outside the
+	// worktree in a deployment, so the mounted tree cannot be reached through a
+	// second writable path. Empty falls back to <root>/.pi/skill-snapshots.
+	SnapshotDir string
+	// Platform overrides runtime.GOOS for tests of the mechanism decision.
+	Platform string
+	// BindMount overrides the kernel bind mount. Nil uses the real one on
+	// Linux; tests use it to exercise the bind path without privileges.
+	BindMount func(source, target string) error
+	// Unmount overrides the kernel unmount. Nil uses the real one.
+	Unmount func(target string) error
 }
 
 // Mount writes the project's tooling into root.
@@ -128,7 +169,7 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 		return Result{}, fmt.Errorf("materialize: create root: %w", err)
 	}
 
-	result := Result{Skills: []string{}, Mounted: []MountedSkill{}, MCPServers: []string{}, Skipped: map[string]string{}}
+	result := Result{Skills: []string{}, Mounted: []MountedSkill{}, MCPServers: []string{}, Skipped: map[string]string{}, Warnings: []string{}}
 	previous := readManifest(root)
 
 	// --- skills ---------------------------------------------------------
@@ -164,7 +205,7 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 				continue
 			}
 		}
-		wanted[slug] = wantedSkill{name: skill.Name, source: source, scope: skill.Scope}
+		wanted[slug] = wantedSkill{name: skill.Name, source: source, scope: skill.Scope, id: skill.ID}
 	}
 
 	skillsRoot, err := safeJoin(root, SkillsRoot)
@@ -181,20 +222,67 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 	}
 	sort.Strings(names)
 
+	// The platform decision is made once per pass; a per-skill kernel refusal
+	// still degrades that skill to copy-ro and says so. The mount is never
+	// pointed at the live bundle: a running session keeps what it was given.
+	preferred := platformMechanism(opts.Platform)
+	snapshots := snapshotRoot(root, opts)
+
 	for _, slug := range names {
 		entry := wanted[slug]
 		target := filepath.Join(skillsRoot, slug)
-		// Rewrite wholesale so an updated bundle never leaves stale files.
-		if err := os.RemoveAll(target); err != nil {
-			return Result{}, fmt.Errorf("materialize: clear skill %s: %w", slug, err)
+
+		// A target that already carries SKILL.md from the same skill row is this
+		// worktree's frozen copy from an earlier pass. Keep it: re-copying would
+		// make an edit reach a session that already started, which is exactly
+		// what FR-14.2/14.5 say must not happen. A *different* row winning the
+		// same name (a shared skill after its private shadow was disabled) is a
+		// configuration change, not an edit, and is re-installed.
+		if isMountedSkill(target) && previous.SkillIDs[slug] == entry.id {
+			mechanism := previous.Mechanisms[slug]
+			if mechanism == "" {
+				// A copy written by an older build (before mechanisms were
+				// recorded) is a plain directory; hardening it in place is safe
+				// and makes the read-only promise hold for it too.
+				mechanism = string(MechanismCopyRO)
+				if err := chmodTree(target, true); err != nil {
+					result.Warnings = append(result.Warnings,
+						fmt.Sprintf("skill %s: could not make the existing copy read-only: %v", slug, err))
+				}
+			}
+			absTarget, err := filepath.Abs(target)
+			if err != nil {
+				return Result{}, fmt.Errorf("materialize: resolve mounted skill %s: %w", slug, err)
+			}
+			result.Skills = append(result.Skills, slug)
+			result.Mounted = append(result.Mounted, MountedSkill{Name: entry.name, Dir: absTarget, Mechanism: mechanism})
+			continue
 		}
-		if err := copyTree(entry.source, target); err != nil {
+
+		// A stale mount or a stale read-only copy must not break provisioning:
+		// unmount best-effort, clear read-only bits, retry once. Only a target
+		// that still will not move is skipped, and the session keeps working.
+		if err := clearMountedTree(target, opts); err != nil {
+			result.Skipped[slug] = "a stale mount could not be removed: " + err.Error()
+			continue
+		}
+
+		used, warning, err := installSkill(root, snapshots, target, entry.source, slug, preferred, opts)
+		if err != nil {
+			// A bundle that cannot be installed is not a transient condition:
+			// a symlink inside it, a full disk, or a denied write would keep
+			// failing and the agent would silently have no skill. Fail the
+			// provisioning pass instead of reporting a mount that is not there.
+			_ = clearMountedTree(target, opts)
 			return Result{}, fmt.Errorf("materialize: mount skill %s: %w", slug, err)
+		}
+		if warning != "" {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("skill %s: %s", slug, warning))
 		}
 		if _, err := os.Stat(filepath.Join(target, "SKILL.md")); err != nil {
 			// A directory without SKILL.md is invisible to Pi, and silently
 			// mounting it would look like the feature works when it does not.
-			_ = os.RemoveAll(target)
+			_ = clearMountedTree(target, opts)
 			result.Skipped[slug] = "bundle has no SKILL.md"
 			continue
 		}
@@ -203,7 +291,7 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 			return Result{}, fmt.Errorf("materialize: resolve mounted skill %s: %w", slug, err)
 		}
 		result.Skills = append(result.Skills, slug)
-		result.Mounted = append(result.Mounted, MountedSkill{Name: entry.name, Dir: absTarget})
+		result.Mounted = append(result.Mounted, MountedSkill{Name: entry.name, Dir: absTarget, Mechanism: used})
 	}
 
 	// Remove skills we mounted last time that are no longer configured.
@@ -211,8 +299,11 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 		if _, keep := wanted[stale]; keep {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(skillsRoot, stale)); err != nil {
-			return Result{}, fmt.Errorf("materialize: remove stale skill %s: %w", stale, err)
+		if err := clearMountedTree(filepath.Join(skillsRoot, stale), opts); err != nil {
+			// A directory we cannot remove must not take the whole session down;
+			// say so and keep the rest of the projection intact.
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("stale skill %s could not be removed: %v", stale, err))
 		}
 	}
 
@@ -245,14 +336,29 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 	// .git/info/exclude instead of .gitignore keeps the repository's tracked
 	// files untouched (we have no business editing the user's commit contents)
 	// while `git status` stays an honest description of *their* work.
-	if err := excludeFromGit(root, []string{"/" + SkillsRoot, "/" + manifestRel, "/" + MCPConfig}); err != nil {
+	if err := excludeFromGit(root, []string{"/" + SkillsRoot, "/" + manifestRel, "/" + MCPConfig, "/" + snapshotRel}); err != nil {
 		return Result{}, err
 	}
 
 	// `MCPServers` non-empty means the agent will get a config: `pimodel.WriteMCP` writes
 	// it at spawn. The field kept its name for the wire format, not for the file it used
 	// to describe.
-	next := Manifest{Skills: result.Skills, MCPServers: result.MCPServers, MCPWritten: len(result.MCPServers) > 0}
+	mechanisms := make(map[string]string, len(result.Mounted))
+	skillIDs := make(map[string]string, len(result.Mounted))
+	for _, mounted := range result.Mounted {
+		slug := filepath.Base(mounted.Dir)
+		mechanisms[slug] = mounted.Mechanism
+		if entry, ok := wanted[slug]; ok {
+			skillIDs[slug] = entry.id
+		}
+	}
+	next := Manifest{
+		Skills:     result.Skills,
+		MCPServers: result.MCPServers,
+		MCPWritten: len(result.MCPServers) > 0,
+		Mechanisms: mechanisms,
+		SkillIDs:   skillIDs,
+	}
 	if err := writeManifest(root, next); err != nil {
 		return Result{}, err
 	}
@@ -340,6 +446,185 @@ func safeJoin(base, rel string) (string, error) {
 		return "", fmt.Errorf("materialize: %q escapes %q", rel, base)
 	}
 	return absJoined, nil
+}
+
+// snapshotRoot is where frozen bind-mount sources live. A deployment points it
+// outside the checkout; the fallback stays inside .pi, which is git-excluded.
+func snapshotRoot(root string, opts Options) string {
+	if strings.TrimSpace(opts.SnapshotDir) != "" {
+		return opts.SnapshotDir
+	}
+	return filepath.Join(root, filepath.FromSlash(snapshotRel))
+}
+
+// isMountedSkill reports whether a directory already holds a mounted skill.
+//
+// It is the whole freeze rule: once a worktree has a skill, later passes leave
+// it alone. Editing the bundle therefore reaches only sessions provisioned
+// after the edit, while the running session keeps the content it was given.
+func isMountedSkill(target string) bool {
+	info, err := os.Lstat(target)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(target, "SKILL.md"))
+	return err == nil
+}
+
+// installSkill creates the mounted tree for one skill and reports the mechanism
+// that actually succeeded.
+//
+// The preferred mechanism is bind-ro on Linux: a snapshot is taken first, then
+// bind-mounted read-only, so the mount is both frozen and cheap. When the kernel
+// refuses (an unprivileged container without CAP_SYS_ADMIN is the common case),
+// the reason is returned as a warning and the skill degrades to a copy, whose
+// mechanism is probed rather than assumed (copy-ro when the read-only bits hold
+// for this process, copy when root can bypass them). The reverse never happens:
+// a platform without bind mounts does not pretend.
+func installSkill(root, snapshots, target, source, slug string, preferred Mechanism, opts Options) (string, string, error) {
+	warning := ""
+	if preferred == MechanismBindRO {
+		snapshot := filepath.Join(snapshots, slug)
+		if err := ensureSnapshot(snapshot, source, opts); err != nil {
+			warning = fmt.Sprintf("could not take a mount snapshot (%v); copying instead", err)
+		} else {
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return "", warning, fmt.Errorf("mount skill: %w", err)
+			}
+			bind := opts.BindMount
+			if bind == nil {
+				bind = bindReadOnly
+			}
+			if err := bind(snapshot, target); err == nil {
+				return string(MechanismBindRO), "", nil
+			} else {
+				warning = fmt.Sprintf("bind mount refused (%v); using a read-only copy", err)
+			}
+		}
+	}
+	if err := copyReadOnly(source, target); err != nil {
+		return "", warning, fmt.Errorf("mount skill: %w", err)
+	}
+	// Permission bits are not a guarantee: root ignores them. Probe by opening
+	// the mounted SKILL.md for writing (without truncating). If it opens, the
+	// tree is a frozen copy but not a read-only one, and the mechanism has to
+	// say so — a deployment without mount capability would otherwise report a
+	// guarantee it does not have.
+	if mountedFileIsWritable(target) {
+		return string(MechanismCopy), "the mounted copy is writable by this process (root without CAP_SYS_ADMIN); the tree is frozen but not read-only", nil
+	}
+	return string(MechanismCopyRO), warning, nil
+}
+
+// mountedFileIsWritable reports whether this process can open the mounted
+// SKILL.md for writing. It never writes: opening alone is what permission bits
+// and Windows' read-only attribute refuse.
+func mountedFileIsWritable(target string) bool {
+	file, err := os.OpenFile(filepath.Join(target, "SKILL.md"), os.O_WRONLY, 0)
+	if err != nil {
+		return false
+	}
+	_ = file.Close()
+	return true
+}
+
+// ensureSnapshot copies the bundle once and reuses it afterwards. Reuse is what
+// freezes the mounted tree: the snapshot belongs to this session and is never
+// refreshed from a bundle that changed under a running session.
+func ensureSnapshot(snapshot, source string, opts Options) error {
+	if isMountedSkill(snapshot) {
+		return nil
+	}
+	if err := clearMountedTree(snapshot, opts); err != nil {
+		return err
+	}
+	return copyTree(source, snapshot)
+}
+
+// copyReadOnly copies a bundle and marks the result read-only.
+//
+// On Unix that is file mode 0444/0555. On Windows Go maps the write bits to
+// FILE_ATTRIBUTE_READONLY, which refuses overwriting or deleting a mounted file;
+// creating a new file in the directory is still possible there, and the manifest
+// says copy-ro rather than claiming a bind mount.
+func copyReadOnly(source, target string) error {
+	if err := copyTree(source, target); err != nil {
+		return err
+	}
+	return chmodTree(target, true)
+}
+
+// chmodTree sets every file (and then every directory, deepest first) to a
+// writable or read-only mode. Missing entries are ignored: the same helper is
+// used after a partial deletion.
+func chmodTree(root string, readOnly bool) error {
+	fileMode, dirMode := os.FileMode(0o644), os.FileMode(0o755)
+	if readOnly {
+		fileMode, dirMode = 0o444, 0o555
+	}
+	var dirs []string
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() {
+			dirs = append(dirs, p)
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			// Do not follow a link: chmod follows it, which would change a file
+			// outside the tree.
+			return nil
+		}
+		if err := os.Chmod(p, fileMode); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := os.Chmod(dirs[i], dirMode); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// clearMountedTree removes a previous mount or copy.
+//
+// A stale mount must not break provisioning, so this is deliberately forgiving:
+// detach best-effort (the kernel says EINVAL when it was never a mount point),
+// then clear read-only bits, then retry once. Callers report a failure per skill
+// instead of failing the session.
+func clearMountedTree(target string, opts Options) error {
+	if _, err := os.Lstat(target); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	unmount := opts.Unmount
+	if unmount == nil {
+		unmount = unmountPath
+	}
+	// A lazy detach is safe on a normal directory (it fails) and is the only way
+	// to remove a mount point that a crashed session left behind.
+	_ = unmount(target)
+	if err := os.RemoveAll(target); err == nil {
+		return nil
+	}
+	if err := chmodTree(target, false); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.RemoveAll(target); err != nil {
+		return err
+	}
+	return nil
 }
 
 // copyTree copies a directory recursively, skipping nothing: a skill bundle is

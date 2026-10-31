@@ -18,6 +18,7 @@ package janitor
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -162,7 +163,7 @@ func (j *Janitor) RunOnce(ctx context.Context) (Result, error) {
 				res.RemovedDirs++
 				continue
 			}
-			if rerr := os.RemoveAll(dir); rerr != nil {
+			if rerr := removeTreeWritable(dir); rerr != nil {
 				res.Failures++
 				j.cfg.Logger.Warn("janitor: orphaned sandbox directory could not be removed; will retry",
 					"user", userID, "project", projectID, "error", rerr.Error())
@@ -188,4 +189,28 @@ func (j *Janitor) RunOnce(ctx context.Context) (Result, error) {
 // statePath is the local provider's layout: <root>/_state/<user>/<project>.json.
 func (j *Janitor) statePath(userID, projectID string) string {
 	return filepath.Join(j.cfg.Root, stateDirName, userID, projectID+".json")
+}
+
+// removeTreeWritable deletes an orphan whose mounted skills are read-only.
+//
+// FR-14.2 makes `.pi/skills` read-only; on Windows that bit also refuses
+// deletion, so a plain RemoveAll would report the orphan as unremovable forever.
+// The same retry-with-writable-modes lives in the sandbox provider's Destroy,
+// and this copy keeps the janitor independent of it.
+func removeTreeWritable(root string) error {
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		_ = os.Chmod(p, 0o644)
+		return nil
+	})
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
+		}
+		_ = os.Chmod(p, 0o755)
+		return nil
+	})
+	return os.RemoveAll(root)
 }

@@ -362,7 +362,10 @@ export const sessions = {
   stats: (id: string) => request<SessionStats>(`/v1/sessions/${id}/stats`),
   status: (id: string) => request<RuntimeStatus>(`/v1/sessions/${id}/status`),
   /** The skill versions this session was mounted with (FR-14.5). */
-  skills: (id: string) => request<{ skills: SessionSkill[] }>(`/v1/sessions/${id}/skills`),
+  skills: (id: string) =>
+    request<{ skills: SessionSkill[]; mechanisms?: Record<string, string> }>(
+      `/v1/sessions/${id}/skills`,
+    ),
   /** Test runs derived from this session's tool events and terminal (FR-12.5). */
   testRuns: (id: string, limit = 20) =>
     request<TestRunsResponse>(`/v1/sessions/${id}/test-runs?limit=${limit}`),

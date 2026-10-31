@@ -59,6 +59,8 @@ func newEnv(t *testing.T) *env {
 		// A real bundle directory so the mount test exercises copying, not just
 		// config writing.
 		SkillsDir: filepath.Join(t.TempDir(), "skills"),
+		// Frozen snapshots outside the checkout, the shape a deployment uses.
+		SnapshotDir: filepath.Join(t.TempDir(), "skill-snapshots"),
 	})
 	return &env{t: t, svc: svc, store: st, user: user}
 }
