@@ -37,6 +37,7 @@ import { ApiError } from "@/lib/types";
 import { toast } from "sonner";
 import { sessionKindLabel, shortModel } from "@/lib/session/format";
 import { qk, useProject, useProviders, useSession, useSessionSkills, useSkills } from "@/lib/session/queries";
+import { buildModelChoices } from "@/lib/session/model-options";
 import { collectBashOutput, runningToolCount, selectTimeline, type Turn } from "@/lib/session/reduce";
 import { capFollowText } from "@/lib/session/follow";
 import type { StreamStatus } from "@/lib/session/use-session-events";
@@ -242,17 +243,11 @@ function WorkbenchBody({
   }, [panelsCollapsed]);
 
   const models = useMemo<ModelOption[]>(() => {
-    const options: ModelOption[] = [{ value: "inherit", label: "跟随默认" }];
-    for (const provider of providers.data?.providers ?? []) {
-      if (!provider.enabled) continue;
-      for (const spec of provider.models ?? []) {
-        options.push({
-          value: `${provider.name}/${spec.id}`,
-          label: `${provider.name}/${spec.name || spec.id}`,
-        });
-      }
-    }
-    return options;
+    // A provider without a key is listed disabled: choosing it used to cost
+    // three automatic retries and a raw 502. Hiding it entirely would leave
+    // "why is my provider gone?" unanswered, so the row keeps its reason.
+    const { options } = buildModelChoices(providers.data?.providers);
+    return [{ value: "inherit", label: "跟随默认" }, ...options];
   }, [providers.data]);
 
   const detail = session.data?.session;

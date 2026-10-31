@@ -40,6 +40,26 @@ describe("humanizeError", () => {
     );
   });
 
+  it("maps the gateway's provider_unavailable code to one Chinese sentence", () => {
+    // What the gateway answers when the provider has no key (HTTP 400, code
+    // provider_unavailable). The UI must never show the JSON body.
+    expect(
+      humanizeError(
+        apiError("provider_unavailable", 'provider "shared-anthropic" has no key configured'),
+      ),
+    ).toBe("服务商「shared-anthropic」还没有配置 API Key，这一轮没有调用模型。请到「设置 → 模型与凭据」填写后重新发送");
+    expect(
+      humanizeError(apiError("provider_unavailable", 'provider "volc" is not available')),
+    ).toContain("volc");
+    expect(
+      humanizeError(apiError("provider_unavailable", "stored key cannot be decrypted")),
+    ).toContain("重新填写");
+    // An unknown sentence under a known code still gets Chinese, not English.
+    expect(humanizeError(apiError("provider_unavailable", "something new"))).toContain(
+      "模型服务不可用",
+    );
+  });
+
   it("does not leak an unmapped English message", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const text = humanizeError(apiError("internal", "some brand new english sentence"));

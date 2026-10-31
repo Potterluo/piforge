@@ -128,25 +128,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	provider, sealed, err := h.cfg.Store.ResolveProvider(r.Context(), claims.UserID, claims.Provider)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_unavailable",
+		// Configuration errors are 4xx on purpose: Pi's model client retries
+		// 5xx (and 429) with backoff, which is right for an upstream outage and
+		// wrong for "this provider has no key". Answering 502 here made a
+		// missing key cost three retries (~30s) before the user saw it.
+		writeErr(w, http.StatusBadRequest, "provider_unavailable",
 			fmt.Sprintf("provider %q is not available", claims.Provider))
 		return
 	}
 	if len(sealed) == 0 {
-		writeErr(w, http.StatusBadGateway, "provider_unavailable",
+		writeErr(w, http.StatusBadRequest, "provider_unavailable",
 			fmt.Sprintf("provider %q has no key configured", claims.Provider))
 		return
 	}
 	secret, err := h.cfg.Box.OpenString(sealed)
 	if err != nil {
 		h.cfg.Logger("llmgw: cannot open key for provider %s: %v", claims.Provider, err)
-		writeErr(w, http.StatusBadGateway, "provider_unavailable", "stored key cannot be decrypted")
+		writeErr(w, http.StatusBadRequest, "provider_unavailable", "stored key cannot be decrypted")
 		return
 	}
 
 	target, err := h.upstreamURL(provider, rest, r.URL.RawQuery)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "provider_unavailable", err.Error())
+		writeErr(w, http.StatusBadRequest, "provider_unavailable", err.Error())
 		return
 	}
 

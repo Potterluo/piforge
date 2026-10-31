@@ -130,6 +130,27 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		sess = updated
 	}
 
+	// A session pinned to a model that cannot answer must fail here, before a
+	// process starts and before Pi sees the prompt.
+	//
+	// This is the acceptance pass's keyless trap: picking `shared-anthropic` in
+	// the new-session dialog wrote `model_ref = shared-anthropic/...` and the
+	// send was accepted, so the gateway answered 502 provider_unavailable and Pi
+	// retried it three times (~30s) before a half-raw error reached the
+	// transcript. `explainMissingModel` already knew how to say this; it only ran
+	// after a failure, which never happened because nothing had tried yet.
+	//
+	// Only an explicit reference is checked. An empty model_ref follows the
+	// deployment default, which the first-run bar and the composer already
+	// explain; resolving it here would make a fake-agent deployment with a
+	// keyless default refuse every send (and the e2e suite runs exactly that).
+	if strings.TrimSpace(sess.ModelRef) != "" {
+		if modelErr := s.explainMissingModel(r.Context(), user.ID, sess.ModelRef); modelErr != nil {
+			s.fail(w, r, modelErr)
+			return
+		}
+	}
+
 	// The first prompt for a session should run inside its checkout. Best
 	// effort: a provisioning failure leaves spec.Worktree empty and the agent
 	// runs in the runtime's default directory instead.

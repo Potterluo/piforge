@@ -1,6 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -24,6 +25,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Spinner } from "@/components/ui/spinner";
 import { humanizeError } from "@/lib/errors";
+import { buildModelChoices } from "@/lib/session/model-options";
 import { useCreateSession, useProviders } from "@/lib/session/queries";
 
 const THINKING_LEVELS = [
@@ -64,18 +66,17 @@ export function NewSessionDialog({
   const create = useCreateSession(projectId ?? "");
 
   const models = useMemo(() => {
-    const options = [{ value: "auto", label: "默认模型" }];
-    for (const provider of providers.data?.providers ?? []) {
-      if (!provider.enabled) continue;
-      for (const spec of provider.models ?? []) {
-        options.push({
-          value: `${provider.name}/${spec.id}`,
-          label: `${provider.name} / ${spec.name || spec.id}`,
-        });
-      }
-    }
-    return options;
+    // A provider with no key cannot answer. It is still listed — with 缺少 API
+    // Key and the link below — because a model that silently disappears from
+    // the picker is its own support ticket. Selecting it is disabled.
+    const { options } = buildModelChoices(providers.data?.providers);
+    return [{ value: "auto", label: "默认模型", selectable: true }, ...options];
   }, [providers.data]);
+
+  const blocked = useMemo(
+    () => buildModelChoices(providers.data?.providers).blocked,
+    [providers.data],
+  );
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -138,14 +139,38 @@ export function NewSessionDialog({
                 <SelectTrigger id="session-model" className="w-full">
                   <SelectValue />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className="min-w-[20rem]">
                   {models.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
+                    <SelectItem
+                      key={option.value}
+                      value={option.value}
+                      disabled={option.selectable === false}
+                      data-testid="session-model-option"
+                      data-selectable={option.selectable === false ? "false" : "true"}
+                      data-model={option.value}
+                    >
+                      <span className="flex min-w-0 flex-col items-start">
+                        <span className="max-w-full truncate">{option.label}</span>
+                        {option.note ? (
+                          <span className="text-[10px] text-muted-foreground">{option.note}</span>
+                        ) : null}
+                      </span>
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              {blocked.length > 0 ? (
+                <FieldDescription data-testid="model-blocked-hint">
+                  {blocked.map((provider) => provider.name).join("、")} 缺少 API Key，不能选择。
+                  <Link
+                    href="/settings/providers"
+                    className="ms-1 text-primary underline underline-offset-2"
+                    onClick={() => onOpenChange(false)}
+                  >
+                    去填写
+                  </Link>
+                </FieldDescription>
+              ) : null}
               {providers.isError ? (
                 <FieldDescription className="text-destructive">
                   模型列表加载失败，将使用服务端默认模型。

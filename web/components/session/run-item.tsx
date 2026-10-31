@@ -13,7 +13,7 @@ import {
   MessageHeader,
 } from "@/components/ui/message";
 import { formatClock, shortModel } from "@/lib/session/format";
-import { modelErrorAdvice, modelErrorTitle } from "@/lib/session/model-error";
+import { modelErrorAdvice, modelErrorText, modelErrorTitle } from "@/lib/session/model-error";
 import { Markdown } from "@/lib/session/markdown-view";
 import type { Block, Turn } from "@/lib/session/reduce";
 import { cn } from "@/lib/utils";
@@ -130,7 +130,7 @@ export function AssistantRun({
                       </span>
                     ) : null}
                   </p>
-                  <p className="mt-1 whitespace-pre-wrap break-words opacity-90">{turn.error}</p>
+                  <p className="mt-1 whitespace-pre-wrap break-words opacity-90">{modelErrorText(turn.error)}</p>
                   <p className="mt-1 text-muted-foreground">{modelErrorAdvice(turn.error)}</p>
                 </div>
               ) : null}

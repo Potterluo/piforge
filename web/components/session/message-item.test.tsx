@@ -46,6 +46,25 @@ describe("MessageItem", () => {
     expect(alert).not.toHaveTextContent("地址与密钥");
   });
 
+  it("localizes the gateway's keyless body instead of printing raw JSON", () => {
+    // The acceptance transcript showed this body verbatim. The code is the
+    // contract; the JSON around it must not reach the reader.
+    render(
+      <MessageItem
+        turn={assistant({
+          error:
+            '502: {"error":{"code":"provider_unavailable","message":"provider \\"shared-anthropic\\" has no key configured"}}',
+          retries: 3,
+        })}
+      />,
+    );
+
+    const alert = screen.getByTestId("turn-error");
+    expect(alert).toHaveTextContent("服务商「shared-anthropic」还没有配置 API Key");
+    expect(alert).not.toHaveTextContent("provider_unavailable");
+    expect(alert).not.toHaveTextContent('"error"');
+  });
+
   it("renders nothing for an empty assistant turn", () => {
     const { container } = render(<MessageItem turn={assistant()} />);
     expect(container).toBeEmptyDOMElement();

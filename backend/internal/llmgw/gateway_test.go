@@ -261,13 +261,19 @@ func TestGatewayRejectsBadTokens(t *testing.T) {
 	}
 }
 
+// A missing key is a configuration error, not an upstream outage: it answers a
+// 4xx so the agent does not retry it (Pi retries 5xx/429, not 4xx). The code
+// stays provider_unavailable so the UI can map it to one sentence.
 func TestGatewayRefusesProvidersWithoutAKey(t *testing.T) {
 	h := newHarness(t)
 	token, _ := h.signer.Issue("ses_1", "usr_1", "no-key", "", time.Now())
 
 	rec := h.do(t, "", http.MethodPost, "/gw/llm/"+token+"/v1/messages", `{}`, nil)
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", rec.Code)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (a 502 is retried by the agent)", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "provider_unavailable") {
+		t.Fatalf("error code missing: %s", rec.Body.String())
 	}
 	if h.captured != nil {
 		t.Fatal("the request reached the upstream despite there being no key")
@@ -279,8 +285,11 @@ func TestGatewayRefusesUnknownProviders(t *testing.T) {
 	token, _ := h.signer.Issue("ses_1", "usr_1", "does-not-exist", "", time.Now())
 
 	rec := h.do(t, "", http.MethodPost, "/gw/llm/"+token+"/v1/messages", `{}`, nil)
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", rec.Code)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "provider_unavailable") {
+		t.Fatalf("error code missing: %s", rec.Body.String())
 	}
 }
 

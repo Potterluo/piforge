@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { classifyModelError, modelErrorAdvice, modelErrorTitle } from "@/lib/session/model-error";
+import {
+  classifyModelError,
+  modelErrorAdvice,
+  modelErrorText,
+  modelErrorTitle,
+} from "@/lib/session/model-error";
 
 describe("classifyModelError", () => {
   it("recognises a missing model", () => {
@@ -48,5 +53,34 @@ describe("modelErrorAdvice", () => {
       expect(modelErrorAdvice(error)).toContain("模型与凭据");
       expect(modelErrorAdvice(error)).not.toContain("设置 → 模型」");
     }
+  });
+});
+
+describe("modelErrorText", () => {
+  it("turns the gateway's keyless body into a Chinese sentence", () => {
+    // The exact string the acceptance tester saw in the transcript.
+    const raw =
+      '502: {"error":{"code":"provider_unavailable","message":"provider \\"shared-anthropic\\" has no key configured"}}';
+    const text = modelErrorText(raw);
+    expect(text).toContain("shared-anthropic");
+    expect(text).toContain("API Key");
+    expect(text).toContain("模型与凭据");
+    expect(text).not.toContain('"error"');
+    expect(text).not.toContain("provider_unavailable");
+    expect(text).not.toContain("502");
+  });
+
+  it("still names the provider when the body has no error envelope", () => {
+    // The gateway writes `{"error":{…}}`; Pi may keep only the inner object.
+    const text = modelErrorText(
+      '400: {"code":"provider_unavailable","message":"provider \\"nokey\\" has no key configured"}',
+    );
+    expect(text).toContain("nokey");
+    expect(text).not.toContain("provider_unavailable");
+  });
+
+  it("keeps a non-gateway error exactly as it arrived", () => {
+    const raw = "404: model_not_found: the requested model does not exist";
+    expect(modelErrorText(raw)).toBe(raw);
   });
 });

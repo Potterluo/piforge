@@ -54,3 +54,28 @@ export function modelErrorAdvice(error: string): string {
 export function modelErrorTitle(error: string): string {
   return classifyModelError(error) === "model_not_found" ? "这个模型用不了" : "模型调用失败";
 }
+
+/**
+ * The sentence shown where the raw provider error used to be.
+ *
+ * Pi surfaces a gateway failure as the gateway's HTTP body: the acceptance pass
+ * saw `502 {"error":{"code":"provider_unavailable","message":"provider
+ * \"shared-anthropic\" has no key configured"}}` verbatim in the transcript.
+ * The code is the contract — the body around it is diagnostics — so a typed
+ * provider_unavailable is translated here, at the one place both error blocks
+ * render.
+ *
+ * Anything else is returned unchanged: inventing a sentence for an unknown
+ * provider error would hide the only useful text the user has.
+ */
+const PROVIDER_UNAVAILABLE = /"code"\s*:\s*"provider_unavailable"/;
+const NO_KEY_MESSAGE = /provider \\?"([^"\\]+)\\?" has no key configured/;
+
+export function modelErrorText(error: string): string {
+  if (!error || !PROVIDER_UNAVAILABLE.test(error)) return error;
+  const provider = NO_KEY_MESSAGE.exec(error)?.[1];
+  if (provider) {
+    return `服务商「${provider}」还没有配置 API Key，这一轮没有调用模型。请到「设置 → 模型与凭据」填写后重新发送。`;
+  }
+  return "模型服务不可用：这个服务商没有配置好（缺少 API Key 或地址）。请到「设置 → 模型与凭据」检查后重新发送。";
+}

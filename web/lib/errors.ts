@@ -88,6 +88,36 @@ const RULES: MessageRule[] = [
     pattern: /^this provider has no API key yet$/i,
     render: () => "这个服务商还没有 API Key，请先填写后再测试",
   },
+  // The gateway's own vocabulary. A run that reaches the gateway with a keyless
+  // provider answers `provider_unavailable` (HTTP 400), and the transcript used
+  // to print the raw body: `502 {"error":{"code":"provider_unavailable",…}}`.
+  {
+    code: "provider_unavailable",
+    pattern: /^provider "(.+?)" has no key configured$/i,
+    render: (m) =>
+      `服务商「${m[1]}」还没有配置 API Key，这一轮没有调用模型。请到「设置 → 模型与凭据」填写后重新发送`,
+  },
+  {
+    code: "provider_unavailable",
+    pattern: /^provider "(.+?)" is not available$/i,
+    render: (m) =>
+      `服务商「${m[1]}」不可用（可能已被删除或停用），请到「设置 → 模型与凭据」检查`,
+  },
+  {
+    code: "provider_unavailable",
+    pattern: /^stored key cannot be decrypted$/i,
+    render: () => "已保存的 key 无法解密，请到「设置 → 模型与凭据」重新填写",
+  },
+  {
+    code: "provider_unavailable",
+    pattern: /^provider "(.+?)" has no base URL$/i,
+    render: (m) => `服务商「${m[1]}」没有填写地址，请到「设置 → 模型与凭据」补充`,
+  },
+  {
+    code: "provider_unavailable",
+    pattern: /.*/,
+    render: () => "模型服务不可用：这个服务商没有配置好，请到「设置 → 模型与凭据」检查后重试",
+  },
   {
     code: "invalid_argument",
     pattern: /^the stored key cannot be decrypted$/i,

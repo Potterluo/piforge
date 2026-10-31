@@ -64,6 +64,12 @@ import { skillInvocation, skillVersionLabel, SkillPalette } from "./skill-palett
 export interface ModelOption {
   value: string;
   label: string;
+  /**
+   * False for a provider that cannot answer (no key). The row is still shown so
+   * the model does not silently vanish from the picker; the reason is `note`.
+   */
+  selectable?: boolean;
+  note?: string;
 }
 
 export interface ComposerTestIds {
@@ -743,10 +749,21 @@ export function Composer({
               >
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent className="min-w-64">
                 {modelItems.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
+                  <SelectItem
+                    key={option.value}
+                    value={option.value}
+                    disabled={option.selectable === false}
+                    data-testid="composer-model-option"
+                    data-selectable={option.selectable === false ? "false" : "true"}
+                  >
+                    <span className="flex min-w-0 flex-col items-start">
+                      <span className="max-w-full truncate">{option.label}</span>
+                      {option.note ? (
+                        <span className="text-[10px] text-muted-foreground">{option.note}</span>
+                      ) : null}
+                    </span>
                   </SelectItem>
                 ))}
               </SelectContent>
