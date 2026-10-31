@@ -27,7 +27,11 @@ param(
     [string]$Provider = "volc|https://api.example.com/v1|deepseek-v4-flash",
     [string]$ProviderKey = $env:PIFORGE_DRILL_KEY,
     [string]$DefaultProvider = "volc",
-    [string]$RunnerToken = ""
+    [string]$RunnerToken = "",
+    # The tenant quota policy: the default every account gets is the
+    # deploy/tenant-limits.json file, and this points the stack at another one
+    # (the soak uses per-tenant overrides).
+    [string]$LimitsFile = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,6 +43,9 @@ $controlPlaneImage = "piforge:$Tag"
 $runnerImage = "piforge/sandbox-runner:$Tag"
 $sandboxImage = "piforge/sandbox-agent:$Tag"
 if ([string]::IsNullOrWhiteSpace($DataVolume)) { $DataVolume = "$Project-data" }
+if ([string]::IsNullOrWhiteSpace($LimitsFile)) { $LimitsFile = Join-Path $root "deploy/tenant-limits.json" }
+if (-not (Test-Path $LimitsFile)) { Write-Host "ERROR: tenant limits file not found: $LimitsFile" -ForegroundColor Red; exit 1 }
+$LimitsFile = (Resolve-Path $LimitsFile).Path
 
 function Step($message) { Write-Host "==> $message" -ForegroundColor Cyan }
 function Fail($message) { Write-Host "ERROR: $message" -ForegroundColor Red; exit 1 }
@@ -77,6 +84,7 @@ if ($Down) {
     $env:PIFORGE_SANDBOX_IMAGE = $sandboxImage
     $env:PIFORGE_PUBLISH = "$Port"
     $env:PIFORGE_DATA_VOLUME = $DataVolume
+    $env:PIFORGE_TENANT_LIMITS_MOUNT = $LimitsFile
     if ([string]::IsNullOrWhiteSpace($env:SANDBOX_RUNNER_TOKEN)) { $env:SANDBOX_RUNNER_TOKEN = "teardown-only" }
     Invoke-Docker -Arguments @("compose", "-p", $Project, "-f", $compose, "down", "-v", "--remove-orphans") -AllowFailure | Out-Null
 
@@ -91,10 +99,17 @@ if ($Down) {
     foreach ($volume in @($volumes)) {
         if ($volume) { & docker volume rm -f $volume *> $null }
     }
+    # Per-tenant bridges are labelled at creation (the runner makes one per
+    # tenant, outside any compose project), so this is the only thing that can
+    # find them after the containers are gone.
+    $tenantNetworks = & docker network ls -q --filter "label=piforge.tenant"
+    foreach ($network in @($tenantNetworks)) {
+        if ($network) { & docker network rm $network *> $null }
+    }
     # `compose down` cannot remove it while the sandboxes are still attached, and
     # they are removed above; this is the second half of that sequence.
     & docker network rm piforge-sandboxes *> $null
-    Write-Host "removed: containers labelled piforge.user, volumes named piforge-ws-*, network piforge-sandboxes"
+    Write-Host "removed: containers labelled piforge.user, volumes named piforge-ws-*, networks labelled piforge.tenant, network piforge-sandboxes"
     Write-Host "kept: the image tags (pass -Rebuild after a source change)"
     exit 0
 }
@@ -162,6 +177,7 @@ $env:PIFORGE_RUNNER_IMAGE = $runnerImage
 $env:PIFORGE_SANDBOX_IMAGE = $sandboxImage
 $env:PIFORGE_PUBLISH = "$Port"
 $env:PIFORGE_DATA_VOLUME = $DataVolume
+$env:PIFORGE_TENANT_LIMITS_MOUNT = $LimitsFile
 $env:SANDBOX_RUNNER_TOKEN = $RunnerToken
 $env:PIFORGE_DEFAULT_PROVIDER = $DefaultProvider
 if (-not [string]::IsNullOrWhiteSpace($Provider)) { $env:PIFORGE_BOOTSTRAP_PROVIDER = $Provider }

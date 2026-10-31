@@ -412,6 +412,42 @@ Seams, in the order they will bite:
   rather than invented numbers.
 
 ## Known limits
+0. **Tenancy is now an operating property on the isolated shape — with four named
+   exceptions.** Since 2026-11-01 (`docs/EXECUTION-BOUNDARY.md` §12,
+   `docs/SANDBOX-DEPLOY.md` §1.7):
+
+   - **Network:** sandboxes no longer share `piforge-sandboxes`. Each tenant gets a
+     bridge of its own (`piforge-t-<hash>`, created by the runner, labelled
+     `piforge.tenant`), and only that tenant's sandboxes plus the control plane and the
+     runner are on it. Measured from inside a sandbox on the isolated stack: the
+     neighbour's name does not resolve (`no such host`), its address times out
+     (`curl` exit 28 after 4.0 s, `nc` no route), while the sandbox still reaches its
+     own model gateway (`200`) and the control plane's `/v1/*` still answers `401`.
+   - **Quota:** CPU / memory / process limits and a concurrent-sandbox cap come from a
+     per-tenant policy (`deploy/tenant-limits.json`, `PIFORGE_TENANT_LIMITS_FILE`), not
+     from the deployment-wide flags. They are applied with
+     `docker run --cpus/--memory/--pids-limit`, recorded on the sandbox row from the
+     container's own `HostConfig`, and reported per tenant in `/v1/admin/status`
+     ("租户配额与网络" on the admin page). A tenant at its cap is refused with
+     `409 tenant_sandbox_limit` and the numbers (`{limit, current, tenant}`) — before
+     this, that refusal was logged and the caller saw a generic 500.
+   - **Audit:** `GET /v1/admin/audit` (admin, paginated, filterable, `format=csv`)
+     reads `tool_calls` across tenants: who / what / when / outcome with session,
+     project and user. There is an `/admin/audit` page with the same filters and an
+     export link.
+   - **Soak:** `pwsh scripts/soak-tenancy.ps1 -Port 7723` — four tenants, four
+     projects, four concurrent runs, then the probes above plus the quota refusal and
+     the audit query. Last run: 0 failures, exit 0, artifacts in
+     `e2e/.artifacts/tenancy/`.
+
+   **What it still does not claim, and must not:** two sandboxes of the *same* tenant
+   share their tenant bridge and can reach each other's 8080 (the image's per-sandbox
+   key still says 401) — per-sandbox networks were rejected because each one costs a
+   network and this daemon refuses the 17th (`all predefined address pools have been
+   fully subnetted`); there is no egress policy (a sandbox can still reach the
+   internet); disk is per sandbox, not per tenant; and the number is four tenants on
+   one Docker Desktop host, not fifty.
+
 
 Ordered roughly by how much they will hurt. Nothing here is softened.
 

@@ -35,6 +35,10 @@
 
 本批（agent 进程进入沙箱，stage 1）同样不改变任何 FR 状态：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。它改的是 HANDOFF Known limit #1 里那句"控制面不是执行边界"：`-agent-in-sandbox`（默认关闭）下 `pi` 由沙箱容器启动、控制面通过 runner 的新 `attach` 端点桥接它的 stdio，沙箱里 `cat /data/piforge.db` 变成 `No such file or directory`，属主缺陷（面板改不了 agent 写的文件）在这个摆法下消失。代价与没做的部分同样明确：agent 仍随控制面重启而死（阶段三才换常驻 supervisor），`materialize`/`provision` 仍写共享卷，MCP 配置故意不进沙箱。证据见 `docs/SANDBOX-DEPLOY.md` §1.4.3，设计与四阶段见 `docs/EXECUTION-BOUNDARY.md`。
 
+本批（多租户成为可运营属性）不改变 FR 状态：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。它补的是验收报告 `e2e/.artifacts/final-isolated/VERDICT.md` §8 第 3 条——"隔离"在执行与文件上成立，租户之间却只隔着认证。三件事，各有命令与证据（设计与取舍见 `docs/EXECUTION-BOUNDARY.md` §12，运维见 `docs/SANDBOX-DEPLOY.md` §1.7）：①**网络**：沙箱不再共享 `piforge-sandboxes`，每个租户一条桥 `piforge-t-<hash>`（runner 建、带 `piforge.tenant` 标签），只有该租户的沙箱 + 控制面 + runner 在上面；从沙箱 A 到 B 按名字 `no such host`、按地址 `curl` 4.0 s 超时/`nc` 无路由，同时 A 到自己的模型网关 200、到控制面 `/v1/*` 仍 401（`e2e/.artifacts/tenancy/isolation-probes.txt`）。选"每租户"而不是"每沙箱"的理由是产品规则（一个 (user, project) 一个沙箱、授权边界是用户）加地址池硬墙：本机 Docker 29.9.2 第 17 条网络就报 `all predefined address pools have been fully subnetted`。**同租户的两个沙箱仍互通 8080**（镜像的每沙箱 key 仍是 401），文档明说不宣称这一点。②**配额**：CPU/内存/进程数来自按租户的策略文件（`deploy/tenant-limits.json`，`PIFORGE_TENANT_LIMITS_FILE`，启动时校验、出错指出租户），经 `docker run --cpus/--memory/--pids-limit` 生效，从容器 `HostConfig` 读回并存进沙箱行，`/v1/admin/status` 的管理页「租户配额与网络」按租户并排显示策略与用量；并发沙箱上限在建之前数行，拒绝是 typed 的 `409 tenant_sandbox_limit` + `{limit,current,tenant}`（此前只写一行 WARN，用户看到的是三层之后的 500）。③**审计**：`GET /v1/admin/audit`（仅管理员、分页、可过滤、`format=csv`）跨租户读 `tool_calls`：谁/什么/何时/成败 + 会话 + 项目 + 用户，另有 `/admin/audit` 页面。`scripts/soak-tenancy.ps1` 用 4 个租户同时各跑一条会调用工具的 prompt，一次跑完隔离、配额、审计与磁盘/网络探测：**0 failures，exit 0**。
+
+---
+
 ---
 # PiForge 对照 PRD 的实现审计
 

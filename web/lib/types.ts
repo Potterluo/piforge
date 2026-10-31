@@ -669,6 +669,85 @@ export interface DeploymentStatus {
   sandbox_usage: SandboxUsage[];
   /** The effective per-sandbox disk budget in bytes; 0 means enforcement is off. */
   sandbox_disk_quota: number;
+  /**
+   * The per-tenant quota policy: the default every tenant gets, where it came
+   * from, how sandbox networks are decided, and one row per account with the
+   * limit it actually runs under and how many sandboxes it holds.
+   */
+  tenant_limits: TenantLimitsReport;
+}
+
+/** The tenant quota policy as the admin screen reads it (GET /v1/admin/status). */
+export interface TenantLimitsReport {
+  /** The default CPU limit (docker --cpus); empty means unlimited. */
+  cpus?: string;
+  /** The default memory limit ("2g"); empty means unlimited. */
+  memory?: string;
+  /** The default process limit; 0 means unlimited. */
+  pids?: number;
+  /** How many sandboxes one tenant may hold at once; 0 means unlimited. */
+  max_sandboxes: number;
+  /** Where the policy came from: "flags", a file path, or "none". */
+  source: string;
+  /** "shared" (one bridge for every sandbox) or "tenant" (a bridge per tenant). */
+  network_mode: string;
+  /** False when the deployment configured no limits at all. */
+  enforced: boolean;
+  tenants: TenantLimitRow[];
+}
+
+/** One tenant's effective limits, next to what it is using. */
+export interface TenantLimitRow {
+  user_id: string;
+  email?: string;
+  cpus?: string;
+  memory?: string;
+  pids?: number;
+  max_sandboxes: number;
+  /** Sandboxes this tenant holds right now, which is what the cap applies to. */
+  sandboxes: number;
+  /** False when both the container limits and the cap are unlimited. */
+  effective: boolean;
+  /** True when the policy names this tenant explicitly. */
+  override: boolean;
+}
+
+/**
+ * One tool call in the operator's audit trail (GET /v1/admin/audit).
+ *
+ * It is the same row the session's own Trace shows, with the owner, project and
+ * session joined in. The arguments are a hash plus the preview the user already
+ * sees, never the arguments themselves.
+ */
+export interface AuditRow {
+  id: string;
+  started_at: string;
+  ended_at?: string;
+  duration_ms?: number;
+  user_id: string;
+  user_email?: string;
+  project_id: string;
+  project?: string;
+  session_id: string;
+  session?: string;
+  run_id?: string;
+  tool: string;
+  namespace?: string;
+  args_hash: string;
+  /** Absent while the call is still running. */
+  failed?: boolean;
+  exit_code?: number;
+  result_bytes?: number;
+}
+
+/** One page of the audit trail, plus how many rows the filter matched. */
+export interface AuditResponse {
+  calls: AuditRow[];
+  total: number;
+  limit: number;
+  offset: number;
+  /** The filters the server understood, echoed back. */
+  filters: Record<string, string>;
 }
 
 /** One sandbox's footprint against the disk budget (GET /v1/admin/status). */

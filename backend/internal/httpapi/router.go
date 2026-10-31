@@ -37,6 +37,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/reconcile"
 	"github.com/piforge/piforge/backend/internal/runtimedirs"
 	"github.com/piforge/piforge/backend/internal/store"
+	"github.com/piforge/piforge/backend/internal/tenantlimits"
 )
 
 // Provisioner attaches a working directory to a session. *provision.Service
@@ -108,6 +109,17 @@ type Deps struct {
 	// (the admin report still measures). A run whose sandbox root is over it is
 	// refused before an agent starts.
 	SandboxDiskQuota int64
+	// TenantLimits is the per-tenant quota policy (internal/tenantlimits). The
+	// admin status page reports each tenant's effective limits next to the
+	// sandboxes it is using, so "who is at their ceiling" is answerable from the
+	// product rather than from the deployment's configuration file. Nil means this
+	// deployment configured no policy, which the page says out loud.
+	TenantLimits *tenantlimits.Policy
+	// SandboxNetworkMode is "shared" or "tenant": how sandbox network membership
+	// is decided. It is reported because it is the difference between "tenants
+	// cannot reach each other" and "tenants are separated by an API key", and an
+	// operator has to be able to see which one this deployment runs.
+	SandboxNetworkMode string
 	// DiskQuotaReportTTL is how long the admin screen may reuse a measurement.
 	// Zero uses diskquota.DefaultReportTTL.
 	DiskQuotaReportTTL time.Duration
@@ -450,6 +462,10 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /v1/admin/users", s.authed(s.handleAdminUsers))
 	mux.Handle("POST /v1/admin/users", s.mutatingBearer(s.handleAdminCreateUser))
 	mux.Handle("PATCH /v1/admin/users/{id}", s.mutatingBearer(s.handleAdminUpdateUser))
+	// The audit trail: tool_calls read across tenants, for an operator. It is the
+	// one cross-tenant read besides the user list, and it is admin-only for the
+	// same reason.
+	mux.Handle("GET /v1/admin/audit", s.authed(s.handleAdminAudit))
 
 	// Anything else is a JSON 404 rather than Go's text/plain default, so the
 	// client's error parser always has the same shape to read.

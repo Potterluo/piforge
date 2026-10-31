@@ -594,28 +594,61 @@ func (s *server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 	// Attach a checkout before answering so the UI can open the file tree
 	// immediately. Best effort: a session that exists but has no worktree yet
-	// is still usable for prompting, and the workspace endpoints say so.
-	if refreshed, ok := s.provisionWorktree(r.Context(), user.ID, projectID, sess); ok {
+	// is still usable for prompting, and the workspace endpoints say so. A
+	// *refusal* (the tenant's sandbox quota) is not best effort: it is the
+	// answer to the request, and the caller has to see the typed error.
+	if refreshed, perr := s.provisionWorktree(r.Context(), user.ID, projectID, sess); perr != nil {
+		if isPolicyRefusal(perr) {
+			// The session was created before its sandbox was refused. Leaving the
+			// row behind would give the caller an id it never saw, and the next
+			// attempt would count against the tenant as a project with a sandbox
+			// it cannot open. Remove it: a refused request leaves nothing.
+			if derr := s.deps.Store.DeleteSession(r.Context(), user.ID, sess.ID); derr != nil {
+				s.log.WarnContext(r.Context(), "could not remove the session a quota refusal created",
+					"session", sess.ID, "error", derr.Error())
+			}
+			s.fail(w, r, perr)
+			return
+		}
+	} else {
 		sess = refreshed
 	}
 	writeJSON(w, http.StatusCreated, sessionResponse{Session: sess})
+}
+
+// isPolicyRefusal reports whether a provisioning error is a decision the caller
+// has to see (the tenant's quota) rather than an incident to log and carry on
+// from.
+//
+// The distinction is the status the error already carries: a 4xx is "the
+// deployment refused this", and swallowing it turns "you have 2 of 2 sandboxes"
+// into a generic 500 three layers later ("the agent has no worktree"), which is
+// the worst possible message. A 5xx stays best effort, because a session without
+// a checkout is still usable for a model-only turn.
+func isPolicyRefusal(err error) bool {
+	var api *contracts.APIError
+	if !errors.As(err, &api) {
+		return false
+	}
+	return statusFor(api.Code) < http.StatusInternalServerError
 }
 
 // provisionWorktree gives the session a working directory through the optional
 // Provisioner and returns the re-read session so worktree_id is populated.
 //
 // The provisioning work must survive the client hanging up (it can involve a
-// clone), so it runs on a detached context with a generous bound. Errors are
-// logged and swallowed on purpose.
-func (s *server) provisionWorktree(ctx context.Context, userID, projectID string, sess *contracts.Session) (*contracts.Session, bool) {
+// clone), so it runs on a detached context with a generous bound. On failure the
+// error is returned *and* logged: the caller decides whether it is a refusal to
+// surface or an incident to swallow (isPolicyRefusal).
+func (s *server) provisionWorktree(ctx context.Context, userID, projectID string, sess *contracts.Session) (*contracts.Session, error) {
 	if s.deps.Provisioner == nil || sess == nil {
-		return sess, false
+		return sess, nil
 	}
 	project, err := s.deps.Store.Project(ctx, userID, projectID)
 	if err != nil {
 		s.log.WarnContext(ctx, "provision: project lookup failed",
 			"session", sess.ID, "error", err.Error())
-		return sess, false
+		return sess, nil
 	}
 
 	pctx, cancel := detach(ctx, 5*time.Minute)
@@ -624,12 +657,12 @@ func (s *server) provisionWorktree(ctx context.Context, userID, projectID string
 	if perr != nil {
 		s.log.WarnContext(ctx, "provision: no worktree for session",
 			"session", sess.ID, "error", perr.Error())
-		return sess, false
+		return sess, perr
 	}
 
 	refreshed, err := s.deps.Store.Session(ctx, userID, sess.ID)
 	if err != nil {
-		return sess, false
+		return sess, nil
 	}
-	return refreshed, true
+	return refreshed, nil
 }

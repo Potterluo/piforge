@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -253,7 +254,104 @@ func (s *server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 		// measurement is still reported so an operator can size a budget).
 		"sandbox_usage":      sandboxUsage,
 		"sandbox_disk_quota": s.diskQuota.Limit(),
+		// The tenant quota policy and each tenant's effective limits: the answer to
+		// "what is this account allowed to use", next to what it is using.
+		"tenant_limits": s.tenantLimitsReport(r.Context(), user.ID),
 	})
+}
+
+// tenantLimitRow is one tenant's line on the admin status page.
+type tenantLimitRow struct {
+	UserID       string `json:"user_id"`
+	Email        string `json:"email,omitempty"`
+	CPUs         string `json:"cpus,omitempty"`
+	Memory       string `json:"memory,omitempty"`
+	Pids         int    `json:"pids,omitempty"`
+	MaxSandboxes int    `json:"max_sandboxes"`
+	// Sandboxes is how many the tenant holds right now, which is what the cap
+	// applies to.
+	Sandboxes int `json:"sandboxes"`
+	// Effective is true when the container limits are not "unlimited", so the page
+	// can distinguish a configured tenant from one the deployment left alone.
+	Effective bool `json:"effective"`
+	// Override is true when the policy names this tenant explicitly.
+	Override bool `json:"override"`
+}
+
+// tenantLimitsReport is the admin status block.
+type tenantLimitsReport struct {
+	CPUs         string `json:"cpus,omitempty"`
+	Memory       string `json:"memory,omitempty"`
+	Pids         int    `json:"pids,omitempty"`
+	MaxSandboxes int    `json:"max_sandboxes"`
+	// Source names where the policy came from ("flags" or the file path): a limit
+	// an operator cannot find the line for is a limit they cannot change.
+	Source string `json:"source"`
+	// NetworkMode is "shared" or "tenant".
+	NetworkMode string `json:"network_mode"`
+	// Enforced is false when the deployment configured nothing: the page has to
+	// tell "unlimited" apart from "we did not think about it".
+	Enforced bool             `json:"enforced"`
+	Tenants  []tenantLimitRow `json:"tenants"`
+}
+
+// tenantLimitsReport builds the tenant block from the policy and one count query.
+//
+// Every account is listed, not only the ones with an override: a tenant with no
+// entry runs with the default, and "there is no row for me" is exactly the
+// confusion this block exists to remove.
+func (s *server) tenantLimitsReport(ctx context.Context, callerID string) tenantLimitsReport {
+	report := tenantLimitsReport{
+		NetworkMode: s.deps.SandboxNetworkMode,
+		Source:      "none",
+		Tenants:     []tenantLimitRow{},
+	}
+	if report.NetworkMode == "" {
+		report.NetworkMode = "shared"
+	}
+	counts := map[string]int{}
+	if s.deps.Store != nil {
+		if got, err := s.deps.Store.SandboxCountsByUser(ctx); err == nil {
+			counts = got
+		} else {
+			s.log.WarnContext(ctx, "admin status: sandbox counts unavailable", "error", err.Error())
+		}
+	}
+	if s.deps.TenantLimits == nil {
+		return report
+	}
+	policy := s.deps.TenantLimits
+	def := policy.Default()
+	report.CPUs, report.Memory, report.Pids = def.CPUs, def.Memory, def.Pids
+	report.MaxSandboxes = def.MaxSandboxes
+	report.Source = policy.Source()
+	report.Enforced = !def.Sandbox().IsZero() || def.MaxSandboxes > 0
+
+	users, err := s.deps.Store.AdminListUsers(ctx, callerID)
+	if err != nil {
+		s.log.WarnContext(ctx, "admin status: tenant list unavailable", "error", err.Error())
+		return report
+	}
+	named := map[string]bool{}
+	for _, key := range policy.Tenants() {
+		named[strings.ToLower(key)] = true
+	}
+	for _, user := range users {
+		limits := policy.For(user.ID, user.Email)
+		report.Tenants = append(report.Tenants, tenantLimitRow{
+			UserID:       user.ID,
+			Email:        user.Email,
+			CPUs:         limits.CPUs,
+			Memory:       limits.Memory,
+			Pids:         limits.Pids,
+			MaxSandboxes: limits.MaxSandboxes,
+			Sandboxes:    counts[user.ID],
+			Effective:    !limits.Sandbox().IsZero() || limits.MaxSandboxes > 0,
+			Override: named[strings.ToLower(user.ID)] ||
+				(user.Email != "" && named[strings.ToLower(user.Email)]),
+		})
+	}
+	return report
 }
 
 // storageUsage returns the cached per-directory scan. The admin page polls every

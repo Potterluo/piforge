@@ -44,6 +44,20 @@ type DockerOptions struct {
 	// CPUs and Memory are the default container limits; empty means "no limit".
 	CPUs   string
 	Memory string
+	// Pids is the default process limit (docker --pids-limit); zero means "no
+	// limit". A create request carries the tenant's own value and wins over this.
+	Pids int
+	// NetworkMode is how sandbox network membership is decided: "shared" puts every
+	// sandbox on Network, "tenant" gives each tenant its own bridge (see
+	// sandbox.NetworkMode). Empty is shared, the pre-multi-tenant behaviour.
+	NetworkMode sandbox.NetworkMode
+	// TenantNetworkPrefix overrides the name prefix of a tenant's bridge.
+	TenantNetworkPrefix string
+	// JoinContainers names the containers that must keep reaching every sandbox —
+	// the control plane and this runner. They are joined to each tenant's bridge
+	// when it is created; without them a per-tenant bridge would isolate the
+	// sandbox from the panels and from its checkout.
+	JoinContainers []string
 	// APIPort is the default container port that serves the sandbox API (8080).
 	APIPort int
 	// APIKey is a fixed SANDBOX_API_KEY for every container this runner creates,
@@ -85,7 +99,10 @@ func NewDockerProvider(opts DockerOptions) (*DockerProvider, error) {
 	if opts.APIPort <= 0 {
 		opts.APIPort = 8080
 	}
-	if opts.ContainerEndpoint && strings.TrimSpace(opts.Network) == "" {
+	if opts.ContainerEndpoint && strings.TrimSpace(opts.Network) == "" && opts.NetworkMode != sandbox.NetworkTenant {
+		// Under per-tenant networks the configured network is legitimately empty:
+		// each create joins a bridge the runner makes for that tenant, which is
+		// where the control plane resolves the container's name.
 		return nil, fmt.Errorf("sandboxrunner: container endpoints need a network (SANDBOX_NETWORK)")
 	}
 	return &DockerProvider{opts: opts}, nil
@@ -200,17 +217,38 @@ func (p *DockerProvider) Reattach(ctx context.Context, sandboxID string, spec sa
 	return provider.Reattach(ctx, sandboxID, spec)
 }
 
+// networkPlan is the create's network decision, in one place so it can be tested
+// without a daemon: per-tenant when either side asks for it (in which case the
+// shared network name is dropped, because a container on two bridges is reachable
+// from both), and the requested-or-configured network otherwise.
+func (p *DockerProvider) networkPlan(request sandbox.RunnerRequest) (sandbox.NetworkMode, string) {
+	if request.TenantNetwork || p.opts.NetworkMode == sandbox.NetworkTenant {
+		return sandbox.NetworkTenant, ""
+	}
+	return sandbox.NetworkShared, firstNonEmpty(request.Network, p.opts.Network)
+}
+
 // creator builds a provider that can create a container: image and CLI required.
 func (p *DockerProvider) creator(request sandbox.RunnerRequest) (*sandbox.Docker, error) {
 	image := firstNonEmpty(request.Image, p.opts.Image)
 	if strings.TrimSpace(image) == "" {
 		return nil, fmt.Errorf("sandboxrunner: no image: the request carried none and the runner has no default (SANDBOX_IMAGE)")
 	}
+	// Tenant networks are decided by either side: the control plane can ask for
+	// them per create (it knows which tenants exist and what its own panels need),
+	// and the runner can require them for every create (it is the process that
+	// creates the bridges). Either way the shared network name must not travel
+	// with the create — a container on two bridges is reachable from both.
+	mode, network := p.networkPlan(request)
 	return sandbox.NewDocker(sandbox.DockerConfig{
 		Image:               image,
-		Network:             firstNonEmpty(request.Network, p.opts.Network),
+		Network:             network,
+		NetworkMode:         mode,
+		TenantNetworkPrefix: p.opts.TenantNetworkPrefix,
+		JoinContainers:      p.opts.JoinContainers,
 		CPUs:                firstNonEmpty(request.CPUs, p.opts.CPUs),
 		Memory:              firstNonEmpty(request.Memory, p.opts.Memory),
+		Pids:                firstInt(request.Pids, p.opts.Pids),
 		DataRoot:            p.opts.DataRoot,
 		APIPort:             p.apiPort(request.APIPort),
 		APIKey:              firstNonEmpty(request.APIKey, p.opts.APIKey),
@@ -267,6 +305,8 @@ func (p *DockerProvider) record(ctx context.Context, provider *sandbox.Docker, s
 		ContainerPathRoot: sandbox.ContainerWorkspace,
 		APIKey:            sb.SandboxAPIKey,
 		Workspace:         sb.Workspace.Normalized(),
+		CPUMilli:          sb.CPUMilli,
+		MemMB:             sb.MemMB,
 	}
 	endpoint, err := provider.Endpoint(ctx, sb.ID)
 	if err != nil {
@@ -283,4 +323,15 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// firstInt is firstNonEmpty for the one numeric field (pids): a request's value
+// wins when it is positive, which is how "unlimited" is expressed.
+func firstInt(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }

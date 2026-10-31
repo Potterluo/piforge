@@ -1269,7 +1269,7 @@ func TestContainerArgs(t *testing.T) {
 		APIPort:  8080,
 		APIKey:   "sandbox-key",
 	}}
-	args := single.containerArgs("piforge-abc", "usr_1", "prj_1", "/data/sandboxes/usr_1/prj_1", "sandbox-key")
+	args := single.containerArgs(context.Background(), "piforge-abc", "usr_1", "prj_1", "/data/sandboxes/usr_1/prj_1", "sandbox-key")
 	assertArgsContain(t, args, "-v", "/data/sandboxes/usr_1/prj_1:/workspace")
 	assertArgsContain(t, args, "-p", "127.0.0.1::8080")
 	assertArgsContain(t, args, "-e", "BROWSER_NO_SANDBOX=--no-sandbox")
@@ -1290,7 +1290,7 @@ func TestContainerArgs(t *testing.T) {
 		APIKey:            "sandbox-key",
 		ContainerEndpoint: true,
 	}}
-	args = shared.containerArgs("piforge-abc", "usr_1", "prj_1", "/data/sandboxes/usr_1/prj_1", "sandbox-key")
+	args = shared.containerArgs(context.Background(), "piforge-abc", "usr_1", "prj_1", "/data/sandboxes/usr_1/prj_1", "sandbox-key")
 	assertArgsAbsent(t, args, "-p")
 	assertArgsContain(t, args, "--network", "piforge-sandboxes")
 	// The browser switch and the key are about the image, not about how the API is
@@ -1314,7 +1314,7 @@ func TestContainerArgsVolumeWorkspace(t *testing.T) {
 		WorkspaceVolume:     "piforge-data",
 		WorkspaceVolumeRoot: "/data",
 	}, volumePrefix: "sandboxes"}
-	args := provider.containerArgs("piforge-abc", "usr_1", "prj_1", "/data/sandboxes/usr_1/prj_1", "sandbox-key")
+	args := provider.containerArgs(context.Background(), "piforge-abc", "usr_1", "prj_1", "/data/sandboxes/usr_1/prj_1", "sandbox-key")
 	// The subpath is relative to the volume's root, not to the data root: the
 	// daemon prepends the volume's mountpoint, and a "usr_1/prj_1" here would
 	// point at <volume>/usr_1/prj_1 instead of <volume>/sandboxes/usr_1/prj_1.
@@ -1453,7 +1453,7 @@ func TestContainerArgsDetachedWorkspace(t *testing.T) {
 		ContainerEndpoint: true,
 		DetachedWorkspace: true,
 	}}
-	args := provider.containerArgs("piforge-abc12345", "usr_1", "prj_1", "/data/sandboxes/usr_1/prj_1", "sandbox-key")
+	args := provider.containerArgs(context.Background(), "piforge-abc12345", "usr_1", "prj_1", "/data/sandboxes/usr_1/prj_1", "sandbox-key")
 	assertArgsContain(t, args, "--mount", "type=volume,source=piforge-ws-abc12345,target=/workspace")
 	assertArgsAbsent(t, args, "-v")
 	for _, arg := range args {

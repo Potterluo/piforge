@@ -35,6 +35,7 @@ import (
 	skillset "github.com/piforge/piforge/backend/internal/skills"
 	"github.com/piforge/piforge/backend/internal/skillsnap"
 	"github.com/piforge/piforge/backend/internal/store"
+	"github.com/piforge/piforge/backend/internal/tenantlimits"
 )
 
 // Config wires the provisioner to its dependencies.
@@ -69,6 +70,15 @@ type Config struct {
 	// Nil means this deployment has no such sandbox — and a sandbox that needs it
 	// then fails loudly instead of writing a tree the agent never sees.
 	WorkspaceFiles func(ctx context.Context, sb *contracts.Sandbox) (materialize.FileSystem, error)
+	// LimitsFor resolves a tenant's quota (internal/tenantlimits). It is where the
+	// concurrency guard learns how many sandboxes this tenant may have; a nil
+	// resolver means "no per-tenant policy", which keeps the single-tenant
+	// behaviour of a deployment that configured none.
+	//
+	// The container limits themselves are applied by the sandbox provider, which
+	// receives the same policy; this one is only about refusing to create the
+	// sandbox at all.
+	LimitsFor func(ctx context.Context, userID string) tenantlimits.Limits
 }
 
 // Service provisions working directories.
@@ -584,6 +594,14 @@ func (s *Service) ensureSandbox(
 		return nil, fmt.Errorf("provision: load sandbox: %w", err)
 	}
 
+	// The concurrency guard, before anything is created: a tenant may hold at most
+	// N sandboxes at once, and N is the policy's, not this function's. It is
+	// checked here because this is the only place a sandbox row is ever created —
+	// a second call site would be a second place to forget the check.
+	if err := s.checkSandboxQuota(ctx, userID); err != nil {
+		return nil, err
+	}
+
 	live, err := s.cfg.Sandbox.Ensure(ctx, userID, project.ID, project.RepoURL, project.DefaultBranch)
 	if err != nil {
 		return nil, fmt.Errorf("provision: create sandbox: %w", err)
@@ -609,11 +627,54 @@ func (s *Service) ensureSandbox(
 		// fixed -sandbox-api-key override). It is sealed by the store and used for
 		// every later call to this sandbox's API.
 		APIKey: live.SandboxAPIKey,
+		// The limits the provider actually applied. They are recorded on the row so
+		// an operator can see the effective quota of this sandbox later, even after
+		// the policy file changed (GET /v1/admin/status reports them).
+		CPUMilli: live.CPUMilli,
+		MemMB:    live.MemMB,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("provision: record sandbox: %w", err)
 	}
 	return sb, nil
+}
+
+// checkSandboxQuota refuses a new sandbox when the tenant already holds as many
+// as its policy allows.
+//
+// The error is typed (contracts.ErrTenantSandboxLimit) and carries the numbers:
+// the client shows "you have 3 of 3 sandboxes; delete or pause a project", which
+// is the only thing a user can act on. Zero in the policy means unlimited, and a
+// deployment with no policy at all keeps unlimited — the guard is a configured
+// ceiling, not a default assumption about how many projects a person may own.
+func (s *Service) checkSandboxQuota(ctx context.Context, userID string) error {
+	if s.cfg.LimitsFor == nil {
+		return nil
+	}
+	limits := s.cfg.LimitsFor(ctx, userID)
+	if limits.MaxSandboxes <= 0 {
+		return nil
+	}
+	count, err := s.cfg.Store.SandboxCountForUser(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("provision: count sandboxes: %w", err)
+	}
+	if count < limits.MaxSandboxes {
+		return nil
+	}
+	message := fmt.Sprintf("this tenant already has %d sandboxes, which is the limit (%d): delete or pause a project's sandbox before creating another",
+		count, limits.MaxSandboxes)
+	slog.WarnContext(ctx, "sandbox creation refused by the tenant quota",
+		slog.String("user", userID), slog.Int("sandboxes", count), slog.Int("limit", limits.MaxSandboxes))
+	return &contracts.APIError{
+		Code:    contracts.ErrTenantSandboxLimit,
+		Message: message,
+		Details: map[string]any{
+			"limit":   limits.MaxSandboxes,
+			"current": count,
+			"tenant":  userID,
+		},
+	}
 }
 
 func (s *Service) findWorktreeByPath(

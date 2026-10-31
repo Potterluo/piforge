@@ -289,8 +289,11 @@ func scanProject(sc interface{ Scan(dest ...any) error }) (*contracts.Project, e
 // ---------------------------------------------------------------------------
 
 // sandboxCols is: id, user_id, project_id, state, provider, node, image,
-// root_dir, workspace, message, last_active_at, created_at, expires_at.
-const sandboxCols = `id, user_id, project_id, state, provider, node, image, root_dir, workspace, message, last_active_at, created_at, expires_at`
+// root_dir, workspace, message, last_active_at, created_at, expires_at,
+// cpu_milli, mem_mb. The last two are the limits the provider applied when it
+// created the container: the tenant quota as a fact about the sandbox, not a
+// re-derivation from a policy file that may have changed since.
+const sandboxCols = `id, user_id, project_id, state, provider, node, image, root_dir, workspace, message, last_active_at, created_at, expires_at, cpu_milli, mem_mb`
 
 // NewSandbox is the input for CreateSandbox. The sandbox manager
 // (internal/sandbox) owns the lifecycle; the store only records it.
@@ -480,6 +483,49 @@ func (s *Store) SandboxIDs(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
+// SandboxCountForUser is how many sandboxes one tenant currently owns.
+//
+// It is the query behind the per-tenant concurrency guard: a tenant may have at
+// most one sandbox per project (UNIQUE(project_id)) and at most N of them at
+// once, and "at once" has to be counted where the rows are. Rows disappear when
+// the idle reaper destroys a sandbox, so the count is the tenant's live
+// footprint, not its history.
+func (s *Store) SandboxCountForUser(ctx context.Context, userID string) (int, error) {
+	var count int
+	if err := s.r.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sandboxes WHERE user_id = ?`, userID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("store: count sandboxes for %q: %w", userID, err)
+	}
+	return count, nil
+}
+
+// SandboxCountsByUser is that count for every tenant in one query. The admin
+// status page shows each tenant's sandboxes next to its limit, and one query per
+// tenant would make an idle screen N+1 round trips.
+func (s *Store) SandboxCountsByUser(ctx context.Context) (map[string]int, error) {
+	rows, err := s.r.QueryContext(ctx,
+		`SELECT user_id, COUNT(*) FROM sandboxes GROUP BY user_id`)
+	if err != nil {
+		return nil, fmt.Errorf("store: count sandboxes by user: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]int, 8)
+	for rows.Next() {
+		var (
+			userID string
+			count  int
+		)
+		if err := rows.Scan(&userID, &count); err != nil {
+			return nil, fmt.Errorf("store: count sandboxes by user: %w", err)
+		}
+		out[userID] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: count sandboxes by user: %w", err)
+	}
+	return out, nil
+}
+
 // SandboxDirectory is one sandbox's host checkout. It is what the disk-quota
 // report in GET /v1/admin/status measures, and it exists as a row type because
 // the admin screen needs the owner and the project next to the bytes: a number
@@ -629,7 +675,8 @@ func scanSandbox(sc interface{ Scan(dest ...any) error }) (*contracts.Sandbox, e
 		expires   sql.NullString
 	)
 	if err := sc.Scan(&sb.ID, &sb.UserID, &sb.ProjectID, &state, &sb.Provider, &sb.Node,
-		&sb.Image, &sb.RootDir, &workspace, &sb.Message, &lastAct, &created, &expires); err != nil {
+		&sb.Image, &sb.RootDir, &workspace, &sb.Message, &lastAct, &created, &expires,
+		&sb.CPUMilli, &sb.MemMB); err != nil {
 		return nil, err
 	}
 	sb.State = contracts.SandboxState(state)

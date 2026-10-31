@@ -116,8 +116,34 @@ type DockerConfig struct {
 	Network string
 	// CPUs and Memory cap the container. Empty means "no limit", which is the honest
 	// default for a self-hosted single-user box and a bad one for a shared deployment.
+	// They are the *deployment-wide* default: LimitsFor, when set, decides per
+	// tenant and these become the values it falls back to.
 	CPUs   string
 	Memory string
+	// Pids caps the container's process/thread count (docker --pids-limit), the
+	// guard against one agent exhausting the host's PID table. Zero is unlimited.
+	Pids int
+	// LimitsFor resolves the limits of one tenant's sandbox. Nil means every
+	// sandbox gets CPUs/Memory/Pids, which is the single-tenant shape.
+	//
+	// It exists because the quota is a property of the account, not of the
+	// deployment: the Docker type is constructed once and asked to create
+	// containers for many tenants, so the answer has to be a function of the
+	// user. The caller owns the policy (cmd/piforged resolves it from a
+	// tenant-limits file or the flags) and this package only applies it.
+	LimitsFor func(ctx context.Context, userID string) Limits
+	// NetworkMode decides whether sandboxes share one network (NetworkShared) or
+	// each tenant gets its own (NetworkTenant). See network.go.
+	NetworkMode NetworkMode
+	// TenantNetworkPrefix overrides the name prefix of a tenant's bridge; empty
+	// uses DefaultTenantNetworkPrefix.
+	TenantNetworkPrefix string
+	// JoinContainers names the containers that must stay able to reach every
+	// sandbox — the control plane (browser/files/shell panels, and the model
+	// gateway the sandbox calls) and the runner (the checkout). They are joined
+	// to each tenant's bridge when it is created. Ignored under NetworkShared,
+	// where they are on the same bridge by construction.
+	JoinContainers []string
 	// DataRoot is the host directory that holds one workspace per (user, project):
 	// <DataRoot>/<userID>/<projectID>. Only a project's own directory is mounted at
 	// /workspace for that project, so a page refresh or a pause does not lose the
@@ -228,7 +254,10 @@ func newDocker(cfg DockerConfig) (*Docker, error) {
 	if strings.TrimSpace(cfg.DataRoot) == "" {
 		return nil, fmt.Errorf("sandbox: docker: data root is required")
 	}
-	if cfg.ContainerEndpoint && strings.TrimSpace(cfg.Network) == "" {
+	if cfg.ContainerEndpoint && strings.TrimSpace(cfg.Network) == "" && cfg.NetworkMode != NetworkTenant {
+		// A tenant network is created per create, so the configured network is
+		// legitimately empty in that mode: the bridge the container joins is the
+		// one its tenant gets, and that is where names resolve.
 		return nil, fmt.Errorf("sandbox: docker: container endpoints need a network to resolve container names on")
 	}
 	// The mount source is compared with what Docker reports back after a restart, so
@@ -366,6 +395,15 @@ func (d *Docker) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 	}
 	want := d.workspaceRoot(dir)
 
+	// The tenant's bridge comes first and on every pass, not only on creation.
+	// Two events undo a membership without touching the sandbox: a control plane
+	// (or runner) container that was recreated, and a sandbox that predates the
+	// tenant-network mode. Both are repaired here, which is why this runs before
+	// the adopt/create decision rather than inside it.
+	if err := d.ensureTenantNetwork(ctx, userID); err != nil {
+		return nil, err
+	}
+
 	created := false
 	state, inspectErr := d.inspect(ctx, name)
 	switch {
@@ -469,7 +507,7 @@ func (d *Docker) runContainer(ctx context.Context, name, userID, projectID, work
 		}
 		apiKey = generated
 	}
-	_, err := d.docker(ctx, d.containerArgs(name, userID, projectID, workspace, apiKey)...)
+	_, err := d.docker(ctx, d.containerArgs(ctx, name, userID, projectID, workspace, apiKey)...)
 	return err
 }
 
@@ -485,7 +523,7 @@ func (d *Docker) runContainer(ctx context.Context, name, userID, projectID, work
 // apiKey is the key this container's API will require. It is a parameter rather
 // than a field because every container gets its own, and a value remembered on
 // the provider would be one container's key handed to the next.
-func (d *Docker) containerArgs(name, userID, projectID, workspace, apiKey string) []string {
+func (d *Docker) containerArgs(ctx context.Context, name, userID, projectID, workspace, apiKey string) []string {
 	args := []string{
 		"run", "-d",
 		"--name", name,
@@ -521,15 +559,12 @@ func (d *Docker) containerArgs(name, userID, projectID, workspace, apiKey string
 	// (correctly owned by root) does, and what a Windows bind mount only hides
 	// because it ignores ownership.
 	args = append(args, "-e", "WORKSPACE="+containerWorkspace)
-	if d.cfg.Network != "" {
-		args = append(args, "--network", d.cfg.Network)
+	if network := d.networkFor(userID); network != "" {
+		args = append(args, "--network", network)
 	}
-	if d.cfg.CPUs != "" {
-		args = append(args, "--cpus", d.cfg.CPUs)
-	}
-	if d.cfg.Memory != "" {
-		args = append(args, "--memory", d.cfg.Memory)
-	}
+	// Limits come from the tenant's policy, resolved per create. A deployment
+	// that configures none gets the deployment-wide flags (or nothing).
+	args = d.applyLimits(args, d.limitsFor(ctx, userID))
 	if d.cfg.APIPort > 0 && !d.cfg.ContainerEndpoint {
 		// Publish on a free host port: two sandboxes on one machine must not fight over
 		// 8080, and the control plane reads the assigned port back from `docker port`.
@@ -1187,6 +1222,13 @@ func (d *Docker) describe(ctx context.Context, userID, projectID, name, apiKey s
 	if err != nil {
 		return nil, err
 	}
+	// The limits are read back from the container, not re-derived from the policy:
+	// "what is this sandbox actually allowed to use" is a fact about the container,
+	// and a policy file that changed since (or a container created by a different
+	// deployment) would make a re-derivation a lie. A read failure is not fatal —
+	// the sandbox is usable, and zero reads as "no limit recorded".
+	applied, _ := d.appliedLimits(ctx, name)
+	cpuMilli, memMB := applied.RecordedLimits()
 	return &contracts.Sandbox{
 		ID:            name,
 		UserID:        userID,
@@ -1195,6 +1237,8 @@ func (d *Docker) describe(ctx context.Context, userID, projectID, name, apiKey s
 		Provider:      d.Name(),
 		Image:         d.cfg.Image,
 		SandboxAPIKey: apiKey,
+		CPUMilli:      cpuMilli,
+		MemMB:         memMB,
 		// RootDir is the host side of this pair's bind mount, because the control
 		// plane's own git and file IO runs here and has to write where the container
 		// looks. Reporting the shared DataRoot (the old behaviour) made every project

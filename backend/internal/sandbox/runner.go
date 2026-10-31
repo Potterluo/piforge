@@ -102,12 +102,25 @@ type RunnerConfig struct {
 	// with every create and with a worktree request.
 	APIKey string
 	// CPUs and Memory cap the container per sandbox; empty leaves the runner's
-	// deployment defaults in charge.
+	// deployment defaults in charge. They are the values sent when the deployment
+	// has no per-tenant policy; LimitsFor, when set, decides per tenant instead.
 	CPUs   string
 	Memory string
+	// Pids caps the container's process count (docker --pids-limit); zero leaves
+	// the runner's default in charge.
+	Pids int
+	// LimitsFor resolves one tenant's limits. Nil means every create carries
+	// CPUs/Memory/Pids, which is the single-tenant shape.
+	LimitsFor func(ctx context.Context, userID string) Limits
+	// TenantNetworks asks the runner for a bridge per tenant instead of one shared
+	// network (sandbox.NetworkTenant). It is the control plane's statement that
+	// sandboxes must not share an L2 segment; the runner is where it is carried
+	// out, because the runner is the process that owns the Docker CLI.
+	TenantNetworks bool
 	// Network is the Docker network a created container joins. Empty leaves the
 	// runner's default in charge; when the runner reports container endpoints this
-	// network has to be one it can resolve names on.
+	// network has to be one it can resolve names on. It is ignored when
+	// TenantNetworks is set — a container on two bridges is reachable from both.
 	Network string
 	// APIPort is the container port that serves the sandbox API (8080). Zero
 	// leaves the runner's default in charge.
@@ -191,6 +204,10 @@ func (r *Runner) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.EnsureTimeout)
 	defer cancel()
 
+	limits := Limits{CPUs: r.cfg.CPUs, Memory: r.cfg.Memory, Pids: r.cfg.Pids}
+	if r.cfg.LimitsFor != nil {
+		limits = r.cfg.LimitsFor(ctx, userID)
+	}
 	request := RunnerRequest{
 		UserID:    userID,
 		ProjectID: projectID,
@@ -199,10 +216,18 @@ func (r *Runner) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 		Branch:    branch,
 		APIPort:   r.cfg.APIPort,
 		APIKey:    r.cfg.APIKey,
-		CPUs:      r.cfg.CPUs,
-		Memory:    r.cfg.Memory,
-		Network:   r.cfg.Network,
-		Detached:  r.cfg.DetachedWorkspace,
+		CPUs:      limits.CPUs,
+		Memory:    limits.Memory,
+		Pids:      limits.Pids,
+		// The network is the runner's decision when it is per tenant: it is the
+		// process that creates the bridge, and naming the shared network here
+		// would put the container back on it.
+		Network:  r.cfg.Network,
+		Detached: r.cfg.DetachedWorkspace,
+	}
+	if r.cfg.TenantNetworks {
+		request.Network = ""
+		request.TenantNetwork = true
 	}
 	var record RunnerRecord
 	if err := r.do(ctx, http.MethodPost, "/v1/sandboxes", request, &record); err != nil {
@@ -349,6 +374,10 @@ func (r *Runner) sandbox(record RunnerRecord) (*contracts.Sandbox, error) {
 		// control plane can open it. A record from an older runner has no field;
 		// the root decides then, and a container path can only mean "not here".
 		Workspace: runnerWorkspaceMode(record),
+		// What the runner actually applied, which is what the sandbox row keeps:
+		// the tenant's quota as a fact about the container.
+		CPUMilli: record.CPUMilli,
+		MemMB:    record.MemMB,
 	}, nil
 }
 
@@ -499,8 +528,16 @@ type RunnerRequest struct {
 	// CPUs and Memory cap the container; empty means "no limit".
 	CPUs   string `json:"cpus,omitempty"`
 	Memory string `json:"memory,omitempty"`
+	// Pids caps the container's process count (docker --pids-limit); zero means
+	// "no limit". The runner sends it only when the tenant's policy sets one.
+	Pids int `json:"pids,omitempty"`
 	// Network is the Docker network the container joins.
 	Network string `json:"network,omitempty"`
+	// TenantNetwork asks for the tenant's own bridge instead of Network
+	// (sandbox.NetworkTenant). A request that sets it must not set Network: one
+	// container on two bridges is reachable from both, and the isolation would be
+	// nominal.
+	TenantNetwork bool `json:"tenant_network,omitempty"`
 	// Detached asks for a workspace volume of this sandbox's own, with the
 	// container path as the reported root: the control plane never mounts it and
 	// reaches the files only through the sandbox API
@@ -548,4 +585,9 @@ type RunnerRecord struct {
 	// "host" (a shared directory) or "api" (only inside the container). Empty
 	// from an older runner means "host".
 	Workspace contracts.WorkspaceMode `json:"workspace,omitempty"`
+	// CPUMilli and MemMB are the limits the runner applied to the container, read
+	// back from its own HostConfig. They are the tenant's quota as a fact, and the
+	// control plane records them with the sandbox row. Zero means "no limit".
+	CPUMilli int `json:"cpu_milli,omitempty"`
+	MemMB    int `json:"mem_mb,omitempty"`
 }

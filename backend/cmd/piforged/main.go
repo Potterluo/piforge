@@ -57,6 +57,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/sandbox"
 	"github.com/piforge/piforge/backend/internal/snapshot"
 	"github.com/piforge/piforge/backend/internal/store"
+	"github.com/piforge/piforge/backend/internal/tenantlimits"
 	"github.com/piforge/piforge/backend/internal/term"
 	"github.com/piforge/piforge/backend/internal/workspaceremote"
 )
@@ -144,6 +145,26 @@ type options struct {
 	sandboxNetwork string
 	sandboxCPUs    string
 	sandboxMemory  string
+	// sandboxPids caps a sandbox's process count (docker --pids-limit). The three
+	// limits are the *default* every tenant gets; -tenant-limits-file and
+	// -tenant-max-sandboxes decide per tenant (internal/tenantlimits).
+	sandboxPids int
+	// sandboxNetworkMode is "shared" (every sandbox on -sandbox-network) or
+	// "tenant" (a bridge per tenant, which is deny-by-default between tenants).
+	sandboxNetworkMode string
+	// sandboxJoinContainers names the containers joined to every tenant bridge:
+	// the control plane and, under the runner provider, the runner itself.
+	sandboxJoinContainers []string
+	// sandboxJoinContainersRaw is what the flag carries; the list is parsed once,
+	// at startup, so a trailing comma is not a container named "".
+	sandboxJoinContainersRaw string
+	// sandboxTenantNetworkPrefix overrides the name prefix of a tenant's bridge.
+	sandboxTenantNetworkPrefix string
+	// tenantLimitsFile is the JSON policy named by PIFORGE_TENANT_LIMITS_FILE.
+	tenantLimitsFile string
+	// tenantMaxSandboxes is how many sandboxes one tenant may have at once (0
+	// disables the guard). A per-tenant entry in the file overrides it.
+	tenantMaxSandboxes int
 	// agentInSandbox is gone as a *choice* (stage 4 of
 	// docs/EXECUTION-BOUNDARY.md): a container placement always runs the agent
 	// inside its sandbox, and -sandbox local always runs it here. The old knob is
@@ -289,9 +310,21 @@ func run() error {
 	flag.StringVar(&opt.sandboxNetwork, "sandbox-network", envOr("PIFORGE_SANDBOX_NETWORK", ""),
 		"docker network for sandboxes (empty: bridge)")
 	flag.StringVar(&opt.sandboxCPUs, "sandbox-cpus", envOr("PIFORGE_SANDBOX_CPUS", ""),
-		"CPU limit per sandbox")
+		"default CPU limit per sandbox, for every tenant without an override (env PIFORGE_SANDBOX_CPUS)")
 	flag.StringVar(&opt.sandboxMemory, "sandbox-memory", envOr("PIFORGE_SANDBOX_MEMORY", ""),
-		"memory limit per sandbox, e.g. 2g")
+		"default memory limit per sandbox, e.g. 2g, for every tenant without an override (env PIFORGE_SANDBOX_MEMORY)")
+	flag.IntVar(&opt.sandboxPids, "sandbox-pids", envInt("PIFORGE_SANDBOX_PIDS", 0),
+		"default process limit per sandbox (docker --pids-limit), 0 is unlimited; the fork-bomb guard (env PIFORGE_SANDBOX_PIDS)")
+	flag.StringVar(&opt.sandboxNetworkMode, "sandbox-network-mode", envOr("PIFORGE_SANDBOX_NETWORK_MODE", "shared"),
+		"how sandboxes join the network: shared (all on -sandbox-network) or tenant (a bridge per tenant; deny-by-default between tenants) (env PIFORGE_SANDBOX_NETWORK_MODE)")
+	flag.StringVar(&opt.sandboxJoinContainersRaw, "sandbox-join-containers", envOr("PIFORGE_SANDBOX_JOIN_CONTAINERS", ""),
+		"comma-separated containers joined to every tenant bridge (the control plane and the runner), required with -sandbox-network-mode tenant (env PIFORGE_SANDBOX_JOIN_CONTAINERS)")
+	flag.StringVar(&opt.sandboxTenantNetworkPrefix, "sandbox-tenant-network-prefix", envOr("PIFORGE_SANDBOX_TENANT_NETWORK_PREFIX", ""),
+		"name prefix of a tenant's Docker network (default piforge-t-) (env PIFORGE_SANDBOX_TENANT_NETWORK_PREFIX)")
+	flag.StringVar(&opt.tenantLimitsFile, "tenant-limits-file", envOr("PIFORGE_TENANT_LIMITS_FILE", ""),
+		"JSON file of per-tenant quota overrides; the flags above are its default (env PIFORGE_TENANT_LIMITS_FILE)")
+	flag.IntVar(&opt.tenantMaxSandboxes, "tenant-max-sandboxes", envInt("PIFORGE_TENANT_MAX_SANDBOXES", 0),
+		"how many sandboxes one tenant may have at once, 0 disables the guard (env PIFORGE_TENANT_MAX_SANDBOXES)")
 	flag.StringVar(&opt.sandboxRunnerURL, "sandbox-runner-url", envOr("PIFORGE_SANDBOX_RUNNER_URL", ""),
 		"base URL of the sandbox-runner service, with -sandbox runner (e.g. http://sandbox-runner:7801)")
 	flag.StringVar(&opt.sandboxRunnerToken, "sandbox-runner-token", envOr("PIFORGE_SANDBOX_RUNNER_TOKEN", ""),
@@ -374,6 +407,18 @@ func run() error {
 	// about where a feature actually is, never about how it was requested.
 	opt.sandboxBrowser, opt.sandboxTerminal, opt.sandboxFiles =
 		string(resolved.Browser), string(resolved.Terminal), string(resolved.Files)
+
+	// The quota policy and the network mode are configuration, and configuration
+	// that cannot mean anything must fail the start: a tenant that quietly runs
+	// unlimited is the failure mode both of these exist to prevent.
+	opt.sandboxJoinContainers = splitList(opt.sandboxJoinContainersRaw)
+	if err := validateTenantWiring(opt.sandboxKind, opt.sandboxNetworkMode, opt.sandboxJoinContainers, opt.tenantMaxSandboxes); err != nil {
+		return err
+	}
+	networkMode, err := sandbox.ParseNetworkMode(opt.sandboxNetworkMode)
+	if err != nil {
+		return err
+	}
 
 	if err := os.MkdirAll(opt.dataDir, 0o755); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
@@ -461,6 +506,43 @@ func run() error {
 
 	if err := seed(ctx, st, opt, logger); err != nil {
 		return err
+	}
+
+	// The tenant quota policy, resolved once: the flags are its default, the file
+	// (when configured) its overrides. It is built after the store because a policy
+	// may name an account by email, and an unreadable or impossible policy must
+	// fail the start here rather than leave a tenant unlimited at the first
+	// session.
+	defaultLimits := tenantlimits.Limits{
+		CPUs:   opt.sandboxCPUs,
+		Memory: opt.sandboxMemory,
+		Pids:   opt.sandboxPids,
+		// The concurrency guard's default. A tenant entry in the file can override
+		// it, which is why it is part of the same policy rather than a second flag
+		// read in a second place.
+		MaxSandboxes: opt.tenantMaxSandboxes,
+	}
+	tenants, err := newTenantResolver(st, defaultLimits, opt.tenantLimitsFile)
+	if err != nil {
+		return fmt.Errorf("tenant limits: %w", err)
+	}
+	// Say the policy once, at boot: every later refusal quotes one of these
+	// numbers, and an operator reading a refusal should not have to guess which
+	// file produced it. The numbers come from the *resolved* policy, not from the
+	// flags: a limits file that overrides the default would otherwise make this
+	// line describe a deployment that is not running.
+	effective := tenants.policy.Default()
+	logger.Info("tenant quota policy",
+		"source", tenants.policy.Source(),
+		"default_cpus", emptyAs(effective.CPUs, "unlimited"),
+		"default_memory", emptyAs(effective.Memory, "unlimited"),
+		"default_pids", effective.Pids,
+		"default_max_sandboxes", effective.MaxSandboxes,
+		"overrides", len(tenants.policy.Tenants()),
+		"network_mode", string(networkMode))
+	if effective.Sandbox().IsZero() && effective.MaxSandboxes == 0 {
+		logger.Warn("no tenant quota is configured: every sandbox may use the whole host",
+			"fix", "set -sandbox-cpus/-sandbox-memory/-sandbox-pids and -tenant-max-sandboxes, or -tenant-limits-file")
 	}
 
 	// A run left "running" belongs to a command whose output died with the
@@ -560,9 +642,17 @@ func run() error {
 			Network:  opt.sandboxNetwork,
 			CPUs:     opt.sandboxCPUs,
 			Memory:   opt.sandboxMemory,
+			Pids:     opt.sandboxPids,
 			DataRoot: filepath.Join(opt.dataDir, "sandboxes"),
 			APIPort:  8080,
 			APIKey:   opt.sandboxAPIKey,
+			// A per-tenant quota and a per-tenant bridge, both resolved here rather
+			// than inside the provider: the policy is the deployment's, and the
+			// provider only applies what it is given.
+			LimitsFor:           tenants.sandboxLimits,
+			NetworkMode:         networkMode,
+			TenantNetworkPrefix: opt.sandboxTenantNetworkPrefix,
+			JoinContainers:      opt.sandboxJoinContainers,
 			// Stage 2: the agent runs inside the sandbox, so its workspace is a
 			// volume of its own that this process never mounts. Stage 4 removed the
 			// switch that used to share it: there is one placement for a container
@@ -590,8 +680,15 @@ func run() error {
 			APIKey:   opt.sandboxAPIKey,
 			CPUs:     opt.sandboxCPUs,
 			Memory:   opt.sandboxMemory,
-			Network:  opt.sandboxNetwork,
-			APIPort:  8080,
+			Pids:     opt.sandboxPids,
+			// The tenant's limits travel with the create, because the runner is a
+			// shared service that must not have to know which tenant it is serving.
+			LimitsFor: tenants.sandboxLimits,
+			// And the network mode travels too: the runner owns the Docker CLI, so
+			// it is the process that creates the per-tenant bridges.
+			TenantNetworks: networkMode == sandbox.NetworkTenant,
+			Network:        opt.sandboxNetwork,
+			APIPort:        8080,
 			// Stage 2: the create request asks the runner for a workspace volume
 			// of this sandbox's own, which no service in the deployment mounts.
 			// Stage 4 removed the switch: a runner placement is always detached.
@@ -1010,6 +1107,9 @@ func run() error {
 		Store:   st,
 		Sandbox: sb,
 		Git:     git,
+		// The concurrency guard reads the same policy the providers were given, so
+		// "how many sandboxes may this tenant have" has one answer in this process.
+		LimitsFor: tenants.policyFor,
 		// Uploaded bundles live here; without it provisioning would mount
 		// nothing and every skill would silently be metadata only.
 		SkillsDir: filepath.Join(opt.dataDir, "skills"),
@@ -1061,6 +1161,11 @@ func run() error {
 		AgentIsolated:      opt.agentInSandbox,
 		SandboxDiskQuota:   opt.sandboxDiskQuota,
 		SkillMaxBytes:      opt.skillMaxBytes,
+		// The quota policy and the network mode are what the admin status page
+		// reports next to each tenant's sandbox count: "what limit is this tenant
+		// running with" has to be answerable without reading the deployment file.
+		TenantLimits:      tenants.policy,
+		SandboxNetworkMode: string(networkMode),
 		Sandbox:            sb,
 		Secrets:            box,
 		WebUpstream:        opt.webUpstream,

@@ -503,3 +503,142 @@ container placement, and `-sandbox local` still defaults to host), the browser/t
   deployment looks healthy while the old sandboxes cannot be reached
   (`docs/SANDBOX-DEPLOY.md` §1.4.6 measures it). That belongs in a backup, and the
   handoff says so.
+
+## 12. Tenancy as an operating property: networks, quotas, audit
+
+The acceptance pass (`e2e/.artifacts/final-isolated/VERDICT.md` §8 item 3) named the
+last gap: "isolation" was true for *execution* and true for *files*, but a tenant was
+still only separated from another tenant by **authentication**. Every sandbox sat on
+one bridge (`piforge-sandboxes`, shared with the control plane), so sandbox A could
+open a TCP connection to sandbox B's port 8080 and be turned away only by the image's
+own nginx and its per-sandbox key; the resource limits existed only deployment-wide
+(`-sandbox-cpus` / `-sandbox-memory`), so one tenant's agent could use the host; and
+`tool_calls` recorded what an agent ran but nothing in the product could read it
+across tenants.
+
+This section is what changed, what it costs, and what it still does not claim.
+
+### 12.1 The network boundary: one bridge per tenant
+
+**Chosen: a Docker bridge per tenant** (`piforge-t-<12 hex of the user id>`), created
+by the runner when the tenant's first sandbox is created, labelled
+`piforge.tenant=<name>` / `piforge.role=sandbox`, and joined by exactly two other
+containers: the control plane and the runner. A sandbox joins **only** its tenant's
+bridge — the shared `piforge-sandboxes` network is not part of a sandbox's
+membership any more (`docker inspect` shows one network per sandbox, `soak.txt`).
+
+**Why per tenant and not per sandbox.** The product's tenancy rule is "one sandbox per
+(user, project)", so a tenant owns as many sandboxes as it has projects; the
+authorization boundary the product already enforces is the *user* (a cross-user read
+is 404 on every route, `15-two-tenant.txt`). Drawing the network boundary where the
+authorization boundary already is keeps the two from disagreeing. A bridge per
+*sandbox* would additionally separate one tenant's own projects — and would cost, per
+sandbox, a network, a `docker network connect` for the control plane, another for the
+runner, and its own address block. On stock Docker the address pool is the wall: this
+daemon refused the 17th network it was asked for
+(`all predefined address pools have been fully subnetted` — measured on Docker
+29.9.2 while writing this section), so per-sandbox networks stop at roughly a dozen
+sandboxes unless every deployment first writes `default-address-pools` into
+`daemon.json`. Per tenant, the same ceiling buys a dozen *accounts*, which is a
+number an operator can plan around, and 50 tenants cost 50 networks + 50 address
+blocks — a deployment that must widen the pool either way, but at a scale where the
+cost is visible before it bites.
+
+**What is deliberately not claimed.** Two sandboxes of the *same* tenant share their
+tenant's bridge and can reach each other's port 8080, where the image's per-sandbox
+key still answers 401. That is a same-tenant, same-owner relationship — the projects
+belong to one account — but it is not "sandboxes cannot reach each other", and this
+document does not say it is. Closing it is the per-sandbox variant above, with the
+address-pool cost stated here rather than discovered later.
+
+**How the two services keep reach.** The sandbox must still reach the control plane
+(it calls the model gateway `/gw/llm/<token>/…` and, for an HTTP MCP server, the
+broker `/gw/mcp/<token>`), and the control plane and runner must still reach the
+sandbox (browser, files, shell panels; the checkout and branch worktrees). That is why
+`-sandbox-join-containers` exists: the runner joins the named containers to each
+tenant bridge it creates, on every `Ensure`, so a recreated control plane is repaired
+instead of silently losing the path. It is an explicit, auditable membership list,
+not an accident of sharing a default network.
+
+Measured from inside tenant 1's sandbox on the isolated stack (`isolation-probes.txt`):
+
+```
+getent hosts piforge-874760ba7dddd0e5   -> no such host
+curl -m 4 http://172.28.0.4:8080/       -> curl: (28) Connection timed out after 4003 ms
+nc -z -w 3 172.28.0.4 8080              -> no route / timed out
+curl <own gateway baseUrl>/models       -> http_code=200
+curl http://piforge:7700/v1/projects    -> http_code=401
+curl http://piforge:7700/healthz        -> http_code=200
+```
+
+By name the sandbox cannot even resolve its neighbour (different bridge, different
+DNS scope); by address the packets have no route (Docker drops between bridges). The
+gateway path and the 401 are the two halves of "still works, still not trusted".
+
+### 12.2 The quota boundary: a per-tenant policy, enforced where containers are made
+
+**Chosen: a policy with a default and per-tenant overrides, in a file the deployment
+mounts** (`deploy/tenant-limits.json`, `PIFORGE_TENANT_LIMITS_FILE`), plus the
+deployment-wide flags as its fallback. Not a `tenant_limits` table.
+
+The quota is part of the deployment's configuration, not its data: it is reviewed
+with the compose file, versioned with the repository, and validated at startup —
+`internal/tenantlimits` rejects an unknown field, a non-numeric CPU count, a memory
+string Docker would refuse, or a negative limit, naming the tenant that is wrong, so a
+typo fails the boot instead of leaving a tenant unlimited. A table would need an admin
+UI to change safely, would not appear in a code review, and would make "the limit this
+sandbox was created with" and "the limit the page shows" two numbers that can drift.
+The honest cost is that changing a quota is a restart.
+
+Three enforcement points, each stated where it happens:
+
+| Limit | Enforced by | Where |
+|---|---|---|
+| CPU / memory / processes | `docker run --cpus/--memory/--pids-limit` on the container | `sandbox.Docker.containerArgs` (per-tenant via `DockerConfig.LimitsFor`; the runner sends the tenant's values in the create request) |
+| concurrent sandboxes | a count of the tenant's `sandboxes` rows before a create | `provision.checkSandboxQuota`, typed `tenant_sandbox_limit` (409) with `{limit, current, tenant}` |
+| disk | the existing per-sandbox `du` measurement (FR-5.8) | `httpapi.enforceSandboxQuota` (unchanged) |
+
+`--pids-limit` is new and is the fork-bomb guard: without it one agent can fill the
+host's PID table and take every tenant with it.
+
+The refusal is typed and it *survives* the request: before this change a provisioning
+failure was logged and swallowed ("provision: no worktree for session"), so a tenant at
+its cap saw a generic 500 three layers later. Now `POST /v1/projects/{id}/sessions` and
+`POST /v1/sessions/{id}/messages` answer 409 `tenant_sandbox_limit` with the numbers,
+and the session row created for the refused request is deleted rather than left behind
+(`httpapi/quota_refusal_test.go`).
+
+What the limits actually applied are recorded: the provider reads them back out of the
+container's own `HostConfig` and the row keeps `cpu_milli`/`mem_mb`, so
+`GET /v1/admin/status` reports the sandbox's real limits next to the tenant's policy
+(`admin-status-tenant-limits.json`), and the two agreeing is a check the soak makes.
+
+### 12.3 The audit trail: `tool_calls`, read across tenants
+
+`GET /v1/admin/audit` (admin only) returns one page of every tool call: when it
+started and ended, how long it took, the tenant (id + email), the project (id + name),
+the session, the run, the tool and the outcome (`ok` / `error` / `running`). Filters:
+`user_id`, `project_id`, `session_id`, `tool`, `outcome`, `since`, `until`, `limit`,
+`offset`. `format=csv` returns the same page as a CSV download, so an operator can
+attach it to a ticket.
+
+It is not a forensic log and the page says so: `tool_calls` keeps a hash plus the same
+short argument preview the user sees in their own transcript, never the arguments
+themselves. What it answers is "who ran what, when, and did it fail" across tenants —
+which is the question the acceptance pass could not answer at all.
+
+### 12.4 What this section does not claim
+
+- **Not sandbox-vs-sandbox within a tenant** (§12.1), stated with its cost.
+- **Not egress control.** A sandbox can still reach the internet if the host allows it;
+  what changed is that it can no longer reach another tenant. Per-tenant egress policy
+  (an allowlist, a proxy) is a separate piece of work and is not here.
+- **Not a per-tenant disk budget.** Disk is still per sandbox, measured and refused per
+  sandbox; a tenant's total disk is the sum of its sandboxes' budgets, which is a
+  consequence, not a policy.
+- **Not billing or usage accounting.** The audit trail records attempts and outcomes,
+  not tokens or cost; `runs` already carries the token counters and this endpoint does
+  not join them.
+- **Not a proof at fifty tenants.** Four tenants, concurrently, on one Docker Desktop
+  host is the measured number (`scripts/soak-tenancy.ps1`); the address-pool ceiling in
+  §12.1 is the first thing a larger deployment will hit.

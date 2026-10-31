@@ -8,6 +8,7 @@
 import {
   ApiError,
   type ApiErrorBody,
+  type AuditResponse,
   type DiffScope,
   type FileContent,
   type FileDiff,
@@ -697,7 +698,52 @@ export const admin = {
     request<{ users: User[] }>("/v1/admin/users", { method: "POST", body: input }),
   updateUser: (id: string, input: UpdateUserInput) =>
     request<{ users: User[] }>(`/v1/admin/users/${id}`, { method: "PATCH", body: input }),
+  /**
+   * One page of the audit trail: every tool call across tenants, newest first.
+   *
+   * The filters are the same ones the CSV export takes (`auditExportUrl`), so the
+   * table on screen and the file an operator attaches to a ticket describe the
+   * same query.
+   */
+  audit: (filter: AuditQuery = {}) =>
+    request<AuditResponse>(`/v1/admin/audit?${auditQueryString(filter)}`),
 };
+
+/** The filters GET /v1/admin/audit understands. */
+export interface AuditQuery {
+  user_id?: string;
+  project_id?: string;
+  session_id?: string;
+  tool?: string;
+  outcome?: "ok" | "error" | "running";
+  since?: string;
+  until?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** Serialises a filter, dropping empty values so the URL stays readable. */
+export function auditQueryString(filter: AuditQuery): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filter)) {
+    if (value === undefined || value === null || value === "") continue;
+    params.set(key, String(value));
+  }
+  return params.toString();
+}
+
+/**
+ * The CSV download URL for a filter.
+ *
+ * It is a plain link rather than a fetch: the browser streams it to disk, the
+ * session cookie authenticates it, and a 200k-row export cannot be accidentally
+ * held in memory by the page. The server caps one download at its page limit and
+ * says so in the UI.
+ */
+export function auditExportUrl(filter: AuditQuery = {}): string {
+  const query = auditQueryString(filter);
+  return query ? `/v1/admin/audit?${query}&format=csv` : "/v1/admin/audit?format=csv";
+}
 
 // ---------------------------------------------------------------------------
 // API keys (FR-13.9)

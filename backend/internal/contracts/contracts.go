@@ -716,6 +716,15 @@ type Sandbox struct {
 	ExpiresAt    *time.Time   `json:"expires_at,omitempty"`
 	Message      string       `json:"message,omitempty"`
 
+	// CPUMilli and MemMB are the resource limits the provider actually applied to
+	// this sandbox, recorded where the container was created. They are the
+	// tenant's quota made visible: an operator asking "what limit is this tenant
+	// running with" gets an answer that is a fact about the container rather than
+	// a re-derivation from the policy that may since have changed. Zero means the
+	// sandbox was created without that limit.
+	CPUMilli int `json:"cpu_milli,omitempty"`
+	MemMB    int `json:"mem_mb,omitempty"`
+
 	// Workspace is how this process can reach the sandbox's files. It is not
 	// JSON: it describes the control plane's own access, which is not something
 	// an API client can act on. See WorkspaceMode.
@@ -959,6 +968,12 @@ const (
 	// in the workspace", not "retry" and not "the server is broken"; the message
 	// names the limit and the current usage.
 	ErrSandboxDiskQuota = "sandbox_disk_quota"
+	// ErrTenantSandboxLimit means this tenant already has as many sandboxes as the
+	// deployment's policy allows (PIFORGE_TENANT_MAX_SANDBOXES, or the
+	// max_sandboxes of its entry in the tenant-limits file). It is its own code
+	// because the remedy is "pause or delete a project's sandbox", not "retry":
+	// the details name the limit and what the tenant is using.
+	ErrTenantSandboxLimit = "tenant_sandbox_limit"
 	ErrRateLimited      = "rate_limited"
 	ErrUpstreamOverload = "upstream_overloaded"
 	ErrConflict         = "conflict"

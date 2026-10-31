@@ -1,0 +1,10 @@
+{
+  "comment": "PiForge tenant quota policy. 'default' is what every account gets; 'tenants' overrides one account by user id or by email. A field an override leaves out is inherited from the default; an explicit 0 means unlimited. Mounted read-only into the control plane at /etc/piforge/tenant-limits.json (PIFORGE_TENANT_LIMITS_FILE). The deployment-wide flags -sandbox-cpus/-sandbox-memory/-sandbox-pids are the fallback when this file is absent.",
+  "default": {
+    "cpus": "1",
+    "memory": "2g",
+    "pids": 512,
+    "max_sandboxes": 3
+  },
+  "tenants": {}
+}

@@ -203,9 +203,17 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 
 	// The first prompt for a session should run inside its checkout. Best
 	// effort: a provisioning failure leaves spec.Worktree empty and the agent
-	// runs in the runtime's default directory instead.
+	// runs in the runtime's default directory instead. A *refusal* is different:
+	// the tenant has no sandbox left under its quota, and that is the answer to
+	// this request, not a detail to log.
 	if sess.WorktreeID == "" {
-		if refreshed, ok := s.provisionWorktree(r.Context(), user.ID, sess.ProjectID, sess); ok {
+		refreshed, perr := s.provisionWorktree(r.Context(), user.ID, sess.ProjectID, sess)
+		if perr != nil {
+			if isPolicyRefusal(perr) {
+				s.fail(w, r, perr)
+				return
+			}
+		} else {
 			sess = refreshed
 		}
 	}

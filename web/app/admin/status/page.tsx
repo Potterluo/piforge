@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Boxes, Cpu, GitBranch, Globe, HardDrive, MessagesSquare, Server, Users } from "lucide-react";
+import { Activity, Boxes, Cpu, GitBranch, Globe, HardDrive, MessagesSquare, Server, ShieldCheck, Users } from "lucide-react";
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Item, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "@/components/ui/item";
@@ -174,6 +174,83 @@ export default function AdminStatusPage() {
             </CardContent>
           </Card>
 
+          <Card data-testid="stat-tenant-limits">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-1.5 text-sm">
+                <ShieldCheck className="size-4" />
+                租户配额与网络
+              </CardTitle>
+              <CardDescription>
+                {data.tenant_limits.enforced
+                  ? `每个账号的沙箱上限与资源上限（来自 ${data.tenant_limits.source}），以及它现在用了几个。`
+                  : "这个部署没有配置任何租户配额：每个沙箱都能用满整台机器。设置 -sandbox-cpus / -sandbox-memory / -sandbox-pids 与 -tenant-max-sandboxes，或用 -tenant-limits-file。"}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-1">
+              <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 pb-2 text-[11px] text-muted-foreground">
+                <span data-testid="tenant-limits-network">
+                  沙箱网络：
+                  <span className="ml-1 font-mono text-foreground">
+                    {data.tenant_limits.network_mode === "tenant" ? "每租户一个网络" : "共享网络"}
+                  </span>
+                  <span className="ml-1">
+                    {data.tenant_limits.network_mode === "tenant"
+                      ? "（租户之间不可达）"
+                      : "（所有沙箱同一网段，只靠每沙箱 API key 区分）"}
+                  </span>
+                </span>
+                <span>
+                  默认：
+                  <span className="ml-1 font-mono text-foreground">
+                    {formatTenantLimit(data.tenant_limits.cpus, data.tenant_limits.memory, data.tenant_limits.pids)}
+                  </span>
+                  {data.tenant_limits.max_sandboxes > 0 ? (
+                    <span className="ml-1">· 最多 {data.tenant_limits.max_sandboxes} 个沙箱</span>
+                  ) : null}
+                </span>
+              </div>
+              {data.tenant_limits.tenants.length === 0 ? (
+                <p className="text-[11px] text-muted-foreground">还没有账号。</p>
+              ) : (
+                data.tenant_limits.tenants.map((row) => {
+                  const atCap =
+                    row.max_sandboxes > 0 && row.sandboxes >= row.max_sandboxes;
+                  return (
+                    <div
+                      key={row.user_id}
+                      data-testid={`tenant-limit-${row.user_id}`}
+                      data-at-cap={atCap ? "true" : "false"}
+                      className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-b border-border/60 py-1.5 text-[11px] last:border-0"
+                    >
+                      <span className="truncate">
+                        {row.email ?? row.user_id}
+                        {row.override ? (
+                          <span className="ml-1.5 rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+                            单独配置
+                          </span>
+                        ) : null}
+                      </span>
+                      <span
+                        className={`flex items-baseline gap-3 text-right tabular-nums ${
+                          atCap ? "text-amber-600" : "text-muted-foreground"
+                        }`}
+                      >
+                        <span className="font-mono">
+                          {formatTenantLimit(row.cpus, row.memory, row.pids)}
+                        </span>
+                        <span>
+                          {row.sandboxes}
+                          {row.max_sandboxes > 0 ? ` / ${row.max_sandboxes}` : ""} 个沙箱
+                          {atCap ? " · 已达上限" : ""}
+                        </span>
+                      </span>
+                    </div>
+                  );
+                })
+              )}
+            </CardContent>
+          </Card>
+
           <Card data-testid="stat-storage">
             <CardHeader>
               <CardTitle className="flex items-center gap-1.5 text-sm">
@@ -255,8 +332,16 @@ export default function AdminStatusPage() {
   );
 }
 
-/** Bytes the way an operator reads them: no decimal for B/KiB, one above. */
-function formatBytes(bytes: number): string {
+/** One tenant's container limits on one line: "2 CPU · 4 GiB · 1024 进程". */
+function formatTenantLimit(cpus?: string, memory?: string, pids?: number): string {
+  const parts: string[] = [];
+  parts.push(cpus ? `${cpus} CPU` : "不限 CPU");
+  parts.push(memory ? memory : "不限内存");
+  if (pids !== undefined && pids > 0) parts.push(`${pids} 进程`);
+  return parts.join(" · ");
+}
+
+/** Bytes the way an operator reads them: no decimal for B/KiB, one above. */function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   const units = ["KiB", "MiB", "GiB", "TiB"];
   let value = bytes / 1024;

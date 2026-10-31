@@ -12,6 +12,7 @@ import {
   Check,
   Copy,
   Eye,
+  ScrollText,
   ChevronRight,
   ChevronsUpDown,
   Download,
@@ -665,6 +666,12 @@ export function AppSidebar({
                 <SidebarMenuButton tooltip="只读排障" render={<Link href="/admin/support" />}>
                   <Eye />
                   <span>只读排障</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton tooltip="审计" render={<Link href="/admin/audit" />}>
+                  <ScrollText />
+                  <span>审计</span>
                 </SidebarMenuButton>
               </SidebarMenuItem>
             </>

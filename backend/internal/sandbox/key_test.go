@@ -70,8 +70,8 @@ func TestContainerArgsCarryOneKeyPerContainer(t *testing.T) {
 		t.Fatalf("NewAPIKey: %v", err)
 	}
 
-	argsA := provider.containerArgs("piforge-aaa", "usr_1", "prj_1", "/data/sandboxes/usr_1/prj_1", first)
-	argsB := provider.containerArgs("piforge-bbb", "usr_1", "prj_2", "/data/sandboxes/usr_1/prj_2", second)
+	argsA := provider.containerArgs(context.Background(), "piforge-aaa", "usr_1", "prj_1", "/data/sandboxes/usr_1/prj_1", first)
+	argsB := provider.containerArgs(context.Background(), "piforge-bbb", "usr_1", "prj_2", "/data/sandboxes/usr_1/prj_2", second)
 	assertArgsContain(t, argsA, "-e", SandboxAPIKeyEnv+"="+first)
 	assertArgsContain(t, argsB, "-e", SandboxAPIKeyEnv+"="+second)
 	if strings.Contains(strings.Join(argsA, " "), second) || strings.Contains(strings.Join(argsB, " "), first) {
@@ -80,7 +80,7 @@ func TestContainerArgsCarryOneKeyPerContainer(t *testing.T) {
 
 	// An empty key must not become `-e SANDBOX_API_KEY=`: a container started with
 	// an empty value would accept requests that present nothing.
-	for _, arg := range provider.containerArgs("piforge-ccc", "u", "p", "/w", "") {
+	for _, arg := range provider.containerArgs(context.Background(), "piforge-ccc", "u", "p", "/w", "") {
 		if strings.HasPrefix(arg, SandboxAPIKeyEnv+"=") {
 			t.Fatalf("an empty key was passed to the container: %q", arg)
 		}
@@ -93,7 +93,7 @@ func TestContainerArgsUseTheFixedOverrideWhenOneIsConfigured(t *testing.T) {
 	provider := &Docker{cfg: DockerConfig{
 		Image: "sandbox:1.11.0", DataRoot: "/data/sandboxes", APIPort: 8080, APIKey: "fixed-debug-key",
 	}}
-	assertArgsContain(t, provider.containerArgs("piforge-abc", "u", "p", "/w", "fixed-debug-key"),
+	assertArgsContain(t, provider.containerArgs(context.Background(), "piforge-abc", "u", "p", "/w", "fixed-debug-key"),
 		"-e", SandboxAPIKeyEnv+"=fixed-debug-key")
 }
 

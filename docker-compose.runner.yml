@@ -29,8 +29,12 @@
 #   - the only credential the sandbox holds is the per-session model gateway
 #     token (and, for an HTTP MCP server, a per-session broker token) — never a
 #     provider key and never an MCP credential;
-#   - sandbox containers are addressed by name on `piforge-sandboxes` and publish
-#     no port on the host.
+#   - sandbox containers are addressed by name on a bridge of their *tenant's*
+#     own (`piforge-t-<hash>`), attached to the control plane and the runner at
+#     creation, and publish no port on the host. There is no shared sandbox
+#     bridge any more: two tenants' sandboxes have no route to each other, which
+#     is what makes "a sandbox cannot reach another sandbox" true rather than
+#     "the image's nginx says 401" (docs/EXECUTION-BOUNDARY.md §11).
 #
 # Requirements: Docker Engine 25+ (volume-subpath), Go 1.25+ for the preflight,
 # a daemon the runner can reach through /var/run/docker.sock, and the three
@@ -84,8 +88,27 @@ services:
       # deployment; leave it empty for tenants.
       PIFORGE_SANDBOX_API_KEY: ${PIFORGE_SANDBOX_API_KEY:-}
       PIFORGE_SANDBOX_NETWORK: piforge-sandboxes
+      # Per-tenant networks. Every sandbox joins a bridge of its own tenant's,
+      # and these are the containers joined to it so the product keeps working:
+      # the control plane serves the browser/file/shell panels through the
+      # sandbox API and is the model gateway the sandbox calls. `shared` is the
+      # single-host shape and is not what this file ships.
+      PIFORGE_SANDBOX_NETWORK_MODE: ${PIFORGE_SANDBOX_NETWORK_MODE:-tenant}
+      PIFORGE_SANDBOX_JOIN_CONTAINERS: piforge,piforge-sandbox-runner
+      # The per-tenant quota. These are the *default* every tenant gets; the file
+      # below can give one account more or less (internal/tenantlimits).
+      PIFORGE_SANDBOX_CPUS: ${PIFORGE_SANDBOX_CPUS:-1}
+      PIFORGE_SANDBOX_MEMORY: ${PIFORGE_SANDBOX_MEMORY:-2g}
+      PIFORGE_SANDBOX_PIDS: ${PIFORGE_SANDBOX_PIDS:-512}
+      PIFORGE_TENANT_MAX_SANDBOXES: ${PIFORGE_TENANT_MAX_SANDBOXES:-3}
+      # Read-only, from deploy/tenant-limits.json unless up-isolated.ps1 was
+      # pointed at another file. A policy that cannot be parsed fails the start.
+      PIFORGE_TENANT_LIMITS_FILE: /etc/piforge/tenant-limits.json
     volumes:
       - piforge-data:/data
+      # The quota policy is configuration, reviewed with the deployment and
+      # mounted read-only; the container never needs to write it.
+      - ${PIFORGE_TENANT_LIMITS_MOUNT:-./deploy/tenant-limits.json}:/etc/piforge/tenant-limits.json:ro
     networks:
       - default
       - sandbox-control
@@ -119,6 +142,18 @@ services:
       # 32-byte key per container. Set it only to pin one key for debugging.
       SANDBOX_API_KEY: ${PIFORGE_SANDBOX_API_KEY:-}
       SANDBOX_NETWORK: piforge-sandboxes
+      # The runner is the process that creates the bridges, so it is the one that
+      # must know the mode and the containers to join. A tenant bridge with
+      # nothing on it would isolate the sandbox from the gateway and from its own
+      # checkout, so the CLI refuses to start in this mode without the list.
+      SANDBOX_NETWORK_MODE: ${PIFORGE_SANDBOX_NETWORK_MODE:-tenant}
+      SANDBOX_JOIN_CONTAINERS: piforge,piforge-sandbox-runner
+      # Backstops for a create that carries no limit of its own (a direct API
+      # call, not the control plane). The control plane sends the tenant's
+      # policy, which wins; these keep a hand-made request from being unlimited.
+      SANDBOX_CPUS: ${PIFORGE_SANDBOX_CPUS:-1}
+      SANDBOX_MEMORY: ${PIFORGE_SANDBOX_MEMORY:-2g}
+      SANDBOX_PIDS: ${PIFORGE_SANDBOX_PIDS:-512}
       # Report http://piforge-<hash8>:8080 instead of a published loopback port:
       # piforged is a container here, so 127.0.0.1:<port> would be its own loopback.
       SANDBOX_CONTAINER_ENDPOINT: "1"

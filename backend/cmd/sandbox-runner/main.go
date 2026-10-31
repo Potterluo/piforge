@@ -29,6 +29,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/piforge/piforge/backend/internal/sandbox"
 	"github.com/piforge/piforge/backend/internal/sandboxrunner"
 )
 
@@ -50,11 +51,19 @@ func run() error {
 		image = flag.String("image", envOr("SANDBOX_IMAGE", ""),
 			"default sandbox image; a create request may name another one")
 		network = flag.String("network", envOr("SANDBOX_NETWORK", ""),
-			"Docker network sandboxes join (empty: bridge)")
+			"Docker network sandboxes join (empty: bridge); ignored when -network-mode tenant")
+		networkMode = flag.String("network-mode", envOr("SANDBOX_NETWORK_MODE", "shared"),
+			"how sandboxes join the network: shared (all on -network) or tenant (a bridge per tenant, the containers in -join-containers attached to each)")
+		tenantNetworkPrefix = flag.String("tenant-network-prefix", envOr("SANDBOX_TENANT_NETWORK_PREFIX", ""),
+			"name prefix of a tenant's bridge (default piforge-t-)")
+		joinContainers = flag.String("join-containers", envOr("SANDBOX_JOIN_CONTAINERS", ""),
+			"comma-separated containers joined to every tenant bridge: the control plane (panels and the model gateway) and this runner (the checkout)")
 		cpus = flag.String("cpus", envOr("SANDBOX_CPUS", ""),
-			"default CPU limit per sandbox")
+			"default CPU limit per sandbox, when a create request carries none")
 		memory = flag.String("memory", envOr("SANDBOX_MEMORY", ""),
-			"default memory limit per sandbox, e.g. 2g")
+			"default memory limit per sandbox, e.g. 2g, when a create request carries none")
+		pids = flag.Int("pids", envInt("SANDBOX_PIDS", 0),
+			"default process limit per sandbox (docker --pids-limit); 0 leaves it unlimited")
 		apiPort = flag.Int("api-port", envInt("SANDBOX_API_PORT", 8080),
 			"container port that serves the sandbox HTTP API")
 		apiKey = flag.String("api-key", envOr("SANDBOX_API_KEY", ""),
@@ -74,13 +83,27 @@ func run() error {
 	if strings.TrimSpace(*token) == "" {
 		return fmt.Errorf("-token (RUNNER_TOKEN) is required: a runner without one is a container-creating HTTP service open to its network")
 	}
+	mode, err := sandbox.ParseNetworkMode(*networkMode)
+	if err != nil {
+		return err
+	}
+	if mode == sandbox.NetworkTenant && len(splitList(*joinContainers)) == 0 {
+		// A tenant bridge nothing else joins is a sandbox that cannot reach the
+		// control plane's gateway or have its checkout provisioned. Failing the
+		// start names the flag instead of leaving every session to fail later.
+		return fmt.Errorf("-network-mode tenant needs -join-containers (SANDBOX_JOIN_CONTAINERS): name the control plane and this runner, e.g. piforge,piforge-sandbox-runner")
+	}
 
 	provider, err := sandboxrunner.NewDockerProvider(sandboxrunner.DockerOptions{
 		DataRoot:            *dataRoot,
 		Image:               *image,
 		Network:             *network,
+		NetworkMode:         mode,
+		TenantNetworkPrefix: *tenantNetworkPrefix,
+		JoinContainers:      splitList(*joinContainers),
 		CPUs:                *cpus,
 		Memory:              *memory,
+		Pids:                *pids,
 		APIPort:             *apiPort,
 		APIKey:              *apiKey,
 		ContainerEndpoint:   *containerEndpoint,
@@ -121,6 +144,8 @@ func run() error {
 		"data_root", *dataRoot,
 		"image", *image,
 		"network", *network,
+		"network_mode", string(mode),
+		"join_containers", strings.Join(splitList(*joinContainers), ","),
 		"container_endpoint", *containerEndpoint)
 
 	select {
@@ -144,6 +169,19 @@ func envOr(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// splitList reads a comma-separated flag, dropping empty entries so a trailing
+// comma or an unset variable is "no containers" rather than one named "".
+func splitList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // envInt reads an integer environment variable, keeping the fallback when it is

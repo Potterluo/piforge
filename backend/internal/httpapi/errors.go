@@ -44,7 +44,11 @@ var statusByCode = map[string]int{
 	// for "insufficient storage" and the only one that does not read as "retry
 	// and it will work": nothing changes until something is deleted.
 	contracts.ErrSandboxDiskQuota: 507,
-	contracts.ErrRateLimited:      429,
+	// The tenant already has as many sandboxes as its quota allows. 409 rather
+	// than 429: waiting does not help, and the remedy is to delete or pause a
+	// project's sandbox. The details name the limit and the current count.
+	contracts.ErrTenantSandboxLimit: 409,
+	contracts.ErrRateLimited:       429,
 	contracts.ErrUpstreamOverload: 503,
 	// A forge that answered 5xx or could not be reached is a bad gateway from
 	// the product's point of view; its 4xx answers are mirrored by the handler.

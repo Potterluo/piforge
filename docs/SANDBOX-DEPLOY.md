@@ -1534,6 +1534,88 @@ compose 栈（`piforge` / `piforge-sandbox-runner` / `piforge-sandbox-image`）�
 
 ---
 
+### 1.7 租户边界：每租户一个网络、每租户一份配额、一条可查的审计
+
+验收报告（`e2e/.artifacts/final-isolated/VERDICT.md` §8 第 3 条）把这条留作最后一个缺口：执行和文件都已经在沙箱里，但**租户之间只隔着认证**。这一节是补上的部分、代价、以及仍然不宣称的东西。设计与取舍写在 `docs/EXECUTION-BOUNDARY.md` §12，这里是运维视角。
+
+#### 1.7.1 网络：一个租户一条桥
+
+每个租户（账号）在第一次建沙箱时由 runner 建一条桥 `piforge-t-<用户 id 的 12 位哈希>`，带标签 `piforge.tenant=<name>` / `piforge.role=sandbox`；沙箱**只**加入这条桥。控制面和 runner 由 `-sandbox-join-containers` 指定，挂在每条租户桥上（否则面板、checkout 和网关都到不了沙箱）。共享的 `piforge-sandboxes` 不再是沙箱的成员。
+
+为什么是"每租户"而不是"每沙箱"：产品规则是"一个 (user, project) 一个沙箱"，而授权边界本身就是**用户**（跨用户读一律 404）。每沙箱一条网络会额外隔开同一账号自己的项目，代价是**每个沙箱**一条网络 + 控制面/runner 各一次 `docker network connect` + 一段地址；而地址池是硬墙——本机 Docker 29.9.2 上第 17 条网络就报 `all predefined address pools have been fully subnetted`，也就是不先写 `daemon.json` 的 `default-address-pools`，每沙箱模式十来个沙箱就撞墙，每租户模式同样的上限换来十几个**账号**。
+
+**不提的部分**：同一租户的两个沙箱共享这条桥，能互相访问 8080，那里仍由镜像自带的每沙箱 API key 挡成 401。这是同一账号自己的项目，但它不是"sandbox 之间不能互通"，文档不这么说。
+
+从租户 1 的沙箱里量（`e2e/.artifacts/tenancy/isolation-probes.txt`）：
+
+```
+getent hosts piforge-874760ba7dddd0e5   -> no such host
+curl -m 4 http://172.28.0.4:8080/       -> curl: (28) Connection timed out after 4003 ms
+nc -z -w 3 172.28.0.4 8080              -> no route / timed out
+curl <自己的 gateway baseUrl>/models    -> http_code=200
+curl http://piforge:7700/v1/projects    -> http_code=401
+curl http://piforge:7700/healthz        -> http_code=200
+```
+
+按名字解不出邻居（不同桥、不同 DNS 作用域），按地址没有路由（Docker 在桥之间丢弃）。网关 200 与 401 是"还能用、但仍不被信任"的两半。
+
+运维命令：
+
+```powershell
+docker network ls --filter label=piforge.tenant          # 每条租户桥
+docker inspect <sandbox> --format '{{range $k,$v := .NetworkSettings.Networks}}{{println $k}}{{end}}'
+docker network inspect piforge-t-<hash> --format '{{range .Containers}}{{.Name}} {{end}}'
+pwsh scripts/up-isolated.ps1 -Project <p> -Down          # 连租户桥一起删（按 label）
+```
+
+#### 1.7.2 配额：一份策略文件，三个执行点
+
+`deploy/tenant-limits.json`（`PIFORGE_TENANT_LIMITS_FILE`，只读挂到 `/etc/piforge/tenant-limits.json`）给出**默认**与**按账号覆盖**；部署级 flag（`-sandbox-cpus/-sandbox-memory/-sandbox-pids`）是文件缺省时的兜底。启动时校验：未知字段、非数字 CPU、Docker 不认的内存写法、负数，都会**让启动失败并指出是哪个租户**，而不是让某个租户悄悄不限量。
+
+```json
+{
+  "default": {"cpus": "1", "memory": "2g", "pids": 512, "max_sandboxes": 3},
+  "tenants": {"bob@example.com": {"cpus": "2", "memory": "3g", "pids": 1024}}
+}
+```
+
+三个执行点：
+
+| 限制 | 谁执行 | 在哪 |
+|---|---|---|
+| CPU / 内存 / 进程数 | `docker run --cpus/--memory/--pids-limit` | `sandbox.Docker.containerArgs`（租户值由控制面算好，runner 在 create 请求里收到） |
+| 并发沙箱数 | 建之前数该租户的 `sandboxes` 行 | `provision.checkSandboxQuota`，返回 `tenant_sandbox_limit`（409）+ `{limit,current,tenant}` |
+| 磁盘 | 每沙箱 `du` 测量（FR-5.8，未变） | `httpapi.enforceSandboxQuota` |
+
+`--pids-limit` 是新的，也是 fork bomb 的唯一闸门。拒绝是**typed**的并且活到了 HTTP 层：改动之前 provisioning 失败只写一行 WARN，租户在配额上限时看到的是三层之后的 500；现在是 409 + 数字，而且为这次被拒的请求建出来的 session 行会被删掉，不留一个客户端不知道 id 的会话。
+
+实际生效的限制会被记录：provider 从容器自己的 `HostConfig` 读回来，行里存 `cpu_milli`/`mem_mb`，`GET /v1/admin/status` 把它们和租户策略并排报出来（`deployment_status.tenant_limits`），管理页「租户配额与网络」就是这一块。
+
+启动日志一行说明策略，拒绝时引用同一组数字：
+
+```
+msg="tenant quota policy" source=/etc/piforge/tenant-limits.json default_cpus=1 default_memory=2g default_pids=512 default_max_sandboxes=2 overrides=1 network_mode=tenant
+```
+
+#### 1.7.3 审计：`tool_calls` 的跨租户查询
+
+`GET /v1/admin/audit`（仅管理员）按页返回每一次工具调用：开始/结束时间、耗时、租户（id + 邮箱）、项目（id + 名称）、会话、run、工具名、结果（`ok`/`error`/`running`）。过滤：`user_id`、`project_id`、`session_id`、`tool`、`outcome`、`since`、`until`、`limit`（上限 500）、`offset`；`format=csv` 给同一页的 CSV 下载。
+
+```powershell
+# 最近 50 条，某个账号
+curl.exe -sS -b cookies.txt "http://127.0.0.1:7723/v1/admin/audit?user_id=usr_...&limit=50"
+# 失败的那些，导出 CSV
+curl.exe -sS -b cookies.txt -o audit.csv "http://127.0.0.1:7723/v1/admin/audit?outcome=error&limit=500&format=csv"
+```
+
+它**不是**取证日志，页面和文档都这么写：`tool_calls` 只存参数哈希与用户在自己转录里已经看到的短预览，不存参数原文。它回答的是"谁在什么时候跑了什么、成没成"，这正是验收报告查不了的那个问题。
+
+#### 1.7.4 一次跑完的证据
+
+`pwsh scripts/soak-tenancy.ps1 -Port 7723` 在一次性栈上建 4 个租户、各建一个项目并**同时**发一条会调用工具的 prompt，然后探测：跨租户不可达（名字 + 地址）、自己网关可达、控制面 `/v1/*` 仍 401、每个沙箱的 CPU/内存/进程数与策略一致、租户到达上限被 409 拒绝并带数字、审计里能查到这四条 run 的工具调用并可导出 CSV。产物在 `e2e/.artifacts/tenancy/`（`soak.txt`、`isolation-probes.txt`、`admin-status-tenant-limits.json`、`audit.csv`）。最近一次：**0 failures，exit 0**。
+
+---
+
 ## 2. Kubernetes：四种做法，各自什么时候是对的
 
 ### 2.1 方案（i）：一个 Pod 一个沙箱，控制面用 client-go 管
