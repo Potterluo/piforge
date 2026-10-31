@@ -35,6 +35,7 @@ var statusByCode = map[string]int{
 	contracts.ErrNeedFullResync:   409,
 	contracts.ErrBranchConflict:   409,
 	contracts.ErrConflict:         409,
+	contracts.ErrSharedProvider:   409,
 	contracts.ErrFileTooLarge:     413,
 	contracts.ErrSandboxUnavail:   422, // 422 is the PRD's default for this code
 	contracts.ErrSandboxPaused:    423,

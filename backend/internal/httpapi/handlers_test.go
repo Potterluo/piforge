@@ -930,9 +930,14 @@ func TestProvidersMergeAndShadow(t *testing.T) {
 		t.Fatalf("inherited = %+v", byName["other"])
 	}
 
-	// Deleting the shared one is impossible through this route.
+	// Deleting the shared one is impossible through this route, and says which
+	// route can: a 404 here read as "the provider is gone" while it sat in the
+	// list (acceptance pass 4).
 	rec = env.doAuthed(http.MethodDelete, "/v1/providers/"+byName["other"].ID, nil, c)
-	env.mustErr(rec, http.StatusNotFound, contracts.ErrNotFound)
+	env.mustErr(rec, http.StatusConflict, contracts.ErrSharedProvider)
+	if !strings.Contains(rec.Body.String(), "/v1/admin/providers/"+byName["other"].ID) {
+		t.Fatalf("the shared refusal does not name the admin endpoint: %s", rec.Body.String())
+	}
 
 	rec = env.doAuthed(http.MethodDelete, "/v1/providers/"+created.Provider.ID, nil, c)
 	if rec.Code != http.StatusOK {

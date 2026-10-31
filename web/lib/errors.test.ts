@@ -60,6 +60,19 @@ describe("humanizeError", () => {
     );
   });
 
+  it("explains a shared provider on the wrong endpoint instead of saying not found", () => {
+    const text = humanizeError(
+      apiError(
+        "shared_provider",
+        'provider "volc" is shared with every user; cancel the share with DELETE /v1/admin/providers/prv_123',
+      ),
+    );
+    expect(text).toContain("volc");
+    expect(text).toContain("共享");
+    expect(text).toContain("/v1/admin/providers/prv_123");
+    expect(text).not.toContain("not_found");
+  });
+
   it("does not leak an unmapped English message", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const text = humanizeError(apiError("internal", "some brand new english sentence"));

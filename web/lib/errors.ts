@@ -271,6 +271,14 @@ const RULES: MessageRule[] = [
     pattern: /^at most 3 sidecars per session$/i,
     render: () => "每个会话最多 3 个旁路对话",
   },
+  // A shared provider addressed through the per-user route. The API now says
+  // "wrong endpoint" instead of `not_found`; the UI says the same thing and
+  // names the admin endpoint that can actually remove it.
+  {
+    code: "shared_provider",
+    pattern: /^provider "(.+?)" is shared with every user; cancel the share with DELETE (\/v1\/admin\/providers\/\S+)$/,
+    render: (m) => `「${m[1]}」是共享 provider，请用 DELETE ${m[2]} 取消共享`,
+  },
   {
     code: "conflict",
     pattern: /^a conflict with an existing record/i,

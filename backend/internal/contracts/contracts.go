@@ -874,7 +874,12 @@ const (
 	ErrRateLimited      = "rate_limited"
 	ErrUpstreamOverload = "upstream_overloaded"
 	ErrConflict         = "conflict"
-	ErrInternal         = "internal"
+	// ErrSharedProvider means the caller addressed a deployment-shared provider
+	// through the per-user provider routes. The provider exists; the endpoint is
+	// the wrong one. It is not `not_found`: a 404 there reads as "gone" and
+	// sends an operator looking for the row that is right there in the list.
+	ErrSharedProvider = "shared_provider"
+	ErrInternal       = "internal"
 	// ErrForge is a failure in the push → pull-request flow whose cause is the
 	// remote or the code-hosting platform rather than the local checkout
 	// (FR-12.6). The message names the step and keeps the forge's own text.

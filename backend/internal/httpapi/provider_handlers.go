@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sort"
 
@@ -113,12 +114,30 @@ func (s *server) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, providerResponse{Provider: p})
 }
 
-// handleDeleteProvider removes one of the caller's providers. Shared
-// (inherited) providers are not deletable here, and an id owned by somebody
-// else answers 404 just like a missing one.
+// handleDeleteProvider removes one of the caller's providers.
+//
+// Shared (inherited) providers are not deletable here: they are deployment
+// configuration, managed at /v1/admin/providers. That case used to answer 404,
+// which reads as "this provider is gone" even though it is listed and usable;
+// it is now a typed 409 that names the endpoint that can remove it. A genuinely
+// unknown id — or another account's private provider, whose existence must not
+// be probeable — still answers 404.
 func (s *server) handleDeleteProvider(w http.ResponseWriter, r *http.Request) {
 	user := auth.MustUser(r.Context())
-	if err := s.deps.Store.DeleteProvider(r.Context(), user.ID, pathID(r)); err != nil {
+	providerID := pathID(r)
+	if err := s.deps.Store.DeleteProvider(r.Context(), user.ID, providerID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			// The delete matched nothing. Ask whether the id names a shared row:
+			// only a provider this caller can see is reported, so an id that is
+			// somebody else's private row stays indistinguishable from unknown.
+			if shared, lookupErr := s.deps.Store.Provider(r.Context(), user.ID, providerID); lookupErr == nil &&
+				shared.Source == contracts.SourceInherited {
+				s.fail(w, r, apiErr(contracts.ErrSharedProvider,
+					"provider %q is shared with every user; cancel the share with DELETE /v1/admin/providers/%s",
+					shared.Name, providerID))
+				return
+			}
+		}
 		s.fail(w, r, err)
 		return
 	}

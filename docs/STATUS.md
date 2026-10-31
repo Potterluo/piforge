@@ -566,3 +566,44 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 - `model_ref` 指向一个存在但没有 key 的 provider 时仍然**不**自动换模型：那是配置错误，静默换模型会让用户以为自己的选择生效了；文案与设置页入口保持不变。
 - 对比的「主会话 0 个文件」语义没有改，只加了说明；要问「主会话相对 main 改了什么」需要另一套基准，不在本批范围。
 - 部署的数据卷仍是验收时的那个（`9ce20975…`），不是更早的 `pf-local-data`；本批只保证同一卷重启，不迁移数据。
+
+## 本批：验收 pass 4 的「取消共享」两半（确认框 + typed 错误）
+
+验收证据：`e2e/.artifacts/acceptance4/stage1.md`。部署 `http://127.0.0.1:7722`（容器 `pf-local`，共享 `volc` 是当时唯一可用的 provider，同时是 `PIFORGE_DEFAULT_PROVIDER`）。本批不改变任何 FR 状态，只修同一处混淆的两面：**共享 provider 的移除在界面上没有确认，在 API 上又在错误端点报 404。**
+
+### 根因
+
+- **界面：一次点击就删。** `/settings/providers` 的共享列表里，「取消共享」是一个只有垃圾桶图标的按钮，`onClick` 直接 `DELETE /v1/admin/providers/{id}`，没有对话框、没有撤销。验收 pass 4 中一次误点删掉了部署里唯一能用的 `volc`，只能手工重建。
+- **API：404 说的是「不存在」，不是「端点不对」。** `DELETE /v1/providers/{id}` 走 `store.DeleteProvider`，SQL 只匹配 `scope='user' AND owner_id=?`；共享行是 `scope='admin'`，于是影响 0 行，`requireOneRow` 返回 `ErrNotFound`，对外就是 404 `not_found`「找不到这个对象，可能已被删除」。provider 明明在列表里、还能用，错误却让人以为它没了。
+
+### 改法
+
+- `backend/internal/contracts/contracts.go` 新增错误码 `shared_provider`，`httpapi/errors.go` 映射 409。`handleDeleteProvider` 在 `ErrNotFound` 时再查一次 `Store.Provider`：只有调用者可见的 `SourceInherited` 行才回 409，消息点名 `DELETE /v1/admin/providers/{id}` 与 provider 名；未知 id、别人的私有行仍然 404（不把 typed 错误变成探测手段）。删除自己的 provider 仍是 200。
+- 前端 `/settings/providers`：共享行（管理区的「取消共享」与合并列表里管理员看到的共享行）都改成带文字的「取消共享」，打开同一个确认框；确认框写明 provider 名、所有继承用户会失去它、钉在「名称/模型」上的会话与跟随默认模型的会话下次发送会失败、key 一并删除且不可撤销；若它是部署默认（`GET /v1/setup` 的 `default_provider`），再加一条红色说明与「部署默认」徽章。自己的 provider 用带文字的「删除」，独立确认框，默认服务商时也提示。两个确认框的确认按钮都是 `variant="destructive"`。
+- `web/lib/errors.ts` 为 `shared_provider` 加中文映射（保留 provider 名与 admin 端点），避免任何旧客户端把英文原文弹给用户。
+- 测试：`backend/internal/httpapi/shared_provider_delete_test.go`（共享 → 409 + 命名端点 + 行仍在；未知 → 404；自己的 → 200；别人的私有 → 404）；`handlers_test.go` 里旧的「共享删除 = 404」断言改为新的 typed 错误；`web/lib/errors.test.ts` 新增映射断言；e2e `82-unshare-confirmation.spec.ts` 点击 → 断言确认框 → 取消后行与 API 都不变 → 确认后消失 → 管理 API 重建成功（并由 `withSharedProvidersClean` 保证跑完没有额外共享 provider）。部署验证脚本 `e2e/scripts/verify-unshare-confirm.mjs` 只走真实 UI/API，密钥从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入、不打印不落盘。
+
+### 证据（部署实例，非 fake peer）
+
+- 失败优先：先只加 `contracts.ErrSharedProvider` 与测试、保留旧 handler，`go test ./internal/httpapi -run TestDeletingASharedProviderThroughTheUserRouteExplainsItself` 失败在 `status = 404, want 409 (body {"error":{"code":"not_found",…}})`（`e2e/.artifacts/fix-unshare/red-newtest.log`）；改完 handler 同测试通过（`green-newtest.log`）。
+- 新镜像（`piforge:local` 最终 `sha256:24d4abd4…`）用**同一个数据卷** `9ce20975…` 重启 `pf-local`（容器 `aaaf4fdd…`，端口仍是 7722→7700，`PIFORGE_DEFAULT_PROVIDER=volc`），`/healthz` 200。探针 `verify-unshare-confirm.mjs` **PASS**：
+  - 错误端点：`DELETE /v1/providers/{volc}` → **409 `shared_provider`**，消息含 `/v1/admin/providers/{id}`，provider 仍在；
+  - 确认框：标题「取消共享「volc」？」，含「所有用户」「下一次发送」，默认服务商红色提示含 `PIFORGE_DEFAULT_PROVIDER`（`1-dialog.png`）；
+  - 取消：行仍在、API 仍 `has_key:true`（`2-after-cancel.png`）；
+  - 确认：行消失、API 不再有 `volc`、`/v1/setup` → `needs_provider:true, default_provider_missing:true`（`3-after-confirm.png`，toast「已取消共享」）；同一旧 id 再删是 404 `not_found`；
+  - 重建：管理 API 重建 `volc`（openai-completions、原 base URL、`deepseek-v4-flash`、key 来自凭据引用）→ 200、`has_key:true`（新 id）、`/v1/setup` → `needs_provider:false, default_provider:"volc"`；UI 刷新后「已配置 key」「部署默认」都在（`4-after-recreate.png`）。`verify.json`、`probe.log`。
+- 最终状态（独立会话复核）：管理列表 `shared-anthropic`（无 key）+ `volc`（`has_key:true`）；`/v1/setup` → `needs_provider:false, shared_provider_available:true, default_provider:"volc"`。证据文件里没有出现密钥。
+
+### 门禁
+
+- `go build ./...`：0；`go vet ./...`：0；`go test ./... -count=1`：全部包 ok（`go-gates.log`）。
+- `pnpm --dir web test -- --run`：**31 个文件 / 251 例通过**；`pnpm --dir web exec next build`：通过（`web-gates.log`、`web-build.log`）。
+- 完整 e2e（复用同一份 `.data`）：**171 passed / 7.2m**（上一批 170 + 本批 `82-unshare-confirmation.spec.ts` 1 例）。日志：`e2e/.artifacts/fix-unshare/e2e-full-final.log`。
+- 镜像与部署：`pwsh scripts/build-app-image.ps1` 重建 `piforge:local`；`pf-local` 用同一卷 `9ce20975…` 重建（容器 `aaaf4fdd…`），环境仍是四个 seed 账号、`PIFORGE_DEFAULT_PROVIDER=volc`。`docker inspect` 前后卷名一致（`deploy-2.log`、`image-build-2.log`）。
+
+### 没做的 / 边界
+
+- `PATCH /v1/providers/{id}` 打在共享行上仍是 403 `forbidden`（store 明确拒绝用户编辑共享配置）。它不是「不存在」，但也不在本批的 404 混淆里；没有改成 `shared_provider`。
+- 确认框不要求输入 provider 名（不是 GitHub 式二次输入）：本批要求是「显式确认 + 说清后果」，两步输入更适合不可恢复的批量操作。
+- `/v1/providers` 创建与共享同名的 provider 仍返回 409 `conflict`（阴影规则的另一半），未改。
+

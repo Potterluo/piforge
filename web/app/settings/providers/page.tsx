@@ -44,7 +44,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { api, type CreateProviderInput } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
 import type { Provider } from "@/lib/types";
-import { qk, useCurrentUser, useProviders } from "@/lib/session/queries";
+import { qk, useCurrentUser, useProviders, useSetup } from "@/lib/session/queries";
 
 const API_KINDS = [
   { value: "anthropic-messages", label: "anthropic-messages" },
@@ -70,6 +70,17 @@ export default function ProvidersPage() {
   const me = useCurrentUser();
   const isAdmin = me.data?.user.role === "admin";
   const [dialogOpen, setDialogOpen] = useState(false);
+
+  // The deployment default is the provider a session with no model_ref follows.
+  // Removing it breaks those sessions, so the confirmation has to say so before
+  // the click, not on the next send.
+  const setup = useSetup();
+  const defaultProvider = setup.data?.default_provider;
+
+  // Shared providers are managed by the admin half of the page, but the merged
+  // list shows the same row. This is the one confirmation both "取消共享"
+  // controls open, so the wording and the consequences cannot drift apart.
+  const [unshareTarget, setUnshareTarget] = useState<Provider | null>(null);
 
   const [name, setName] = useState("");
   const [apiKind, setApiKind] = useState("openai-compat");
@@ -109,6 +120,7 @@ export default function ProvidersPage() {
     mutationFn: (id: string) => api.providers.remove(id),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: qk.providers });
+      void queryClient.invalidateQueries({ queryKey: ["setup"] });
       toast.success("Provider 已删除");
     },
     onError: (error) => {
@@ -116,6 +128,21 @@ export default function ProvidersPage() {
         description: humanizeError(error),
       });
     },
+  });
+
+  const unshare = useMutation({
+    mutationFn: (id: string) => api.admin.unshareProvider(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: qk.providers });
+      void queryClient.invalidateQueries({ queryKey: ["admin", "providers"] });
+      void queryClient.invalidateQueries({ queryKey: ["setup"] });
+      setUnshareTarget(null);
+      toast.success("已取消共享");
+    },
+    onError: (error) =>
+      toast.error("取消失败", {
+        description: humanizeError(error),
+      }),
   });
 
   const update = useMutation({
@@ -279,26 +306,54 @@ export default function ProvidersPage() {
                   <AlertDialog>
                     <AlertDialogTrigger
                       render={
-                        <Button size="icon-xs" variant="ghost" aria-label="删除 Provider" />
+                        <Button
+                          size="xs"
+                          variant="ghost"
+                          aria-label="删除 Provider"
+                          data-testid="provider-delete"
+                        />
                       }
                     >
                       <Trash />
+                      删除
                     </AlertDialogTrigger>
-                    <AlertDialogContent>
+                    <AlertDialogContent data-testid="provider-delete-dialog">
                       <AlertDialogHeader>
                         <AlertDialogTitle>删除「{provider.name}」？</AlertDialogTitle>
                         <AlertDialogDescription>
-                          用这个 provider 的会话将无法再调用它的模型，已保存的 key 会一并删除。
+                          用这个 provider 的会话将无法再调用它的模型，已保存的 key 会一并删除。这个操作无法撤销。
                         </AlertDialogDescription>
                       </AlertDialogHeader>
+                      {defaultProvider === provider.name ? (
+                        <p className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive">
+                          「{provider.name}」是部署的默认服务商。删除后，没有指定模型的会话将无法发送。
+                        </p>
+                      ) : null}
                       <AlertDialogFooter>
                         <AlertDialogCancel>取消</AlertDialogCancel>
-                        <AlertDialogAction onClick={() => remove.mutate(provider.id)}>
+                        <AlertDialogAction
+                          variant="destructive"
+                          data-testid="provider-delete-confirm"
+                          onClick={() => remove.mutate(provider.id)}
+                        >
                           删除
                         </AlertDialogAction>
                       </AlertDialogFooter>
                     </AlertDialogContent>
                   </AlertDialog>
+                ) : isAdmin ? (
+                  // An inherited row is not the admin's own provider, so it offers
+                  // 取消共享 rather than 删除. The scope is in the label: the same
+                  // trash icon meaning two different removals was the confusion.
+                  <Button
+                    size="xs"
+                    variant="ghost"
+                    data-testid="provider-unshare"
+                    onClick={() => setUnshareTarget(provider)}
+                  >
+                    <Trash />
+                    取消共享
+                  </Button>
                 ) : null}
               </ItemActions>
             </Item>
@@ -498,6 +553,16 @@ export default function ProvidersPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <UnshareProviderDialog
+        provider={unshareTarget}
+        defaultProvider={defaultProvider}
+        pending={unshare.isPending}
+        onCancel={() => setUnshareTarget(null)}
+        onConfirm={() => {
+          if (unshareTarget) unshare.mutate(unshareTarget.id);
+        }}
+      />
     </div>
   );
 }
@@ -513,6 +578,11 @@ function SharedProviders({ onChanged }: { onChanged: () => void }) {
     queryKey: ["admin", "providers"],
     queryFn: () => api.admin.providers(),
   });
+  // The deployment default matters before the click: unsharing it leaves every
+  // session that follows the default with no model at all.
+  const setup = useSetup();
+  const defaultProvider = setup.data?.default_provider;
+  const [unshareTarget, setUnshareTarget] = useState<Provider | null>(null);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [apiKind, setApiKind] = useState("openai-compat");
@@ -563,6 +633,8 @@ function SharedProviders({ onChanged }: { onChanged: () => void }) {
     mutationFn: (id: string) => api.admin.unshareProvider(id),
     onSuccess: () => {
       toast.success("已取消共享");
+      setUnshareTarget(null);
+      void queryClient.invalidateQueries({ queryKey: ["setup"] });
       refresh();
     },
     onError: (error) =>
@@ -624,6 +696,9 @@ function SharedProviders({ onChanged }: { onChanged: () => void }) {
                 <div className="flex flex-wrap items-center gap-2">
                   <ItemTitle>{provider.name}</ItemTitle>
                   <Badge variant="outline">{provider.api}</Badge>
+                  {defaultProvider === provider.name ? (
+                    <Badge variant="secondary">部署默认</Badge>
+                  ) : null}
                   {provider.has_key ? (
                     <Badge variant="outline">已配置 key</Badge>
                   ) : (
@@ -660,13 +735,13 @@ function SharedProviders({ onChanged }: { onChanged: () => void }) {
                   编辑
                 </Button>
                 <Button
-                  size="icon-xs"
+                  size="xs"
                   variant="ghost"
-                  aria-label="取消共享"
-                  disabled={unshare.isPending}
-                  onClick={() => unshare.mutate(provider.id)}
+                  data-testid="shared-provider-unshare"
+                  onClick={() => setUnshareTarget(provider)}
                 >
                   <Trash />
+                  取消共享
                 </Button>
               </ItemActions>
             </Item>
@@ -854,7 +929,80 @@ function SharedProviders({ onChanged }: { onChanged: () => void }) {
           </form>
         </DialogContent>
       </Dialog>
+
+      <UnshareProviderDialog
+        provider={unshareTarget}
+        defaultProvider={defaultProvider}
+        pending={unshare.isPending}
+        onCancel={() => setUnshareTarget(null)}
+        onConfirm={() => {
+          if (unshareTarget) unshare.mutate(unshareTarget.id);
+        }}
+      />
     </section>
+  );
+}
+/**
+ * The confirmation between a click and an unshare.
+ *
+ * A single click on the old icon deleted the deployment's only usable provider
+ * during acceptance pass 4, so this is deliberately not a one-liner: it names the
+ * provider, says which sessions stop working, and — when the provider is the
+ * deployment default — says that sessions with no explicit model will have
+ * nothing to send to. Both 取消共享 controls open this same dialog, so the
+ * consequences cannot drift apart between the admin section and the merged list.
+ */
+function UnshareProviderDialog({
+  provider,
+  defaultProvider,
+  pending,
+  onCancel,
+  onConfirm,
+}: {
+  provider: Provider | null;
+  defaultProvider?: string;
+  pending: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <AlertDialog
+      open={provider !== null}
+      onOpenChange={(next) => {
+        if (!next) onCancel();
+      }}
+    >
+      <AlertDialogContent data-testid="shared-provider-unshare-dialog" className="sm:max-w-md">
+        <AlertDialogHeader>
+          <AlertDialogTitle>取消共享「{provider?.name ?? ""}」？</AlertDialogTitle>
+          <AlertDialogDescription>
+            所有用户都会立刻失去「{provider?.name ?? ""}」——继承它的账号在「模型与凭据」里将看不到这个服务商。钉在「
+            {provider?.name ?? ""}/模型」上的会话、以及跟随默认模型的会话，下一次发送时会找不到模型并失败。已保存的 key
+            会一并删除，无法撤销。
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        {provider && defaultProvider === provider.name ? (
+          <p
+            data-testid="shared-provider-unshare-default-warning"
+            className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs text-destructive"
+          >
+            「{provider.name}」是部署的默认服务商（PIFORGE_DEFAULT_PROVIDER）。取消共享后，没有指定模型的会话将无法发送，直到重新共享一个默认服务商。
+          </p>
+        ) : null}
+        <AlertDialogFooter>
+          <AlertDialogCancel data-testid="shared-provider-unshare-cancel">取消</AlertDialogCancel>
+          <AlertDialogAction
+            variant="destructive"
+            data-testid="shared-provider-unshare-confirm"
+            disabled={pending}
+            onClick={onConfirm}
+          >
+            {pending ? <Spinner /> : null}
+            确认取消共享
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 /**
