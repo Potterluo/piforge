@@ -600,6 +600,7 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 - `pnpm --dir web test -- --run`：**31 个文件 / 251 例通过**；`pnpm --dir web exec next build`：通过（`web-gates.log`、`web-build.log`）。
 - 完整 e2e（复用同一份 `.data`）：**171 passed / 7.2m**（上一批 170 + 本批 `82-unshare-confirmation.spec.ts` 1 例）。日志：`e2e/.artifacts/fix-unshare/e2e-full-final.log`。
 - 镜像与部署：`pwsh scripts/build-app-image.ps1` 重建 `piforge:local`；`pf-local` 用同一卷 `9ce20975…` 重建（容器 `aaaf4fdd…`），环境仍是四个 seed 账号、`PIFORGE_DEFAULT_PROVIDER=volc`。`docker inspect` 前后卷名一致（`deploy-2.log`、`image-build-2.log`）。
+- `pwsh scripts/deliver-check.ps1`（`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入，未打印、未落盘）：run `20261031-124731`，**119 条 `[PASS]` / 0 条 FAIL**，`failure` 为空；一次性容器/volume 已删除，`pf-local` 容器 id 前后都是 `aaaf4fdd…`、卷仍是 `9ce20975…`，源码树干净（drill 自己的守卫）。日志：`e2e/.artifacts/fix-unshare/deliver-check.log`；summary：`e2e/.artifacts/delivery-drill/20261031-124731/summary.json`。
 
 ### 没做的 / 边界
 
