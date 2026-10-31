@@ -4,7 +4,7 @@ import * as React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangleIcon, GitBranch, LoaderCircle, PanelRight, ScrollText } from "lucide-react";
+import { AlertTriangleIcon, GitBranch, GitMerge, LoaderCircle, PanelRight, ScrollText } from "lucide-react";
 import type { PanelImperativeHandle } from "react-resizable-panels";
 
 import { Badge } from "@/components/ui/badge";
@@ -43,6 +43,7 @@ import type { StreamStatus } from "@/lib/session/use-session-events";
 import type { ForkPoint } from "@/lib/types";
 
 import { BranchTree } from "./branch-tree";
+import { AdoptDialog } from "./adopt-dialog";
 import { CompactContextButton } from "./compact-context";
 import { Composer, type ModelOption } from "./composer";
 import { ContextMeter } from "./context-marker";
@@ -219,6 +220,7 @@ function WorkbenchBody({
   const [branchesOpen, setBranchesOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [sidecarOpen, setSidecarOpen] = useState(false);
+  const [adoptOpen, setAdoptOpen] = useState(false);
   const [forkTarget, setForkTarget] = useState<{ entryId: string; preview?: string } | null>(null);
 
   /**
@@ -341,6 +343,22 @@ function WorkbenchBody({
             <GitBranch />
             分支
           </Button>
+          {/* The merge half of "fork, run in parallel, pick one" (FR-2.6).
+              It lives in the branch's own header, not only in a hover menu on a
+              sidebar row: the acceptance pass opened the main session's menu,
+              saw 对比 and nothing else, and concluded adopt did not exist. */}
+          {detail?.kind === "branch" && detail.parent_id ? (
+            <Button
+              size="sm"
+              variant="outline"
+              data-testid="session-adopt-open"
+              title="把这个分支的提交和改动带回来源会话"
+              onClick={() => setAdoptOpen(true)}
+            >
+              <GitMerge />
+              采纳到…
+            </Button>
+          ) : null}
           <Button
             size="sm"
             variant="outline"
@@ -440,6 +458,10 @@ function WorkbenchBody({
 
       <SessionLogsSheet sessionId={sessionId} open={logsOpen} onOpenChange={setLogsOpen} />
       <SidecarDock sessionId={sessionId} projectId={projectId} open={sidecarOpen} onOpenChange={setSidecarOpen} />
+
+      {detail?.kind === "branch" ? (
+        <AdoptDialog branchId={sessionId} open={adoptOpen} onOpenChange={setAdoptOpen} />
+      ) : null}
 
       <ForkDialog
         open={forkTarget !== null}

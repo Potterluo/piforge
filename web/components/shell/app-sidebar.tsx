@@ -81,7 +81,9 @@ import {
   sessionStatusTone,
 } from "@/lib/session/format";
 import { qk, useCurrentUser, useFeature, useProjectSessions, useProjects, useSessionSearch } from "@/lib/session/queries";
-import { SupportNotices } from "@/components/shell/support-notices";import { cn } from "@/lib/utils";
+import { SupportNotices } from "@/components/shell/support-notices";
+import { AdoptDialog } from "@/components/session/adopt-dialog";
+import { cn } from "@/lib/utils";
 import type { Session, SessionStatus } from "@/lib/types";
 
 interface SessionGroup {
@@ -138,23 +140,6 @@ function activeIds(pathname: string): { projectId: string | null; sessionId: str
 }
 
 /** How a branch's work travelled into the target (FR-2.6). */
-function adoptModeLabel(mode: string): string {
-  switch (mode) {
-    case "merge":
-      return "已合并提交";
-    case "fast-forward":
-      return "已快进提交";
-    case "working-tree":
-      return "已应用到工作区（未提交）";
-    case "merge+working-tree":
-      return "已合并提交，剩余改动在工作区";
-    case "fast-forward+working-tree":
-      return "已快进提交，剩余改动在工作区";
-    default:
-      return "已采纳";
-  }
-}
-
 function StatusDot({ status }: { status: SessionStatus }) {
   const tone = sessionStatusTone(status);
   return (
@@ -766,6 +751,8 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
   const [renaming, setRenaming] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  // Adopting asks first: source → target, what comes over, and what happened.
+  const [adoptOpen, setAdoptOpen] = useState(false);
   // The compare chooser: a session can only be compared with *other* sessions in
   // its project. Picking `session.id` as the fallback (the old behaviour when a
   // session had no parent) put the same id in the URL twice and the compare page
@@ -907,24 +894,11 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
               data-testid="session-adopt"
               onClick={() => {
                 setMenuOpen(false);
-                void api.sessions
-                  .adopt(session.id)
-                  .then((data) =>
-                    toast.success("已采纳回主干", {
-                      // Say how the work travelled: commits merge as commits, loose
-                      // files stay uncommitted on the target.
-                      description: `${adoptModeLabel(data.adopted.mode)} · ${data.adopted.commit} · ${data.adopted.files.length} 个文件`,
-                    }),
-                  )
-                  .catch((error: unknown) =>
-                    toast.error("采纳失败", {
-                      description: humanizeError(error),
-                    }),
-                  );
+                setAdoptOpen(true);
               }}
             >
               <GitMerge />
-              采纳回主干
+              采纳到…
             </DropdownMenuItem>
           ) : null}
           <DropdownMenuItem
@@ -1088,6 +1062,15 @@ function SessionActions({ session, projectId }: { session: Session; projectId: s
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {session.kind === "branch" ? (
+        <AdoptDialog
+          branchId={session.id}
+          open={adoptOpen}
+          onOpenChange={setAdoptOpen}
+          onAdopted={refresh}
+        />
+      ) : null}
     </>
   );
 }
