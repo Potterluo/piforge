@@ -56,6 +56,11 @@ const (
 	StatusSettled  SessionStatus = "settled"
 	StatusFailed   SessionStatus = "failed"
 	StatusArchived SessionStatus = "archived"
+	// StatusInterrupted is a run that was in flight when its agent process went
+	// away. It is not idle (the turn never settled) and not failed (the agent did
+	// not report an error): it is the durable record of "this run was cut off",
+	// written by internal/reconcile after it proves no live process exists.
+	StatusInterrupted SessionStatus = "interrupted"
 )
 
 // SandboxState mirrors PRD §5.2 FR-5.1.

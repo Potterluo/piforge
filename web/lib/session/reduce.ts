@@ -419,6 +419,13 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
       // next turn, so treating them as completion makes the UI flicker idle.
       const settled = asRecord(event.payload);
       const stopped = settled.aborted === true;
+      // A run the reconciler interrupted settles with status "interrupted" and
+      // the sentence an operator needs ("服务重启，本次运行被中断"). Without this
+      // the run stopped but the transcript said nothing about why.
+      const interrupted =
+        str(settled.status) === "interrupted"
+          ? str(settled.reason) || str(settled.message) || "本次运行被中断"
+          : undefined;
       return {
         ...state,
         running: false,
@@ -430,7 +437,7 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
           const error = stopped && isAbortEcho(turn.error, turn.stopReason) ? undefined : turn.error;
           return { ...turn, streaming: false, error };
         }),
-        error: stopped ? null : state.error,
+        error: interrupted ?? (stopped ? null : state.error),
       };
     }
 

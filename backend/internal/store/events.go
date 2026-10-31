@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
 )
@@ -30,13 +31,7 @@ func (s *Store) AppendEvent(ctx context.Context, userID string, ev *contracts.Ev
 		return nil, fmt.Errorf("store: append event %q: payload is not valid JSON: %w", ev.Type, ErrInvalid)
 	}
 
-	var (
-		seq     int64
-		payload any
-	)
-	if len(ev.Payload) > 0 {
-		payload = string(ev.Payload)
-	}
+	var seq int64
 
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		var kind string
@@ -50,14 +45,8 @@ func (s *Store) AppendEvent(ctx context.Context, userID string, ev *contracts.Ev
 			return fmt.Errorf("store: append event: session %q: %w", ev.SessionID, err)
 		}
 
-		if err := tx.QueryRowContext(ctx,
-			`INSERT INTO events (session_id, seq, run_id, entry_id, parent_id, type, payload, ts)
-			 SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ?
-			   FROM events WHERE session_id = ?
-			 RETURNING seq`,
-			ev.SessionID, ev.RunID, ev.EntryID, ev.ParentID, ev.Type, payload,
-			formatTime(ts), ev.SessionID).Scan(&seq); err != nil {
-			return fmt.Errorf("store: append event %q: %w", ev.Type, err)
+		if seq, err = insertEvent(ctx, tx, ev, ts); err != nil {
+			return err
 		}
 
 		if _, err := tx.ExecContext(ctx,
@@ -75,6 +64,27 @@ func (s *Store) AppendEvent(ctx context.Context, userID string, ev *contracts.Ev
 	out.Seq = seq
 	out.TS = ts
 	return &out, nil
+}
+
+// insertEvent writes one event row, allocating the session's next seq inside
+// the caller's transaction. It is shared by AppendEvent and the reconciler so a
+// recovery event is ordered by exactly the same rule as a live one.
+func insertEvent(ctx context.Context, tx *sql.Tx, ev *contracts.Event, ts time.Time) (int64, error) {
+	var payload any
+	if len(ev.Payload) > 0 {
+		payload = string(ev.Payload)
+	}
+	var seq int64
+	if err := tx.QueryRowContext(ctx,
+		`INSERT INTO events (session_id, seq, run_id, entry_id, parent_id, type, payload, ts)
+		 SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ?
+		   FROM events WHERE session_id = ?
+		 RETURNING seq`,
+		ev.SessionID, ev.RunID, ev.EntryID, ev.ParentID, ev.Type, payload,
+		formatTime(ts), ev.SessionID).Scan(&seq); err != nil {
+		return 0, fmt.Errorf("store: append event %q: %w", ev.Type, err)
+	}
+	return seq, nil
 }
 
 // ListEvents returns events of one session with seq > afterSeq in ascending

@@ -34,6 +34,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/crypto"
 	"github.com/piforge/piforge/backend/internal/diskquota"
 	"github.com/piforge/piforge/backend/internal/fsx"
+	"github.com/piforge/piforge/backend/internal/reconcile"
 	"github.com/piforge/piforge/backend/internal/runtimedirs"
 	"github.com/piforge/piforge/backend/internal/store"
 )
@@ -172,6 +173,12 @@ type Deps struct {
 	// heartbeating, so this is also how long a crashed viewer can keep the
 	// browser before somebody else may take it.
 	BrowserTakeoverTTL time.Duration
+	// Reconciler repairs a session that claims to be running while no agent
+	// process serves it. The delete guard calls it before trusting a "running"
+	// row, so a project pinned by a crashed run is deletable in the same
+	// request. Nil keeps the old behaviour (the persisted row alone decides);
+	// cmd/piforged always wires one.
+	Reconciler *reconcile.Reconciler
 	// Now defaults to time.Now.
 	Now func() time.Time
 	// Logger defaults to slog.Default().

@@ -64,6 +64,7 @@ const STATUS_LABELS: Record<SessionStatus, string> = {
   settled: "已完成",
   failed: "失败",
   archived: "已归档",
+  interrupted: "已中断",
 };
 
 export function sessionStatusLabel(status: SessionStatus | undefined): string {
@@ -80,6 +81,7 @@ export function sessionStatusTone(
       return "running";
     case "paused":
     case "archived":
+    case "interrupted":
       return "paused";
     case "failed":
       return "failed";

@@ -31,7 +31,7 @@
 - 审计方法：先读 `docs/STATUS-AUDIT.md`（`06b61a3`）的每条判定，再逐条重读 `backend/internal/httpapi/router.go` 的路由表、各 handler、`web/components/**` 与 `e2e/tests/*.spec.ts`；以「实现 + 断言了用户可见结果的测试名」为准，不采信命名与注释。
 - 状态口径：**DONE** 必须点名一条断言用户可见承诺的测试或 e2e 路径；**PARTIAL** 必须写清缺什么；**MISSING** 是无实现。
 - 本版把 `06b61a3` 之后的修复接进台账：`f766651`（FR-2.5 / FR-2.6）、`bd85ade`（FR-2.7）、`9c4ab0b`（FR-11.8）、`717f7cb`（FR-12.5），以及浏览器启动按沙箱单飞与 profile 僵尸锁恢复（FR-11.1）。本批补上 FR-12.6（一键开 PR）并把 FR-8.8 从 PARTIAL 移到 DONE——开 PR 是那一条里唯一缺的能力。
-- 计数（按本文件表格行重数，不是抄旧表头）：**126 条 FR = DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**（`be01575` 时是 52 / 54；此后 FR-1.9、FR-9.2、FR-3.3、FR-14.4、FR-6.6、FR-10.2、FR-11.2、FR-12.4、FR-14.1、FR-12.1、FR-12.2、FR-16.3、FR-12.3、FR-12.6、FR-8.8、FR-11.3 逐一移入 DONE）。另有 7 条非 FR 交付能力（见「交付能力（非 FR，单独计）」），均 DONE；**整表 133 行 = DONE 75 / PARTIAL 42 / MISSING 15 / 不做 1**。本批（快照行生命周期 + 沙箱磁盘配额）不改变任何 FR 状态，只新增一条非 FR 行。
+- 计数（按本文件表格行重数，不是抄旧表头）：**126 条 FR = DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**（`be01575` 时是 52 / 54；此后 FR-1.9、FR-9.2、FR-3.3、FR-14.4、FR-6.6、FR-10.2、FR-11.2、FR-12.4、FR-14.1、FR-12.1、FR-12.2、FR-16.3、FR-12.3、FR-12.6、FR-8.8、FR-11.3 逐一移入 DONE）。另有 8 条非 FR 交付能力（见「交付能力（非 FR，单独计）」），均 DONE；**整表 134 行 = DONE 76 / PARTIAL 42 / MISSING 15 / 不做 1**。本批（重启对账）不改变任何 FR 状态，只新增一条非 FR 行。
 
 > 说明：PRD 中没有「部署」类 FR（§12 是里程碑，`deploy/` 是 Dockerfile.app / Dockerfile.offline / Dockerfile.runner / k8s.yaml / entrypoint.sh，属交付物而非需求行），因此下面没有部署行。`sandbox-runner`（把 Docker CLI 从控制面移出去）同样是交付物而非 FR：它没有改变任何一条 FR 的状态，证据见 `docs/SANDBOX-DEPLOY.md` §1.4 与 `scripts/verify-runner-sandbox.ps1`。
 >
@@ -179,8 +179,9 @@ PRD 没有这两条的 FR 行，但它们是演练暴露、已修复、且有用
 | ⌘K 命令面板的默认选中 / Enter（PRD §10.1-5、§13「全部交互可键盘到达」；PRD 没有对应 FR 行） | DONE | 旧实现把选择交给 cmdk 1.1.1，它按行的 `value` 字符串认选中行。会话行的 label 在 projects 查询返回后才从「项目」变成真实项目名，`value` 随之变化，存储的选中值不再匹配任何行：`[cmdk-item][aria-selected="true"]` 实测 0，而 cmdk 的 Enter 只会向选中行派发，于是「输入 → 回车」什么都不发生。现在面板自己管理选择：行有稳定 id（`session:<id>` 等），active 行由可见列表**推导**（当前 id 不在了就选第一行），`aria-selected`、`aria-activedescendant`、`role=listbox/option`、`aria-controls/expanded` 同源；↑↓/Home/End/Enter 由面板处理。列表仍在加载时按 Enter **忽略而不是排队**：结果随时可能变化，排队的 Enter 会执行用户没看见的行；面板保持打开，行出现后下一次 Enter 生效。测试：`web/components/shell/command-palette.test.tsx` 4 例（异步落定后第一行默认选中且 Enter 进入会话、label 变化不丢选择、加载中 Enter 无效、↑↓ 仍可用）、`e2e/tests/60-session-search.spec.ts` 的「Ctrl+K → 输入 → Enter 直接打开」（旧代码在保留新 spec、去掉 ArrowDown 后必失败）与「列表仍在加载时 Enter 被忽略，随后生效」；部署实例探针 `e2e/scripts/fix-palette-shadow-probe.mjs` 旧构建 `selected=0`、URL 未变。 |
 | 运行时目录生命周期：`<dataDir>` 下每个目录都有 owner、删除路径与 janitor 兜底 | DONE | 见「本批：运行时目录生命周期」。`backend/internal/runtimedirs` 是唯一清单（sandboxes / pi-agents / skill-snapshots / snapshots / artifacts / skills，外加 piforge.db、master.key、secret.key 三个部署文件）；`TestEveryInventoryEntryHasALifecycle` 逐行要求 creator/owner/delete path/fallback，`TestEveryDataDirLiteralIsInTheInventory` 扫描 `filepath.Join(dataDir, …)`，新目录没有生命周期会失败。删会话级联 pi-agents + artifacts + skill-snapshots；删项目级联所有子会话的同三类目录与每个 sandbox 的 `snapshots/<sbx>`；janitor 每类一条 count/bytes 日志，单个失败不中断、索引读不到拒扫。`GET /v1/admin/status` 的 `storage` 块与 admin 页面按目录报告 entries/bytes。测试：`runtime_dirs_test.go` 4 例、`janitor_test.go` 新增 4 例（含 live-owner fixture 与索引失败）、`runtimedirs` 4 例；部署探针 `e2e/scripts/dirlifecycle-probe.mjs` 旧镜像留下两个目录、新镜像 10s 内清零，设计见 `e2e/.artifacts/fix-dirlifecycle/`。 |
 | 快照记录（`snapshots` 表行）的生命周期：外键级联 + janitor 行清扫 + 迁移 | DONE | 见「本批：快照行生命周期 + 沙箱磁盘配额」。`snapshots.sandbox_id` 现在是 `REFERENCES sandboxes(id) ON DELETE CASCADE` 的真外键（删项目 → 级联 sandboxes → 行随目录一起消失）；老库在 `store.Open` 时幂等重建（一个事务里建新表、原样拷贝每一行、改名，外键校验在拷贝期间关闭，所以「sandbox 已经没了」的历史行留给 janitor 而不是迁移删掉）；janitor 每轮读 `SnapshotIndex`（一条查询、covering index `snapshots_sweep`），只删「manifest 目录不存在」或「sandbox 行不存在」的行，目录和 sandbox 都活着的一行不碰、没有 blob_key 的行不猜也不删；`DeleteSnapshots` 分批删。另外修掉让删除根本走不到级联的那个缺陷：sandbox 被空闲回收后再删项目会 409（provider 已经不认这个 id），现在 `sandbox.ErrNotFound` 视为「已经销毁」。 |
+| 重启对账：声称 running 但没有进程的会话/运行被标记 `interrupted`（本次修复） | DONE | 见「本批：重启对账」。`internal/reconcile` 在**启动时（端口打开前）**、看门狗每 `-session-reconcile-interval`（默认 30s，0 关闭周期）以及**删项目守卫里**，用 `pi.Runtime.Alive`（进程内注册表，唯一权威）核对 `sessions.status='running'` 或 `runs.status='started'` 的行；只有注册表明确说没有进程时才在一个事务里把 session 改成 `interrupted`、把 started run 落成 `interrupted`（`interrupted_by=reconcile`、`completion_note` 写原因），并追加 `run.settled`（payload 带 `status`/`reason`）与一条 `platform.error`（`code=run_interrupted`，message 是「服务重启，本次运行被中断」/「运行进程已退出，本次运行被中断」）。启动日志一行 `session reconciliation at startup scanned=… interrupted=… runs=… kept_live=…`；看门狗只在真的修复时打 summary。幂等：第二遍看不到 running/started 行，不追加事件；活着的会话绝不被改（注册表返回 true → `kept_live`）。删项目不再被这条谎言永久钉住：守卫先对项目做同一轮对账再数 running，仍有活进程才 409。测试：`reconcile/reconcile_test.go` 6 例（启动对账 + 事件 + 日志计数、幂等、活运行不动、看门狗在子进程消失后修复、无注册表时保守不动、按项目只动自己）、`httpapi/project_delete_reconcile_test.go` 2 例（stale running → 删除 200；活运行 → 仍 409 且行仍是 running）。旧代码 fail-first：同一测试 409 且 session 仍 running（`e2e/.artifacts/fix-reconcile/fail-first-go.log`）。部署实测：旧镜像上 `probe-quota-before-…` 删除 409、行仍 running；新镜像启动日志 `interrupted=1`，行变 interrupted、事件带原因，UI 删除成功（`e2e/.artifacts/fix-reconcile/`）。 |
 
-计数：上面 126 条 FR 是 **DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**（按表格行逐行重数）；加上七条非 FR 交付能力（均 DONE）后整表 **133 行 = DONE 75 / PARTIAL 42 / MISSING 15 / 不做 1**。本批（快照行生命周期 + 沙箱磁盘配额）不改变任何 FR 状态（FR-5.8 仍是 PARTIAL：配额按运行边界周期性测量，且本地 provider 仍无 CPU/内存限制），新增第七行非 FR；FR-14.2 仍是 PARTIAL（Windows 仍没有目录级不可变，且 copy-ro 不阻止在目录里新建文件）。
+计数：上面 126 条 FR 是 **DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**（按表格行逐行重数）；加上八条非 FR 交付能力（均 DONE）后整表 **134 行 = DONE 76 / PARTIAL 42 / MISSING 15 / 不做 1**。本批（重启对账）不改变任何 FR 状态（FR-5.8 仍是 PARTIAL：配额按运行边界周期性测量，且本地 provider 仍无 CPU/内存限制），新增第八行非 FR；FR-14.2 仍是 PARTIAL（Windows 仍没有目录级不可变，且 copy-ro 不阻止在目录里新建文件）。
 
 **明确边界：远端 / AIO 沙箱里的浏览器仍不会在空闲时被停止。** `15b995c` 的 idle 策略只在 host placement 生效：控制面直接持有 Chrome 进程，`browser.Manager` 能 stop 它。远端 / AIO 模式下 Chrome 跑在沙箱里，控制面断开 CDP 只意味着没人看了，进程仍在沙箱里；`PIFORGE_BROWSER_IDLE_TIMEOUT` 不会杀它，也没有 runner 侧的空闲回收。要覆盖这条路径，需要沙箱 provider 按「无 viewer」自行 stop 浏览器（或 runner 提供 idle 端点），目前没有实现，也没有测试。
 
@@ -814,3 +815,87 @@ UI：徽章的 `title` 与 `aria-label` 各一句可访问说明，区别是真�
 - 镜像只用 `scripts/build-app-image.ps1` 重建：`sha256:5bc1692ac16c8b1feb09dad624cfd34a65fe0180be8c2bf5c1a849f9a526ec8d`；`pf-local` 始终用**同一个数据卷** `9ce20975…`，`CapDrop=["CAP_DAC_OVERRIDE"]`、`CapAdd=null`、端口 7722→7700、`PIFORGE_DEFAULT_PROVIDER=volc`（`deploy-before.log` / `deploy-after.log` / `deploy-quota5mib.log` / `deploy-final.log`）。最终容器 `7c2c1c33…`，配额已恢复默认 2 GiB。
 - `pwsh scripts/deliver-check.ps1`（`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入，未打印、未落盘）：run `20261031-151551`，**119 条 `[PASS]` / 0 条 FAIL**，`failure` 为 null；镜像 id 与部署的同一个；一次性容器 `pf-drill` / volume `pf-drill-data` 已删除，`pf-local` 全程未被触碰（前后容器 id 都是 `7c2c1c33…`），drill 的「source checkout is clean」守卫通过。日志：`deliver-check.log`；summary：`e2e/.artifacts/delivery-drill/20261031-151551/summary.json`。
 - 证据目录：`e2e/.artifacts/fix-rows-quota/`（`probe-rows-before.json`、`probe-rows-after.json`、`janitor-orphan-row.log`、`deployed-schema.log`、`probe-quota-before.json`、`probe-quota-after.json`、`probe-skill-cap.json`、`fail-first-go.log`；截图 `quota-after-session-error.png`、`quota-after-admin-quota.png`、`rows-before-admin-storage.png`、`rows-after-admin-storage.png`）。
+
+## 本批：重启对账（running 只能是「有进程在服务」）
+
+### 1. 缺陷
+
+一个回合在进程死亡时不会留下终态：`hub.applyDerivedState` 只在 `run.started` 写 `sessions.status='running'`、在 `run.settled`/`run.aborted` 写回 idle；`runs.status` 也停在 `started`。控制面重启（或 agent 子进程崩溃）后，没有第二个写者，行就永远停在 running。用户撞上的三件事：
+
+- 会话页一直显示「运行中」，没有回合会结束；
+- 删项目被 `RunningSessionCount` 拒绝（「还有 1 个会话正在运行，请先停止这些回合再删除项目」），而用户没有可停的回合；
+- 除了手工改库，没有任何修复路径。
+
+上一批的部署上就留着一个这样的项目：`probe-quota-before-1793429858000`（旧镜像在回合进行中被重启）。
+
+### 2. 机制（`backend/internal/reconcile`）
+
+**唯一权威是进程内注册表**：`pi.Runtime.Alive(sessionID)` 问的是「这个 session 有没有活着的 bridge/子进程」，不是 SQLite、不是 hub 的订阅缓存、也不是 normalizer 的 `Status`（后两者都会在子进程死后残留）。`reconcile.Liveness` 只暴露这一个问题，`*pi.Runtime` 满足它。
+
+一轮对账的候选集是 `sessions.status='running'` **或**存在 `runs.status='started'` 的会话（`store.RunningSessions` / `RunningSessionsInProject`，`schema.sql` 加了 `sessions_running` 部分索引）。对每个候选：
+
+1. 注册表说活着 → `kept_live++`，**什么都不写**（debug 日志说明保留原因）；
+2. 注册表说没有进程 → `store.InterruptRunningSession` 在**一个事务**里：
+   - `UPDATE sessions SET status='interrupted' WHERE status='running'`（只有仍然是 running 才动，避免覆盖并发 settle）；
+   - 把仍在 `started` 的 run 逐条落成 `interrupted`，`settled_at`、`interrupted_by='reconcile'`、`completion_note=原因`；
+   - 追加 `run.settled`（`{"status":"interrupted","reason":…,"reconciled":true}`，run_id 指向被中断的 run）——这是前端唯一认的完成信号，打开的页面会因此停止「运行中」；
+   - 追加一条 `platform.error`（`{"code":"run_interrupted","message":原因,"reason":原因}`），让之后打开会话的人看到原因；
+3. 没有可改的行（status 已不是 running 且没有 started run）→ 事务不写事件，这就是幂等。
+
+三个调用点：
+
+- **启动时、端口打开前**（`cmd/piforged/main.go`，带 30s 上限）：`ReasonRestart =「服务重启，本次运行被中断」`。日志 `interrupted an orphaned run` + 一行 summary：`session reconciliation at startup scanned=… interrupted=… runs=… kept_live=…`。
+- **看门狗**：`-session-reconcile-interval` / `PIFORGE_SESSION_RECONCILE_INTERVAL`，默认 30s，0 关闭周期（启动那一轮仍跑）。`ReasonProcessGone =「运行进程已退出，本次运行被中断」`；没有修复时只打 debug，有修复才打 summary。
+- **删项目守卫**（见下）。
+
+**保守性**：Runtime 为 nil 或未实现 `Alive` → 整轮跳过并 WARN（`the agent registry is unavailable`），一行都不改；store 出错 → 回滚并 WARN；注册表说活着 → 不动。先证明「死」，再写「中断」。
+
+### 3. 删除守卫为什么不能再被谎言钉住
+
+`handleDeleteProject` 现在在 `RunningSessionCount` **之前**调用 `Reconciler.Project(...)`：
+
+- 谎（行 running、进程不在）→ 当场对账成 interrupted，计数变 0，**同一个请求继续走**销毁与删行；
+- 真（注册表说活着）→ 保留原 409，行仍是 running。
+
+选择「当场修复并继续」而不是「返回一个让用户重试的特定错误」：修复本身是幂等、保守且已经证明安全的；让人先看一次 409 再点一次只是把内部状态机暴露给用户，而「我能删掉我的项目」是这条修复唯一要兑现的结果。失败的对账（store 错误）仍然让守卫拒绝——不是「修不了就放行」。
+
+### 4. fail-first
+
+- **Go（旧代码）**：`TestDeleteProjectReconcilesAStaleRunningSession` 在 `2ccc85f` 上跑：`delete answered 409, not 200 … (session status after the refusal: running)`，日志 `e2e/.artifacts/fix-reconcile/fail-first-go.log`。修复后同一测试 200，项目消失。`TestDeleteProjectStillRefusesALiveRun` 在旧代码上通过（旧守卫一律拒绝），修复后仍通过（这次是因为注册表说活着）。
+- **部署（旧镜像，未改库）**：`e2e/scripts/fix-reconcile-probe.mjs before` 对 `prj_01M68BZT60TFTGSJ64JAT29TZ7`：UI 删除 toast「删除失败 项目「probe-quota-before-1793429858000」还有 1 个会话正在运行…」、`DELETE /v1/projects/{id}` → **409**、库里 session 仍 `running`、run 仍 `started`、没有对账事件（`stuck-before.json`、截图 `stuck-before-delete-refused.png`）。
+
+### 5. 部署实测（同一个卷 `9ce20975…`）
+
+- 新镜像 `scripts/build-app-image.ps1` 构建（`sha256:7e829ca2…`），`pf-local` 在同一卷上重建（新容器 `760749a7…`，端口 7722→7700，`PIFORGE_DEFAULT_PROVIDER=volc`、`CapDrop=["CAP_DAC_OVERRIDE"]`、`CapAdd=null`、配额默认 2 GiB）。
+- 启动日志（端口打开前）：`interrupted an orphaned run phase=startup session=ses_01M68BZT649A02VBB8JVPCKFWS project=prj_01M68BZT60TFTGSJ64JAT29TZ7 runs=1 reason=服务重启，本次运行被中断`，随后 `session reconciliation at startup scanned=1 interrupted=1 runs=1 kept_live=0`（`deploy-after.log`、`startup-reconcile.log`）。
+- 数据库（只读查询，未手工改库）：session `running → interrupted`；run `run_18e38af5028a4fbb_3` `started → interrupted`，`interrupted_by=reconcile`、`completion_note=服务重启，本次运行被中断`；事件新增 `run.settled`（带 reason）与 `platform.error`（`code=run_interrupted`）。同项目里**早已正常结束**的 `run_18e38af45a3d90dd_2` 仍是 `settled`，没有被改写。
+- 之后 UI 删除同一项目：成功回到首页，`GET /v1/projects/{id}` → **404**，库里 project/session/run/event/sandbox 行全部为空（`stuck-after.json`、截图 `stuck-after-session-interrupted.png`、`stuck-after-deleted-home.png`）。
+- 说明：`stuck-after.json` 里有一条 `[BROKEN]` 是**探针断言写错了**（它要求项目里每一条 run 都变成 interrupted，包括崩溃前已经正常结束的那条）；产品事实在同一份 JSON 里，修正后的断言由 `node e2e/scripts/fix-reconcile-probe.mjs recheck` 在已删除项目的记录上重放，全部 `[ok]`（`stuck-after-recheck.json`、`probe-after-recheck-console.log`）。删除是不可逆的，没重跑一次 after 来掩盖这条断言错误。
+
+### 6. 测试
+
+- `backend/internal/reconcile/reconcile_test.go`
+  - `TestBootReconcileInterruptsAnOrphanedRun`：running 行 + started run、空注册表 → interrupted、run 落盘、两种事件带原因、日志含 `interrupted=1`；第二遍 `Scanned=0` 且事件数不变（幂等）。
+  - `TestReconcileLeavesALiveRunAlone`：注册表说活着，跑两遍（等于看门狗 tick 落在活跃回合旁）→ `kept_live=1`，session 仍 running、run 仍 started、0 事件。**这条就是演练期间「对账不得打扰活跃 run」的断言。**
+  - `TestWatchdogInterruptsARunWhoseProcessDied`：先活着（不修）→ 子进程消失 → 同一轮看门狗修成 interrupted（无重启的崩溃）。
+  - `TestReconcileWithoutARegistryInterruptsNothing`：没有注册表时保守不动并解释。
+  - `TestProjectReconcileTouchesOnlyItsOwnProject`：按项目对账不动别的项目。
+- `backend/internal/httpapi/project_delete_reconcile_test.go`：`TestDeleteProjectReconcilesAStaleRunningSession`（200）、`TestDeleteProjectStillRefusesALiveRun`（409，行仍 running）。
+- `web/lib/session/reduce.test.ts`：interrupted 的 `run.settled` 停流并显示原因；`web/lib/types.ts` + `format.ts` 增加 `interrupted` /「已中断」。
+- e2e `61-project-lifecycle.spec.ts` 的「a project with a running turn refuses to be deleted」改成**真正的活回合**（`[[hold-run]]` 经 API 发出并等到 `running`，再点删除），因为手改 status 的旧写法现在正是「谎」，会被对账修掉并放行——它不再能证明守卫。
+
+### 7. 边界（明确没做的）
+
+- **容器/远端 placement 的孤儿**：注册表是进程内的。如果 agent 跑在控制面之外（crashed runner 仍活着、沙箱里的 pi 在控制面重启后继续跑），新的控制面看不到它，会把它当作孤儿并标 interrupted。本部署是 `-sandbox local`（agent 是控制面子进程，重启即死），所以这条路径没有歧义；远端 placement 需要 runner 侧提供存活查询，本批没有做，也不假装做了。
+- 对账是「注册表说死」而不是「心跳超时」：没有一个跨进程的租约，所以一个在两次检查之间刚好起跑的回合，理论上仍有极小的窗口（注册表在 `Prompt` 前已经 spawn，因此窗口只在 `Alive` 检查与事务之间）；没有引入 grace 期，因为删除路径要的是「立刻可删」，而 grace 会把一个刚崩的回合继续钉住。
+- 不做自动重放：不重新提交用户消息，也不 resume Pi 的回合；只把「被中断」写成事实。
+- 停止的 run 的 token 统计仍是 0（进程没来得及上报），`completion_note` 是原因而不是 usage。
+
+### 8. 门禁（本批）
+
+- `go build ./...`：0；`go vet ./...`：0；`go test ./... -count=1`：全部包 ok、退出 0（新增 `internal/reconcile` 6 例、`httpapi/project_delete_reconcile_test.go` 2 例；`go-test.log`）。
+- `pnpm --dir web test -- --run`：**31 个文件 / 252 例通过**（新增 1 例）；`pnpm --dir web exec next build`：退出 0（`web-test.log`、`web-build.log`）。
+- 完整 e2e（同一份 `.data`）：**173 passed / 8.2m**（`e2e-full.log`）。用例数不变：`61-project-lifecycle.spec.ts` 的删除守卫用例从「手改 status」改成「真正的活回合」（`[[hold-run]]`），因为前者现在会被对账修掉并放行，已不能证明守卫。
+- 镜像只用 `scripts/build-app-image.ps1` 重建：`sha256:7e829ca294e842f697aa84b79521735cceccf5a4bc70aa3f112e2cd1b3c2a8b0`；`pf-local` 用**同一个数据卷** `9ce20975…` 重建（`760749a7…`），`CapDrop=["CAP_DAC_OVERRIDE"]`、`CapAdd=null`、`PIFORGE_DEFAULT_PROVIDER=volc`、配额默认 2 GiB（`deploy-before.log` / `deploy-after.log`）。
+- `pwsh scripts/deliver-check.ps1`（`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入，未打印、未落盘）：**GATE_DRILL**；一次性容器 `pf-drill` / volume `pf-drill-data` 已删除，`pf-local` 全程未被触碰；drill 的「source checkout is clean」守卫通过。
+- 证据目录：`e2e/.artifacts/fix-reconcile/`（`fail-first-go.log`、`go-test.log`、`go-reconcile-tests.log`、`web-test.log`、`web-build.log`、`build-image.log`、`deploy-before.log`、`deploy-after.log`、`startup-reconcile.log`、`stuck-before.json`、`stuck-after.json`、`stuck-after-recheck.json`、`probe-*-console.log`、`e2e-61.log`、`e2e-full.log`；截图 `stuck-before-confirm.png`、`stuck-before-delete-refused.png`、`stuck-after-session-interrupted.png`、`stuck-after-deleted-home.png`）。

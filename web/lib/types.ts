@@ -25,7 +25,11 @@ export type SessionStatus =
   | "paused"
   | "settled"
   | "failed"
-  | "archived";
+  | "archived"
+  // A run that was cut off when its agent process went away (a restart or a
+  // crash). The backend writes this only after proving nothing serves it; the
+  // reason arrives in the run.settled event's payload.
+  | "interrupted";
 
 export type SandboxState =
   | "CREATING"

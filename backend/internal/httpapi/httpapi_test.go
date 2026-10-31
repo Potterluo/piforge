@@ -19,6 +19,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/crypto"
+	"github.com/piforge/piforge/backend/internal/reconcile"
 	"github.com/piforge/piforge/backend/internal/store"
 )
 
@@ -96,6 +97,14 @@ func newTestEnv(t *testing.T) *testEnv {
 		SkillsDir: skillsDir,
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	// The delete guard asks the registry before trusting a "running" row. The
+	// fake answers "alive" unless a test says otherwise (see markDead), so this
+	// changes no existing expectation.
+	env.deps.Reconciler = reconcile.New(reconcile.Config{
+		Store:   st,
+		Runtime: env.runtime,
+		Logger:  env.deps.Logger,
+	})
 	env.rebuild()
 	return env
 }
@@ -354,6 +363,10 @@ type fakeRuntime struct {
 	// the process is alive but was never given a model configuration.
 	modelConfigMissing bool
 	stops              []string
+	// alive is the in-process registry the reconciler consults. Nil means
+	// "every session is alive", which keeps the seam invisible to tests that
+	// never mention it; a non-nil map answers per session.
+	alive map[string]bool
 }
 
 func newFakeRuntime() *fakeRuntime {
@@ -415,6 +428,36 @@ func (f *fakeRuntime) StartedModelConfig(_ string) (bool, bool) {
 		return false, false
 	}
 	return !f.modelConfigMissing, true
+}
+
+// Alive is the registry the reconciler treats as authoritative. An unset map
+// answers "alive" so tests that never touch the reconciler see no change.
+func (f *fakeRuntime) Alive(sessionID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.alive == nil {
+		return true
+	}
+	return f.alive[sessionID]
+}
+
+// markAlive / markDead say what the registry knows about one session.
+func (f *fakeRuntime) markAlive(sessionID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.alive == nil {
+		f.alive = map[string]bool{}
+	}
+	f.alive[sessionID] = true
+}
+
+func (f *fakeRuntime) markDead(sessionID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.alive == nil {
+		f.alive = map[string]bool{}
+	}
+	f.alive[sessionID] = false
 }
 
 func (f *fakeRuntime) Prompt(_ context.Context, req contracts.PromptRequest) (contracts.PromptResult, error) {

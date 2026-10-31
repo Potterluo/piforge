@@ -245,18 +245,33 @@ test("a project with a running turn refuses to be deleted", async ({ page }) => 
   const projectId = await ensureProject(page, name);
   const sessionId = await openSession(page, projectId, "busy session");
 
-  // Fake the running state through the API rather than racing a real turn: the
-  // fake peer can settle between the status poll and the click, which would
-  // test its speed instead of the guard. `status` is the same field the hub
-  // writes on run_started, so the guard is exercised exactly as in production.
-  const patched = await apiWrite(page, "PATCH", `/v1/sessions/${sessionId}`, {
-    status: "running",
-  });
-  expect(patched.status).toBeLessThan(300);
-
+  // A genuinely live turn, not a status patched by hand. The delete guard now
+  // asks the agent registry, so a "running" row with nothing behind it is
+  // repaired and the delete proceeds; that is the right behaviour, and it means
+  // this test has to hold a real process to exercise the refusal. The dialog is
+  // opened first and the [[hold-run]] prompt is sent last, so the paced fake
+  // peer cannot settle before the confirm click.
   await page.goto(`/p/${projectId}`);
   await page.getByTestId("project-actions").click();
   await page.getByTestId("project-delete").click();
+
+  const started = await apiWrite(page, "POST", `/v1/sessions/${sessionId}/messages`, {
+    client_msg_id: `cm_busy_${sessionId}`,
+    text: "hold this run open [[hold-run]]",
+  });
+  expect(started.status).toBe(200);
+  await expect
+    .poll(
+      async () => {
+        const res = await page.request.get(`/v1/sessions/${sessionId}`);
+        if (!res.ok()) return `http ${res.status()}`;
+        const body = (await res.json()) as { session: { status: string } };
+        return body.session.status;
+      },
+      { timeout: 20_000 },
+    )
+    .toBe("running");
+
   await page.getByTestId("project-delete-confirm").click();
 
   const toast = page.locator("[data-sonner-toast]").filter({ hasText: "删除失败" });
@@ -272,9 +287,21 @@ test("a project with a running turn refuses to be deleted", async ({ page }) => 
   expect(refused.status).toBe(409);
   expect((refused.body as { error: { message: string } }).error.message).toContain("正在运行");
 
-  // Let the fake turn end, then clean up so the suite does not accumulate.
-  const idle = await apiWrite(page, "PATCH", `/v1/sessions/${sessionId}`, { status: "idle" });
-  expect(idle.status).toBeLessThan(300);
+  // Stop the real turn, then the same request finishes. Interrupting also
+  // proves the refusal was about a live agent, not about the row.
+  const stopped = await apiWrite(page, "POST", `/v1/sessions/${sessionId}/interrupt`, {});
+  expect(stopped.status).toBeLessThan(300);
+  await expect
+    .poll(
+      async () => {
+        const res = await page.request.get(`/v1/sessions/${sessionId}`);
+        if (!res.ok()) return "gone";
+        const body = (await res.json()) as { session: { status: string } };
+        return body.session.status;
+      },
+      { timeout: 20_000 },
+    )
+    .not.toBe("running");
   const gone = await apiWrite(page, "DELETE", `/v1/projects/${projectId}`);
   expect(gone.status).toBeLessThan(300);
 });

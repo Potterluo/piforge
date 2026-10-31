@@ -126,6 +126,11 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS sessions_user_active ON sessions (user_id, last_active_at DESC);
 CREATE INDEX IF NOT EXISTS sessions_root ON sessions (root_id);
 CREATE INDEX IF NOT EXISTS sessions_project ON sessions (user_id, project_id);
+-- The reconciler (internal/reconcile) sweeps whatever claims a turn is in
+-- flight on boot and once per watchdog interval. A partial index keeps that
+-- pass proportional to the runs actually stuck, not to every session the
+-- deployment has ever created.
+CREATE INDEX IF NOT EXISTS sessions_running ON sessions (status) WHERE status = 'running';
 
 -- ============ runs (one prompt -> agent_settled) ============
 CREATE TABLE IF NOT EXISTS runs (

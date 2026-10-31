@@ -49,6 +49,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/pimodel"
 	"github.com/piforge/piforge/backend/internal/provision"
 	"github.com/piforge/piforge/backend/internal/reaper"
+	"github.com/piforge/piforge/backend/internal/reconcile"
 	"github.com/piforge/piforge/backend/internal/sandbox"
 	"github.com/piforge/piforge/backend/internal/snapshot"
 	"github.com/piforge/piforge/backend/internal/store"
@@ -140,6 +141,10 @@ type options struct {
 	sandboxDiskQuota int64
 	// skillMaxBytes caps the total a single skill import may expand (FR-5.8).
 	skillMaxBytes int64
+	// sessionReconcileInterval is how often the watchdog compares persisted
+	// "running" rows with the in-process agent registry. Zero keeps the boot
+	// pass but disables the periodic one.
+	sessionReconcileInterval time.Duration
 }
 
 // defineParallelLimit registers the FR-3.3 knob on fs. It lives in one function so
@@ -236,6 +241,9 @@ func run() error {
 		"how often the sandbox idle reaper checks for candidates")
 	flag.DurationVar(&opt.sandboxSweep, "sandbox-sweep", envDuration("PIFORGE_SANDBOX_SWEEP", 10*time.Minute),
 		"how often sandbox directories with no project row are removed, at startup and then on this interval (0 disables, local provider only)")
+	flag.DurationVar(&opt.sessionReconcileInterval, "session-reconcile-interval",
+		envDuration("PIFORGE_SESSION_RECONCILE_INTERVAL", 30*time.Second),
+		"how often sessions that claim a run is in flight are checked against the live agent registry (0 disables the periodic pass; the startup pass always runs)")
 	flag.StringVar(&opt.sandboxKind, "sandbox", envOr("PIFORGE_SANDBOX", "local"),
 		"sandbox provider: local (directories), docker (one container per project, CLI here) or runner (a sandbox-runner service runs the CLI)")
 	flag.StringVar(&opt.sandboxBrowser, "sandbox-browser", envOr("PIFORGE_SANDBOX_BROWSER", "auto"),
@@ -874,6 +882,16 @@ func run() error {
 	}
 
 	// 7. HTTP.
+	//
+	// Reconciliation is built before the router because the delete guard uses the
+	// same instance: "running" must mean "an agent serves it", not "a row says
+	// so", on both the boot path and the on-demand path.
+	rec := reconcile.New(reconcile.Config{
+		Store:   st,
+		Runtime: rt,
+		Logger:  logger,
+		Now:     time.Now,
+	})
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Store:              st,
 		Auth:               authn,
@@ -898,6 +916,7 @@ func run() error {
 		Provisioner:        prov,
 		SetupDefaults:      setupDefaults,
 		BrowserTakeoverTTL: opt.browserTakeoverTTL,
+		Reconciler:         rec,
 		Now:                time.Now,
 		Logger:             logger,
 	})
@@ -911,6 +930,29 @@ func run() error {
 	}
 
 	errCh := make(chan error, 1)
+
+	// Restart reconciliation, before the port is open. A process that was running
+	// a turn when the previous control plane died leaves sessions.status='running'
+	// and runs.status='started' with no agent behind either. Nothing else repairs
+	// that: the UI shows a run that never ends, and the delete guard refuses the
+	// project forever. The pass is bounded and never fatal — a failure is logged
+	// and the server still starts, because a stale row must not keep the
+	// deployment down.
+	bootCtx, bootCancel := context.WithTimeout(ctx, 30*time.Second)
+	report, rerr := rec.Run(bootCtx, reconcile.ReasonRestart, "startup")
+	bootCancel()
+	if rerr != nil {
+		logger.Warn("session reconciliation at startup failed; stale rows were left as they are",
+			"error", rerr.Error())
+	}
+	logger.Info("session reconciliation at startup",
+		"scanned", report.Scanned,
+		"interrupted", report.Interrupted,
+		"runs", report.Runs,
+		"kept_live", report.Live,
+		"watchdog", opt.sessionReconcileInterval.String())
+	go rec.Start(ctx, opt.sessionReconcileInterval)
+
 	// Idle agents are stopped on their own (FR-5.x): a session keeps its process warm
 	// for speed, but nothing else bounded how many of those a long-lived deployment
 	// accumulates. The default is generous; the e2e harness sets it low so a suite of

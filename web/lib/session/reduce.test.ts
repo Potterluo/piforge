@@ -271,6 +271,24 @@ describe("completion signal", () => {
     expect(state.running).toBe(false);
     expect(state.turns[0].streaming).toBe(false);
   });
+
+  it("an interrupted settle stops the run and shows why it was cut off", () => {
+    // The reconciler's run.settled carries the restart reason; the transcript
+    // must say it instead of silently returning to idle.
+    const state = reduceAll([
+      event(EV.turnStarted, {}, { seq: 1 }),
+      delta(2, "turn-1", 0, "说到一半"),
+      event(
+        EV.runSettled,
+        { status: "interrupted", reason: "服务重启，本次运行被中断" },
+        { seq: 3 },
+      ),
+    ]);
+
+    expect(state.running).toBe(false);
+    expect(state.streaming).toBe(false);
+    expect(state.error).toBe("服务重启，本次运行被中断");
+  });
 });
 
 describe("sequence discipline", () => {

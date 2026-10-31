@@ -74,13 +74,14 @@ type SessionPatch struct {
 
 // statuses is the closed set of session statuses (contracts.SessionStatus).
 var sessionStatuses = map[contracts.SessionStatus]bool{
-	contracts.StatusActive:   true,
-	contracts.StatusRunning:  true,
-	contracts.StatusIdle:     true,
-	contracts.StatusPaused:   true,
-	contracts.StatusSettled:  true,
-	contracts.StatusFailed:   true,
-	contracts.StatusArchived: true,
+	contracts.StatusActive:      true,
+	contracts.StatusRunning:     true,
+	contracts.StatusIdle:        true,
+	contracts.StatusPaused:      true,
+	contracts.StatusSettled:     true,
+	contracts.StatusFailed:      true,
+	contracts.StatusArchived:    true,
+	contracts.StatusInterrupted: true,
 }
 
 // CreateSession inserts a session owned by userID.

@@ -13,6 +13,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/reconcile"
 	"github.com/piforge/piforge/backend/internal/sandbox"
 	"github.com/piforge/piforge/backend/internal/skillsnap"
 	"github.com/piforge/piforge/backend/internal/store"
@@ -331,6 +332,25 @@ func (s *server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	// A live turn is not a sandbox state: deleting the row underneath it kills
 	// work the user is watching and there is no undo. Refuse and say what to
 	// stop first instead of stopping it for them.
+	//
+	// "Running" in SQLite is not by itself a live turn. A process that died (a
+	// restart, a crash) leaves the row saying running with nothing behind it,
+	// and believing that row made the project permanently undeletable. Ask the
+	// in-process registry first and repair the rows it proves stale; only a
+	// session the runtime actually serves is allowed to refuse this delete.
+	if s.deps.Reconciler != nil {
+		report, rerr := s.deps.Reconciler.Project(r.Context(), user.ID, projectID,
+			reconcile.ReasonProcessGone, "delete")
+		if rerr != nil {
+			// A failed repair is not permission to proceed: the guard below still
+			// sees the row and refuses, which is the safe outcome.
+			s.log.WarnContext(r.Context(), "delete project: reconciling stale runs failed",
+				"project", projectID, "error", rerr.Error())
+		} else if report.Interrupted > 0 {
+			s.log.InfoContext(r.Context(), "delete project: repaired stale running sessions",
+				"project", projectID, "sessions", report.Interrupted, "runs", report.Runs)
+		}
+	}
 	if running, err := s.deps.Store.RunningSessionCount(r.Context(), user.ID, projectID); err != nil {
 		s.fail(w, r, err)
 		return
