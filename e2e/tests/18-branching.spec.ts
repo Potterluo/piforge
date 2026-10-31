@@ -78,6 +78,43 @@ test.describe("branching", () => {
     await actions.click();
     await expect(page.getByTestId("session-rename")).toBeVisible({ timeout: 20_000 });
   });
+
+  /**
+   * The acceptance pass opened this dialog, found 创建分支 greyed out, and had
+   * nothing on screen telling it that 分支名称 was the missing piece — the
+   * placeholder is an example, not a requirement. The helper line (and the
+   * button's title) is the fix: a disabled control must say why.
+   */
+  test("the fork dialog explains that the name is required", async ({ page }) => {
+    await login(page, USER);
+    const parentId = await openNewSession(page);
+    await sendPrompt(page, "fork dialog hint");
+
+    await page.getByRole("button", { name: "分支", exact: true }).click();
+    const fork = page.getByRole("button", { name: "从这里分叉" }).first();
+    await expect(fork).toBeVisible({ timeout: 30_000 });
+    await fork.click();
+
+    const hint = page.getByTestId("fork-label-hint");
+    await expect(hint).toBeVisible();
+    await expect(hint).toContainText("必填");
+
+    const submit = page.getByTestId("fork-submit");
+    await expect(submit).toBeDisabled();
+    await expect(submit).toHaveAttribute("title", "请先填写分支名称");
+
+    await page.getByTestId("fork-label").fill(`hint-${Date.now()}`);
+    await expect(submit).toBeEnabled();
+    await expect(submit).not.toHaveAttribute("title", /.+/);
+    await submit.click();
+
+    // The button does what the hint promised.
+    await expect.poll(() => page.url(), { timeout: 30_000 }).not.toContain(`/s/${parentId}`);
+    // During the navigation the old and the new workbench can both be in the
+    // document for a frame, so assert on the first composer rather than strict
+    // uniqueness.
+    await expect(page.getByTestId("composer-input").first()).toBeVisible({ timeout: 40_000 });
+  });
 });
 
 /** Waits for the fork points the agent reports, and returns the one at `index`. */

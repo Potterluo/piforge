@@ -84,8 +84,15 @@ function ForkForm({
           value={label}
           onChange={(event) => setLabel(event.target.value)}
           placeholder="例如：fix-cache-v2"
+          aria-describedby="fork-label-hint"
+          aria-required="true"
           autoFocus
         />
+        {/* Without this the button is disabled with no reason: the acceptance
+            pass clicked 创建分支, nothing happened, and nothing said why. */}
+        <p id="fork-label-hint" data-testid="fork-label-hint" className="text-xs text-muted-foreground">
+          分支名称必填：它同时用作新分支的标签和 worktree 名，填写后「创建分支」才可用。
+        </p>
       </Field>
 
       <DialogFooter>
@@ -95,6 +102,7 @@ function ForkForm({
         <Button
           data-testid="fork-submit"
           disabled={fork.isPending || label.trim().length === 0}
+          title={label.trim().length === 0 ? "请先填写分支名称" : undefined}
           onClick={() => fork.mutate()}
         >
           {fork.isPending ? <Spinner /> : <GitFork />}
