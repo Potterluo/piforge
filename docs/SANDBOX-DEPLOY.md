@@ -1294,6 +1294,215 @@ docker exec piforge ls /data -> gateway.key master.key pi-agents piforge.db … 
 - 补发窗口内的字节会重复投递一次（有界：一个 socket 缓冲，不是整个 run）；
 - 阶段四（删掉 flag、删掉 host spawn、K8s `pods/exec` provider）没有开始。
 
+### 1.4.6 阶段四：只留下一条执行路径，stdio 的拒绝变成产品行为（2026-11-01）
+
+阶段三把默认翻过来之后，`-agent-in-sandbox=false` 仍然能选回"agent 跑在控制面旁边"那条路。
+阶段四把这条路**删掉**，把唯一还靠日志说明的凭据缺口（stdio MCP）变成产品里的可见状态，
+并且把三把密钥的丢失后果实测了一遍。设计取舍写在 `docs/EXECUTION-BOUNDARY.md` §11。
+
+**形状（现在只有两种执行，且都由 provider 决定）**：
+
+```
+-sandbox docker|runner  →  agent 永远在沙箱里（supervisor + agent-launcher + pi）
+-sandbox local          →  agent 是控制面的子进程（开发/演练路径，未改动）
+```
+
+- **flag 退休，不是被忽略**：`-agent-in-sandbox=false`（或 `PIFORGE_AGENT_IN_SANDBOX=0`，
+  老 compose 文件里最常见的就是它）在 docker/runner 下是**启动错误**，报文直接写清楚原因
+  （agent 在控制面旁边就能读 `/data`）和出路（`-sandbox local`）。`true` 是 no-op，
+  所以已有 compose 文件继续可用；local 下的残留 `=1` 只警告一次。
+- **删掉的代码**（逐条 file + symbol 见 `docs/EXECUTION-BOUNDARY.md` §11.3）：
+  `sessionAgentLauncher`、`pi.RuntimeConfig.WrapArgv`、`liveness.LauncherArgv`、
+  `agentGitEnv`/`agentCheckoutDirs`、`resolveAgentInSandbox`，以及只用来在两条路之间
+  切换的接线。`-sandbox local` 需要的路径一条没动（本地子进程、无 marker、in-process registry）。
+- **stdio MCP 的诚实答案**：不搬进沙箱（凭据就得进容器），也不搬到控制面（那是把租户代码
+  放到数据库旁边），而是**拒绝并把拒绝显示出来**：`GET /v1/mcp/servers` 返回
+  `agent_isolated` 与 `unavailable{name:{code,reason}}`，MCP 面板显示
+  「stdio MCP 服务器在隔离模式下不可用：<原因>」，会话的 `.pi/mounted.json` 用
+  `mcp_unavailable` 记录它，并且不把它写进 `mcp_servers`。判定只有一个地方
+  （`internal/mcpstage`），面板、manifest、启动日志用同一句话。
+
+#### 实测（Windows 11 / Docker Desktop，7724，compose 默认隔离实例；镜像 `piforge:stage4`）
+
+三个镜像都是这一棵树（控制面 `sha256:9e44d0b207a1…`）：
+
+```powershell
+pwsh scripts/build-app-image.ps1 -Tag piforge:stage4
+docker build -f deploy/Dockerfile.runner -t piforge/sandbox-runner:stage4 .
+docker build -f deploy/Dockerfile.sandbox-agent --build-arg AGENT_IMAGE=piforge:stage4 -t piforge/sandbox-agent:stage4 .
+```
+
+启动就是 `docker compose -f docker-compose.runner.yml up -d`，只额外给了镜像 tag、端口
+7724、独立数据卷 `pf-stage4-data`、种子账号、runner token 和 volc provider（密钥从
+`~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读进进程环境，从未打印）：
+
+```
+startup: sandbox placement resolved sandbox=runner browser=remote terminal=remote files=remote
+startup: the agent runs inside the sandbox sandbox=runner user=gem pi=pi launcher=/opt/piforge/piforged
+startup: reattached to surviving agents count=0
+docker inspect piforge -> 只有 pf-stage4-data -> /data
+```
+
+**1. 一条真实 prompt：写入、跑测试、提交，全在沙箱里**
+
+`写一个 Node 脚本 primes.js 打印前 10 个素数，配一个 test.js 并运行它，然后 git commit`
+（`send` 1069 ms 接受）：
+
+```
+settled=True after 17s  process_id=6533
+session_file=/workspace/.piforge/sessions/ses_01M69MNMJZV2QNP1M520N5DBF9.jsonl
+transcript: write primes.js -> edit test.js -> bash(node test.js) -> bash(git commit)
+toolResult: [main bba9ff9] Add primes.js and prime tests / 2 files changed, 43 insertions(+)
+docker exec -u gem <sandbox> git -C /workspace/repo log --oneline -1
+  bba9ff9 Add primes.js and prime tests
+```
+
+`process_id` 是沙箱里的 `pi` pid；`session_file` 是容器路径（工作区只有沙箱看得到）。
+
+**2. 进程与文件系统边界（同一实例）**
+
+```
+docker exec piforge ps -ef | grep -c 'pi --mode'                       -> 0
+docker exec -u gem <sandbox> ps -o pid,ppid,args                      -> agent-supervisor(2099)
+                                                                          agent-launcher(2107)
+                                                                          pi(2116)
+docker exec -u gem <sandbox> ls /data                                 -> No such file or directory
+docker exec -u gem <sandbox> head -c 8 /data/piforge.db               -> cannot open
+```
+
+**3. stdio MCP：产品里说得出来，沙箱里什么都没有**
+
+配了一个 http（`stage4docs`，假凭据 `sk-stage4-http-fake…`）和一个 stdio
+（`stage4fs`，假凭据 `sk-stage4-stdio-fake…`）。`GET /v1/mcp/servers`：
+
+```json
+{"agent_isolated": true,
+ "unavailable": {"stage4fs": {"code": "stdio_needs_credentials_in_the_sandbox",
+   "reason": "a stdio MCP server is a process Pi starts inside the sandbox, and it
+              authenticates with credentials in its own environment; the sandbox has no
+              egress point where the control plane could inject them … Use an HTTP MCP
+              server instead …"}}}
+```
+
+沙箱里那个会话的 `mcp.json`（只有被代理的 http server，token 每会话一个）：
+
+```json
+{"mcpServers":{"stage4docs":{"url":"http://piforge:7700/gw/mcp/dmNX2AFc5dqspuMychXeFWkNhABXsQfPEAptaTQu5L8"}}}
+```
+
+会话的挂载记录（`docker exec -u gem <sandbox> cat /workspace/repo/.pi/mounted.json`）：
+
+```json
+{"skills":["code-review","explain-codebase","test-gap"],
+ "mcp_servers":["stage4docs"],
+ "mcp_written":true,
+ "mcp_unavailable":{"stage4fs":{"code":"stdio_needs_credentials_in_the_sandbox","reason":"…"}}}
+```
+
+同一个会话的 `GET /v1/sessions/{id}/tooling` 返回同样的 `mcp_unavailable`（未 provision 的
+会话也能回答，因为它是算出来的，不是只读 manifest）。
+
+**凭据没有进沙箱**（每条都是命令 + 计数）：
+
+```
+文件里出现真实 provider key（pattern 走 stdin，不出现在 argv）：
+  grep -rlF -f - --exclude-dir=proc --exclude-dir=sys /   (as root) -> 0 files
+沙箱环境里出现 provider key：
+  env | grep -c -E '^(VOLCE|PIFORGE_BOOTSTRAP_PROVIDER_KEY)='           -> 0
+两个假 MCP 凭据（http/stdio）：
+  grep -rl -e sk-stage4-http-fake -e sk-stage4-stdio-fake /workspace /home/gem /tmp /opt -> 0 files
+stdio server 的启动命令（server-filesystem）在 /workspace 里                  -> 0 files
+```
+
+**4. 阶段四的拒绝就在启动时（`docker run --entrypoint /app/bin/piforged piforge:stage4 …`）**
+
+```
+-sandbox runner -agent-in-sandbox=false
+  ERROR piforged exited with an error err="-agent-in-sandbox=false is not available for
+  -sandbox runner: the agent always runs inside the sandbox … run -sandbox local for an
+  unsandboxed development deployment"
+PIFORGE_AGENT_IN_SANDBOX=0（同上）
+PIFORGE_AGENT_IN_SANDBOX=maybe
+  ERROR … err="PIFORGE_AGENT_IN_SANDBOX must be 0 or 1, got \"maybe\""
+-sandbox local -agent-in-sandbox            -> 启动，日志一行 WARN 说这个开关对 local 无效
+-sandbox local（不做任何事）                -> 正常启动，agent 是子进程
+```
+
+**5. 三把密钥：丢一个会发生什么（每次都是 mv 走 → 重启 → 发一条 prompt → 恢复 → 再发）**
+
+| 密钥（`/data`，0600，32 字节） | 谁用它 | 实测丢失后的错误 |
+|---|---|---|
+| `master.key` | `crypto.Box`：provider API key（`providers.key_cipher`）与 PR token | `400 {"code":"provider_unavailable","message":"stored key cannot be decrypted"}`（run 的 `stopReason=error`） |
+| `gateway.key` | `llmgw` 的 HMAC：每个会话的模型网关 token | 活着的 agent 用它启动时拿到的 token：`401 {"code":"invalid_token","message":"invalid or expired token"}`；**新会话来同样一条 prompt 正常** |
+| `secret.key` | store 的 `secretBoxFor`：沙箱 API key（`sandboxes.api_key_cipher`）、MCP 凭据（`mcp_servers.secrets_cipher`）、MCP broker token | `POST /messages` → 500，日志 `store: open sandbox api key: cipher: message authentication failed`；同时活着的 agent 打 broker 得到 `could not read the MCP credential: cipher: message authentication failed` |
+
+三把都恢复（`mv` 回去、重启）之后：`tooling` 又能读到 manifest
+（`mounted.skills=code-review,explain-codebase,test-gap`、`mounted.mcp_servers=stage4docs`、
+`mcp_unavailable=stage4fs`），同一个会话再发一条 prompt 正常返回 `ok`。
+
+`gateway.key` 那一轮里有两个值得记住的事实：`docker restart` 只花 1260 ms，沙箱容器和
+里面 7 个 `pi` 进程一个没动；以及"新会话正常、仅旧 token 失效"——这就是为什么轮换
+`gateway.key` 之后必须重启（或等它自然重启）持有旧 token 的 agent。
+
+**6. 备份与恢复（同一条命令，实测走通一遍）**
+
+```powershell
+# 备份：一条命令，整个状态卷（db + 三把密钥 + 配置）
+docker run --rm -v pf-stage4-data:/data -v ${PWD}:/backup alpine:3.20 `
+  tar czf /backup/pf-stage4-backup.tar.gz -C /data .
+# 230694 bytes；tar tzf 里有 ./piforge.db ./master.key ./gateway.key ./secret.key
+
+# 恢复：解到一个全新卷，用同一棵树起第二个实例（7723）
+docker volume create pf-stage4-restore
+docker run --rm -v ${PWD}:/backup -v pf-stage4-restore:/data alpine:3.20 `
+  sh -c "cd /data && tar xzf /backup/pf-stage4-backup.tar.gz"
+docker run -d --name pf-stage4-restore --network piforge_sandbox-control -p 7723:7700 `
+  -v pf-stage4-restore:/data --cap-drop DAC_OVERRIDE `
+  -e PIFORGE_DATA=/data -e PIFORGE_GATEWAY_URL=http://pf-stage4-restore:7700 `
+  -e PIFORGE_SANDBOX=runner -e PIFORGE_SANDBOX_RUNNER_URL=http://sandbox-runner:7801 `
+  -e "PIFORGE_SANDBOX_RUNNER_TOKEN=$tok" -e PIFORGE_SANDBOX_IMAGE=piforge/sandbox-agent:stage4 `
+  -e PIFORGE_SANDBOX_NETWORK=piforge-sandboxes -e PIFORGE_DEFAULT_PROVIDER=volc piforge:stage4
+docker network connect piforge-sandboxes pf-stage4-restore
+```
+
+恢复实例的实测：`/healthz` 200，**没有**重新 seed（`created the first admin account` 没有出现，
+说明 DB 是从备份来的），登录后项目列表里就是 `stage4-isolated`，在同一项目里新建会话、发
+`只回复 ok`，`stopReason=stop`、正文 `ok` —— 即恢复出来的 `master.key` 还能解开 provider key，
+`gateway.key` 也还能签发/校验 token。
+
+**7. `-sandbox local` 与演练（这一轮没有被阶段四影响）**
+
+`pwsh scripts/deliver-check.ps1 -Image piforge:stage4` 走的就是 local 放置，
+`-sandbox local` 的代码路径一条都没删：本地子进程、无 heartbeat marker、in-process registry。
+`pf-local`（7722）全程没有被碰。
+
+#### 本轮门禁与清理（阶段四）
+
+| 门 | 结果 |
+|---|---|
+| `go build ./...` / `go vet ./...` | 干净 |
+| `go test ./... -count=1` | 全部包 ok（新增 `internal/mcpstage` 5 例、`materialize` 的 manifest 一例、`httpapi` 的 panel/tooling 两例（隔离/本地各一遍）、`cmd/piforged` 的 `TestRejectDisabledIsolation` 13 条；删除 `pi/wrap_test.go` 与 `agent_git_env_test.go`） |
+| `pnpm --dir web test -- --run` | **276 / 276**（35 文件；新增 `web/lib/mcp.test.ts` 4 例） |
+| `pnpm --dir web exec next build` | 通过 |
+| `pnpm --dir e2e test` | **182 / 182 passed（8.7m）**，exit 0 |
+| `pwsh scripts/deliver-check.ps1 -Image piforge:stage4` | 见本节末的最后一跑 |
+
+**关于演练的两次记录，写清楚免得被误读**：这一轮第一次跑演练时，唯一的失败项是
+`the source checkout is clean after the drill`——因为阶段四自己的改动还没提交，脚本看到
+`git status` 非空就觉得是它弄脏了仓库（`118 PASS / 1 FAIL`，run `20261101-030116`，
+其余 118 条全过，包括 `pf-local` 前后同 id、`/healthz` 200、临时容器/卷都清掉、密钥在所有
+文本 artifact 里 0 次）。把这一棵树的改动提交后再跑一次，就是下表这一次：
+
+| 演练 | 结果 |
+|---|---|
+| `pwsh scripts/deliver-check.ps1 -Image piforge:stage4` | run `20261101-030532`：**119 PASS / 0 FAIL**，`failure` 为空，101.9 s，镜像 `sha256:3bff909b7fc4…`（本仓库这一棵树的构建；演练用 local 放置，`the source checkout is clean after the drill` 为 `<clean>`） |
+
+`pf-local`（7722）前后同一个容器 id `7dc14e4a7525…`、`/healthz` 200。一次性实例已删：
+compose 栈（`piforge` / `piforge-sandbox-runner` / `piforge-sandbox-image`）、恢复实例
+`pf-stage4-restore`、沙箱容器（只按 `^piforge-[0-9a-f]+$` 删）、数据卷 `pf-stage4-data` /
+`pf-stage4-restore` / `piforge-ws-e88ac70dc907f95d`、网络 `piforge_default` /
+`piforge_sandbox-control` / `piforge-sandboxes`。宿主机上的备份 tar（含三把密钥）用后即删。
+
 
 ### 1.5 推荐方案下仍然会坏的地方（这一节是重点）
 

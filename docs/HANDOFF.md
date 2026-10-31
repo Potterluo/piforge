@@ -102,15 +102,82 @@ served. `/v1/admin/status` (admin only) is the operational truth — see below.
 
 ## Operate it
 
+### Keys: what each one protects, and what breaks when it is lost
+
+`/data` holds **three** 32-byte keys, all `0600`, all created on first use. They are not
+interchangeable, and losing one breaks a different part of the product (measured on a
+throwaway isolated instance, `docs/SANDBOX-DEPLOY.md` §1.4.6 — every row below is an
+error that was actually served, not a reading of the code):
+
+| File | What it is | Losing it (measured) | Rotating it |
+|---|---|---|---|
+| `master.key` | `crypto.Box`: seals provider API keys (`providers.key_cipher`) and PR tokens | The next run fails at the model call: `400 {"code":"provider_unavailable","message":"stored key cannot be decrypted"}`. Every provider key must be re-entered. | Same as losing it — the file *is* the key. Re-enter the keys after. |
+| `gateway.key` | HMAC for the per-session model-gateway tokens (`<gateway>/gw/llm/<token>`) | An agent that is still running (it holds the token it started with) gets `401 {"code":"invalid_token","message":"invalid or expired token"}`. **New sessions work**, because they get a token signed with the new key. | Same: every token issued before the rotation is invalid. Restart the affected agents (or wait for their idle TTL) so they get a fresh one. |
+| `secret.key` | store `secretBoxFor`: sandbox API keys (`sandboxes.api_key_cipher`), MCP credentials (`mcp_servers.secrets_cipher`), MCP broker tokens | `POST /messages` → 500 with `store: open sandbox api key: cipher: message authentication failed`; the MCP broker answers `could not read the MCP credential: cipher: message authentication failed`. Existing sandboxes cannot be reached by the panels; the file is re-created on the next seal, so the deployment *looks* healthy while the old sandboxes are dead to it. | Same, and it is the nastiest of the three: recreate the sandboxes and re-enter the MCP credentials. |
+
+Consequences worth stating in one place:
+
+- **Nothing else in `/data` can rebuild them.** They are random, generated once, never
+  derived from the database or from each other.
+- **`gateway.key` is the only one whose loss is survivable without re-entering
+  anything** — the cost is that every live agent's model calls fail until it restarts
+  with a new token. That is exactly why it lives on the data volume (stage 3) and why a
+  restarted control plane keeps its survivors working.
+- **A backup is the database *and* all three keys, taken together.** A database without
+  them restores into a deployment whose provider keys, sandbox keys and MCP credentials
+  are all unreadable.
+
+Backup (stop the control plane first — the archive must not capture a WAL in flight; the
+sandbox agents keep running while it is down, which is what stage 3 bought):
+
+```powershell
+docker stop piforge
+docker run --rm -v piforge-data:/data -v ${PWD}:/backup alpine:3.20 `
+  tar czf /backup/piforge-$(Get-Date -Format yyyyMMdd-HHmm).tar.gz -C /data .
+docker start piforge
+# contains: piforge.db, master.key, gateway.key, secret.key, skills/, pi-agents/, snapshots/
+```
+
+Restore, verified end to end this round (a fresh volume, a second instance on 7723, the
+same project list, and a real prompt that answers — §1.4.6 item 6):
+
+```powershell
+docker volume create piforge-restored
+docker run --rm -v ${PWD}:/backup -v piforge-restored:/data alpine:3.20 `
+  sh -c "cd /data && tar xzf /backup/piforge-<stamp>.tar.gz"
+# then start the control plane against that volume with the SAME environment
+```
+
+Rotation, in the order that keeps the downtime honest:
+
+1. **`gateway.key`** — stop the control plane, `mv /data/gateway.key
+   /data/gateway.key.old`, start it. The new key is created on boot; every live agent's
+   next model call fails with 401 until its process is restarted (`DELETE` the session's
+   agent by pausing the sandbox, or wait for `-agent-idle-ttl`). Delete the old file once
+   no agent from that era is running.
+2. **`master.key`** — rotating it invalidates every sealed provider key: stop, move the
+   file aside, start, then re-enter each provider key in Settings → Providers (and any PR
+   token). There is no re-encryption path; the old blobs are unreadable by design.
+3. **`secret.key`** — rotating it invalidates every sandbox API key and every MCP
+   credential: stop, move it aside, start, then recreate sandboxes (the panels cannot
+   talk to the old containers) and re-enter MCP credentials. Cheaper alternative: keep the
+   file and rotate only the MCP credentials that matter.
+
 ### Data directory (`/data` inside the container)
 
 ```
-/data/master.key            32 bytes, 0600, generated on first boot
+/data/master.key            32 bytes, 0600, generated on first boot: seals provider keys
+                            and PR tokens (crypto.Box)
 /data/gateway.key           32 bytes, 0600, generated on first boot: the HMAC key for the
                             per-session model-gateway tokens. It lives on the data volume
                             so an agent that outlives a control-plane restart keeps using
                             the token it was started with (stage 3). Losing it invalidates
-                            every outstanding token, exactly like losing master.key.
+                            every outstanding token — but only those: new sessions work.
+/data/secret.key            32 bytes, 0600, created when the first sandbox (or MCP server)
+                            is stored: seals sandbox API keys, MCP credentials and MCP
+                            broker tokens. Losing it makes every existing sandbox
+                            unreachable and every MCP credential unreadable; it is then
+                            re-created silently on the next seal.
 /data/piforge.db            SQLite; 5.2 MB + 4.2 MB -wal + 32 KB -shm at 7 sessions / 6 projects
 /data/artifacts/            screenshots and other session artifacts (<session>/screenshots/…)
 /data/pi-agents/<session>/  per-session agent config: auth.json, mcp.json, models.json, models-store.json
@@ -423,6 +490,37 @@ Ordered roughly by how much they will hurt. Nothing here is softened.
    what the `-sandbox` default selects. Stage 4 (removing the flag, the host spawn and the
    K8s `pods/exec` provider) has not started; the remaining limits are listed in
    `EXECUTION-BOUNDARY.md` §10.1.
+
+   **Stage 4 is done (2026-11-01), and the sandboxed execution is now the only one.**
+   Three things changed, and one thing is still missing:
+
+   - **the switch is gone.** `-agent-in-sandbox` no longer selects anything: a container
+     placement always runs the agent inside its sandbox, `-sandbox local` never does.
+     `-agent-in-sandbox=false` (or `PIFORGE_AGENT_IN_SANDBOX=0`, which is what an older
+     compose file carries) is now a **startup error** that names the flag, the reason
+     (an agent beside the control plane can read `/data`) and the way to run unsandboxed
+     on purpose. `true` is a no-op; on `-sandbox local` a stale `=1` is one warning.
+     Measured on 7724 (`SANDBOX-DEPLOY.md` §1.4.6 item 4).
+   - **the dead path is deleted**, file by file in `EXECUTION-BOUNDARY.md` §11.3:
+     `sessionAgentLauncher`, `pi.RuntimeConfig.WrapArgv`, `liveness.LauncherArgv`,
+     `agentGitEnv`/`agentCheckoutDirs`, `resolveAgentInSandbox`, plus the wiring that only
+     existed to choose between the two executions. `-sandbox local` — the development and
+     delivery-drill path — lost nothing: child process, no marker, in-process registry,
+     and the full e2e + drill still pass (§1.4.6 has the gates).
+   - **stdio MCP is refused in the product, not just in the log.** The panel says
+     「stdio MCP 服务器在隔离模式下不可用」 with the reason, the tooling answer carries the same
+     map, and the checkout's `.pi/mounted.json` records it in `mcp_unavailable` while
+     keeping the server out of `mcp_servers`. The reasoning for refusing rather than
+     running it in the sandbox (or on the control plane) is written out in
+     `EXECUTION-BOUNDARY.md` §11.1; the evidence — API output, the manifest inside the
+     sandbox, and 0 grep hits for a fake stdio credential and for the real provider key —
+     is in `SANDBOX-DEPLOY.md` §1.4.6 item 3.
+   - **what is still missing for a production claim:** the `ps`/`/data` proofs ran on
+     Windows + Docker Desktop, not a Linux host; there is no K8s provider (`pods/exec`);
+     and the stage-2 gaps (`worktrees.base_commit`, the idle-reclaim snapshot, the
+     disk-quota measurement, in-container `CloneSession`) are unchanged. The keys'
+     failure modes are now measured and documented (`Operate it` above and §1.4.6 item 5),
+     including the third key, `secret.key`, which this document had not named before.
 2. **Interrupt, then send another message: the agent resumes the interrupted request.**
    Verified on 2026-10-31, deterministically (6/6 runs; `e2e/scripts/fix-interrupt-context-probe.mjs`,
    raw runs in `e2e/.artifacts/fix-interrupt-context/`). Send "Count from 1 to 200" and stop it
@@ -463,12 +561,12 @@ Ordered roughly by how much they will hurt. Nothing here is softened.
    startup inside this image. Runner mode needs a second service, a shared volume, the
    same path on both sides, and Engine ≥ 25 for `volume-subpath`. Two of the five failure
    modes in `SANDBOX-DEPLOY.md` §1.4.1 are *silent* when the volume mapping is wrong.
-   `-agent-in-sandbox` adds two requirements of its own: the sandbox image must carry `pi`
+   A container placement adds two requirements of its own: the sandbox image must carry `pi`
    and `/opt/piforge/piforged` (`deploy/Dockerfile.sandbox-agent` builds that image from
    the control-plane image, so the two cannot drift on the pi version), and the control
    plane must reach the sandbox's gateway by name. A sandbox image without them fails the
    first prompt with a clear error; it never falls back to running beside the control
-   plane.
+   plane (stage 4 deleted that fallback).
 6. **No restart policy here.** `RestartPolicy: "no"` — a daemon restart or host reboot
    leaves the product down until someone starts it, and when it does come back every
    agent, PTY and Chromium is gone (reconciliation marks the runs interrupted; it does

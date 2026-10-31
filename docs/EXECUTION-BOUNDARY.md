@@ -170,10 +170,23 @@ stop. Stage 3 therefore brokers **HTTP** MCP servers:
   revoked token is refused on the next request **and not re-minted** by a respawn.
 
 What the sandbox holds is therefore a revocable, per-session, per-server credential
-rather than a copy of the user's. A **stdio** MCP server is still not staged under the
-flag, with a log line saying why: its credential would have to live in the sandbox's
-environment, and there is no egress point to inject anything at. That is a limitation of
-the transport, not of the broker.
+rather than a copy of the user's.
+
+**A stdio MCP server is refused, and stage 4 made the refusal part of the product.**
+The transport is the reason, and it is worth stating precisely because the obvious
+alternatives were considered and rejected (§11.1): Pi starts a stdio server *inside*
+the sandbox, and such a server authenticates with credentials in its own environment.
+There is no point on that path where the control plane could inject anything — the
+process does not call the gateway at all, it calls its upstream directly. So "stage it
+and brokered" is not expressible; the choices are "put the user's credential in the
+container" (what this document exists to stop), "run it on the control plane" (worse:
+tenant-configured code beside the database), or "do not stage it". Stage 3 chose the
+third and only logged it, which left a user staring at a fully-enabled server the agent
+never had. Stage 4 keeps the refusal and makes it visible: `GET /v1/mcp/servers` and
+`GET /v1/sessions/{id}/tooling` carry the omission with a code and a reason
+(`internal/mcpstage`), the checkout's mount manifest records it in
+`mcp_unavailable`, and the MCP panel shows 「stdio MCP 服务器在隔离模式下不可用」 with that
+reason.
 
 ## 5. Liveness and reconciliation with a remote agent
 
@@ -329,11 +342,13 @@ not a silent coupling).
 | 1 | `pi` runs inside the sandbox via `docker exec` over the runner's attach endpoint; model config through the file API; heartbeat inside; provider key still only in the control plane | `-agent-in-sandbox` (env `PIFORGE_AGENT_IN_SANDBOX`), default **off** | On a throwaway deployment: `ps -ef` **inside** the sandbox contains `pi` and `ps -ef` in the control plane does not; `cat /data/piforge.db` fails inside the sandbox; one real prompt commits in the sandbox worktree; panels/tests/inline review work; restart kills the agent for the stated reason. **Done** (`docs/SANDBOX-DEPLOY.md` §1.4.3). |
 | 2 | `materialize` + `provision` through the sandbox file API; the workspace is a volume of the sandbox's own; `chmod a+rwX` and `safe.directory` dropped where one writer owns the tree | same flag | The same prompt completes with **no host mount of the workspace** in the control plane; a skill bundle is read-only inside the sandbox; `git worktree add` for a branch session happens entirely through the API. **Done** (`docs/SANDBOX-DEPLOY.md` §1.4.4). |
 | 3 | Detached supervisor: agent survives a control-plane restart, control plane reattaches; MCP credential broker; agent stderr through the file API | flag **on by default** for docker/runner | Restart the control plane mid-run: the same `pi` pid answers `get_state` after reattach; the run settles instead of interrupted; a run whose control plane is gone for longer than TTL is honestly interrupted (no replay). **Done** (`docs/SANDBOX-DEPLOY.md` §1.4.5). |
-| 4 | Remove the flag; delete the in-process host spawn for container providers; `sandbox.Docker.Attach` becomes the only path; a K8s `pods/exec`-shaped provider | — | Full gates (Go, web, e2e, delivery drill) green with the flag gone, and `ps` proofs hold on a Linux host, not only Docker Desktop. **Not done.** |
+| 4 | Remove the flag; delete the in-process host spawn for container providers; `sandbox.Docker.Attach` becomes the only path; a K8s `pods/exec`-shaped provider | — | Full gates (Go, web, e2e, delivery drill) green with the flag gone, and `ps` proofs hold on a Linux host, not only Docker Desktop. **Done for the flag and the host spawn (2026-11-01, `docs/SANDBOX-DEPLOY.md` §1.4.6); the K8s provider is not started.** |
 
-Stages 1–3 are implemented; stage 3 is the default for `docker`/`runner`, and stage 4 is
-not started. `docs/SANDBOX-DEPLOY.md` §1.4.3, §1.4.4 and §1.4.5 record them with raw
-`ps`/`mount`/`chmod`/commit/restart output.
+Stages 1–4 are implemented. Stage 3 made the sandboxed placement the default for
+`docker`/`runner`; stage 4 deleted the switch, the execution it selected and the
+plumbing that only existed to choose between them (§11). `docs/SANDBOX-DEPLOY.md`
+§1.4.3, §1.4.4, §1.4.5 and §1.4.6 record them with raw
+`ps`/`mount`/`chmod`/commit/restart/`grep` output.
 
 ### 10.1 What is still not moved (named, not hidden)
 
@@ -372,9 +387,17 @@ an accepted cost, or work that needs a K8s provider to exist first:
    not workspace, so they stay on the state volume by design. For `mcp.json` that is now
    a *requirement* as well as a choice: the host copy must be rendered without the real
    credential, and it is.
-8. **A stdio MCP server is still not staged under the flag.** Its credential would have
-   to be an environment variable in the sandbox and there is no egress point to inject it
-   at. The launch logs which server was skipped and why.
+8. ~~A stdio MCP server is still not staged under the flag.~~ **Decided in stage 4, and
+   made visible instead of logged.** A stdio server is not staged into an isolated
+   sandbox — its credential would have to be an environment variable in the container
+   and the transport offers no egress point to inject it at (§11.1 records why running
+   it on the control plane instead was rejected). What changed is where the refusal
+   appears: the MCP panel says 「stdio MCP 服务器在隔离模式下不可用」 with the reason
+   (`GET /v1/mcp/servers` → `unavailable`, `agent_isolated`), the session's tooling
+   answer carries the same map, and the checkout's `.pi/mounted.json` records it in
+   `mcp_unavailable` while keeping the server out of `mcp_servers`. Evidence in
+   `docs/SANDBOX-DEPLOY.md` §1.4.6 (API output, the manifest inside the sandbox, and
+   0 grep hits for both a fake stdio credential and the real provider key).
 9. **The replay window duplicates bytes, and it is bounded.** A reattaching control plane
    is resumed at the last byte the previous one accepted, so the in-flight tail is
    delivered twice (one socket buffer's worth, not the run). This is a documented cost of
@@ -382,7 +405,101 @@ an accepted cost, or work that needs a K8s provider to exist first:
 10. **The gateway signing key moves to the data volume** (`/data/gateway.key`). A
     deployment that loses it invalidates every token it ever issued — which is the same
     consequence as losing `master.key`, and the reason both belong in the backup.
-11. **`-agent-in-sandbox` is on by default for docker/runner and still off for local**;
-    it also requires `-sandbox-files remote` (the file panel has no host tree to read).
-    That is a startup check, not a silent coupling. Removing the flag entirely is stage 4.
+11. ~~`-agent-in-sandbox` is on by default for docker/runner and still off for local~~;
+    **stage 4 deleted it.** The placement follows the provider: a container sandbox
+    always runs the agent inside it, `-sandbox local` never does. The retired knob is
+    still *recognised* so that `false` on a container placement is a startup error
+    naming the flag and the reason instead of a silent downgrade (§11.2).
 
+
+## 11. Stage 4: what was deleted, and the two decisions
+
+Stage 4 is the cleanup stage: stages 1-3 built a second execution and proved it, and
+this stage removes the first one so there is nothing left to switch between. The rules
+it followed: `-sandbox local` is the development path and the delivery drill's path, so
+nothing it needs was touched; and every deletion below is paired with a gate run
+(`docs/SANDBOX-DEPLOY.md` §1.4.6).
+
+### 11.1 stdio MCP servers: refused, visibly
+
+Three designs were on the table.
+
+| Design | What it means | Verdict |
+|---|---|---|
+| Run the server **inside the sandbox** with a scoped credential minted per session | Pi already starts it there; "scoped" would mean a sandbox-side wrapper that fetches the real credential from the control plane and puts it in the child's environment | **Rejected.** The wrapper has to hand the credential to the process it starts — a stdio MCP server authenticates with `KEY=value` in its own environment and talks to its upstream directly. So the real credential still lands in the sandbox; the token would only be a hop, not a boundary. Keeping the credential out would mean proxying the server's *upstream traffic*, i.e. TLS interception with a CA inside the sandbox, which is a much larger and more fragile thing than the HTTP broker. |
+| Run the server **on the control plane** and bridge its stdio over the gateway | The credential stays here; the sandbox holds a per-session token and a byte pipe | **Rejected.** It executes tenant-configured code (`command`, `args`, `cwd` are user input) beside the database — exactly the authority this whole document removes from the control plane, and worse than the pre-stage-4 shape because the control plane would be the *parent* of that process. It also needs a second in-sandbox binary, a new endpoint, a process manager and its own cleanup path. |
+| Do not stage it, and say so **in the product** | The server is configured and enabled, and the agent does not get it | **Chosen.** It is the only option that keeps the credential out of the sandbox *and* keeps tenant code out of the control plane, and stage 4's job is to stop hiding it in a log line. |
+
+How it is surfaced, in one place (`internal/mcpstage`):
+
+- `GET /v1/mcp/servers` returns `agent_isolated` and `unavailable: {<name>: {code,
+  reason}}`; the MCP panel renders 「stdio MCP 服务器在隔离模式下不可用：<reason>」 on the row
+  and one explanation above the list.
+- `GET /v1/sessions/{id}/tooling` returns the same map as `mcp_unavailable`, computed
+  rather than only read, so a session that has not been provisioned still answers.
+- The checkout's `.pi/mounted.json` records it in `mcp_unavailable`, and the server is
+  deliberately **not** in `mcp_servers`/`mcp_written` — that list is what the agent was
+  given.
+- The launch still logs the skip, with the same code, because an operator reading the
+  container log should not have to open the UI.
+
+### 11.2 The escape hatch: refused, not warned
+
+`-agent-in-sandbox=false` on a container placement is a **startup error**, not a
+warning-plus-degraded-mode:
+
+```
+-agent-in-sandbox=false is not available for -sandbox runner: the agent always runs
+inside the sandbox, because running it beside the control plane lets it read /data
+(docs/EXECUTION-BOUNDARY.md §10.1). Remove the flag to keep the isolated placement, or
+run -sandbox local for an unsandboxed development deployment
+```
+
+`PIFORGE_AGENT_IN_SANDBOX=0` gets the same refusal (an older compose file is the most
+likely source of it), a nonsense value is still a configuration error, and `true` is a
+no-op so an existing file keeps working. On `-sandbox local` the retired switch cannot
+mean anything — there is no container to put the agent in — so a stale `true` is
+reported once and ignored rather than failing a development start.
+
+The alternative (an escape hatch that boots with a warning) was rejected for the reason
+this document exists: a warning in a log is not a boundary, and the resulting instance
+is the multi-tenant one whose agent can read `/data`, `master.key` and every other
+tenant's workspace.
+
+### 11.3 Deleted: file + symbol
+
+Every item was reachable only from the in-control-plane agent spawn for a container
+placement, or only configured it. `-sandbox local`'s path (child process, `WrapArgv`
+nil, no marker, in-process registry) is untouched.
+
+| File | Symbol | Why it could go |
+|---|---|---|
+| `cmd/piforged/session_liveness.go` | `sessionAgentLauncher` | The only writer of the heartbeat marker for a locally spawned agent of a container placement. It returns nil for local, and containers now always use the in-sandbox supervisor. Deleted with its test (`TestAgentLauncherIsOnlyWiredForContainerProviders`). |
+| `backend/internal/pi/runtime.go` | `RuntimeConfig.WrapArgv` + its use in `Start` | The outermost argv rewrite that existed so the liveness launcher could be the agent's parent. Nothing set it after the deletion above; `pi/wrap_test.go` deleted with it. |
+| `backend/internal/liveness/launch.go` | `LauncherArgv` | Built that wrapper's argv. `LauncherCommand`, `Supervise` and `MaybeLaunch` stay — the sandbox-side launcher is still `piforged agent-launcher … -- pi`, built in `agent_sandbox.go`. `TestLauncherArgvRefusesIncompleteConfiguration` became `TestSuperviseRefusesIncompleteConfiguration` (the same validation, one layer down). |
+| `cmd/piforged/main.go` | `agentGitEnv`, `agentCheckoutDirs` (+ `agent_git_env_test.go`) | Told a *host-side* agent's git that a container-owned checkout belonged to another account. The agent now runs as the account that owns the tree, so there is no "dubious ownership" to lift; `sandboxAgentEnv` stopped stripping `GIT_CONFIG_*` because nothing produces it any more. |
+| `cmd/piforged/sandbox_placement.go` | `resolveAgentInSandbox` | The tri-state (flag → environment → provider default). Replaced by `rejectDisabledIsolation`, which only decides whether the start is allowed. |
+| `cmd/piforged/main.go` | the `-agent-in-sandbox` switch's plumbing: the tri-state call, the `local` contradiction check, `sessionAgentLauncher` wiring, `wrapArgv` argument to `newRuntime` | The switch no longer selects anything (§11.2). |
+| `cmd/piforged/sandbox_placement.go` | `validateAgentWorkspace` → `validateContainerWorkspace` | It keyed on the flag; the rule is now a property of the provider (a container placement always has a detached workspace). |
+| `cmd/piforged/main.go` | `DetachedWorkspace: opt.agentInSandbox` → `true` (docker and runner), `ShellExecutor.OwnedTree: opt.agentInSandbox` → `true` | The shared-volume deployment for a container provider no longer exists, so the values are constants of the placement. The provider fields stay: they describe a shape, not a switch, and the runner's request still carries them. |
+
+What deliberately stayed: `-sandbox-files` (it still refuses a host file panel on a
+container placement, and `-sandbox local` still defaults to host), the browser/terminal
+`host` placements (a mixed deployment is still allowed and still warned about), and
+`DetachedWorkspace` on the providers.
+
+### 11.4 What stage 4 does *not* claim
+
+- **Docker Desktop is not a Linux host.** The `ps`/`/data` proofs in §1.4.6 ran on
+  Windows 11 + Docker Desktop. The kernel boundary is real (the sandbox is a container
+  with no `/data`), but "on a Linux host, with a Linux daemon" is still unmeasured and
+  is the first thing the next stage should do.
+- **No K8s provider.** `pods/exec` instead of `docker exec` is a provider, not a
+  boundary change; it has not been written.
+- **The idle-reclaim snapshot, the disk-quota measurement, `worktrees.base_commit` and
+  in-container `CloneSession`** are still the stage-2 gaps listed in §10.1.
+- **A lost `secret.key` is silently a new era.** Losing it invalidates every sealed
+  sandbox API key and MCP credential; the file is re-created on the next seal, so the
+  deployment looks healthy while the old sandboxes cannot be reached
+  (`docs/SANDBOX-DEPLOY.md` §1.4.6 measures it). That belongs in a backup, and the
+  handoff says so.
