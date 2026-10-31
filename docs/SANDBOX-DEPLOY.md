@@ -1078,8 +1078,8 @@ docker exec -u gem <sandbox> grep -c VOLCE /workspace/.piforge/agents/*/models.j
 | `go build ./...` / `go vet ./...` | 干净 |
 | `go test ./... -count=1` | 全部包 ok（新增：`materialize` 的 `MountFS`/`SandboxFS`/`DigestFS` 用例、`provision` 的 detached 两例、`sandbox` 的 volume/safe.directory/mode 用例、`cmd/piforged` 的 `validateAgentWorkspace`） |
 | `pnpm --dir web test -- --run` | **272 / 272**（34 文件） |
-| `pnpm --dir e2e test` | **182 / 182 passed** |
-| `pwsh scripts/deliver-check.ps1` | **119 / 119 PASS** |
+| `pnpm --dir e2e test` | **182 / 182 passed（8.5m）**，exit 0 |
+| `pwsh scripts/deliver-check.ps1 -Image piforge:agent-drill` | run `20261101-005703`：**119 PASS / 0 FAIL**，`failure` 为空，96 s，镜像 `sha256:ebd8c664…`（本仓库这一棵树的构建；`-agent-in-sandbox` 关，local 路径不变） |
 
 `pf-local`（7722）前后同一个容器 id `7dc14e4a7525…`、`/healthz` 200。一次性实例已删：
 `pf-drill-control`、`pf-drill-runner`、`piforge-ba8b2e998f171d81`（只按
