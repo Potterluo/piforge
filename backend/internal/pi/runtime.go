@@ -49,6 +49,13 @@ type RuntimeConfig struct {
 	// it to run the fake peer in-process over io.Pipe; a production deployment
 	// can use it to reach Pi through a sandbox shim's stdio channel.
 	Dial func(spec contracts.SessionSpec, sessionFile string) (io.ReadWriteCloser, error)
+	// WrapArgv, when set, rewrites one session's final argv after Launcher has
+	// wrapped it. It is the outermost wrapper on purpose: the agent's liveness
+	// launcher (internal/liveness) has to be the direct parent of the agent, or
+	// the heartbeat it writes would describe the wrong process. The wrapper
+	// receives the launch context, so it may look up where the session's
+	// workspace lives.
+	WrapArgv func(ctx context.Context, spec contracts.SessionSpec, argv []string) ([]string, error)
 }
 
 // Runtime implements contracts.AgentRuntime with one Pi child process per
@@ -227,6 +234,19 @@ func (r *Runtime) spawn(ctx context.Context, spec contracts.SessionSpec) (*sessi
 			cfg.BinaryPath = wrapped[0]
 			cfg.Args = wrapped[1:]
 		}
+	}
+	if r.cfg.WrapArgv != nil {
+		// Outermost wrapper: the heartbeat launcher must be the agent's direct
+		// parent, so it wraps whatever the jail produced.
+		wrapped, werr := r.cfg.WrapArgv(ctx, spec, append([]string{cfg.BinaryPath}, cfg.Args...))
+		if werr != nil {
+			return nil, fmt.Errorf("pi: wrap the agent for session %s: %w", spec.SessionID, werr)
+		}
+		if len(wrapped) == 0 {
+			return nil, fmt.Errorf("pi: wrap the agent for session %s: the wrapper produced an empty argv", spec.SessionID)
+		}
+		cfg.BinaryPath = wrapped[0]
+		cfg.Args = wrapped[1:]
 	}
 	norm := NewNormalizer(spec.SessionID, spec.Kind)
 	cfg.Translator = norm.Translate

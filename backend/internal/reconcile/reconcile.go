@@ -4,19 +4,37 @@
 //
 // # Why this is its own package
 //
-// The authority is the *in-process* agent registry (pi.Runtime.Alive). On boot
-// it is empty by definition, so every persisted "running" row is a leftover from
-// the process that died; during a run it is populated, so a live turn is never
-// touched. Keeping the rule here means the boot pass, the watchdog, and the
-// project-delete guard all ask the same question and write the same record.
+// The authority is a probe (contracts.LivenessProbe), not a row. On boot the
+// in-process registry is empty by definition, so every persisted "running" row
+// looks like a leftover from the process that died; during a run it is
+// populated, so a live turn is never touched. Keeping the rule here means the
+// boot pass, the watchdog, and the project-delete guard all ask the same
+// question and write the same record.
+//
+// # Which authority a deployment asks
+//
+// With -sandbox local the agent is a child of this process, so the in-process
+// registry is the whole truth and a restart really does kill every run. With
+// -sandbox docker/runner the agent lives beside its workspace and outlives this
+// process: the registry is empty after a restart while the agents are still
+// running, so a registry-only reconciler would write "interrupted" over live
+// runs. cmd/piforged therefore wires a liveness.Composite there — the registry
+// *and* a heartbeat marker read from the sandbox (internal/liveness).
 //
 // # Conservatism
 //
-// Reconciliation never guesses. A runtime that does not implement Liveness (or
-// is nil) leaves every row alone and says so; an Alive session is left running;
-// a failed store write changes nothing. The only state this package writes is
-// for a session that claims a turn is in flight and that the registry explicitly
-// says nobody is serving.
+// Reconciliation never guesses, and "unknown" is never written as "dead":
+//
+//   - no authority at all (nil probe and nil registry) leaves every row alone
+//     and says so;
+//   - a probe that returns an error is unknown: the row is left running and a
+//     WARN names the session, because an unreachable sandbox is not evidence
+//     that a run died;
+//   - only a definitive false interrupts;
+//   - a failed store write changes nothing.
+//
+// The only state this package writes is for a session that claims a turn is in
+// flight and whose authority explicitly says nobody is serving it.
 package reconcile
 
 import (
@@ -47,17 +65,35 @@ const (
 // reconciler must not reach for Status (the normalizer's view, which can be
 // stale or zero) or for the hub's subscription cache (a subscription outlives a
 // dead child).
+//
+// It is the *local* authority. A deployment whose agents live outside this
+// process configures Config.Probe instead; Config.Runtime remains for the
+// local provider and for callers that have no probe.
 type Liveness interface {
 	Alive(sessionID string) bool
 }
 
-// Config wires a Reconciler. Store is required; Runtime may be nil, in which
-// case the reconciler refuses to interrupt anything.
+// DefaultProbeTimeout bounds one probe call. A probe talks to a sandbox (an
+// HTTP round trip); without a bound, one unreachable sandbox would stall the
+// whole boot pass and every watchdog tick behind it. Exceeding it is an error,
+// i.e. "unknown", i.e. the session keeps running.
+const DefaultProbeTimeout = 10 * time.Second
+
+// Config wires a Reconciler. Store is required; Probe and Runtime may both be
+// nil, in which case the reconciler refuses to interrupt anything.
 type Config struct {
-	Store   *store.Store
+	Store *store.Store
+	// Probe is the liveness authority to ask, and takes precedence over Runtime
+	// when both are set. A deployment with agents outside this process must set
+	// it: the in-process registry cannot see them.
+	Probe contracts.LivenessProbe
+	// Runtime is the in-process registry, used when Probe is nil. Nil together
+	// with a nil Probe means "no authority": nothing is interrupted.
 	Runtime Liveness
-	Logger  *slog.Logger
-	Now     func() time.Time
+	// ProbeTimeout bounds one probe call (default DefaultProbeTimeout).
+	ProbeTimeout time.Duration
+	Logger       *slog.Logger
+	Now          func() time.Time
 }
 
 // Report is the summary one pass logs and tests assert on.
@@ -68,11 +104,14 @@ type Report struct {
 	Interrupted int
 	// Runs is how many started runs were settled as interrupted.
 	Runs int
-	// Live is how many candidates the registry proved alive and were left alone.
+	// Live is how many candidates an authority proved alive and were left alone.
 	Live int
+	// Unknown is how many candidates the authority could not answer for. They
+	// were left running: unknown never interrupts.
+	Unknown int
 }
 
-// Reconciler reconciles persisted run state against the live agent registry.
+// Reconciler reconciles persisted run state against the live agent authority.
 type Reconciler struct {
 	cfg Config
 }
@@ -84,6 +123,21 @@ func New(cfg Config) *Reconciler {
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
+	}
+	if cfg.ProbeTimeout <= 0 {
+		cfg.ProbeTimeout = DefaultProbeTimeout
+	}
+	switch {
+	case cfg.Probe != nil:
+		// Nothing to say here: the caller names the probe it wired (the startup
+		// log in cmd/piforged does), and this package must not print a type name
+		// it does not own.
+	case cfg.Runtime != nil:
+		// The one deployment shape that can rely on the registry: the agent is a
+		// child of this process. Say so, because "a restart killed every run" and
+		// "a restart left runs alive" are different products.
+		cfg.Logger.Info("session reconciliation asks the in-process agent registry: no liveness probe is configured",
+			"detail", "correct for -sandbox local, where the agent is a child of this process; a container provider must configure a probe or a restart will interrupt live runs")
 	}
 	return &Reconciler{cfg: cfg}
 }
@@ -121,8 +175,8 @@ func (r *Reconciler) reconcile(ctx context.Context, candidates []store.RunningSe
 		r.summary(phase, report, reason)
 		return report, nil
 	}
-	if r.cfg.Runtime == nil {
-		// No registry means no way to prove a run is dead. Leaving it running is
+	if r.cfg.Probe == nil && r.cfg.Runtime == nil {
+		// No authority means no way to prove a run is dead. Leaving it running is
 		// the conservative answer; lying about it would be worse than the stale
 		// row.
 		r.cfg.Logger.WarnContext(ctx, "session reconciliation skipped: the agent registry is unavailable",
@@ -134,9 +188,24 @@ func (r *Reconciler) reconcile(ctx context.Context, candidates []store.RunningSe
 
 	var errs []error
 	for _, candidate := range candidates {
-		if r.cfg.Runtime.Alive(candidate.SessionID) {
+		alive, lerr := r.authority(ctx, candidate.SessionID)
+		if lerr != nil {
+			// Unknown, not dead. The probe could not answer — an unreachable
+			// sandbox, a missing key, a timeout — and an unavailable authority
+			// is not evidence that a run died. Leave the row alone and name the
+			// session so an operator can see which authority went quiet.
+			report.Unknown++
+			r.cfg.Logger.WarnContext(ctx, "session liveness is unknown; the session is left running",
+				"phase", phase,
+				"session", candidate.SessionID,
+				"project", candidate.ProjectID,
+				"reason", reason,
+				"error", lerr.Error())
+			continue
+		}
+		if alive {
 			report.Live++
-			r.cfg.Logger.DebugContext(ctx, "session kept running: the runtime still serves it",
+			r.cfg.Logger.DebugContext(ctx, "session kept running: an authority still serves it",
 				"phase", phase, "session", candidate.SessionID, "project", candidate.ProjectID)
 			continue
 		}
@@ -166,11 +235,26 @@ func (r *Reconciler) reconcile(ctx context.Context, candidates []store.RunningSe
 	return report, errors.Join(errs...)
 }
 
+// authority asks the configured liveness source. An error is "unknown" to every
+// caller: the probe was asked and could not answer.
+//
+// The registry is synchronous and has no failure mode, so it is called directly;
+// a probe talks to a sandbox and is bounded, because a boot pass that hangs on a
+// dead sandbox is a deployment that never opens its port.
+func (r *Reconciler) authority(ctx context.Context, sessionID string) (bool, error) {
+	if r.cfg.Probe == nil {
+		return r.cfg.Runtime.Alive(sessionID), nil
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, r.cfg.ProbeTimeout)
+	defer cancel()
+	return r.cfg.Probe.Alive(probeCtx, sessionID)
+}
+
 // summary is the one line an operator can find after a restart. The watchdog is
 // silent when it found nothing (it runs every interval); boot and on-demand
 // passes always report.
 func (r *Reconciler) summary(phase string, report Report, reason string) {
-	quiet := phase == "watchdog" && report.Interrupted == 0
+	quiet := phase == "watchdog" && report.Interrupted == 0 && report.Unknown == 0
 	if quiet {
 		r.cfg.Logger.Debug("session reconciliation found nothing to repair",
 			"phase", phase, "scanned", report.Scanned)
@@ -182,6 +266,7 @@ func (r *Reconciler) summary(phase string, report Report, reason string) {
 		"interrupted", report.Interrupted,
 		"runs", report.Runs,
 		"kept_live", report.Live,
+		"unknown", report.Unknown,
 		"reason", reason)
 }
 

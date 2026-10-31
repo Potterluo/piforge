@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/liveness"
 	"github.com/piforge/piforge/backend/internal/store"
 )
 
@@ -365,5 +368,220 @@ func TestProjectReconcileTouchesOnlyItsOwnProject(t *testing.T) {
 	}
 	if other.Status != contracts.StatusRunning {
 		t.Fatalf("another project's session was rewritten to %q", other.Status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The remote-placement gap: reconcile must ask a probe, not only the registry
+// ---------------------------------------------------------------------------
+
+// probeRecorder is the fake "remote" liveness a container deployment configures:
+// it answers for sessions whose agent lives outside this process.
+type probeRecorder struct {
+	mu     sync.Mutex
+	answer map[string]bool
+	err    error
+	calls  int
+}
+
+func newProbeRecorder() *probeRecorder { return &probeRecorder{answer: map[string]bool{}} }
+
+func (p *probeRecorder) Alive(ctx context.Context, sessionID string) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	if p.err != nil {
+		return false, p.err
+	}
+	return p.answer[sessionID], nil
+}
+
+func (p *probeRecorder) set(sessionID string, alive bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.answer[sessionID] = alive
+}
+
+// withProbe rebuilds the fixture's reconciler around a probe.
+func (f *fixture) withProbe(t *testing.T, probe contracts.LivenessProbe) *Reconciler {
+	t.Helper()
+	return New(Config{Store: f.store, Probe: probe, Runtime: f.registry, Logger: f.logger})
+}
+
+// TestReconcileLeavesALiveRemoteSessionAlone is the defect this batch fixes,
+// stated as the invariant the drill needs: after a control-plane restart the
+// in-process registry is empty, the agent inside the sandbox is still running,
+// and two watchdog passes must not touch the row.
+func TestReconcileLeavesALiveRemoteSessionAlone(t *testing.T) {
+	f := newFixture(t)
+	probe := newProbeRecorder()
+	probe.set(f.session.ID, true)
+	rec := f.withProbe(t, probe)
+	ctx := context.Background()
+
+	for i := 0; i < 2; i++ {
+		report, err := rec.Run(ctx, ReasonProcessGone, "watchdog")
+		if err != nil {
+			t.Fatalf("Run #%d: %v", i+1, err)
+		}
+		if report.Scanned != 1 || report.Live != 1 || report.Interrupted != 0 || report.Unknown != 0 {
+			t.Fatalf("pass #%d = %+v, want the live remote session kept", i+1, report)
+		}
+	}
+	if got := f.sessionStatus(t); got != contracts.StatusRunning {
+		t.Fatalf("a live remote session was rewritten to %q", got)
+	}
+	if runs := f.runs(t); len(runs) != 1 || runs[0].Status != "started" {
+		t.Fatalf("a live remote run was settled: %+v", runs)
+	}
+	if got := len(f.events(t)); got != 0 {
+		t.Fatalf("a live remote session got %d recovery events", got)
+	}
+	if probe.calls != 2 {
+		t.Fatalf("the probe was asked %d times, want 2", probe.calls)
+	}
+}
+
+// TestRegistryOnlyWiringInterruptsALiveRemoteSession is the bug itself, frozen
+// as a test: a reconciler wired the way cmd/piforged wired it before this batch
+// (registry only, no probe) cannot see a remote agent, so it writes
+// "interrupted" over a live run. The next test proves the fixed wiring does not.
+func TestRegistryOnlyWiringInterruptsALiveRemoteSession(t *testing.T) {
+	f := newFixture(t)
+	remote := newProbeRecorder()
+	remote.set(f.session.ID, true) // the sandbox says the agent is alive
+	registryOnly := New(Config{Store: f.store, Runtime: f.registry, Logger: f.logger})
+
+	report, err := registryOnly.Run(context.Background(), ReasonRestart, "startup")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.Interrupted != 1 {
+		t.Fatalf("report = %+v, want the registry-only wiring to interrupt the live remote run (that is the bug)", report)
+	}
+	if got := f.sessionStatus(t); got != contracts.StatusInterrupted {
+		t.Fatalf("session status = %q, want interrupted (the bug)", got)
+	}
+	if runs := f.runs(t); runs[0].Status != "interrupted" {
+		t.Fatalf("run = %+v, want interrupted (the bug)", runs[0])
+	}
+}
+
+// TestReconcileInterruptsOnlyOnADefinitiveDeadAnswer: with the same live remote
+// agent, the probe-aware wiring leaves it alone — and once the authority says
+// dead, the very same reconciler repairs the row.
+func TestReconcileInterruptsOnlyOnADefinitiveDeadAnswer(t *testing.T) {
+	f := newFixture(t)
+	probe := newProbeRecorder()
+	probe.set(f.session.ID, true)
+	rec := f.withProbe(t, probe)
+	ctx := context.Background()
+
+	report, err := rec.Run(ctx, ReasonRestart, "startup")
+	if err != nil {
+		t.Fatalf("Run (alive): %v", err)
+	}
+	if report.Interrupted != 0 || report.Live != 1 {
+		t.Fatalf("report = %+v, want the live session kept", report)
+	}
+
+	probe.set(f.session.ID, false)
+	report, err = rec.Run(ctx, ReasonRestart, "startup")
+	if err != nil {
+		t.Fatalf("Run (dead): %v", err)
+	}
+	if report.Interrupted != 1 || report.Runs != 1 || report.Live != 0 {
+		t.Fatalf("report = %+v, want one interrupted run after a definitive dead", report)
+	}
+	if got := f.sessionStatus(t); got != contracts.StatusInterrupted {
+		t.Fatalf("session status = %q, want interrupted", got)
+	}
+}
+
+// TestReconcileTreatsAProbeErrorAsUnknown is the conservative rule with teeth:
+// an unreachable sandbox leaves the session running, counts it as unknown, names
+// it in a WARN, and appends nothing to the transcript.
+func TestReconcileTreatsAProbeErrorAsUnknown(t *testing.T) {
+	f := newFixture(t)
+	probe := newProbeRecorder()
+	probe.err = errors.New("sandbox sbx_1: unreachable")
+	rec := f.withProbe(t, probe)
+
+	report, err := rec.Run(context.Background(), ReasonRestart, "startup")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.Scanned != 1 || report.Unknown != 1 || report.Interrupted != 0 || report.Runs != 0 {
+		t.Fatalf("report = %+v, want one unknown and no interruption", report)
+	}
+	if got := f.sessionStatus(t); got != contracts.StatusRunning {
+		t.Fatalf("an unknown liveness rewrote the session to %q", got)
+	}
+	if runs := f.runs(t); runs[0].Status != "started" {
+		t.Fatalf("an unknown liveness settled the run: %+v", runs[0])
+	}
+	if got := len(f.events(t)); got != 0 {
+		t.Fatalf("an unknown liveness appended %d events", got)
+	}
+	logs := f.logs.String()
+	if !strings.Contains(logs, "session liveness is unknown") ||
+		!strings.Contains(logs, f.session.ID) ||
+		!strings.Contains(logs, "unreachable") {
+		t.Fatalf("the WARN does not name the session and the reason:\n%s", logs)
+	}
+	if !strings.Contains(logs, "unknown=1") {
+		t.Fatalf("the summary does not count the unknown session:\n%s", logs)
+	}
+}
+
+// TestReconcileWithACompositeProbeIsUnknownWhenTheSandboxCannotAnswer is the
+// composite fallback: the in-process registry says dead (a fresh process) and
+// the sandbox source errors, so the composite errors and reconciliation leaves
+// the row alone. This is the "restart plus a broken sandbox" case.
+func TestReconcileWithACompositeProbeIsUnknownWhenTheSandboxCannotAnswer(t *testing.T) {
+	f := newFixture(t)
+	brokenSandbox := liveness.ProbeFunc(func(context.Context, string) (bool, error) {
+		return false, errors.New("sandbox API returned HTTP 502")
+	})
+	probe := liveness.NewComposite(liveness.NewProcess(f.registry), brokenSandbox)
+	rec := f.withProbe(t, probe)
+
+	report, err := rec.Run(context.Background(), ReasonRestart, "startup")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.Unknown != 1 || report.Interrupted != 0 {
+		t.Fatalf("report = %+v, want the unknown session kept", report)
+	}
+	if got := f.sessionStatus(t); got != contracts.StatusRunning {
+		t.Fatalf("session status = %q, want running", got)
+	}
+}
+
+// TestReconcileProbeTimeoutIsUnknown proves a hung sandbox cannot stall the boot
+// pass into writing: the per-candidate deadline turns it into unknown, and the
+// row is kept.
+func TestReconcileProbeTimeoutIsUnknown(t *testing.T) {
+	f := newFixture(t)
+	blocked := liveness.ProbeFunc(func(ctx context.Context, _ string) (bool, error) {
+		<-ctx.Done()
+		return false, ctx.Err()
+	})
+	rec := New(Config{
+		Store:        f.store,
+		Probe:        blocked,
+		Logger:       f.logger,
+		ProbeTimeout: 20 * time.Millisecond,
+	})
+
+	report, err := rec.Run(context.Background(), ReasonRestart, "startup")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.Unknown != 1 || report.Interrupted != 0 {
+		t.Fatalf("report = %+v, want one unknown", report)
+	}
+	if got := f.sessionStatus(t); got != contracts.StatusRunning {
+		t.Fatalf("session status = %q, want running", got)
 	}
 }

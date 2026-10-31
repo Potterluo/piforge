@@ -400,6 +400,59 @@ func (s *Store) SandboxForProject(ctx context.Context, userID, projectID string)
 	return sb, nil
 }
 
+// SessionSandbox is where one session's workspace lives: the sandbox that holds
+// its worktree (or, for a session without one, the sandbox of its project) and
+// that sandbox's host directory.
+//
+// It exists for the liveness probe (internal/liveness): a container-backed probe
+// gets a session id from reconciliation and has to answer two questions the
+// session row does not carry — which sandbox to ask, and where its workspace is
+// on the host (the agent's launcher writes the heartbeat there). Both come from
+// one query, which also means the answer cannot disagree with itself.
+type SessionSandbox struct {
+	SandboxID string
+	// RootDir is the host directory of the sandbox, empty when the row does not
+	// know it (an older record).
+	RootDir string
+	// Provider is the sandbox row's provider ("local", "docker", "runner").
+	Provider string
+}
+
+// SessionSandboxFor resolves a session to its sandbox.
+//
+// A sidecar session shares its main session's worktree, and an ephemeral session
+// may have none at all, so the lookup prefers the worktree's sandbox and falls
+// back to the project's. It is a service-level query like RunningSessions: the
+// caller already has the session id and nothing else, and it deliberately takes
+// no user predicate.
+func (s *Store) SessionSandboxFor(ctx context.Context, sessionID string) (SessionSandbox, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return SessionSandbox{}, fmt.Errorf("store: session sandbox: a session id is required: %w", ErrInvalid)
+	}
+	var (
+		id, rootDir, provider sql.NullString
+	)
+	err := s.r.QueryRowContext(ctx,
+		`SELECT COALESCE(w.sandbox_id, p.id),
+		        COALESCE(wsb.root_dir, p.root_dir),
+		        COALESCE(wsb.provider, p.provider)
+		   FROM sessions s
+		   LEFT JOIN worktrees w ON w.id = s.worktree_id
+		   LEFT JOIN sandboxes wsb ON wsb.id = w.sandbox_id
+		   LEFT JOIN sandboxes p ON p.project_id = s.project_id AND p.user_id = s.user_id
+		  WHERE s.id = ?`, sessionID).Scan(&id, &rootDir, &provider)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SessionSandbox{}, fmt.Errorf("store: session sandbox for %q: %w", sessionID, ErrNotFound)
+	}
+	if err != nil {
+		return SessionSandbox{}, fmt.Errorf("store: session sandbox for %q: %w", sessionID, err)
+	}
+	if !id.Valid || strings.TrimSpace(id.String) == "" {
+		return SessionSandbox{}, fmt.Errorf("store: session %q has no sandbox: %w", sessionID, ErrNotFound)
+	}
+	return SessionSandbox{SandboxID: id.String, RootDir: rootDir.String, Provider: provider.String}, nil
+}
+
 // SandboxIDs lists every sandbox id in the deployment. The janitor uses it to
 // decide whether a directory under <data>/snapshots still has an owner; one
 // query per pass, not one per directory.

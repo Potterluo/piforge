@@ -699,6 +699,32 @@ type SandboxProvider interface {
 	Exec(ctx context.Context, sandboxID string, argv []string, dir string) (string, error)
 }
 
+// LivenessProbe answers the one question restart reconciliation asks before it
+// is allowed to write "interrupted": is an agent still serving this session?
+//
+// It is a probe, not a status view. The in-process registry
+// (pi.Runtime.Alive) only knows about agents this process spawned, which is the
+// whole truth for -sandbox local and a half-truth for a container provider: the
+// agent there lives beside its workspace, so it outlives a control-plane restart
+// and the new process has to ask the sandbox instead of its own memory
+// (internal/liveness does exactly that).
+//
+// The contract has three answers, and the difference between the last two is the
+// point:
+//
+//   - (true, nil): an agent serves this session. Do not interrupt it.
+//   - (false, nil): nobody serves this session. Interrupting it is correct.
+//   - (false, err) or (true, err): the authority could not answer. The caller
+//     treats that as "unknown" and leaves the session alone: an unavailable
+//     probe is not evidence that a run is dead, and a bookkeeping mistake kills
+//     a real run (internal/reconcile documents the rule and tests it).
+//
+// Alive must respect ctx; a probe that cannot answer within the caller's
+// deadline returns an error rather than a stale guess.
+type LivenessProbe interface {
+	Alive(ctx context.Context, sessionID string) (bool, error)
+}
+
 // WorktreeSandbox is the optional half of SandboxProvider that creates a
 // session's linked worktree inside the sandbox instead of on the control plane's
 // own filesystem.

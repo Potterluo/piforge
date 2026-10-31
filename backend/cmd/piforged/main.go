@@ -44,6 +44,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/httpapi"
 	"github.com/piforge/piforge/backend/internal/isolate"
 	"github.com/piforge/piforge/backend/internal/janitor"
+	"github.com/piforge/piforge/backend/internal/liveness"
 	"github.com/piforge/piforge/backend/internal/llmgw"
 	"github.com/piforge/piforge/backend/internal/pi"
 	"github.com/piforge/piforge/backend/internal/pimodel"
@@ -58,6 +59,13 @@ import (
 )
 
 func main() {
+	// The agent launcher is a mode of this binary: `piforged agent-launcher
+	// -root <sandbox> -session <id> -- <agent argv>`. It runs before flag parsing
+	// because its argv belongs to the agent, not to the server. See
+	// internal/liveness for why a marker needs its own process.
+	if code, handled := liveness.MaybeLaunch(context.Background(), os.Args); handled {
+		os.Exit(code)
+	}
 	if err := run(); err != nil {
 		slog.Error("piforged exited with an error", "err", err)
 		os.Exit(1)
@@ -713,7 +721,14 @@ func run() error {
 		return ref
 	}
 
-	rt, err := newRuntime(opt, logger, setupFor, modelFor, launcher)
+	// A container provider's agent does not have to die with this process, which
+	// is why every agent it spawns is wrapped in a launcher that keeps a
+	// heartbeat marker inside the sandbox workspace (internal/liveness). The
+	// marker is what restart reconciliation reads after a control-plane restart;
+	// without it the new process could only see its own empty registry.
+	agentLauncher := sessionAgentLauncher(opt, st, remoteSB, logger)
+
+	rt, err := newRuntime(opt, logger, setupFor, modelFor, launcher, agentLauncher)
 	if err != nil {
 		return err
 	}
@@ -886,8 +901,16 @@ func run() error {
 	// Reconciliation is built before the router because the delete guard uses the
 	// same instance: "running" must mean "an agent serves it", not "a row says
 	// so", on both the boot path and the on-demand path.
+	//
+	// Which authority answers that question depends on where the agent lives. A
+	// local agent is this process's child, so the in-process registry is the
+	// whole truth. A container agent outlives this process, so the probe also
+	// reads the heartbeat marker from the sandbox; without that, every live
+	// remote session would be marked interrupted after a control-plane restart.
+	livenessProbe := sessionLivenessProbe(opt, st, rt, remoteSB, keys, logger)
 	rec := reconcile.New(reconcile.Config{
 		Store:   st,
+		Probe:   livenessProbe,
 		Runtime: rt,
 		Logger:  logger,
 		Now:     time.Now,
@@ -1150,7 +1173,12 @@ func stopAgentsOnSandbox(ctx context.Context, logger *slog.Logger, st *store.Sto
 // newRuntime builds the agent runtime. With -fake-pi it drives the fake peer
 // that ships with the repo, which is how development and the e2e suite run
 // without a model account.
-func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSpec) agentSetup, modelFor func(contracts.SessionSpec, string) string, launcher isolate.Launcher) (*pi.Runtime, error) {
+//
+// wrapArgv is nil for -sandbox local, where the agent is this process's own
+// child and the in-process registry is the whole truth. A container provider
+// passes the heartbeat launcher, so the agent that outlives a restart is also an
+// agent the next process can see.
+func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSpec) agentSetup, modelFor func(contracts.SessionSpec, string) string, launcher isolate.Launcher, wrapArgv func(context.Context, contracts.SessionSpec, []string) ([]string, error)) (*pi.Runtime, error) {
 	bin := opt.piBin
 	args := []string{"--mode", "rpc"}
 
@@ -1179,6 +1207,7 @@ func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSp
 		EnvFor: func(spec contracts.SessionSpec) []string {
 			return setup(spec).Env
 		},
+		WrapArgv: wrapArgv,
 	}), nil
 }
 
