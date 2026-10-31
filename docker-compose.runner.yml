@@ -4,6 +4,13 @@
 #
 #   docker compose -f docker-compose.runner.yml up -d --build
 #
+#   pwsh scripts/up-isolated.ps1
+#
+# That script builds the three images in the only order that works, runs the
+# preflight (which checks what is *inside* the sandbox image, not just its tag)
+# and then starts this file. The defaults below are the tags it builds, so a
+# plain `docker compose -f docker-compose.runner.yml up` uses the same images.
+#
 # This file is deliberately self-contained. It used to be an overlay that had to
 # be combined with `docker-compose.yml` and then completed with
 # `PIFORGE_AGENT_IN_SANDBOX=1` / `SANDBOX_WORKSPACE_VOLUME=...`; stage 3 of
@@ -25,16 +32,17 @@
 #   - sandbox containers are addressed by name on `piforge-sandboxes` and publish
 #     no port on the host.
 #
-# Requirements: Docker Engine 25+ (volume-subpath), a daemon the runner can reach
-# through /var/run/docker.sock, and the two images below. `sandbox-image` builds
-# the second one from the first; it runs nothing (its entrypoint exits) and exists
-# so a cold checkout gets both images from one `--build`.
+# Requirements: Docker Engine 25+ (volume-subpath), Go 1.25+ for the preflight,
+# a daemon the runner can reach through /var/run/docker.sock, and the three
+# images below. `sandbox-image` builds the sandbox image from `piforge` — that is
+# what puts the agent runtime inside it — and its entrypoint exits, so it exists
+# only so a cold checkout builds both from one `--build`.
 services:
   piforge:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ${PIFORGE_IMAGE:-piforge:dev}
+    image: ${PIFORGE_IMAGE:-piforge:isolated}
     container_name: piforge
     ports:
       - "${PIFORGE_PUBLISH:-7700}:7700"
@@ -64,7 +72,7 @@ services:
       PIFORGE_SANDBOX: runner
       PIFORGE_SANDBOX_RUNNER_URL: http://sandbox-runner:7801
       PIFORGE_SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:?set SANDBOX_RUNNER_TOKEN to a long random string}
-      PIFORGE_SANDBOX_IMAGE: ${PIFORGE_SANDBOX_IMAGE:-piforge/sandbox-agent:dev}
+      PIFORGE_SANDBOX_IMAGE: ${PIFORGE_SANDBOX_IMAGE:-piforge/sandbox-agent:isolated}
       # The agent inside the sandbox needs the binaries the sandbox image
       # provides; these are also the defaults, named here for anyone reading the
       # file instead of the flag help.
@@ -96,7 +104,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.runner
-    image: ${PIFORGE_RUNNER_IMAGE:-piforge/sandbox-runner:dev}
+    image: ${PIFORGE_RUNNER_IMAGE:-piforge/sandbox-runner:isolated}
     container_name: piforge-sandbox-runner
     # Reap the `docker` processes this service spawns.
     init: true
@@ -106,7 +114,7 @@ services:
       RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:?set SANDBOX_RUNNER_TOKEN to a long random string}
       SANDBOX_RUNNER_ADDR: 0.0.0.0:7801
       SANDBOX_DATA_ROOT: /data/sandboxes
-      SANDBOX_IMAGE: ${PIFORGE_SANDBOX_IMAGE:-piforge/sandbox-agent:dev}
+      SANDBOX_IMAGE: ${PIFORGE_SANDBOX_IMAGE:-piforge/sandbox-agent:isolated}
       # Empty is the default and the secure value: sandbox.Docker then generates a
       # 32-byte key per container. Set it only to pin one key for debugging.
       SANDBOX_API_KEY: ${PIFORGE_SANDBOX_API_KEY:-}
@@ -136,8 +144,8 @@ services:
       context: .
       dockerfile: deploy/Dockerfile.sandbox-agent
       args:
-        AGENT_IMAGE: ${PIFORGE_IMAGE:-piforge:dev}
-    image: ${PIFORGE_SANDBOX_IMAGE:-piforge/sandbox-agent:dev}
+        AGENT_IMAGE: ${PIFORGE_IMAGE:-piforge:isolated}
+    image: ${PIFORGE_SANDBOX_IMAGE:-piforge/sandbox-agent:isolated}
     container_name: piforge-sandbox-image
     depends_on:
       - piforge

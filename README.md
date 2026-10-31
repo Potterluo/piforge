@@ -94,6 +94,47 @@ docs/research/         the research briefings the spec was derived from
 - Optional: `rg` (ripgrep) for fast content search; a bounded walk is used otherwise
 - Optional: Chrome/Chromium for the browser panel (`-chrome <path>`); without it
   the panel reports "unavailable" instead of pretending
+- Optional, for the isolated stack: Docker Engine 25+ (the runner creates sandboxes with
+  `volume-subpath` mounts)
+
+## Run the isolated stack (one command)
+
+This is the deployment shape the product is built for: a control plane container, a
+sandbox runner that is the only process holding `/var/run/docker.sock`, and one
+sandbox container per (user, project) in which the agent, the shell and the browser run.
+The workspace volume is mounted by the sandbox and by nothing else.
+
+```powershell
+$env:PIFORGE_DRILL_KEY='...'   # the provider key; the script never prints it
+pwsh scripts/up-isolated.ps1
+```
+
+That one command:
+
+1. builds the three images in the only order that works — control plane → runner →
+   sandbox image built **from** the control plane, so `pi` and `/opt/piforge/piforged`
+   are inside it at exactly the version the control plane runs;
+2. runs the preflight (`backend/cmd/preflight`): Docker Engine ≥ 25, all three images
+   present, and — the check a tag cannot do — that the sandbox image really contains
+   `/opt/piforge/piforged` and `pi`. It fails before anything starts, naming the missing
+   piece;
+3. starts the stack on **7723** (so it cannot collide with a `pf-local` on 7722) with a
+   fresh data volume, the seeded accounts, and the provider you passed, then waits for
+   `/healthz`.
+
+Then open <http://127.0.0.1:7723/login> (`admin@piforge.local` / `piforge-admin-123`,
+`dev@piforge.local` / `piforge-dev-123` — change them before exposing the port).
+
+```powershell
+pwsh scripts/up-isolated.ps1 -Check     # preflight only: no build, no start
+pwsh scripts/up-isolated.ps1 -Rebuild   # rebuild all three images, then start
+pwsh scripts/up-isolated.ps1 -Down      # remove the stack, its sandboxes and volumes
+```
+
+`.env.example` is the same configuration for the manual path
+(`docker compose -f docker-compose.runner.yml up`). It names `piforge/sandbox-agent`, not
+the published AIO base: that base has no agent runtime, so a sandbox running it cannot
+start the agent — the trap the preflight exists to catch.
 
 ## Run it locally
 

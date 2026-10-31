@@ -40,6 +40,35 @@ Shape of the system:
 
 ## Run it
 
+### The isolated shape: one command
+
+The shape this document's isolation claims are about (control plane container, sandbox
+runner holding `/var/run/docker.sock`, one sandbox container and one workspace volume per
+project) is one command from a clean checkout:
+
+```powershell
+$env:PIFORGE_DRILL_KEY='...'
+pwsh scripts/up-isolated.ps1
+```
+
+It builds the three images in the only order that works — control plane, then the runner,
+then the sandbox image **from** the control plane so `pi` and `/opt/piforge/piforged` are
+inside it at the same version — runs `backend/cmd/preflight` (Docker Engine ≥ 25, all
+three images, and that the sandbox image really contains `/opt/piforge/piforged` and
+`pi`), then starts the stack on 7723 with a fresh volume and waits for `/healthz`. It
+prints the URL and the seeded accounts at the end. `-Check` runs only the preflight;
+`-Down` removes the stack, its sandboxes and their volumes; `-Rebuild` rebuilds all three
+images after a source change.
+
+`.env.example` is the same configuration for the manual
+`docker compose -f docker-compose.runner.yml up` path. It names
+`piforge/sandbox-agent`, **not** the published AIO base — that image has no
+`/opt/piforge` and no `pi`, so a sandbox running it cannot start the agent. That was the
+onboarding trap the acceptance pass hit (it had to override every variable); the
+preflight now fails at minute one and names the missing piece instead.
+
+### The local shape (`pf-local`, 7722)
+
 Build (the image is all-in-one: `piforged` plus the built Next app on 127.0.0.1:3100,
 proxied by the control plane — you do not run `pnpm dev` in this shape). The canonical
 command is the script; it cross-compiles the control plane, builds the web app and layers
