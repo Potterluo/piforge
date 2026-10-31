@@ -39,25 +39,42 @@ func TestContainerUnderMapsTheWorkspaceAndNothingElse(t *testing.T) {
 	}
 }
 
-// The environment handed to the sandbox is the session's environment with three
+// The environment handed to the sandbox is the session's environment with two
 // deliberate changes, and every one of them is a bug if it regresses:
 //
 //   - PI_CODING_AGENT_DIR points into the sandbox (models.json is written there
 //     through the file API);
-//   - GIT_CONFIG_* is dropped (it names host paths and exists to lift a
-//     "dubious ownership" refusal that cannot happen when the agent runs as the
-//     account that owns the checkout);
 //   - HOME is the sandbox user's, because `docker exec -u` does not set it.
+//
+// It used to drop GIT_CONFIG_* as well. Stage 4 deleted the host-side agent that
+// needed those entries (they named control-plane paths to lift a "dubious
+// ownership" refusal), so the fixture here is what setupFor actually produces now:
+// no GIT_CONFIG_*, and the only control-plane path is the agent directory that
+// gets rewritten. The assertion that matters is unchanged — no /data path survives
+// into the sandbox — and it now holds by construction rather than by a filter.
 func TestSandboxAgentEnvKeepsTheTokenAndMovesThePaths(t *testing.T) {
 	host := []string{
 		"PI_CODING_AGENT_DIR=/data/pi-agents/ses_1",
 		"ANTHROPIC_BASE_URL=http://pf-control:7700/gw/llm/tok",
 		"ANTHROPIC_API_KEY=tok",
-		"GIT_CONFIG_COUNT=1",
-		"GIT_CONFIG_KEY_0=safe.directory",
-		"GIT_CONFIG_VALUE_0=/data/sandboxes/usr_1/prj_1/repo",
 		"UNRELATED=1",
 	}
+	// What setupFor builds, checked from the outside: exactly one entry names a
+	// control-plane path, and it is the one this function rewrites. A second one
+	// would be a leak the sandbox could read.
+	hostPaths := 0
+	for _, entry := range host {
+		if strings.Contains(entry, "/data/") {
+			hostPaths++
+			if !strings.HasPrefix(entry, "PI_CODING_AGENT_DIR=") {
+				t.Fatalf("the session environment carries a control-plane path the sandbox copy cannot rewrite: %q", entry)
+			}
+		}
+	}
+	if hostPaths != 1 {
+		t.Fatalf("fixture drift: %d control-plane paths, want only the agent dir", hostPaths)
+	}
+
 	got := sandboxAgentEnv(host, "/workspace/.piforge/agents/ses_1")
 	joined := strings.Join(got, "\n")
 	if !strings.Contains(joined, "PI_CODING_AGENT_DIR=/workspace/.piforge/agents/ses_1") {

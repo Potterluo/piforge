@@ -101,6 +101,13 @@ type Deps struct {
 	// DiskQuotaReportTTL is how long the admin screen may reuse a measurement.
 	// Zero uses diskquota.DefaultReportTTL.
 	DiskQuotaReportTTL time.Duration
+	// AgentIsolated reports that this deployment runs every agent inside a
+	// sandbox container (a docker or runner placement; stage 4 of
+	// docs/EXECUTION-BOUNDARY.md made that the only placement for them). It is a
+	// fact about the deployment, not a switch: the panels need it to answer "can
+	// this MCP server reach the agent at all?", and cmd/piforged derives it from
+	// the provider.
+	AgentIsolated bool
 
 	// DefaultProvider is the provider a session falls back to when it pins no
 	// model. The runtime resolves it the same way, so the explanation of a failed

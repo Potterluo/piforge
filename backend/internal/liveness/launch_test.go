@@ -1,7 +1,6 @@
 package liveness
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -163,16 +162,21 @@ func TestSupervisorRemovesTheMarkerWhenTheAgentIsKilled(t *testing.T) {
 
 // TestMaybeLaunchIsTheSameLauncherEndToEnd covers the argv contract the control
 // plane relies on: `piforged agent-launcher -root … -session … -- <agent>`
-// parses, runs the agent, and owns the marker. This is the exact command
-// sessionAgentLauncher builds in cmd/piforged.
+// parses, runs the agent, and owns the marker. The argv is built here by hand
+// because that is exactly what cmd/piforged/agent_sandbox.go builds inside the
+// sandbox since stage 4 — there is no second builder to drift from it.
 func TestMaybeLaunchIsTheSameLauncherEndToEnd(t *testing.T) {
 	t.Setenv("PIFORGE_LIVENESS_HELPER", "beat")
 	root := t.TempDir()
 	cfg := quietSupervisor(t, root)
-	argv, err := LauncherArgv(os.Args[0], cfg, helperArgv())
-	if err != nil {
-		t.Fatalf("LauncherArgv: %v", err)
-	}
+	agent := helperArgv()
+	argv := append([]string{
+		os.Args[0], LauncherCommand,
+		"-root", cfg.Root,
+		"-session", cfg.SessionID,
+		"-interval", cfg.Interval.String(),
+		"--",
+	}, agent...)
 	if argv[1] != LauncherCommand {
 		t.Fatalf("argv = %v", argv)
 	}
@@ -200,33 +204,16 @@ func TestMaybeLaunchIsTheSameLauncherEndToEnd(t *testing.T) {
 	}
 }
 
-// TestLauncherArgvRefusesIncompleteConfiguration: a launcher without a root or
-// a session cannot write a marker, and starting one anyway would produce an
-// agent the probe cannot see.
-func TestLauncherArgvRefusesIncompleteConfiguration(t *testing.T) {
+// TestSuperviseRefusesIncompleteConfiguration: a launcher without a root or a
+// session cannot write a marker, and starting one anyway would produce an agent
+// the probe cannot see. Since stage 4 the argv is the only way in, so this drives
+// Supervise directly (the same validation MaybeLaunch reaches through it).
+func TestSuperviseRefusesIncompleteConfiguration(t *testing.T) {
 	agent := []string{"pi", "--mode", "rpc"}
-	if _, err := LauncherArgv("", SupervisorConfig{Root: "/x", SessionID: "ses_1"}, agent); err == nil {
-		t.Fatal("LauncherArgv accepted an empty executable")
+	if _, err := Supervise(context.Background(), SupervisorConfig{Root: "/x"}, agent); err == nil {
+		t.Fatal("Supervise accepted an empty session id")
 	}
-	if _, err := LauncherArgv("/bin/piforged", SupervisorConfig{SessionID: "ses_1"}, agent); err == nil {
-		t.Fatal("LauncherArgv accepted an empty root")
-	}
-	if _, err := LauncherArgv("/bin/piforged", SupervisorConfig{Root: "/x"}, agent); err == nil {
-		t.Fatal("LauncherArgv accepted an empty session id")
-	}
-	if _, err := LauncherArgv("/bin/piforged", SupervisorConfig{Root: "/x", SessionID: "ses_1"}, nil); err == nil {
-		t.Fatal("LauncherArgv accepted an empty agent argv")
-	}
-	// The argv it does build is the one MaybeLaunch parses, "--" included.
-	got, err := LauncherArgv("/bin/piforged", SupervisorConfig{Root: "/x", SessionID: "ses_1", Interval: time.Second}, agent)
-	if err != nil {
-		t.Fatalf("LauncherArgv: %v", err)
-	}
-	want := []string{"/bin/piforged", LauncherCommand, "-root", "/x", "-session", "ses_1", "-interval", "1s", "--", "pi", "--mode", "rpc"}
-	if strings.Join(got, " ") != strings.Join(want, " ") {
-		t.Fatalf("LauncherArgv = %v, want %v", got, want)
-	}
-	if !bytes.Contains([]byte(strings.Join(got, " ")), []byte("-- ")) {
-		t.Fatalf("the agent argv is not separated: %v", got)
+	if _, err := Supervise(context.Background(), SupervisorConfig{SessionID: "ses_1"}, agent); err == nil {
+		t.Fatal("Supervise accepted an empty root")
 	}
 }

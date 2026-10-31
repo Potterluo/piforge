@@ -200,8 +200,8 @@ func resolvePlacement(feature, requested string, container bool) (placement, err
 	return placement(requested), nil
 }
 
-// validateAgentWorkspace rejects a deployment that runs the agent inside the
-// sandbox while the file panel still reads this process's own disk.
+// validateContainerWorkspace rejects a container placement whose file panel
+// still reads this process's own disk.
 //
 // Stage 2 of docs/EXECUTION-BOUNDARY.md makes the sandbox's workspace a volume of
 // its own: nothing outside the sandbox mounts it. The file panel is how the user
@@ -209,55 +209,103 @@ func resolvePlacement(feature, requested string, container bool) (placement, err
 // the sandbox API. A deployment that pins the panel to the host would start
 // healthy and then show an empty tree beside an agent that is editing files, which
 // is worse than refusing to start.
-func validateAgentWorkspace(agentInSandbox bool, files string) error {
-	if !agentInSandbox {
+//
+// Stage 4 removed the last case that made this conditional: every container
+// placement now has a detached workspace, so the check no longer depends on a
+// flag. -sandbox local is unaffected — there the host directory *is* the
+// workspace, which is why the rule is about the provider and not about panels in
+// general.
+func validateContainerWorkspace(kind, files string) error {
+	if !isContainerSandbox(kind) {
 		return nil
 	}
 	if strings.EqualFold(strings.TrimSpace(files), string(placeRemote)) {
 		return nil
 	}
-	return fmt.Errorf("-agent-in-sandbox keeps the workspace inside the sandbox, so the file panel must be remote too (got -sandbox-files %s); drop the flag to keep a shared workspace", files)
+	return fmt.Errorf("a %s sandbox keeps the workspace inside the container, so the file panel must be remote too (got -sandbox-files %s); the agent runs in the sandbox and no host directory holds its files", kind, files)
 }
 
-// resolveAgentInSandbox decides where the agent process runs.
+// rejectDisabledIsolation refuses a deployment that asks for the pre-stage-4
+// shape: a container sandbox with the agent running beside the control plane.
 //
-// It is a tri-state, and each arm is a real deployment:
+// It is a refusal rather than a warning because the failure mode is exactly what
+// stages 1–3 removed — an agent that can read /data: the database, master.key,
+// every tenant's workspace. An operator who writes `-agent-in-sandbox=false` (or
+// inherits it from an older compose file) gets a startup error that names the
+// flag, the reason and the way to run unsandboxed on purpose (-sandbox local, the
+// development path).
 //
-//   - the flag was passed: it wins, in both directions. An operator who writes
-//     `-agent-in-sandbox=false` on a runner deployment is deliberately running
-//     the old, weaker shape (the agent beside the control plane) and gets it.
-//   - PIFORGE_AGENT_IN_SANDBOX is set: the environment wins, because compose
-//     files configure this deployment that way. Both "1" and "0" are honoured.
-//   - neither: **on for docker and runner, off for local**. That is the stage-3
-//     flip. The container providers now have a supervisor that keeps the agent
-//     alive and reattachable, so "the agent runs in the sandbox" is the honest
-//     default for them; `local` has no container to run in, and it is what
-//     development uses.
+// Both directions are decided here:
 //
-// The local arm is not a compromise: -agent-in-sandbox is rejected for local a
-// few lines further down, so returning true there would be a startup error
-// rather than a different design.
-func resolveAgentInSandbox(fs *flag.FlagSet, value bool, kind string) (bool, error) {
-	if fs != nil {
-		explicit := false
-		fs.Visit(func(f *flag.Flag) {
-			if f.Name == "agent-in-sandbox" {
-				explicit = true
-			}
-		})
-		if explicit {
-			return value, nil
+//   - `true` is accepted and does nothing: it is what an existing compose file
+//     says, and it agrees with the only placement that exists (PIFORGE_AGENT_IN_SANDBOX
+//     is still read for the same reason, and a nonsense value is still an error
+//     rather than a silent default).
+//   - `false` on docker/runner is a startup error.
+//   - on -sandbox local the switch cannot mean anything — there is no container to
+//     put the agent in — so a stale `true` is reported once and ignored. Failing a
+//     development start because a retired variable is still exported would add a
+//     failure mode with no security value; the returned warning is what keeps that
+//     from being silent.
+//
+// Stage 4 of docs/EXECUTION-BOUNDARY.md §10 is why this is all that is left of a
+// flag that used to choose between two executions.
+func rejectDisabledIsolation(fs *flag.FlagSet, value bool, kind string) (warning string, err error) {
+	envRaw := strings.ToLower(strings.TrimSpace(os.Getenv("PIFORGE_AGENT_IN_SANDBOX")))
+	envValue, envSet := parseIsolationSwitch(envRaw)
+	if envRaw != "" && !envSet {
+		// Same rule as stage 3: an operator who wrote "yes" expects it to mean
+		// something, so a value this process cannot read is an error.
+		return "", fmt.Errorf("PIFORGE_AGENT_IN_SANDBOX must be 0 or 1, got %q", os.Getenv("PIFORGE_AGENT_IN_SANDBOX"))
+	}
+	// What the deployment asked for, in the order it can express it: the flag
+	// when it was passed, then the environment, and "nothing" when neither said
+	// anything (which is the honest answer for a compose file that never had the
+	// switch).
+	asked, requested := false, false
+	source := ""
+	if fs != nil && setBy(fs, "agent-in-sandbox") {
+		asked, requested, source = true, value, "-agent-in-sandbox"
+	} else if envSet {
+		asked, requested, source = true, envValue, "PIFORGE_AGENT_IN_SANDBOX"
+	}
+	if !isContainerSandbox(kind) {
+		if asked && requested {
+			return fmt.Sprintf("%s is retired and has no effect for -sandbox %s: the agent there is this process's child, and there is no sandbox to run it in. Remove it from the deployment's configuration",
+				source, kind), nil
 		}
+		return "", nil
 	}
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("PIFORGE_AGENT_IN_SANDBOX"))) {
+	if asked && !requested {
+		return "", fmt.Errorf("-agent-in-sandbox=false is not available for -sandbox %s: the agent always runs inside the sandbox, because running it beside the control plane lets it read /data (docs/EXECUTION-BOUNDARY.md §10.1). "+
+			"Remove the flag to keep the isolated placement, or run -sandbox local for an unsandboxed development deployment", kind)
+	}
+	return "", nil
+}
+
+// setBy reports whether fs saw that flag on the command line.
+func setBy(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
+// parseIsolationSwitch reads the retired switch's environment value. The second
+// result is false for a value that is neither an affirmation nor a negation, so
+// the caller can reject a typo instead of treating it as "unset".
+func parseIsolationSwitch(raw string) (bool, bool) {
+	switch raw {
 	case "":
-		// No opinion: the provider decides.
+		return false, false
 	case "1", "true", "yes", "on":
-		return true, nil
+		return true, true
 	case "0", "false", "no", "off":
-		return false, nil
+		return false, true
 	default:
-		return false, fmt.Errorf("PIFORGE_AGENT_IN_SANDBOX must be 0 or 1, got %q", os.Getenv("PIFORGE_AGENT_IN_SANDBOX"))
+		return false, false
 	}
-	return isContainerSandbox(kind), nil
 }

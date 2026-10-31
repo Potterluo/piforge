@@ -685,23 +685,20 @@ func (a *sandboxAgent) client(ctx context.Context, sandboxID string) (*aio.Clien
 
 // sandboxAgentEnv adapts the session environment to the sandbox.
 //
-// Three changes, each with a reason:
+// Two changes, each with a reason:
 //
 //   - PI_CODING_AGENT_DIR points at the copy written through the file API, not
 //     at the control plane's /data path (which does not exist in the container).
-//   - GIT_CONFIG_* entries are dropped. They exist to tell the agent's git that
-//     the checkout belongs to another account; inside the sandbox the agent runs
-//     as the account that owns it, so there is no "dubious ownership" to lift,
-//     and the host paths in them would be lies.
 //   - HOME is the sandbox user's, because `docker exec -u` does not set it.
+//
+// It used to drop GIT_CONFIG_* entries as well: those told a *host-side* agent's
+// git that a container-owned checkout belonged to another account. Stage 4 deleted
+// that execution, and with it the entries, so there is nothing to drop.
 func sandboxAgentEnv(hostEnv []string, agentDir string) []string {
 	out := make([]string, 0, len(hostEnv)+1)
 	for _, entry := range hostEnv {
 		name, _, ok := strings.Cut(entry, "=")
 		if !ok {
-			continue
-		}
-		if strings.HasPrefix(name, "GIT_CONFIG_") {
 			continue
 		}
 		if name == "PI_CODING_AGENT_DIR" {

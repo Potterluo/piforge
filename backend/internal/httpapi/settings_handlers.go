@@ -10,6 +10,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/mcpstage"
 	skillset "github.com/piforge/piforge/backend/internal/skills"
 )
 
@@ -214,8 +215,22 @@ func (s *server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
 }
 
 // mcpServersResponse is the MCP list envelope.
+//
+// It carries the placement as well as the configuration, because the two
+// together are the answer the panel has to give: a stdio server is a valid
+// setting in both placements, and only one of them can stage it. Returning the
+// servers alone is what let the panel show a fully-enabled server the agent was
+// never given (docs/EXECUTION-BOUNDARY.md §10.1 item 8).
 type mcpServersResponse struct {
 	Servers []*contracts.MCPServer `json:"servers"`
+	// AgentIsolated reports that the agent runs inside a sandbox in this
+	// deployment, which is what makes some of these servers unstaged.
+	AgentIsolated bool `json:"agent_isolated"`
+	// Unavailable names the configured servers this placement cannot hand to the
+	// agent, keyed by server name, with the code and the reason
+	// (internal/mcpstage). Empty when everything can be staged, so a client can
+	// treat its absence as "nothing to explain".
+	Unavailable map[string]mcpstage.Omission `json:"unavailable,omitempty"`
 }
 
 type mcpServerResponse struct {
@@ -233,7 +248,13 @@ func (s *server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 	if servers == nil {
 		servers = []*contracts.MCPServer{}
 	}
-	writeJSON(w, http.StatusOK, mcpServersResponse{Servers: servers})
+	writeJSON(w, http.StatusOK, mcpServersResponse{
+		Servers: servers,
+		// The placement, and the servers it cannot stage: the panel shows both
+		// instead of leaving a configured stdio server looking functional.
+		AgentIsolated: s.deps.AgentIsolated,
+		Unavailable:   mcpstage.Omissions(servers, s.deps.AgentIsolated),
+	})
 }
 
 // handleCreateMCPServer stores a user-defined MCP server. stdio is not

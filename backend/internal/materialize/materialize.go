@@ -31,6 +31,7 @@ import (
 	"strings"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/mcpstage"
 )
 
 // Layout constants. Pi's convention is one directory per skill containing a
@@ -88,6 +89,16 @@ type Manifest struct {
 	Skills     []string `json:"skills"`
 	MCPServers []string `json:"mcp_servers"`
 	MCPWritten bool     `json:"mcp_written"`
+	// MCPUnavailable names the configured servers this placement cannot hand to
+	// the agent, keyed by server name, with the code and the reason
+	// (internal/mcpstage). It is part of the record rather than a log line
+	// because "the agent has no such tool" is a fact about this session, and a
+	// user looking at a fully-enabled server in the panel is otherwise looking at
+	// a setting that does nothing (docs/EXECUTION-BOUNDARY.md §10.1 item 8).
+	//
+	// A server listed here is deliberately *not* in MCPServers: that list is what
+	// the agent was given, and reporting both would be a contradiction.
+	MCPUnavailable map[string]mcpstage.Omission `json:"mcp_unavailable,omitempty"`
 	// Mechanisms records how each mounted skill was installed: "bind-ro" or
 	// "copy-ro" (FR-14.2). It is part of the manifest because "is it a real
 	// mount?" is a question an operator asks, and the answer differs per
@@ -177,6 +188,12 @@ type Options struct {
 	BindMount func(source, target string) error
 	// Unmount overrides the kernel unmount. Nil uses the real one.
 	Unmount func(target string) error
+	// MCPUnavailable names the enabled servers this placement cannot stage, with
+	// the reason (internal/mcpstage). The caller decides it — the projection
+	// knows how to write a skill tree, not where the agent runs — and this
+	// package records the answer in the manifest and keeps those servers out of
+	// the "the agent has these" list.
+	MCPUnavailable map[string]mcpstage.Omission
 }
 
 // Mount writes the project's tooling into root on the control plane's own disk.
@@ -354,8 +371,16 @@ func MountFS(fs FileSystem, root string, skills []*contracts.Skill, servers []*c
 	// It is deliberately not duplicated here. Two files would mean two sources of
 	// truth, and the project-local one wins in Pi — silently dropping the credentials
 	// the agent directory carries.
+	unavailable := map[string]mcpstage.Omission{}
 	for _, server := range servers {
 		if server == nil || !server.Enabled {
+			continue
+		}
+		if omission, blocked := opts.MCPUnavailable[server.Name]; blocked {
+			// Configured, enabled, and deliberately not staged. Recording it here
+			// is what turns a server-log warning into a fact about this session
+			// (docs/EXECUTION-BOUNDARY.md §10.1 item 8).
+			unavailable[server.Name] = omission
 			continue
 		}
 		result.MCPServers = append(result.MCPServers, server.Name)
@@ -389,11 +414,12 @@ func MountFS(fs FileSystem, root string, skills []*contracts.Skill, servers []*c
 		}
 	}
 	next := Manifest{
-		Skills:     result.Skills,
-		MCPServers: result.MCPServers,
-		MCPWritten: len(result.MCPServers) > 0,
-		Mechanisms: mechanisms,
-		SkillIDs:   skillIDs,
+		Skills:         result.Skills,
+		MCPServers:     result.MCPServers,
+		MCPWritten:     len(result.MCPServers) > 0,
+		MCPUnavailable: unavailable,
+		Mechanisms:     mechanisms,
+		SkillIDs:       skillIDs,
 	}
 	if err := writeManifestFS(fs, root, next); err != nil {
 		return Result{}, err

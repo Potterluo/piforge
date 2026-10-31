@@ -20,6 +20,7 @@ import {
   type CreatePRResult,
   type InterruptResult,
   type MCPServer,
+  type MCPServersResponse,
   type Project,
   type DeploymentStatus,
   type SupportNotice,
@@ -630,7 +631,7 @@ export const skills = {
 };
 
 export const mcp = {
-  list: () => request<{ servers: MCPServer[] }>("/v1/mcp/servers"),
+  list: () => request<MCPServersResponse>("/v1/mcp/servers"),
   create: (input: Omit<MCPServer, "id" | "created_at" | "has_secrets"> & { secrets?: string }) =>
     request<{ server: MCPServer }>("/v1/mcp/servers", { method: "POST", body: input }),
   remove: (id: string) => request<{ ok: boolean }>(`/v1/mcp/servers/${id}`, { method: "DELETE" }),

@@ -217,27 +217,30 @@ func equalStrings(a, b []string) bool {
 }
 
 // Stage 2 gives each sandbox a workspace volume of its own, so the file panel has
-// nothing on this disk to read. A deployment that pins it to the host would start
-// healthy and then show an empty tree beside an agent editing files.
-func TestValidateAgentWorkspace(t *testing.T) {
+// nothing on this disk to read. Stage 4 removed the flag that used to make this
+// conditional: a container placement always has a detached workspace, so `host`
+// is a contradiction and `local` is untouched.
+func TestValidateContainerWorkspace(t *testing.T) {
 	cases := []struct {
 		name    string
-		agent   bool
+		kind    string
 		files   string
 		wantErr bool
 	}{
-		{name: "flag off: any placement is fine", agent: false, files: "host"},
-		{name: "flag off with remote files", agent: false, files: "remote"},
-		{name: "flag on with remote files", agent: true, files: "remote"},
-		{name: "flag on with host files is refused", agent: true, files: "host", wantErr: true},
-		{name: "flag on with the request value is refused", agent: true, files: "auto", wantErr: true},
+		{name: "local keeps the host panel", kind: "local", files: "host"},
+		{name: "local is unaffected by the rule", kind: "local", files: "remote"},
+		{name: "docker with a remote panel", kind: "docker", files: "remote"},
+		{name: "runner with a remote panel", kind: "runner", files: "remote"},
+		{name: "docker with a host panel is refused", kind: "docker", files: "host", wantErr: true},
+		{name: "runner with a host panel is refused", kind: "runner", files: "host", wantErr: true},
+		{name: "the request value is refused", kind: "runner", files: "auto", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateAgentWorkspace(tc.agent, tc.files)
+			err := validateContainerWorkspace(tc.kind, tc.files)
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("validateAgentWorkspace(%v, %q) = nil, want an error", tc.agent, tc.files)
+					t.Fatalf("validateContainerWorkspace(%q, %q) = nil, want an error", tc.kind, tc.files)
 				}
 				if !strings.Contains(err.Error(), "must be remote") {
 					t.Fatalf("error = %v, want it to name the file panel", err)
@@ -245,40 +248,46 @@ func TestValidateAgentWorkspace(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("validateAgentWorkspace(%v, %q) = %v", tc.agent, tc.files, err)
+				t.Fatalf("validateContainerWorkspace(%q, %q) = %v", tc.kind, tc.files, err)
 			}
 		})
 	}
 }
 
-// The stage-3 flip: the agent runs in the sandbox by default for the container
-// providers, and stays beside the control plane for -sandbox local. The flag and
-// the environment still win, in both directions, because an operator who pinned
-// the old shape must get it.
-func TestResolveAgentInSandbox(t *testing.T) {
+// Stage 4 deleted the switch, not the intent behind it: `false` on a container
+// placement is refused at startup (it is the unsandboxed multi-tenant instance
+// stages 1–3 eliminated), `true` is a no-op so an existing compose file keeps
+// working, and -sandbox local — the development path — still starts, with one
+// warning when a retired variable asks for something local cannot have.
+func TestRejectDisabledIsolation(t *testing.T) {
 	cases := []struct {
-		name string
-		kind string
-		flag string // "" = not passed
-		env  string
-		want bool
+		name        string
+		kind        string
+		flag        string // "" = not passed
+		env         string
+		wantErr     string // "" = must start
+		wantWarning bool
 	}{
-		{name: "docker defaults on", kind: "docker", want: true},
-		{name: "runner defaults on", kind: "runner", want: true},
-		{name: "local defaults off", kind: "local", want: false},
-		{name: "docker can be turned off", kind: "docker", flag: "false", want: false},
-		{name: "local cannot be turned on by the provider default", kind: "local", flag: "false", want: false},
-		{name: "the flag beats the environment", kind: "runner", flag: "false", env: "1", want: false},
-		{name: "the environment turns it on for docker", kind: "docker", env: "1", want: true},
-		{name: "the environment turns it off for runner", kind: "runner", env: "0", want: false},
-		{name: "the environment works for local too", kind: "local", env: "1", want: true},
+		{name: "docker with no switch", kind: "docker"},
+		{name: "runner with no switch", kind: "runner"},
+		{name: "docker with the switch on", kind: "docker", flag: "true"},
+		{name: "runner with the environment on", kind: "runner", env: "1"},
+		{name: "local with no switch", kind: "local"},
+		{name: "local with the switch off", kind: "local", flag: "false"},
+		{name: "local with the environment off", kind: "local", env: "0"},
+		{name: "docker with the switch off is refused", kind: "docker", flag: "false", wantErr: "always runs inside the sandbox"},
+		{name: "runner with the environment off is refused", kind: "runner", env: "0", wantErr: "always runs inside the sandbox"},
+		{name: "the flag beats the environment", kind: "docker", flag: "true", env: "0"},
+		{name: "local ignores the retired switch, loudly", kind: "local", flag: "true", wantWarning: true},
+		{name: "local ignores it from the environment too", kind: "local", env: "1", wantWarning: true},
+		{name: "a nonsense environment value is an error", kind: "runner", env: "maybe", wantErr: "must be 0 or 1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("PIFORGE_AGENT_IN_SANDBOX", tc.env)
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
-			value := false
-			fs.BoolVar(&value, "agent-in-sandbox", false, "")
+			value := true
+			fs.BoolVar(&value, "agent-in-sandbox", true, "")
 			args := []string{}
 			if tc.flag != "" {
 				args = append(args, "-agent-in-sandbox="+tc.flag)
@@ -286,23 +295,25 @@ func TestResolveAgentInSandbox(t *testing.T) {
 			if err := fs.Parse(args); err != nil {
 				t.Fatalf("parse: %v", err)
 			}
-			got, err := resolveAgentInSandbox(fs, value, tc.kind)
-			if err != nil {
-				t.Fatalf("resolve: %v", err)
+			warning, err := rejectDisabledIsolation(fs, value, tc.kind)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("kind=%s flag=%q env=%q: %v, want it to start", tc.kind, tc.flag, tc.env, err)
+				}
+				if tc.wantWarning && warning == "" {
+					t.Fatalf("kind=%s flag=%q env=%q: started silently; the retired switch has to be reported", tc.kind, tc.flag, tc.env)
+				}
+				if !tc.wantWarning && warning != "" {
+					t.Fatalf("kind=%s flag=%q env=%q: unexpected warning %q", tc.kind, tc.flag, tc.env, warning)
+				}
+				return
 			}
-			if got != tc.want {
-				t.Fatalf("kind=%s flag=%q env=%q: got %v, want %v", tc.kind, tc.flag, tc.env, got, tc.want)
+			if err == nil {
+				t.Fatalf("kind=%s flag=%q env=%q: accepted, want %q", tc.kind, tc.flag, tc.env, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not mention %q", err.Error(), tc.wantErr)
 			}
 		})
-	}
-}
-
-// A value that is neither 0 nor 1 is a configuration error, not a default: an
-// operator who wrote PIFORGE_AGENT_IN_SANDBOX=yes expects "yes" to mean
-// something, and silently choosing the provider default would bury the typo.
-func TestResolveAgentInSandboxRejectsANonsenseEnvironment(t *testing.T) {
-	t.Setenv("PIFORGE_AGENT_IN_SANDBOX", "maybe")
-	if _, err := resolveAgentInSandbox(nil, false, "runner"); err == nil {
-		t.Fatal("a non-boolean environment value must be a startup error")
 	}
 }

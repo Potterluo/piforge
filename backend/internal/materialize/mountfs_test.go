@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/mcpstage"
 )
 
 // memFS is a FileSystem with no disk under it: everything MountFS writes has to
@@ -250,6 +251,34 @@ func TestMountFSProjectsEntirelyThroughTheFilesystem(t *testing.T) {
 	}
 	if _, ok := fs.files["/workspace/repo/.pi/skills/pdf-tools/SKILL.md"]; ok {
 		t.Fatal("the stale skill is still there")
+	}
+}
+
+// Stage 4's stdio decision, recorded where a user can find it: a server the
+// placement cannot stage is in the manifest's mcp_unavailable map with its code
+// and reason, and deliberately *not* in mcp_servers (that list is what the agent
+// was given). An HTTP server in the same configuration is unaffected.
+func TestMountFSRecordsAnUnstagedServerInsteadOfClaimingIt(t *testing.T) {
+	fs := newMemFS()
+	root := "/workspace/repo"
+	servers := []*contracts.MCPServer{
+		{Name: "fs", Enabled: true, Transport: contracts.MCPStdio, Command: "npx"},
+		{Name: "docs", Enabled: true, Transport: contracts.MCPHTTP, URL: "https://example.test/mcp"},
+	}
+	omission := mcpstage.Omission{Code: mcpstage.CodeStdioNeedsCredentials, Reason: mcpstage.ReasonStdio}
+	if _, err := MountFS(fs, root, nil, servers, Options{MCPUnavailable: map[string]mcpstage.Omission{"fs": omission}}); err != nil {
+		t.Fatalf("MountFS: %v", err)
+	}
+	manifest := ReadFS(fs, root)
+	if len(manifest.MCPServers) != 1 || manifest.MCPServers[0] != "docs" {
+		t.Fatalf("mcp_servers = %v, want only the HTTP server", manifest.MCPServers)
+	}
+	if !manifest.MCPWritten {
+		t.Fatal("mcp_written is false although one server was staged")
+	}
+	recorded, ok := manifest.MCPUnavailable["fs"]
+	if !ok || recorded.Code != omission.Code || recorded.Reason != omission.Reason {
+		t.Fatalf("mcp_unavailable = %v, want the stdio omission recorded", manifest.MCPUnavailable)
 	}
 }
 

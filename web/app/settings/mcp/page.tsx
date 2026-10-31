@@ -32,6 +32,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
+import { STDIO_UNAVAILABLE_HEADLINE, hasUnstagedServers, unavailableExplanation } from "@/lib/mcp";
 import { formatRelative } from "@/lib/session/format";
 import { qk } from "@/lib/session/queries";
 
@@ -119,6 +120,11 @@ export default function McpPage() {
   });
 
   const list = servers.data?.servers ?? [];
+  // Stage 4: a stdio server cannot be handed to an agent that runs inside the
+  // sandbox, and the deployment says so per server instead of leaving the row
+  // looking functional (docs/EXECUTION-BOUNDARY.md §10.1 item 8).
+  const unavailable = servers.data?.unavailable;
+  const showIsolationNotice = hasUnstagedServers(servers.data?.agent_isolated, unavailable);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
@@ -126,7 +132,9 @@ export default function McpPage() {
         <div className="flex min-w-0 flex-col gap-1">
           <h1 className="text-base font-medium">MCP 中心</h1>
           <p className="max-w-2xl text-xs text-muted-foreground">
-            MCP server 给 agent 提供额外工具。stdio 进程跑在沙箱里，拥有和你相同的权限。凭据用 AES-GCM 加密存库，接口只能写、不能读回；密钥来自 PIFORGE_SECRET_KEY 或数据目录的 secret.key。
+            MCP server 给 agent 提供额外工具。凭据用 AES-GCM 加密存库，接口只能写、不能读回；密钥来自
+            PIFORGE_SECRET_KEY 或数据目录的 secret.key。agent 在隔离沙箱里运行时，http server 由控制面代理
+            出口并带可吊销的每会话 token，stdio server 不会被装进沙箱（原因见下方提示）。
           </p>
         </div>
         <Button size="sm" className="ml-auto" onClick={() => setDialogOpen(true)}>
@@ -136,6 +144,20 @@ export default function McpPage() {
       </header>
 
       <div className="flex flex-col gap-2 p-4">
+        {showIsolationNotice ? (
+          <div
+            data-testid="mcp-isolation-notice"
+            className="rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground"
+          >
+            <p className="font-medium text-foreground">{STDIO_UNAVAILABLE_HEADLINE}</p>
+            <p className="mt-1">
+              这个部署的 agent 跑在每个会话自己的沙箱容器里；stdio server 的凭据必须写进沙箱环境，
+              而沙箱里没有可供控制面注入凭据的出口，所以下面标记的 stdio server 不会被装进沙箱——
+              它仍然能用，只是这个会话的 agent 拿不到这些工具。改用 http（远程端点）：控制面代理出口，
+              沙箱里只有可吊销的每会话 token，真实凭据不出控制面。
+            </p>
+          </div>
+        ) : null}
         {servers.isPending ? (
           <>
             <Skeleton className="h-16 w-full" />
@@ -167,7 +189,11 @@ export default function McpPage() {
             </EmptyContent>
           </Empty>
         ) : (
-          list.map((server) => (
+          list.map((server) => {
+            // One sentence per affected server: a banner alone does not tell a
+            // user with three servers which one the agent did not get.
+            const explanation = unavailableExplanation(server, unavailable);
+            return (
             <Item key={server.id} variant="outline">
               <ItemMedia variant="icon">
                 <Boxes />
@@ -180,12 +206,26 @@ export default function McpPage() {
                   {server.scope === "admin" ? <Badge>共享</Badge> : <Badge variant="outline">私有</Badge>}
                   {server.has_secrets ? <Badge variant="outline">有凭据</Badge> : null}
                   {server.enabled ? null : <Badge variant="destructive">已停用</Badge>}
+                  {explanation ? (
+                    <Badge variant="destructive" data-testid="mcp-unavailable-badge" data-name={server.name}>
+                      隔离模式下不会加载
+                    </Badge>
+                  ) : null}
                 </div>
                 <ItemDescription className="font-mono text-xs">
                   {server.transport === "stdio"
                     ? [server.command, ...(server.args ?? [])].filter(Boolean).join(" ")
                     : server.url || "未配置端点"}
                 </ItemDescription>
+                {explanation ? (
+                  <ItemDescription
+                    data-testid="mcp-unavailable-reason"
+                    data-name={server.name}
+                    className="text-[11px] text-destructive"
+                  >
+                    {explanation}
+                  </ItemDescription>
+                ) : null}
                 <ItemDescription className="text-[11px]">
                   {formatRelative(server.created_at)}
                 </ItemDescription>
@@ -203,7 +243,8 @@ export default function McpPage() {
                 </Button>
               </ItemActions>
             </Item>
-          ))
+            );
+          })
         )}
       </div>
 

@@ -572,6 +572,28 @@ export interface MCPServer {
   created_at: string;
 }
 
+/**
+ * One server the deployment cannot hand to the agent (docs/EXECUTION-BOUNDARY.md
+ * §10.1 item 8). `code` is what a client switches on; `reason` is the sentence a
+ * person reads. Both come from the server, because the rule ("is this server
+ * stageable here?") lives in one place and the panel only renders it.
+ */
+export interface MCPOmission {
+  code: string;
+  reason: string;
+}
+
+/**
+ * The MCP panel's answer: what is configured, and what this deployment can
+ * actually stage. `agent_isolated` is the placement; `unavailable` is keyed by
+ * server name, matching the checkout's mount manifest.
+ */
+export interface MCPServersResponse {
+  servers: MCPServer[];
+  agent_isolated?: boolean;
+  unavailable?: Record<string, MCPOmission>;
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------

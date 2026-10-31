@@ -31,6 +31,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/gitx"
 	"github.com/piforge/piforge/backend/internal/materialize"
+	"github.com/piforge/piforge/backend/internal/mcpstage"
 	skillset "github.com/piforge/piforge/backend/internal/skills"
 	"github.com/piforge/piforge/backend/internal/skillsnap"
 	"github.com/piforge/piforge/backend/internal/store"
@@ -424,6 +425,14 @@ func (s *Service) mountTooling(ctx context.Context, userID, sessionID string, sb
 		// is named after the session id so the delete path (and the janitor's
 		// sweep) can map it back to a session without a second index.
 		SnapshotDir: snapshotDir,
+		// A detached workspace is an isolated agent (stage 4: every docker and
+		// runner deployment), so the servers this placement cannot stage are
+		// recorded in the manifest instead of vanishing into a log line.
+		MCPUnavailable: mcpstage.Omissions(servers, remote),
+	}
+	for name, omission := range options.MCPUnavailable {
+		slog.Warn("an MCP server will not reach this session's agent",
+			"session", sessionID, "server", name, "code", omission.Code, "reason", omission.Reason)
 	}
 	var result materialize.Result
 	if remote {

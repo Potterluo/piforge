@@ -48,6 +48,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/liveness"
 	"github.com/piforge/piforge/backend/internal/llmgw"
 	"github.com/piforge/piforge/backend/internal/materialize"
+	"github.com/piforge/piforge/backend/internal/mcpstage"
 	"github.com/piforge/piforge/backend/internal/pi"
 	"github.com/piforge/piforge/backend/internal/pimodel"
 	"github.com/piforge/piforge/backend/internal/provision"
@@ -143,9 +144,12 @@ type options struct {
 	sandboxNetwork string
 	sandboxCPUs    string
 	sandboxMemory  string
-	// agentInSandbox runs the agent process inside the container instead of as a
-	// child of this process (docs/EXECUTION-BOUNDARY.md stage 1). Only meaningful
-	// for docker/runner; -sandbox local rejects it.
+	// agentInSandbox is gone as a *choice* (stage 4 of
+	// docs/EXECUTION-BOUNDARY.md): a container placement always runs the agent
+	// inside its sandbox, and -sandbox local always runs it here. The old knob is
+	// still registered, and only so that a deployment which turns isolation off
+	// gets a refusal naming the flag instead of a silent downgrade; see
+	// rejectDisabledIsolation.
 	agentInSandbox bool
 	// sandboxAgentLauncher and sandboxAgentPi name the binaries *inside* the
 	// sandbox: the control-plane binary that provides `agent-launcher` (the
@@ -292,15 +296,13 @@ func run() error {
 		"base URL of the sandbox-runner service, with -sandbox runner (e.g. http://sandbox-runner:7801)")
 	flag.StringVar(&opt.sandboxRunnerToken, "sandbox-runner-token", envOr("PIFORGE_SANDBOX_RUNNER_TOKEN", ""),
 		"shared bearer token of the sandbox-runner service, with -sandbox runner")
-	// Stage 3 of docs/EXECUTION-BOUNDARY.md changed the default: the agent runs
-	// inside the sandbox for every container provider (docker/runner), because a
-	// detached supervisor now keeps it alive across a control-plane restart
-	// (internal/agentsupervisor). -sandbox local keeps it off: there is no
-	// container to run in, and the local placement is what development uses.
-	// resolveAgentInSandbox below is where the tri-state is decided; this default
-	// only matters for the help text and for an explicit env override.
-	flag.BoolVar(&opt.agentInSandbox, "agent-in-sandbox", envOr("PIFORGE_AGENT_IN_SANDBOX", "0") == "1",
-		"run the agent process inside the sandbox (docker/runner). Default: on for docker/runner, off for local (env PIFORGE_AGENT_IN_SANDBOX)")
+	// Deprecated, and deliberately still parsed: stage 4 removed the choice, and a
+	// deployment that asks for the old, unsandboxed shape must fail loudly rather
+	// than run a multi-tenant instance with the agent beside the control plane.
+	// Passing `true` is accepted as a no-op so an existing compose file or script
+	// keeps working. See rejectDisabledIsolation.
+	flag.BoolVar(&opt.agentInSandbox, "agent-in-sandbox", envOr("PIFORGE_AGENT_IN_SANDBOX", "1") == "1",
+		"deprecated and always on for docker/runner: the agent runs inside the sandbox. `false` is refused at startup (env PIFORGE_AGENT_IN_SANDBOX)")
 	flag.StringVar(&opt.sandboxAgentLauncher, "sandbox-agent-launcher", envOr("PIFORGE_SANDBOX_AGENT_LAUNCHER", "/opt/piforge/piforged"),
 		"path of the piforged binary inside the sandbox (it provides agent-launcher: the heartbeat supervisor)")
 	flag.StringVar(&opt.sandboxAgentPi, "sandbox-agent-pi", envOr("PIFORGE_SANDBOX_AGENT_PI", "pi"),
@@ -349,21 +351,16 @@ func run() error {
 	if err := validateSandboxFlags(opt.sandboxKind, opt.sandboxRunnerURL, opt.sandboxRunnerToken); err != nil {
 		return err
 	}
-	// Where the agent runs is a function of the provider, not only of the flag:
-	// stage 3 made the sandboxed placement the default for container providers.
-	// Resolve it before anything else reads it, so no later check sees a
-	// half-decided value.
-	agentInSandbox, err := resolveAgentInSandbox(flag.CommandLine, opt.agentInSandbox, opt.sandboxKind)
+	// Where the agent runs is not a decision any more: a container placement runs
+	// it inside the sandbox, and -sandbox local runs it here. What is left is the
+	// refusal — the retired switch may be present in an operator's compose file or
+	// startup script, and "off" must fail the start instead of quietly producing a
+	// multi-tenant instance whose agent can read /data.
+	isolationWarning, err := rejectDisabledIsolation(flag.CommandLine, opt.agentInSandbox, opt.sandboxKind)
 	if err != nil {
 		return err
 	}
-	opt.agentInSandbox = agentInSandbox
-	// Stage 1 of the execution boundary: the agent can only move into a container
-	// that exists. -sandbox local has no process namespace to attach to, and
-	// pretending otherwise would leave a flag that silently does nothing.
-	if opt.agentInSandbox && opt.sandboxKind == "local" {
-		return fmt.Errorf("-agent-in-sandbox needs a container provider (-sandbox docker or -sandbox runner); the local provider has no sandbox to run the agent in (docs/EXECUTION-BOUNDARY.md §8)")
-	}
+	opt.agentInSandbox = isContainerSandbox(opt.sandboxKind)
 
 	// Where the browser, the terminal and the file panel look is one decision, not
 	// three. Resolve it before anything is created: a contradictory combination
@@ -382,12 +379,12 @@ func run() error {
 		return fmt.Errorf("create data dir: %w", err)
 	}
 
-	// Stage 2 of the execution boundary removes the shared volume: with
-	// -agent-in-sandbox the workspace is a volume of the sandbox's own, so there
-	// is no host directory for the file panel (or the skill projection) to read.
-	// A deployment that pins the panel to the host would show an empty tree next
-	// to a running agent, which is the one combination that must not start.
-	if err := validateAgentWorkspace(opt.agentInSandbox, opt.sandboxFiles); err != nil {
+	// Stage 2 of the execution boundary removes the shared volume: with a
+	// container placement the workspace is a volume of the sandbox's own, so
+	// there is no host directory for the file panel (or the skill projection) to
+	// read. A deployment that pins the panel to the host would show an empty tree
+	// next to a running agent, which is the one combination that must not start.
+	if err := validateContainerWorkspace(opt.sandboxKind, opt.sandboxFiles); err != nil {
 		return err
 	}
 
@@ -399,6 +396,12 @@ func run() error {
 		"browser", opt.sandboxBrowser,
 		"terminal", opt.sandboxTerminal,
 		"files", opt.sandboxFiles)
+	// A retired switch that was exported in this deployment's environment is worth
+	// one line: it is one of the few keys in a compose file that no longer does
+	// anything (stage 4 of docs/EXECUTION-BOUNDARY.md).
+	if isolationWarning != "" {
+		logger.Warn(isolationWarning, "sandbox", opt.sandboxKind)
+	}
 	// The cap is invisible otherwise: parallel runs are opt-in per user, and the
 	// only other place it surfaces is a refusal. Say it once at startup.
 	logger.Info("parallel branch limit", "branches", parallelLimit, "max", httpapi.MaxParallelLimit)
@@ -560,10 +563,11 @@ func run() error {
 			DataRoot: filepath.Join(opt.dataDir, "sandboxes"),
 			APIPort:  8080,
 			APIKey:   opt.sandboxAPIKey,
-			// Stage 2: with the agent inside the sandbox, its workspace is a
-			// volume of its own that this process never mounts. Stage 1 still
-			// shared the volume; that is what this flag stops doing.
-			DetachedWorkspace: opt.agentInSandbox,
+			// Stage 2: the agent runs inside the sandbox, so its workspace is a
+			// volume of its own that this process never mounts. Stage 4 removed the
+			// switch that used to share it: there is one placement for a container
+			// provider now.
+			DetachedWorkspace: true,
 		})
 		if derr != nil {
 			return fmt.Errorf("init docker sandbox provider: %w", derr)
@@ -590,7 +594,8 @@ func run() error {
 			APIPort:  8080,
 			// Stage 2: the create request asks the runner for a workspace volume
 			// of this sandbox's own, which no service in the deployment mounts.
-			DetachedWorkspace: opt.agentInSandbox,
+			// Stage 4 removed the switch: a runner placement is always detached.
+			DetachedWorkspace: true,
 		})
 		if rerr != nil {
 			return fmt.Errorf("init runner sandbox provider: %w", rerr)
@@ -615,13 +620,15 @@ func run() error {
 
 	// Stage 1 of docs/EXECUTION-BOUNDARY.md: the agent process runs *inside* the
 	// sandbox, not beside this one. The provider has to be able to attach a byte
-	// stream to a process in the container; local has no container, and a
-	// provider without that surface would otherwise fail at the first prompt.
+	// stream to a process in the container; local has no container, which is why
+	// this is the one thing the provider still gets asked for. Stage 4 removed the
+	// branch that used to make it a choice: if a container provider cannot attach,
+	// there is no fallback to run beside this process any more, so the start fails.
 	var agentAttacher sandbox.Attacher
 	if opt.agentInSandbox {
 		attacher, ok := sb.(sandbox.Attacher)
 		if !ok {
-			return fmt.Errorf("-agent-in-sandbox: the %q provider cannot attach a process stream; use -sandbox docker or -sandbox runner", opt.sandboxKind)
+			return fmt.Errorf("-sandbox %s has no attach verb, which every container placement needs: the agent runs inside its own sandbox (docs/EXECUTION-BOUNDARY.md §10)", opt.sandboxKind)
 		}
 		agentAttacher = attacher
 	}
@@ -658,11 +665,11 @@ func run() error {
 			return fmt.Errorf("remote workspace files need a container sandbox provider (-sandbox docker or -sandbox runner)")
 		}
 		fileBackend = &sandboxFileBackend{provider: remoteSB, store: st, keys: sandboxKeys{store: st, fixed: opt.sandboxAPIKey}}
-		// OwnedTree follows the workspace shape, not the provider: a detached
+		// OwnedTree follows the workspace shape: a container placement's
 		// workspace (stage 2) is built and read by the sandbox user alone, so the
-		// panel's git needs no `safe.directory`, while a shared volume still does
-		// (the control plane writes into it as root).
-		executor := workspaceremote.ShellExecutor{Backend: fileBackend, OwnedTree: opt.agentInSandbox}
+		// panel's git needs no `safe.directory`. Stage 4 removed the shared-volume
+		// deployment that was the other case.
+		executor := workspaceremote.ShellExecutor{Backend: fileBackend, OwnedTree: true}
 		remoteFiles, rerr := workspaceremote.New(workspaceremote.Config{
 			Backend: fileBackend,
 			// Same runner, same parsing: only the machine executing git changes.
@@ -763,7 +770,7 @@ func run() error {
 		resolvedModels.Unlock()
 
 		// MCP servers reach the agent the only way Pi accepts them: a file in the
-		// session's agent directory. Under -agent-in-sandbox the file holds a
+		// session's agent directory. For a container placement the file holds a
 		// broker URL and a revocable per-session token instead of a credential —
 		// see mcpEntriesForSession.
 		entries, merr := mcpEntriesForSession(ctx, st, spec, opt.agentInSandbox, gatewayBase, logger)
@@ -793,14 +800,20 @@ func run() error {
 			Args: args,
 			// PI_CODING_AGENT_DIR is the authoritative pointer; the *_BASE_URL
 			// variables stay for clients that read them directly.
-			Env: append([]string{
+			//
+			// No GIT_CONFIG_* entries: they existed to tell a host-side agent that
+			// a container-owned checkout belonged to another account, and stage 4
+			// deleted that execution. Inside the sandbox the agent runs as the
+			// account that owns the tree, so there is no "dubious ownership" to
+			// lift (sandboxAgentEnv used to strip them for that reason).
+			Env: []string{
 				"PI_CODING_AGENT_DIR=" + res.Dir,
 				"ANTHROPIC_BASE_URL=" + gatewayURL,
 				"ANTHROPIC_API_KEY=" + token,
 				"OPENAI_BASE_URL=" + gatewayURL + "/v1",
 				"OPENAI_API_KEY=" + token,
 				"PIFORGE_GATEWAY_TOKEN=" + token,
-			}, agentGitEnv(opt.sandboxKind, spec.Worktree)...),
+			},
 		}
 	}
 
@@ -816,28 +829,18 @@ func run() error {
 		return ref
 	}
 
-	// A container provider's agent does not have to die with this process, which
-	// is why every agent it spawns is wrapped in a launcher that keeps a
-	// heartbeat marker inside the sandbox workspace (internal/liveness). The
-	// marker is what restart reconciliation reads after a control-plane restart;
-	// without it the new process could only see its own empty registry.
-	//
-	// Under -agent-in-sandbox the marker is written by the same supervisor, but
-	// running inside the sandbox (see below), so there is nothing to wrap here.
-
 	// One resolver for every sandbox API call this process makes: the file panel,
-	// the terminal, the browser, the worktree request and — under
-	// -agent-in-sandbox — the model configuration written through the file API
-	// all present the same key the container was created with.
+	// the terminal, the browser, the worktree request and — for a container
+	// placement — the model configuration written through the file API all present
+	// the same key the container was created with.
 	keys := sandboxKeys{store: st, fixed: opt.sandboxAPIKey}
 
-	// Stage 1 of docs/EXECUTION-BOUNDARY.md. Under -agent-in-sandbox the agent is
-	// a process inside the sandbox and this one only owns its stdio; the
-	// heartbeat launcher then travels in the sandbox-side argv (agent_sandbox.go)
-	// rather than wrapping a local spawn, which would describe a process that no
-	// longer exists.
+	// Stage 1 of docs/EXECUTION-BOUNDARY.md. For a container placement the agent is
+	// a process inside the sandbox and this one only owns its stdio; the heartbeat
+	// launcher travels in the sandbox-side argv (agent_sandbox.go). Stage 4 deleted
+	// the other arm — wrapping a locally spawned agent in the same launcher — which
+	// only existed for the placement that no longer exists.
 	var agent *sandboxAgent
-	var agentLauncher func(context.Context, contracts.SessionSpec, []string) ([]string, error)
 	if opt.agentInSandbox {
 		agent, err = newSandboxAgent(remoteSB, agentAttacher, keys, st, setupFor, opt, logger)
 		if err != nil {
@@ -849,11 +852,9 @@ func run() error {
 			"pi", opt.sandboxAgentPi,
 			"launcher", opt.sandboxAgentLauncher,
 			"detail", "RPC over the sandbox exec stream; the provider key never enters the container")
-	} else {
-		agentLauncher = sessionAgentLauncher(opt, st, remoteSB, logger)
 	}
 
-	rt, err := newRuntime(opt, logger, setupFor, modelFor, launcher, agentLauncher, agent)
+	rt, err := newRuntime(opt, logger, setupFor, modelFor, launcher, agent)
 	if err != nil {
 		return err
 	}
@@ -1053,6 +1054,11 @@ func run() error {
 		Workspace:          files,
 		DefaultProvider:    opt.defaultProvider,
 		ParallelLimit:      parallelLimit,
+		// The panels have to answer "can this MCP server reach the agent at all?",
+		// and the answer follows the placement: a container deployment runs every
+		// agent in its sandbox, so a stdio server cannot be staged there
+		// (internal/mcpstage).
+		AgentIsolated:      opt.agentInSandbox,
 		SandboxDiskQuota:   opt.sandboxDiskQuota,
 		SkillMaxBytes:      opt.skillMaxBytes,
 		Sandbox:            sb,
@@ -1327,11 +1333,13 @@ func stopAgentsOnSandbox(ctx context.Context, logger *slog.Logger, st *store.Sto
 // that ships with the repo, which is how development and the e2e suite run
 // without a model account.
 //
-// wrapArgv is nil for -sandbox local, where the agent is this process's own
-// child and the in-process registry is the whole truth. A container provider
-// passes the heartbeat launcher, so the agent that outlives a restart is also an
-// agent the next process can see.
-func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSpec) agentSetup, modelFor func(contracts.SessionSpec, string) string, launcher isolate.Launcher, wrapArgv func(context.Context, contracts.SessionSpec, []string) ([]string, error), agent *sandboxAgent) (*pi.Runtime, error) {
+// There are two executions, and each one is the whole of its placement: a
+// container provider passes the sandbox agent (Dial, so the process is spawned
+// inside the sandbox and this one only owns its stdio), and -sandbox local passes
+// nil, so the agent is this process's own child and the in-process registry is the
+// whole truth. Stage 4 removed the third shape — a locally spawned agent wrapped
+// in the sandbox heartbeat launcher — because no placement produces it any more.
+func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSpec) agentSetup, modelFor func(contracts.SessionSpec, string) string, launcher isolate.Launcher, agent *sandboxAgent) (*pi.Runtime, error) {
 	bin := opt.piBin
 	args := []string{"--mode", "rpc"}
 
@@ -1360,7 +1368,6 @@ func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSp
 		EnvFor: func(spec contracts.SessionSpec) []string {
 			return setup(spec).Env
 		},
-		WrapArgv: wrapArgv,
 	}
 	if agent != nil {
 		// The process is not ours to spawn: Dial starts it in the sandbox and
@@ -1388,62 +1395,6 @@ func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSp
 type agentSetup struct {
 	Env  []string
 	Args []string
-}
-
-// agentGitEnv tells the agent's own git that the checkout it works in belongs to
-// another account — but only for a container provider, where that is true.
-//
-// A container sandbox creates the checkout as its own user (`gem`, uid 1000) so
-// the panel's git and shell can write it. The agent process is a child of this
-// process and runs as root, and git 2.39 refuses to work in a repository owned by
-// somebody else:
-//
-//	fatal: detected dubious ownership in repository at '/data/sandboxes/.../repo'
-//
-// That refusal lands on the first command a coding task usually ends with
-// (`git add`/`git commit`), and no amount of file-mode work fixes it: the check is
-// about the owner, not the mode. The panel's git already carries
-// `-c safe.directory=<container path>` on every invocation (workspaceremote); this
-// is the same narrow grant for a process that cannot pass flags to the commands it
-// runs — GIT_CONFIG_* is inherited by every git the agent starts. The directories
-// named are the session's own checkout and, for a branch session, the main
-// checkout that holds its administrative files; never `safe.directory=*`.
-//
-// The local provider returns nothing: there the checkout is owned by the user this
-// process runs as, so there is no second account and no refusal to lift.
-func agentGitEnv(kind, worktree string) []string {
-	if kind == "local" {
-		return nil
-	}
-	dirs := agentCheckoutDirs(worktree)
-	if len(dirs) == 0 {
-		return nil
-	}
-	env := []string{fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(dirs))}
-	for i, dir := range dirs {
-		env = append(env,
-			fmt.Sprintf("GIT_CONFIG_KEY_%d=safe.directory", i),
-			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, dir),
-		)
-	}
-	return env
-}
-
-// agentCheckoutDirs is the set of directories git may have to be told about: the
-// worktree itself, plus the repository whose `.git/worktrees/<slug>` a linked
-// worktree points into.
-func agentCheckoutDirs(worktree string) []string {
-	worktree = strings.TrimSpace(worktree)
-	if worktree == "" {
-		return nil
-	}
-	dirs := []string{worktree}
-	// <pair>/worktrees/<slug> is a linked worktree of <pair>/repo; its gitdir lives
-	// in the main checkout, which git checks for ownership as well.
-	if filepath.Base(filepath.Dir(worktree)) == "worktrees" {
-		dirs = append(dirs, filepath.Join(filepath.Dir(filepath.Dir(worktree)), "repo"))
-	}
-	return dirs
 }
 
 // piAPI maps a stored provider api onto the name Pi uses in models.json.
@@ -1753,13 +1704,13 @@ func loadOrCreateSigningKey(path string) ([]byte, error) {
 //     decrypted here and written as environment variables (the historical
 //     shape). The agent runs beside this process, so those credentials were
 //     never further from the control plane than the agent itself.
-//   - -agent-in-sandbox: an HTTP MCP server is **brokered**. The sandbox gets
-//     `<gateway>/gw/mcp/<token>`; the control plane injects the real credential
-//     on egress, and the token is per-session and revocable
-//     (DELETE /v1/sessions/{id}/mcp-token). A **stdio** server is not staged at
-//     all, with a log line saying why: its credential would have to live in the
-//     sandbox's environment, which is the thing stage 1 of
-//     docs/EXECUTION-BOUNDARY.md removed (design §4).
+//   - a container placement (stage 4: every docker/runner deployment): an HTTP MCP
+//     server is **brokered**. The sandbox gets `<gateway>/gw/mcp/<token>`; the
+//     control plane injects the real credential on egress, and the token is
+//     per-session and revocable (DELETE /v1/sessions/{id}/mcp-token). A **stdio**
+//     server is not staged — the same decision `internal/mcpstage` gives the panel
+//     and the mount manifest, so the log line here cannot disagree with them
+//     (docs/EXECUTION-BOUNDARY.md §11.1).
 func mcpEntriesForSession(ctx context.Context, st *store.Store, spec contracts.SessionSpec, sandboxed bool, gatewayBase string, logger *slog.Logger) ([]pimodel.MCPEntry, error) {
 	servers, err := st.ListMCPServers(ctx, spec.UserID)
 	if err != nil {
@@ -1777,14 +1728,15 @@ func mcpEntriesForSession(ctx context.Context, st *store.Store, spec contracts.S
 			Args:      server.Args,
 			URL:       server.URL,
 		}
+		if omission, blocked := mcpstage.Unavailable(server, sandboxed); blocked {
+			// The panel and the manifest already say this; the log is for whoever
+			// reads the container output instead of the UI.
+			logger.Warn("an MCP server is not staged into the sandbox",
+				"session", spec.SessionID, "server", server.Name, "transport", server.Transport,
+				"code", omission.Code, "reason", omission.Reason)
+			continue
+		}
 		if sandboxed {
-			if !strings.EqualFold(string(server.Transport), string(contracts.MCPHTTP)) {
-				logger.Warn("an MCP server is not staged into the sandbox",
-					"session", spec.SessionID, "server", server.Name, "transport", server.Transport,
-					"reason", "a stdio MCP server needs its credentials in the sandbox environment, which is what the execution boundary forbids",
-					"fix", "use an HTTP MCP server: it is proxied with a revocable per-session token")
-				continue
-			}
 			token, terr := st.EnsureMCPToken(ctx, spec.UserID, spec.SessionID, server.ID)
 			if terr != nil {
 				if errors.Is(terr, store.ErrMCPTokenRevoked) {

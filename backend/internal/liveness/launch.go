@@ -167,35 +167,6 @@ func Supervise(ctx context.Context, cfg SupervisorConfig, argv []string) (int, e
 	}
 }
 
-// LauncherArgv wraps an agent command so that running it starts the launcher
-// instead. Self is the control-plane executable (os.Executable()).
-func LauncherArgv(self string, cfg SupervisorConfig, argv []string) ([]string, error) {
-	if strings.TrimSpace(self) == "" {
-		return nil, errors.New("liveness: the launcher needs the executable that provides " + LauncherCommand)
-	}
-	if err := validateSessionID(cfg.SessionID); err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(cfg.Root) == "" {
-		return nil, errors.New("liveness: the launcher needs the sandbox workspace root")
-	}
-	if len(argv) == 0 {
-		return nil, errors.New("liveness: the launcher needs an agent command to run")
-	}
-	interval := cfg.Interval
-	if interval <= 0 {
-		interval = DefaultBeat
-	}
-	out := []string{
-		self, LauncherCommand,
-		"-root", cfg.Root,
-		"-session", cfg.SessionID,
-		"-interval", interval.String(),
-		"--",
-	}
-	return append(out, argv...), nil
-}
-
 // MaybeLaunch is the entry point the control-plane binary calls first: when argv
 // asks for the launcher it runs the agent and returns its exit code with
 // handled=true, and the server never starts.

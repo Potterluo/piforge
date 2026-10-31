@@ -2,11 +2,8 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"os"
 	"path"
-	"strings"
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
@@ -21,65 +18,16 @@ import (
 // This file is the deployment's half of the contract. internal/liveness knows
 // how to turn a heartbeat into an answer and internal/reconcile knows what to do
 // with it; only this file knows that -sandbox local has an in-process agent and
-// that a container provider has a workspace on a host path the marker can live
-// in.
+// that a container provider has a workspace the marker lives in.
 //
-// The two halves must agree, which is why they are built in one place:
+// Since stage 4 there is exactly one writer and one reader, and both live inside
+// the sandbox: the supervisor (internal/agentsupervisor) starts the heartbeat
+// launcher there, and this probe reads the marker back through the sandbox's own
+// API. Stage 4 deleted the other writer — an argv wrapper for a locally spawned
+// agent of a container placement — which nothing produced any more.
 //
-//   - sessionAgentLauncher is the writer: every agent spawned for a container
-//     sandbox runs under a process that owns <sandbox>/.piforge/live/<session>.
-//   - sessionLivenessProbe is the reader: the registry first, then that marker
-//     through the sandbox's own API.
-//
-// A writer without a reader would leave stale files; a reader without a writer
-// would call every live remote session dead. Both are wired from the same
-// remoteSB check below.
-
-// sessionAgentLauncher returns the argv wrapper that gives a container-backed
-// agent a heartbeat, or nil for the local provider.
-//
-// Nil is not a degradation here: the local provider's agent is a child of this
-// process, so a restart kills it and the registry's "dead" is the truth.
-func sessionAgentLauncher(opt options, st *store.Store, remote sandbox.Remote, logger *slog.Logger) func(context.Context, contracts.SessionSpec, []string) ([]string, error) {
-	if remote == nil {
-		return nil
-	}
-	self, err := os.Executable()
-	if err != nil {
-		// Without the executable's own path the launcher cannot be re-executed,
-		// and an agent without a heartbeat would be interrupted by the next
-		// boot pass. Say it loudly: this is the one failure that silently
-		// reverts the deployment to the old, wrong behaviour.
-		logger.Error("session liveness: cannot resolve this executable, so agents will run without a heartbeat marker; a control-plane restart will interrupt their runs",
-			"error", err.Error())
-		return nil
-	}
-	logger.Info("session liveness: container agents run under a heartbeat launcher",
-		"sandbox", opt.sandboxKind,
-		"marker", path.Join(sandbox.ContainerWorkspace, liveness.MarkerDir, "<session>"),
-		"beat", liveness.DefaultBeat.String(),
-		"launcher", self+" "+liveness.LauncherCommand)
-
-	return func(ctx context.Context, spec contracts.SessionSpec, argv []string) ([]string, error) {
-		target, terr := st.SessionSandboxFor(ctx, spec.SessionID)
-		if terr != nil {
-			// Failing the spawn is deliberate. Running the agent unmarked would
-			// make the probe call this session dead on the next pass, and the
-			// run would be interrupted by reconciliation rather than by an
-			// honest error here.
-			return nil, fmt.Errorf("resolve the sandbox for the heartbeat marker: %w", terr)
-		}
-		if strings.TrimSpace(target.RootDir) == "" {
-			return nil, fmt.Errorf("sandbox %s has no host workspace, so the heartbeat marker has nowhere to live", target.SandboxID)
-		}
-		return liveness.LauncherArgv(self, liveness.SupervisorConfig{
-			Root:      target.RootDir,
-			SessionID: spec.SessionID,
-			Interval:  liveness.DefaultBeat,
-			Logger:    logger,
-		}, argv)
-	}
-}
+// A reader without a writer would call every live remote session dead, which is
+// why the probe is wired from the same remoteSB check below.
 
 // sessionLivenessProbe builds the authority reconciliation asks.
 //

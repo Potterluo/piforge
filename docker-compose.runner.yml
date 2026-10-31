@@ -8,10 +8,10 @@
 # be combined with `docker-compose.yml` and then completed with
 # `PIFORGE_AGENT_IN_SANDBOX=1` / `SANDBOX_WORKSPACE_VOLUME=...`; stage 3 of
 # docs/EXECUTION-BOUNDARY.md made the sandboxed placement the default for the
-# container providers, so the isolated shape is now a plain `up` with no extra
-# flags and no shared workspace volume.
+# container providers, and stage 4 deleted the switch, so the isolated shape is a
+# plain `up` with no extra flags and no shared workspace volume.
 #
-# What "isolated" means here, concretely (docs/SANDBOX-DEPLOY.md §1.4.5):
+# What "isolated" means here, concretely (docs/SANDBOX-DEPLOY.md §1.4.6):
 #
 #   - each (user, project) gets its own container and its own workspace volume
 #     (`piforge-ws-<pair hash>`); neither this control plane nor the runner
@@ -57,9 +57,10 @@ services:
       # The agent's gateway has to be reachable *from the sandbox*, by name: the
       # agent is a process in another container, so 127.0.0.1 would be its own.
       PIFORGE_GATEWAY_URL: http://piforge:7700
-      # The sandboxed placement. It is the default for runner placements since
-      # stage 3; pinned here so the file says what it deploys.
-      PIFORGE_AGENT_IN_SANDBOX: "1"
+      # No PIFORGE_AGENT_IN_SANDBOX here any more: stage 4 of
+      # docs/EXECUTION-BOUNDARY.md deleted the switch, so a runner placement always
+      # runs the agent inside its sandbox. `=1` would still be accepted as a no-op;
+      # `=0` is refused at startup, which is the point.
       PIFORGE_SANDBOX: runner
       PIFORGE_SANDBOX_RUNNER_URL: http://sandbox-runner:7801
       PIFORGE_SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:?set SANDBOX_RUNNER_TOKEN to a long random string}

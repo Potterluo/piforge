@@ -8,6 +8,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/materialize"
+	"github.com/piforge/piforge/backend/internal/mcpstage"
 	skillset "github.com/piforge/piforge/backend/internal/skills"
 )
 
@@ -25,6 +26,13 @@ type toolingResponse struct {
 	// MountedAt is the worktree root the projection ran against; empty when the
 	// session has no checkout yet.
 	MountedAt string `json:"mounted_at"`
+	// MCPUnavailable is the live answer for the same question the manifest
+	// records: which configured servers this placement cannot hand to the agent,
+	// and why (internal/mcpstage). It is computed rather than only read back
+	// because a session that has not been provisioned yet has no manifest, and
+	// "not staged, here is the reason" is exactly what a user needs before the
+	// first prompt rather than after it.
+	MCPUnavailable map[string]mcpstage.Omission `json:"mcp_unavailable,omitempty"`
 }
 
 // handleSessionTooling reports the configured and mounted tooling for a session.
@@ -47,7 +55,11 @@ func (s *server) handleSessionTooling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := toolingResponse{Skills: skillset.Annotate(skills), MCPServers: servers}
+	resp := toolingResponse{
+		Skills:         skillset.Annotate(skills),
+		MCPServers:     servers,
+		MCPUnavailable: mcpstage.Omissions(servers, s.deps.AgentIsolated),
+	}
 	if sess.WorktreeID == "" {
 		// Nothing has been provisioned yet; the configuration is still valid.
 		writeJSON(w, http.StatusOK, resp)

@@ -59,13 +59,12 @@ type RuntimeConfig struct {
 	// that read, wired in cmd/piforged so this package keeps knowing nothing
 	// about sandboxes.
 	LogsFor func(ctx context.Context, sessionID string) (*contracts.SessionLogs, error)
-	// WrapArgv, when set, rewrites one session's final argv after Launcher has
-	// wrapped it. It is the outermost wrapper on purpose: the agent's liveness
-	// launcher (internal/liveness) has to be the direct parent of the agent, or
-	// the heartbeat it writes would describe the wrong process. The wrapper
-	// receives the launch context, so it may look up where the session's
-	// workspace lives.
-	WrapArgv func(ctx context.Context, spec contracts.SessionSpec, argv []string) ([]string, error)
+	// WrapArgv used to rewrite one session's final argv after Launcher had wrapped
+	// it, so the liveness supervisor could become the agent's direct parent. Stage
+	// 4 of docs/EXECUTION-BOUNDARY.md deleted it together with the placement that
+	// needed it: a container provider's agent is started inside the sandbox
+	// (Dial), and -sandbox local's agent is this process's child, for which a
+	// heartbeat marker would describe a process that dies with its parent.
 	// AgentWorktree translates spec.Worktree into the path the *agent process*
 	// uses for the same directory, or returns "" to keep the host path.
 	//
@@ -270,19 +269,6 @@ func (r *Runtime) spawn(ctx context.Context, spec contracts.SessionSpec) (*sessi
 			cfg.BinaryPath = wrapped[0]
 			cfg.Args = wrapped[1:]
 		}
-	}
-	if r.cfg.WrapArgv != nil {
-		// Outermost wrapper: the heartbeat launcher must be the agent's direct
-		// parent, so it wraps whatever the jail produced.
-		wrapped, werr := r.cfg.WrapArgv(ctx, spec, append([]string{cfg.BinaryPath}, cfg.Args...))
-		if werr != nil {
-			return nil, fmt.Errorf("pi: wrap the agent for session %s: %w", spec.SessionID, werr)
-		}
-		if len(wrapped) == 0 {
-			return nil, fmt.Errorf("pi: wrap the agent for session %s: the wrapper produced an empty argv", spec.SessionID)
-		}
-		cfg.BinaryPath = wrapped[0]
-		cfg.Args = wrapped[1:]
 	}
 	norm := NewNormalizer(spec.SessionID, spec.Kind)
 	cfg.Translator = norm.Translate
