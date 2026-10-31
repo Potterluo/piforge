@@ -34,6 +34,16 @@ type ShellExecutor struct {
 	Backend Backend
 	// Binary is the git executable inside the container; empty means "git".
 	Binary string
+	// OwnedTree says the sandbox's own account owns the checkout, so git's
+	// ownership check passes without being told to trust it.
+	//
+	// It is true when the workspace is a volume of the sandbox's own and every
+	// writer ran there as the sandbox user (stage 2 of docs/EXECUTION-BOUNDARY.md).
+	// The alternative — a checkout that arrived through a bind mount owned by
+	// somebody else — needs `safe.directory`, which disables a check for that path.
+	// Turning it off where it is not needed is the narrow reading of "trust this
+	// repository", not a change of behaviour for the deployments that need it.
+	OwnedTree bool
 }
 
 var _ gitx.ExecFunc = ShellExecutor{}.Run
@@ -64,7 +74,13 @@ func (e ShellExecutor) Run(ctx context.Context, dir string, stdin []byte, argv [
 	// 500 even though `docker exec -u root git` worked. The path is already the
 	// workspace this sandbox owns, so trusting exactly it is the narrow fix:
 	// `safe.directory=*` would trust every repository in the container.
-	quoted = append(quoted, aio.Quote("-c"), aio.Quote("safe.directory="+tgt.Root))
+	//
+	// OwnedTree is the case where that history does not apply: the tree was built
+	// by the sandbox user inside the sandbox, so there is no foreign owner and the
+	// flag is not injected (see ShellExecutor.OwnedTree).
+	if !e.OwnedTree {
+		quoted = append(quoted, aio.Quote("-c"), aio.Quote("safe.directory="+tgt.Root))
+	}
 	for _, arg := range argv {
 		quoted = append(quoted, aio.Quote(arg))
 	}

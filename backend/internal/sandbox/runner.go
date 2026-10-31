@@ -112,6 +112,14 @@ type RunnerConfig struct {
 	// APIPort is the container port that serves the sandbox API (8080). Zero
 	// leaves the runner's default in charge.
 	APIPort int
+	// DetachedWorkspace asks the runner to give each sandbox a workspace volume of
+	// its own instead of a shared one, and to report the container path as the
+	// workspace root (sandbox.DockerConfig.DetachedWorkspace). It is stage 2 of
+	// docs/EXECUTION-BOUNDARY.md and travels with the *create* request, not with a
+	// runner environment variable: it changes what the control plane can reach, so
+	// a runner configured detached while this process still expects a shared
+	// directory would fail every skill mount. One flag, one place.
+	DetachedWorkspace bool
 	// Timeout bounds one read/change call (default runnerRequestTimeout).
 	Timeout time.Duration
 	// EnsureTimeout bounds one create (default runnerEnsureTimeout).
@@ -194,6 +202,7 @@ func (r *Runner) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 		CPUs:      r.cfg.CPUs,
 		Memory:    r.cfg.Memory,
 		Network:   r.cfg.Network,
+		Detached:  r.cfg.DetachedWorkspace,
 	}
 	var record RunnerRecord
 	if err := r.do(ctx, http.MethodPost, "/v1/sandboxes", request, &record); err != nil {
@@ -335,7 +344,23 @@ func (r *Runner) sandbox(record RunnerRecord) (*contracts.Sandbox, error) {
 		Provider: r.Name(),
 		Image:    r.cfg.Image,
 		RootDir:  record.RootDir,
+		// Workspace is the runner's answer, because the runner is the process that
+		// created the mount and therefore the only one that can say whether this
+		// control plane can open it. A record from an older runner has no field;
+		// the root decides then, and a container path can only mean "not here".
+		Workspace: runnerWorkspaceMode(record),
 	}, nil
+}
+
+// runnerWorkspaceMode resolves where the runner said a sandbox's files are.
+func runnerWorkspaceMode(record RunnerRecord) contracts.WorkspaceMode {
+	if mode := record.Workspace.Normalized(); mode == contracts.WorkspaceAPI {
+		return mode
+	}
+	if path.Clean(strings.TrimSpace(record.RootDir)) == ContainerWorkspace {
+		return contracts.WorkspaceAPI
+	}
+	return contracts.WorkspaceHost
 }
 
 // warnAboutDataRoot reports the one deployment mistake this provider cannot
@@ -346,6 +371,12 @@ func (r *Runner) sandbox(record RunnerRecord) (*contracts.Sandbox, error) {
 // crosses the boundary fails later, far from the cause.
 func (r *Runner) warnAboutDataRoot(record RunnerRecord, userID, projectID string) {
 	if strings.TrimSpace(record.RootDir) == "" {
+		return
+	}
+	if runnerWorkspaceMode(record) == contracts.WorkspaceAPI {
+		// A detached workspace is not a shared directory, so "both services must
+		// name the same path" is not a rule it has to satisfy. Comparing would
+		// warn on every create.
 		return
 	}
 	want := filepath.Join(r.cfg.DataRoot, userID, projectID)
@@ -470,6 +501,11 @@ type RunnerRequest struct {
 	Memory string `json:"memory,omitempty"`
 	// Network is the Docker network the container joins.
 	Network string `json:"network,omitempty"`
+	// Detached asks for a workspace volume of this sandbox's own, with the
+	// container path as the reported root: the control plane never mounts it and
+	// reaches the files only through the sandbox API
+	// (sandbox.DockerConfig.DetachedWorkspace, docs/EXECUTION-BOUNDARY.md stage 2).
+	Detached bool `json:"detached_workspace,omitempty"`
 }
 
 // RunnerWorktreeRequest is the body of POST /v1/sandboxes/{id}/worktrees.
@@ -508,4 +544,8 @@ type RunnerRecord struct {
 	// APIKey is the SANDBOX_API_KEY the container was created with. It is
 	// returned once, on create, and never logged.
 	APIKey string `json:"api_key,omitempty"`
+	// Workspace is how the control plane can reach this sandbox's files:
+	// "host" (a shared directory) or "api" (only inside the container). Empty
+	// from an older runner means "host".
+	Workspace contracts.WorkspaceMode `json:"workspace,omitempty"`
 }

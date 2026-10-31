@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/aio"
+	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/materialize"
 	"github.com/piforge/piforge/backend/internal/sandbox"
 	"github.com/piforge/piforge/backend/internal/store"
 	"github.com/piforge/piforge/backend/internal/workspaceremote"
@@ -69,7 +71,6 @@ func (b *sandboxFileBackend) client(ctx context.Context, sandboxID string) (*aio
 		return cached.client, nil
 	}
 	b.mu.Unlock()
-
 	endpoint, err := b.provider.Endpoint(ctx, sandboxID)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s has no reachable endpoint: %w", sandboxID, err)
@@ -93,4 +94,30 @@ func (b *sandboxFileBackend) client(ctx context.Context, sandboxID string) (*aio
 	b.cache[sandboxID] = cachedSandboxClient{client: client, at: now}
 	b.mu.Unlock()
 	return client, nil
+}
+
+// files opens one sandbox's workspace as the filesystem materialize writes into.
+//
+// It is the provisioner's seam for a workspace that exists only inside the
+// container (stage 2 of docs/EXECUTION-BOUNDARY.md): the same client the file
+// panel uses, the same key, the same container root — because the projection and
+// the panel must never disagree about which tree they are describing.
+//
+// The root is the sandbox's workspace as the container names it; ContainerPath
+// answers that for a detached sandbox and would refuse a host path outside a
+// project, which is the guard that keeps a mis-resolved sandbox from writing into
+// somebody else's tree.
+func (b *sandboxFileBackend) files(ctx context.Context, sb *contracts.Sandbox) (materialize.FileSystem, error) {
+	if sb == nil {
+		return nil, fmt.Errorf("materialize: no sandbox")
+	}
+	root, err := b.provider.ContainerPath(sb.RootDir)
+	if err != nil {
+		return nil, fmt.Errorf("materialize: workspace of sandbox %s: %w", sb.ID, err)
+	}
+	client, err := b.client(ctx, sb.ID)
+	if err != nil {
+		return nil, fmt.Errorf("materialize: sandbox %s: %w", sb.ID, err)
+	}
+	return materialize.NewSandboxFS(materialize.SandboxConfig{Client: client, Root: root})
 }

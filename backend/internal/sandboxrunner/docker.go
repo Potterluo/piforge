@@ -202,6 +202,10 @@ func (p *DockerProvider) creator(request sandbox.RunnerRequest) (*sandbox.Docker
 		ContainerEndpoint:   p.opts.ContainerEndpoint,
 		WorkspaceVolume:     p.opts.WorkspaceVolume,
 		WorkspaceVolumeRoot: p.opts.WorkspaceVolumeRoot,
+		// The create request decides, not this service's configuration: a detached
+		// workspace changes what the *control plane* can reach, and the control
+		// plane is the only side that knows whether it is prepared for that.
+		DetachedWorkspace: request.Detached,
 	})
 }
 
@@ -247,6 +251,7 @@ func (p *DockerProvider) record(ctx context.Context, provider *sandbox.Docker, s
 		RootDir:           sb.RootDir,
 		ContainerPathRoot: sandbox.ContainerWorkspace,
 		APIKey:            sb.SandboxAPIKey,
+		Workspace:         sb.Workspace.Normalized(),
 	}
 	endpoint, err := provider.Endpoint(ctx, sb.ID)
 	if err != nil {

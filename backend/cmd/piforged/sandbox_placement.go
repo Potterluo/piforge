@@ -197,3 +197,22 @@ func resolvePlacement(feature, requested string, container bool) (placement, err
 	}
 	return placement(requested), nil
 }
+
+// validateAgentWorkspace rejects a deployment that runs the agent inside the
+// sandbox while the file panel still reads this process's own disk.
+//
+// Stage 2 of docs/EXECUTION-BOUNDARY.md makes the sandbox's workspace a volume of
+// its own: nothing outside the sandbox mounts it. The file panel is how the user
+// sees that workspace, and the skill projection writes into it; both go through
+// the sandbox API. A deployment that pins the panel to the host would start
+// healthy and then show an empty tree beside an agent that is editing files, which
+// is worse than refusing to start.
+func validateAgentWorkspace(agentInSandbox bool, files string) error {
+	if !agentInSandbox {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(files), string(placeRemote)) {
+		return nil
+	}
+	return fmt.Errorf("-agent-in-sandbox keeps the workspace inside the sandbox, so the file panel must be remote too (got -sandbox-files %s); drop the flag to keep a shared workspace", files)
+}

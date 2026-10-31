@@ -178,6 +178,22 @@ type DockerConfig struct {
 	// ("/data/sandboxes" under a volume mounted at "/data"). Required with
 	// WorkspaceVolume, ignored without it.
 	WorkspaceVolumeRoot string
+
+	// DetachedWorkspace gives each sandbox a volume of its own that no other
+	// container mounts, and reports the workspace as the container path
+	// ("/workspace") instead of a host directory. It is stage 2 of
+	// docs/EXECUTION-BOUNDARY.md: the control plane never mounts the workspace, so
+	// the agent's files are reachable only through the sandbox's own API, and this
+	// process must not create, read or chmod anything under DataRoot for it.
+	//
+	// It is mutually exclusive with WorkspaceVolume: that one is a *shared* volume
+	// the control plane also mounts, which is exactly what this mode removes.
+	//
+	// Empty volume names are not "no workspace": the volume is created by the
+	// daemon on first run (a named volume source in --mount), derived from the same
+	// (user, project) hash as the container name, so a restarted control plane
+	// finds the same workspace without a row telling it.
+	DetachedWorkspace bool
 }
 
 // NewDocker builds a container provider. It needs the Docker CLI and an image,
@@ -223,6 +239,16 @@ func newDocker(cfg DockerConfig) (*Docker, error) {
 	}
 	cfg.DataRoot = filepath.Clean(root)
 	d := &Docker{cfg: cfg}
+	if cfg.DetachedWorkspace {
+		// The two shapes are answers to opposite questions — "where does the shared
+		// volume live" versus "make the workspace unreachable from here" — and a
+		// config that asks for both has no meaning. Refusing it at construction
+		// beats a container whose mount contradicts the deployment's intent.
+		if cfg.WorkspaceVolume != "" {
+			return nil, fmt.Errorf("sandbox: docker: DetachedWorkspace and WorkspaceVolume are mutually exclusive: a detached workspace is a volume no other container mounts")
+		}
+		return d, nil
+	}
 	if cfg.WorkspaceVolume != "" {
 		if strings.TrimSpace(cfg.WorkspaceVolumeRoot) == "" {
 			return nil, fmt.Errorf("sandbox: docker: workspace volume %q needs the path it is mounted at here (WorkspaceVolumeRoot)", cfg.WorkspaceVolume)
@@ -288,6 +314,27 @@ func (d *Docker) volumeSubpath(userID, projectID string) string {
 	return path.Join(d.volumePrefix, userID, projectID)
 }
 
+// detachedVolumeName is the Docker volume that holds one sandbox's workspace when
+// the control plane must not see it.
+//
+// Derived from the container name — which is the (user, project) hash — for two
+// reasons: the daemon creates a named volume on first use, so nothing has to
+// remember it; and a process that adopted the container (a restarted control
+// plane, the runner answering a Get) can derive it again from the container name
+// alone. That is what keeps a detached workspace self-describing.
+func detachedVolumeName(containerName string) string {
+	return "piforge-ws-" + strings.TrimPrefix(containerName, "piforge-")
+}
+
+// workspaceRoot is the directory this provider reports as a sandbox's RootDir: the
+// pair's host directory, or the container path when the workspace is detached.
+func (d *Docker) workspaceRoot(dir string) string {
+	if d.cfg.DetachedWorkspace {
+		return containerWorkspace
+	}
+	return dir
+}
+
 // Ensure creates the container if it is missing and returns its state.
 //
 // It also makes sure the container has a usable checkout before reporting READY.
@@ -307,9 +354,17 @@ func (d *Docker) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 		return nil, err
 	}
 	name := d.containerName(userID, projectID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("sandbox: docker: create workspace %s: %w", dir, err)
+	if !d.cfg.DetachedWorkspace {
+		// The pair's host directory is the bind mount's (or shared volume's)
+		// content, so it has to exist here. A detached workspace is mounted from a
+		// volume only the sandbox ever sees: creating a same-named directory on
+		// this disk would be a tree nothing reads, which is precisely the silent
+		// split this mode exists to end.
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("sandbox: docker: create workspace %s: %w", dir, err)
+		}
 	}
+	want := d.workspaceRoot(dir)
 
 	created := false
 	state, inspectErr := d.inspect(ctx, name)
@@ -318,7 +373,7 @@ func (d *Docker) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 		mount, mountErr := d.workspaceMount(ctx, name)
 		key, keyErr := d.containerAPIKey(ctx, name)
 		switch {
-		case mountErr != nil || !sameHostDir(mount, dir):
+		case mountErr != nil || !sameHostDir(mount, want):
 			// A container created before this provider gave each pair its own
 			// directory mounts the shared data root (or something else entirely).
 			// Reusing it would show this project another tenant's working tree, so
@@ -326,7 +381,7 @@ func (d *Docker) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 			// sandbox must not decide that somebody's uncommitted work is disposable.
 			slog.Warn("sandbox: docker: container workspace does not belong to this project; recreating the container",
 				"container", name,
-				"want", dir,
+				"want", want,
 				"got", mount,
 				"mount_error", mountErr)
 			if err := d.replaceContainer(ctx, name, userID, projectID, dir); err != nil {
@@ -438,7 +493,14 @@ func (d *Docker) containerArgs(name, userID, projectID, workspace, apiKey string
 		"--label", "piforge.project=" + projectID,
 		"--workdir", containerWorkspace,
 	}
-	if d.cfg.WorkspaceVolume != "" {
+	if d.cfg.DetachedWorkspace {
+		// A volume of this sandbox's own, mounted at /workspace. The daemon creates
+		// it on first use and resolves it by name, so no host path is involved and
+		// no other container can mount it — the control plane included. That is the
+		// whole point: the workspace is reachable only through the sandbox API.
+		args = append(args, "--mount", fmt.Sprintf(
+			"type=volume,source=%s,target=%s", detachedVolumeName(name), containerWorkspace))
+	} else if d.cfg.WorkspaceVolume != "" {
 		// The daemon resolves a volume itself; nothing here depends on a host
 		// path. The subpath is the pair's directory inside the shared volume,
 		// derived exactly like the bind mount's path (see workspacePath), so
@@ -530,10 +592,10 @@ type sandboxStep struct {
 // bug. A .git without a commit is not "ready": the empty commit is what worktrees
 // branch from, so a half-provisioned checkout is resumed instead of trusted.
 //
-// The last step opens the tree to the *other* writer. A container deployment has
-// two: `gem` (uid 1000, the sandbox user) owns the workspace because the sandbox
-// created it, and root in the control plane materialises skills/MCP config into it,
-// spawns the agent there and writes that agent's heartbeat marker into
+// The last step opens the tree to the *other* writer. A shared-volume deployment
+// has two: `gem` (uid 1000, the sandbox user) owns the workspace because the
+// sandbox created it, and root in the control plane materialises skills/MCP config
+// into it, spawns the agent there and writes that agent's heartbeat marker into
 // `<pair>/.piforge/live/<session>`. A tree created 0755 by gem is not writable by a
 // control plane that dropped CAP_DAC_OVERRIDE (the documented compose does, so
 // `copy-ro` skills are real), and the session then dies on the first write:
@@ -549,7 +611,14 @@ type sandboxStep struct {
 // tooling live beside the checkout, not inside it. It runs only when the checkout
 // is created, never on the ready path: a later pass would also loosen the 0444/0555
 // skill copies materialise wrote, and those are the read-only guarantee itself.
-func planCheckout(ready bool, repoURL, branch string) []sandboxStep {
+//
+// shared says that second writer exists. With a detached workspace (stage 2 of
+// docs/EXECUTION-BOUNDARY.md) it does not: the projection is written through the
+// sandbox API *as gem*, the agent runs as gem, and the marker is written by a
+// launcher inside the sandbox. One account owns everything, so there is no second
+// identity to open the tree for — and opening it would be loosening the sandbox's
+// own workspace for a writer that no longer exists.
+func planCheckout(ready bool, repoURL, branch string, shared bool) []sandboxStep {
 	if ready {
 		return nil
 	}
@@ -559,7 +628,7 @@ func planCheckout(ready bool, repoURL, branch string) []sandboxStep {
 	}
 	open := sandboxStep{name: "permissions", argv: []string{"chmod", "-R", "a+rwX", containerWorkspace}}
 	if url := strings.TrimSpace(repoURL); url != "" {
-		return []sandboxStep{
+		steps := []sandboxStep{
 			// "." because the checkout directory already exists (and must, so that
 			// the bind mount cannot be replaced by a clone volume silently).
 			{name: "clone", argv: []string{"git", "clone", "--quiet", "--", url, "."}},
@@ -568,10 +637,13 @@ func planCheckout(ready bool, repoURL, branch string) []sandboxStep {
 				argv:     []string{"git", "checkout", "-q", branch},
 				fallback: []string{"git", "checkout", "-q", "-b", branch},
 			},
-			open,
 		}
+		if shared {
+			steps = append(steps, open)
+		}
+		return steps
 	}
-	return []sandboxStep{
+	steps := []sandboxStep{
 		{name: "init", argv: []string{"git", "init", "-q", "-b", branch}},
 		// The identity is written into the checkout inside the container instead of
 		// being passed with -c on the commit: every later commit from the panel
@@ -580,8 +652,11 @@ func planCheckout(ready bool, repoURL, branch string) []sandboxStep {
 		{name: "init", argv: []string{"git", "config", "user.name", sandboxGitName}},
 		{name: "init", argv: []string{"git", "config", "user.email", sandboxGitEmail}},
 		{name: "commit", argv: []string{"git", "commit", "--allow-empty", "--no-gpg-sign", "-q", "-m", initialCommit}},
-		open,
 	}
+	if shared {
+		steps = append(steps, open)
+	}
+	return steps
 }
 
 // planBranchWorktree is the argv list that makes worktreeDir a linked worktree of
@@ -597,7 +672,7 @@ func planCheckout(ready bool, repoURL, branch string) []sandboxStep {
 // anything; `worktree add -b` is then the single command that creates the branch
 // and the checkout, in the repository (a worktree cannot be added from a
 // subdirectory of the repository).
-func planBranchWorktree(ready bool, repoDir, worktreeDir, branch string) ([]sandboxStep, error) {
+func planBranchWorktree(ready bool, repoDir, worktreeDir, branch string, shared bool) ([]sandboxStep, error) {
 	if ready {
 		return nil, nil
 	}
@@ -611,15 +686,17 @@ func planBranchWorktree(ready bool, repoDir, worktreeDir, branch string) ([]sand
 	if strings.HasPrefix(branch, "-") {
 		return nil, fmt.Errorf("invalid branch name %q: it starts with a dash", branch)
 	}
-	return []sandboxStep{
+	steps := []sandboxStep{
 		{name: "check-ref-format", dir: repoDir, argv: []string{"git", "check-ref-format", "--branch", branch}},
 		{name: "worktree", dir: repoDir, argv: []string{"git", "worktree", "add", "-b", branch, "--", worktreeDir}},
-		// Same two writers as the main checkout (see planCheckout): gem owns the
-		// worktree, and the control plane materialises tooling into it as root with
-		// CAP_DAC_OVERRIDE dropped. Without the write bit for the second identity,
-		// a branch session fails provisioning on `mkdir <worktree>/.pi`.
-		{name: "permissions", dir: repoDir, argv: []string{"chmod", "-R", "a+rwX", worktreeDir}},
-	}, nil
+	}
+	// Same two writers as the main checkout (see planCheckout), and the same rule:
+	// a shared-volume deployment has a root control plane materialising tooling
+	// into the worktree, a detached one has only the sandbox user.
+	if shared {
+		steps = append(steps, sandboxStep{name: "permissions", dir: repoDir, argv: []string{"chmod", "-R", "a+rwX", worktreeDir}})
+	}
+	return steps, nil
 }
 
 // ensureCheckout makes /workspace/repo a git checkout owned by the sandbox user.
@@ -645,7 +722,7 @@ func (d *Docker) ensureCheckout(ctx context.Context, name, apiKey, repoURL, bran
 	if err != nil {
 		return fmt.Errorf("sandbox: docker: checkout %s: %w", containerRepoDir, err)
 	}
-	steps := planCheckout(ready, repoURL, branch)
+	steps := planCheckout(ready, repoURL, branch, !d.cfg.DetachedWorkspace)
 	if len(steps) == 0 {
 		return nil
 	}
@@ -655,12 +732,12 @@ func (d *Docker) ensureCheckout(ctx context.Context, name, apiKey, repoURL, bran
 		return fmt.Errorf("sandbox: docker: prepare %s: %s", containerRepoDir, commandFailure(res))
 	}
 	for _, step := range steps {
-		err := runSandboxStep(ctx, shell, step)
+		err := runSandboxStep(ctx, shell, step, !d.cfg.DetachedWorkspace)
 		if err == nil {
 			continue
 		}
 		if step.fallback != nil {
-			ferr := runSandboxStep(ctx, shell, sandboxStep{name: step.name, dir: step.dir, argv: step.fallback})
+			ferr := runSandboxStep(ctx, shell, sandboxStep{name: step.name, dir: step.dir, argv: step.fallback}, !d.cfg.DetachedWorkspace)
 			if ferr == nil {
 				continue
 			}
@@ -715,12 +792,12 @@ func (d *Docker) AddWorktree(ctx context.Context, sandboxID, repoDir, path, bran
 	if err != nil {
 		return fmt.Errorf("sandbox: docker: add worktree %s: %w", worktree, err)
 	}
-	steps, err := planBranchWorktree(ready, repo, worktree, branch)
+	steps, err := planBranchWorktree(ready, repo, worktree, branch, !d.cfg.DetachedWorkspace)
 	if err != nil {
 		return fmt.Errorf("sandbox: docker: add worktree %s: %w", worktree, err)
 	}
 	for _, step := range steps {
-		if err := runSandboxStep(ctx, shell, step); err != nil {
+		if err := runSandboxStep(ctx, shell, step, !d.cfg.DetachedWorkspace); err != nil {
 			return fmt.Errorf("sandbox: docker: %s %s: %w", step.name, worktree, err)
 		}
 	}
@@ -862,13 +939,14 @@ func probeCheckoutReady(ctx context.Context, shell checkoutShell) (bool, error) 
 }
 
 // runSandboxStep runs one planned argv in the step's directory (the main
-// checkout when the step names none).
-func runSandboxStep(ctx context.Context, shell checkoutShell, step sandboxStep) error {
+// checkout when the step names none). safeDir says the sandbox's git needs to be
+// told the checkout is trusted; see checkoutCommand.
+func runSandboxStep(ctx context.Context, shell checkoutShell, step sandboxStep, safeDir bool) error {
 	dir := step.dir
 	if strings.TrimSpace(dir) == "" {
 		dir = containerRepoDir
 	}
-	command, err := checkoutCommand(step.argv, dir)
+	command, err := checkoutCommand(step.argv, dir, safeDir)
 	if err != nil {
 		return err
 	}
@@ -888,23 +966,30 @@ func runSandboxStep(ctx context.Context, shell checkoutShell, step sandboxStep) 
 // checkoutCommand turns one planned argv into the shell string the sandbox API
 // runs, as the sandbox user.
 //
-// git gets `-c safe.directory=<dir>`. A checkout arrived through a bind mount,
-// and on a Docker Desktop/drvfs host the mount can show it as owned by somebody
-// other than the shell account; git 2.34 then refuses the repository with
-// "detected dubious ownership", which turned every panel git view into a 500. The
-// path is exactly the directory this command was told to run in — a workspace the
-// sandbox owns — so trusting it is narrower than `safe.directory=*`.
+// git gets `-c safe.directory=<dir>`. A checkout that arrived through a bind
+// mount can show up, on a Docker Desktop/drvfs host, as owned by somebody other
+// than the shell account; git 2.34 then refuses the repository with "detected
+// dubious ownership", which turned every panel git view into a 500. The path is
+// exactly the directory this command was told to run in — a workspace the sandbox
+// owns — so trusting it is narrower than `safe.directory=*`.
+//
+// safeDir says that foreign ownership is possible at all. It is a property of the
+// mount, not of git: with a detached workspace the tree is a volume the image
+// chowned to its own user and the checkout was created by that user through this
+// same API, so there is no second owner to lift and the flag is not injected. A
+// flag nobody needs is still a widening of trust (it disables an ownership check
+// for that path), which is why it is not left on "just in case".
 //
 // Only a git step gets the flag: a plan step is not necessarily git (the
 // `permissions` step runs chmod), and prefixing those turns the mode string into
 // `-c safe.directory=…`, which chmod rejects as an invalid mode.
-func checkoutCommand(argv []string, dir string) (string, error) {
+func checkoutCommand(argv []string, dir string, safeDir bool) (string, error) {
 	if len(argv) == 0 {
 		return "", fmt.Errorf("sandbox: docker: checkout step has no command")
 	}
 	quoted := make([]string, 0, len(argv)+3)
 	quoted = append(quoted, aio.Quote(argv[0]))
-	if argv[0] == "git" {
+	if argv[0] == "git" && safeDir {
 		quoted = append(quoted, aio.Quote("-c"), aio.Quote("safe.directory="+dir))
 	}
 	for _, arg := range argv[1:] {
@@ -976,9 +1061,16 @@ func (d *Docker) Get(ctx context.Context, sandboxID string) (*contracts.Sandbox,
 		ID:       name,
 		Provider: d.Name(),
 		Image:    d.cfg.Image,
+		// A container whose workspace this process cannot open is described as
+		// such even before the mount is read: the zero value ("host") would make
+		// every caller try to write a path that does not exist here.
+		Workspace: contracts.WorkspaceHost,
 	}
 	if mount, merr := d.workspaceMount(ctx, name); merr == nil {
 		out.RootDir = mount
+		if path.Clean(filepath.ToSlash(mount)) == containerWorkspace {
+			out.Workspace = contracts.WorkspaceAPI
+		}
 	}
 	out.State = dockerState(state)
 	return out, nil
@@ -1110,10 +1202,24 @@ func (d *Docker) describe(ctx context.Context, userID, projectID, name, apiKey s
 		// container path was the bug before that: provisioning wrote to "/workspace"
 		// on the host. ContainerPath translates this directory to /workspace for
 		// anything that speaks to the container.
-		RootDir:      dir,
+		//
+		// A detached workspace is the one case where the container path *is* the
+		// answer: there is no host side, so RootDir names /workspace and Workspace
+		// tells every caller to go through the sandbox API instead of opening it.
+		RootDir:      d.workspaceRoot(dir),
+		Workspace:    workspaceModeOf(d.workspaceRoot(dir)),
 		CreatedAt:    time.Now().UTC(),
 		LastActiveAt: time.Now().UTC(),
 	}, nil
+}
+
+// workspaceModeOf reads the mode off the reported root: a RootDir that is the
+// container's mount root names a tree this process cannot open.
+func workspaceModeOf(root string) contracts.WorkspaceMode {
+	if path.Clean(filepath.ToSlash(root)) == containerWorkspace {
+		return contracts.WorkspaceAPI
+	}
+	return contracts.WorkspaceHost
 }
 
 func (d *Docker) resolve(sandboxID string) string {
@@ -1201,28 +1307,82 @@ func (d *Docker) lastArg(args []string) string {
 // the subpath it was given; the same volume is at DataRoot here, so the subpath
 // re-roots to the directory this process reads — the same string the bind shape
 // would have produced, which is what keeps Ensure's comparison one comparison.
+//
+// A *detached* volume — one of this sandbox's own, which no other container
+// mounts — is answered as the container path /workspace: this process cannot name
+// it in its own filesystem, and the sandbox is the only place it exists. It is
+// recognised from the container's own mount record rather than from
+// DockerConfig.DetachedWorkspace so that a process which adopted the container (a
+// restarted control plane, the stateless runner answering a Get) reaches the same
+// answer without a row or a flag telling it.
 func (d *Docker) workspaceMount(ctx context.Context, name string) (string, error) {
 	if d.cfg.WorkspaceVolume != "" {
 		return d.volumeWorkspaceMount(ctx, name)
 	}
-	out, err := d.docker(ctx, "inspect", "--format", "{{json .Mounts}}", name)
+	// HostConfig.Mounts, not the runtime Mounts: the requested mount is where a
+	// volume's options live, and it is written when the container is created — a
+	// later `docker start` preserves it.
+	out, err := d.docker(ctx, "inspect", "--format", "{{json .HostConfig.Mounts}}", name)
 	if err != nil {
 		return "", err
+	}
+	if detachedMount(out, name) {
+		return containerWorkspace, nil
 	}
 	var mounts []struct {
 		Type        string `json:"Type"`
 		Source      string `json:"Source"`
+		Target      string `json:"Target"`
 		Destination string `json:"Destination"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &mounts); err != nil {
 		return "", fmt.Errorf("sandbox: docker: inspect mounts %s: %w", name, err)
 	}
 	for _, mount := range mounts {
-		if path.Clean(filepath.ToSlash(mount.Destination)) == containerWorkspace {
-			return mount.Source, nil
+		target := mount.Target
+		if strings.TrimSpace(target) == "" {
+			target = mount.Destination
 		}
+		if path.Clean(filepath.ToSlash(target)) != containerWorkspace {
+			continue
+		}
+		if mount.Type == "volume" {
+			// A volume we did not name ourselves and that is not this sandbox's
+			// detached one: where its files are cannot be described from here, and
+			// guessing a host path would be worse than saying so.
+			return "", fmt.Errorf("sandbox: docker: %s mounts volume %q at %s, which is not this sandbox's own workspace volume",
+				name, mount.Source, containerWorkspace)
+		}
+		return mount.Source, nil
 	}
 	return "", fmt.Errorf("sandbox: docker: %s has no %s mount", name, containerWorkspace)
+}
+
+// detachedMount reports whether the container's recorded mounts make its
+// /workspace this sandbox's own volume — the shape a detached workspace has.
+func detachedMount(hostConfigMounts, containerName string) bool {
+	var mounts []struct {
+		Type          string `json:"Type"`
+		Source        string `json:"Source"`
+		Target        string `json:"Target"`
+		VolumeOptions *struct {
+			Subpath string `json:"Subpath"`
+		} `json:"VolumeOptions"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(hostConfigMounts)), &mounts) != nil {
+		return false
+	}
+	want := detachedVolumeName(containerName)
+	for _, mount := range mounts {
+		if path.Clean(filepath.ToSlash(mount.Target)) != containerWorkspace {
+			continue
+		}
+		if mount.Type != "volume" || mount.Source != want {
+			return false
+		}
+		return mount.VolumeOptions == nil || strings.TrimSpace(mount.VolumeOptions.Subpath) == ""
+	}
+	return false
 }
 
 // volumeWorkspaceMount reads the mount *requested* for /workspace out of the

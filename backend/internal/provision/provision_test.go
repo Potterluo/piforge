@@ -595,6 +595,9 @@ func TestMountRecordsTheVersionOncePerSession(t *testing.T) {
 type fakeWorktreeSandbox struct {
 	root  string
 	calls []worktreeCall
+	// workspace is what Ensure reports: empty means a directory on this disk,
+	// contracts.WorkspaceAPI means the tree is only inside the container.
+	workspace contracts.WorkspaceMode
 }
 
 type worktreeCall struct {
@@ -615,6 +618,7 @@ func (f *fakeWorktreeSandbox) Ensure(ctx context.Context, userID, projectID, rep
 		State:     contracts.SandboxReady,
 		Provider:  "fake",
 		RootDir:   f.root,
+		Workspace: f.workspace,
 	}, nil
 }
 

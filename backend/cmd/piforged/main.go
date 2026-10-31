@@ -46,6 +46,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/janitor"
 	"github.com/piforge/piforge/backend/internal/liveness"
 	"github.com/piforge/piforge/backend/internal/llmgw"
+	"github.com/piforge/piforge/backend/internal/materialize"
 	"github.com/piforge/piforge/backend/internal/pi"
 	"github.com/piforge/piforge/backend/internal/pimodel"
 	"github.com/piforge/piforge/backend/internal/provision"
@@ -360,6 +361,15 @@ func run() error {
 		return fmt.Errorf("create data dir: %w", err)
 	}
 
+	// Stage 2 of the execution boundary removes the shared volume: with
+	// -agent-in-sandbox the workspace is a volume of the sandbox's own, so there
+	// is no host directory for the file panel (or the skill projection) to read.
+	// A deployment that pins the panel to the host would show an empty tree next
+	// to a running agent, which is the one combination that must not start.
+	if err := validateAgentWorkspace(opt.agentInSandbox, opt.sandboxFiles); err != nil {
+		return err
+	}
+
 	logger := newLogger(opt)
 	logger.Info("starting piforged",
 		"addr", opt.addr, "data", abs(opt.dataDir), "dev", opt.dev, "fake_pi", opt.useFakePi)
@@ -519,6 +529,10 @@ func run() error {
 			DataRoot: filepath.Join(opt.dataDir, "sandboxes"),
 			APIPort:  8080,
 			APIKey:   opt.sandboxAPIKey,
+			// Stage 2: with the agent inside the sandbox, its workspace is a
+			// volume of its own that this process never mounts. Stage 1 still
+			// shared the volume; that is what this flag stops doing.
+			DetachedWorkspace: opt.agentInSandbox,
 		})
 		if derr != nil {
 			return fmt.Errorf("init docker sandbox provider: %w", derr)
@@ -543,6 +557,9 @@ func run() error {
 			Memory:   opt.sandboxMemory,
 			Network:  opt.sandboxNetwork,
 			APIPort:  8080,
+			// Stage 2: the create request asks the runner for a workspace volume
+			// of this sandbox's own, which no service in the deployment mounts.
+			DetachedWorkspace: opt.agentInSandbox,
 		})
 		if rerr != nil {
 			return fmt.Errorf("init runner sandbox provider: %w", rerr)
@@ -600,12 +617,21 @@ func run() error {
 	// resolveSandboxPlacement already rejected remote without a container, so the
 	// only thing left to guard is the provider itself.
 	var files contracts.Workspace = fs
+	// fileBackend is the sandbox-API view of a checkout. It is built when the file
+	// panel is remote (the default under a container provider) and is reused by the
+	// provisioner: the skill projection writes through the same client the panel
+	// reads with, so there is one answer per sandbox about where the bytes are.
+	var fileBackend *sandboxFileBackend
 	if opt.sandboxFiles == "remote" {
 		if remoteSB == nil {
 			return fmt.Errorf("remote workspace files need a container sandbox provider (-sandbox docker or -sandbox runner)")
 		}
-		fileBackend := &sandboxFileBackend{provider: remoteSB, store: st, keys: sandboxKeys{store: st, fixed: opt.sandboxAPIKey}}
-		executor := workspaceremote.ShellExecutor{Backend: fileBackend}
+		fileBackend = &sandboxFileBackend{provider: remoteSB, store: st, keys: sandboxKeys{store: st, fixed: opt.sandboxAPIKey}}
+		// OwnedTree follows the workspace shape, not the provider: a detached
+		// workspace (stage 2) is built and read by the sandbox user alone, so the
+		// panel's git needs no `safe.directory`, while a shared volume still does
+		// (the control plane writes into it as root).
+		executor := workspaceremote.ShellExecutor{Backend: fileBackend, OwnedTree: opt.agentInSandbox}
 		remoteFiles, rerr := workspaceremote.New(workspaceremote.Config{
 			Backend: fileBackend,
 			// Same runner, same parsing: only the machine executing git changes.
@@ -940,6 +966,13 @@ func run() error {
 	// One path decides where a session's frozen skill tree lives, for the
 	// provisioner that writes it and the delete path that reclaims it.
 	skillSnapshotDir := filepath.Join(opt.dataDir, "skill-snapshots")
+	// The same seam the file panel uses, for the same reason: with a detached
+	// workspace the projection is a request to the sandbox, and a sandbox whose
+	// files must be written has to be addressed through its own API and key.
+	var workspaceFiles func(context.Context, *contracts.Sandbox) (materialize.FileSystem, error)
+	if fileBackend != nil {
+		workspaceFiles = fileBackend.files
+	}
 	prov := provision.New(provision.Config{
 		Store:   st,
 		Sandbox: sb,
@@ -949,7 +982,8 @@ func run() error {
 		SkillsDir: filepath.Join(opt.dataDir, "skills"),
 		// Frozen skill snapshots live outside every checkout, so a bind mount's
 		// source has no second, agent-writable path (FR-14.2).
-		SnapshotDir: skillSnapshotDir,
+		SnapshotDir:    skillSnapshotDir,
+		WorkspaceFiles: workspaceFiles,
 	})
 
 	// 6. Authentication.

@@ -114,16 +114,17 @@ func newSandboxAgent(provider sandbox.Remote, attacher sandbox.Attacher, keys sa
 }
 
 // SessionFile places a session's JSONL file where both sides can reach it:
-// <pair>/.piforge/sessions/<session>.jsonl, the sandbox's own workspace, which is
-// the volume the container mounts at /workspace.
+// <pair>/.piforge/sessions/<session>.jsonl, the sandbox's own workspace.
 //
 // Not inside the checkout: `<repo>/.piforge` would show up as untracked noise in
 // the changes panel. Not under /tmp either: the control plane still reads this
 // file for CloneSession and reports it in Status, and two /tmp directories in two
 // containers are two different files.
 //
-// It is pi.RuntimeConfig.SessionFileFor. The path is a host path; Dial maps it to
-// the container path in one step, so both sides name the same bytes.
+// It is pi.RuntimeConfig.SessionFileFor. Stage 2 makes the workspace a volume only
+// the sandbox mounts, so this path is the *container* path and nothing here can
+// open it; Dial maps it one step further (unchanged) and the file is written by Pi
+// inside the sandbox.
 func (a *sandboxAgent) SessionFile(sessionID string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -133,7 +134,7 @@ func (a *sandboxAgent) SessionFile(sessionID string) string {
 		// cannot be resolved cannot be launched either, and Dial says so.
 		return ""
 	}
-	return filepath.Join(target.RootDir, ".piforge", "sessions", sessionID+".jsonl")
+	return workspacePath(target.RootDir, ".piforge", "sessions", sessionID+".jsonl")
 }
 
 // alignSessionFile fixes the session file's cwd header inside the sandbox.
@@ -166,28 +167,44 @@ func (a *sandboxAgent) alignSessionFile(ctx context.Context, client *aio.Client,
 	return nil
 }
 
-// ensureSharedDirs makes the workspace directories the sandbox user writes to
-// writable by that user.
+// ensureSharedDirs makes the workspace directories the agent writes to exist,
+// through the sandbox's own API.
 //
-// The control plane creates the pair's directories as root; the agent runs as
-// gem, and gem has to create its session file and its model-config directory in
-// there. 0777 is the same answer the checkout's `chmod -R a+rwX /workspace`
-// gives for the rest of the workspace, applied to the ones created after it.
-// The parent is included on purpose: a 0755 .piforge would let gem write into
-// .piforge/sessions but not create .piforge/agents next to it.
-func ensureSharedDirs(pairRoot string) error {
-	for _, dir := range []string{
-		filepath.Join(pairRoot, ".piforge"),
-		filepath.Join(pairRoot, ".piforge", "sessions"),
-	} {
-		if err := os.MkdirAll(dir, 0o777); err != nil {
-			return err
-		}
-		if err := os.Chmod(dir, 0o777); err != nil {
-			return err
-		}
+// It used to create them on the host and chmod them 0777, because the control
+// plane created them as root and the agent runs as gem. With a detached workspace
+// (stage 2) there is no host directory to create, and there is no second owner to
+// open the tree for: the sandbox user creates these directories over its own API,
+// owns them, and writes the session file and the model configuration into them.
+// One writer, one account — the same rule the checkout follows.
+func ensureSharedDirs(ctx context.Context, client *aio.Client, containerRoot string) error {
+	dirs := []string{
+		path.Join(containerRoot, ".piforge"),
+		path.Join(containerRoot, ".piforge", "sessions"),
+	}
+	quoted := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		quoted = append(quoted, aio.Quote(dir))
+	}
+	res, err := client.Exec(ctx, "mkdir -p -- "+strings.Join(quoted, " "), containerRoot)
+	if err != nil {
+		return fmt.Errorf("agent-in-sandbox: prepare the workspace directories: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("agent-in-sandbox: prepare the workspace directories: exit %d: %s",
+			res.ExitCode, strings.TrimSpace(res.Output))
 	}
 	return nil
+}
+
+// workspacePath joins elements under a sandbox workspace root in the root's own
+// syntax. A container root is POSIX whatever this process runs on, and
+// filepath.Join would turn "/workspace/.piforge" into "\workspace\.piforge" on a
+// Windows control plane — a string no other part of the deployment would match.
+func workspacePath(root string, parts ...string) string {
+	if strings.HasPrefix(root, "/") {
+		return path.Join(append([]string{root}, parts...)...)
+	}
+	return filepath.Join(append([]string{root}, parts...)...)
 }
 
 // ContainerWorktree reports the path the agent process itself uses for a
@@ -266,8 +283,8 @@ func (a *sandboxAgent) Dial(spec contracts.SessionSpec, sessionFile string) (io.
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureSharedDirs(target.RootDir); err != nil {
-		return nil, fmt.Errorf("agent-in-sandbox: prepare the workspace directories: %w", err)
+	if err := ensureSharedDirs(ctx, client, root); err != nil {
+		return nil, err
 	}
 	agentDir, err := a.stageModelConfig(ctx, target.SandboxID, spec, root, client)
 	if err != nil {

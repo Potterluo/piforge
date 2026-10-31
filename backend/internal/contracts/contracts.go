@@ -673,6 +673,34 @@ type AdoptResult struct {
 // Sandbox (implemented by internal/sandbox)
 // ---------------------------------------------------------------------------
 
+// WorkspaceMode says where a sandbox's files are, as the control plane can
+// reach them. It is part of the sandbox row because it decides *how* every later
+// write is made, and it has to survive a restart: a process that guesses wrong
+// writes a tree the sandbox never reads (or, worse, fails every skill mount).
+//
+// The zero value is WorkspaceHost, so a row created by an older build — and every
+// hand-built test — keeps the behaviour it had.
+type WorkspaceMode string
+
+const (
+	// WorkspaceHost is a directory this process can open: the local provider's
+	// data directory, or a container provider whose workspace is a shared volume.
+	WorkspaceHost WorkspaceMode = "host"
+	// WorkspaceAPI means the workspace exists only inside the sandbox and is
+	// addressed through its file API (stage 2 of docs/EXECUTION-BOUNDARY.md).
+	// RootDir then names the path inside the container ("/workspace"), not a
+	// directory on this disk, and nothing in the control plane may open it.
+	WorkspaceAPI WorkspaceMode = "api"
+)
+
+// Normalized returns the mode with the empty value resolved to WorkspaceHost.
+func (m WorkspaceMode) Normalized() WorkspaceMode {
+	if m == WorkspaceAPI {
+		return WorkspaceAPI
+	}
+	return WorkspaceHost
+}
+
 // Sandbox is one isolated execution environment, keyed by (project, user).
 type Sandbox struct {
 	ID           string       `json:"id"`
@@ -687,6 +715,11 @@ type Sandbox struct {
 	CreatedAt    time.Time    `json:"created_at"`
 	ExpiresAt    *time.Time   `json:"expires_at,omitempty"`
 	Message      string       `json:"message,omitempty"`
+
+	// Workspace is how this process can reach the sandbox's files. It is not
+	// JSON: it describes the control plane's own access, which is not something
+	// an API client can act on. See WorkspaceMode.
+	Workspace WorkspaceMode `json:"-"`
 
 	// SandboxAPIKey is the key the sandbox's own HTTP API requires, as reported
 	// by the provider that created the container. It is a secret: json:"-" keeps

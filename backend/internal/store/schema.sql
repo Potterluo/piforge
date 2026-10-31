@@ -75,6 +75,11 @@ CREATE TABLE IF NOT EXISTS sandboxes (
     node           TEXT NOT NULL DEFAULT '',
     image          TEXT NOT NULL DEFAULT '',
     root_dir       TEXT NOT NULL DEFAULT '',
+    -- How the control plane reaches this sandbox's files: '' / 'host' is a
+    -- directory it can open, 'api' is a workspace that exists only inside the
+    -- container (docs/EXECUTION-BOUNDARY.md stage 2). root_dir follows: a
+    -- container path ("/workspace") for 'api'.
+    workspace      TEXT NOT NULL DEFAULT '',
     message        TEXT NOT NULL DEFAULT '',
     cpu_milli      INTEGER NOT NULL DEFAULT 0,
     mem_mb         INTEGER NOT NULL DEFAULT 0,

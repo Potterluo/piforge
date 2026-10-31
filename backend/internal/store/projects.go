@@ -289,8 +289,8 @@ func scanProject(sc interface{ Scan(dest ...any) error }) (*contracts.Project, e
 // ---------------------------------------------------------------------------
 
 // sandboxCols is: id, user_id, project_id, state, provider, node, image,
-// root_dir, message, last_active_at, created_at, expires_at.
-const sandboxCols = `id, user_id, project_id, state, provider, node, image, root_dir, message, last_active_at, created_at, expires_at`
+// root_dir, workspace, message, last_active_at, created_at, expires_at.
+const sandboxCols = `id, user_id, project_id, state, provider, node, image, root_dir, workspace, message, last_active_at, created_at, expires_at`
 
 // NewSandbox is the input for CreateSandbox. The sandbox manager
 // (internal/sandbox) owns the lifecycle; the store only records it.
@@ -307,6 +307,9 @@ type NewSandbox struct {
 	Image     string
 	RootDir   string
 	Message   string
+	// Workspace is how this process reaches the sandbox's files
+	// (contracts.WorkspaceMode). Empty means "host": a directory it can open.
+	Workspace contracts.WorkspaceMode
 	// APIKey is the key the sandbox's own API requires (per-sandbox, generated
 	// where the container was created). It is sealed before it is written: the
 	// sandboxes table is a file on disk like any other.
@@ -337,11 +340,12 @@ func (s *Store) CreateSandbox(ctx context.Context, userID string, in NewSandbox)
 		return nil, err
 	}
 	if _, err := s.w.ExecContext(ctx,
-		`INSERT INTO sandboxes (id, user_id, project_id, state, provider, node, image, root_dir,
+		`INSERT INTO sandboxes (id, user_id, project_id, state, provider, node, image, root_dir, workspace,
 		                        message, cpu_milli, mem_mb, disk_gb, last_active_at, created_at, expires_at,
 		                        api_key_cipher)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, userID, in.ProjectID, string(state), in.Provider, in.Node, in.Image, in.RootDir,
+		string(in.Workspace.Normalized()),
 		in.Message, in.CPUMilli, in.MemMB, in.DiskGB, formatTime(now), formatTime(now), nullTime(in.ExpiresAt),
 		keyCipher); err != nil {
 		if isUniqueViolation(err) {
@@ -617,17 +621,19 @@ func (s *Store) ReapableSandboxes(ctx context.Context, state contracts.SandboxSt
 
 func scanSandbox(sc interface{ Scan(dest ...any) error }) (*contracts.Sandbox, error) {
 	var (
-		sb      contracts.Sandbox
-		state   string
-		lastAct string
-		created string
-		expires sql.NullString
+		sb        contracts.Sandbox
+		state     string
+		workspace string
+		lastAct   string
+		created   string
+		expires   sql.NullString
 	)
 	if err := sc.Scan(&sb.ID, &sb.UserID, &sb.ProjectID, &state, &sb.Provider, &sb.Node,
-		&sb.Image, &sb.RootDir, &sb.Message, &lastAct, &created, &expires); err != nil {
+		&sb.Image, &sb.RootDir, &workspace, &sb.Message, &lastAct, &created, &expires); err != nil {
 		return nil, err
 	}
 	sb.State = contracts.SandboxState(state)
+	sb.Workspace = contracts.WorkspaceMode(workspace).Normalized()
 	sb.LastActiveAt = parseTime(lastAct)
 	sb.CreatedAt = parseTime(created)
 	sb.ExpiresAt = parseTimePtr(expires)

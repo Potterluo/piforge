@@ -559,10 +559,19 @@ func (m *Manager) finishLaunch(sandboxID string, pending *pendingLaunch, session
 // launch starts chrome and connects to its devtools endpoint.
 func (m *Manager) launch(ctx context.Context, sandboxID, profileRoot string) (*Session, error) {
 	profile := filepath.Join(profileRoot, ".piforge-browser")
-	// A lock left by a browser that is gone is cleared here, inside the serialised
-	// launch, so two attempts can never both decide it is stale.
-	if err := prepareProfile(profile); err != nil {
-		return nil, &LaunchError{SandboxID: sandboxID, Stage: StageProfile, Err: err}
+	// A remote browser is attached to, not started: the sandbox owns the process
+	// and the profile directory. Preparing the profile here would create a
+	// directory on the control plane's disk that no browser ever opens — and with
+	// a detached workspace (docs/EXECUTION-BOUNDARY.md stage 2) profileRoot is a
+	// container path, so "preparing" it would either fail or, worse, create
+	// /workspace on this machine. The lock handling below is local-browser work.
+	remote := m.cfg.Remote != nil
+	if !remote {
+		// A lock left by a browser that is gone is cleared here, inside the
+		// serialised launch, so two attempts can never both decide it is stale.
+		if err := prepareProfile(profile); err != nil {
+			return nil, &LaunchError{SandboxID: sandboxID, Stage: StageProfile, Err: err}
+		}
 	}
 
 	// Pick a free port rather than a fixed one, so two sandboxes on one host
@@ -612,7 +621,7 @@ func (m *Manager) launch(ctx context.Context, sandboxID, profileRoot string) (*S
 	}
 	// A remote browser is attached to, not started: the sandbox owns the process, and
 	// killing it here would kill the user's browser.
-	if m.cfg.Remote != nil {
+	if remote {
 		wsURL, debugHTTP, rerr := m.cfg.Remote(ctx, sandboxID)
 		if rerr == nil && wsURL != "" {
 			session, aerr := m.attachRemote(ctx, sandboxID, profile, wsURL, debugHTTP)

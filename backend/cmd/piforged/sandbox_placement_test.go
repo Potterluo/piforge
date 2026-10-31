@@ -214,3 +214,38 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// Stage 2 gives each sandbox a workspace volume of its own, so the file panel has
+// nothing on this disk to read. A deployment that pins it to the host would start
+// healthy and then show an empty tree beside an agent editing files.
+func TestValidateAgentWorkspace(t *testing.T) {
+	cases := []struct {
+		name    string
+		agent   bool
+		files   string
+		wantErr bool
+	}{
+		{name: "flag off: any placement is fine", agent: false, files: "host"},
+		{name: "flag off with remote files", agent: false, files: "remote"},
+		{name: "flag on with remote files", agent: true, files: "remote"},
+		{name: "flag on with host files is refused", agent: true, files: "host", wantErr: true},
+		{name: "flag on with the request value is refused", agent: true, files: "auto", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateAgentWorkspace(tc.agent, tc.files)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("validateAgentWorkspace(%v, %q) = nil, want an error", tc.agent, tc.files)
+				}
+				if !strings.Contains(err.Error(), "must be remote") {
+					t.Fatalf("error = %v, want it to name the file panel", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validateAgentWorkspace(%v, %q) = %v", tc.agent, tc.files, err)
+			}
+		})
+	}
+}

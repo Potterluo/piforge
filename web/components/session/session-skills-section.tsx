@@ -68,11 +68,13 @@ export function SessionSkillsSection({ sessionId }: { sessionId: string }) {
                 {(() => {
                   // FR-14.2: say which mechanism is actually in use, in one
                   // sentence a screen reader and a hover both get. The three
-                  // differences are real: a bind mount refuses every write, a
-                  // read-only copy refuses overwriting an existing file but the
-                  // agent can still create a new one in the directory (a copy is
-                  // not a mount), and a frozen-but-writable copy is not read-only
-                  // at all.
+                  // differences are real: a bind mount refuses every write and is
+                  // enforced by the kernel, a read-only copy refuses every write
+                  // because the files are mode 0444 (and the directory 0555, so a
+                  // new file is refused too where the platform enforces directory
+                  // bits), and a frozen-but-writable copy is not read-only at all.
+                  // The copy is not a mount, and the label says so instead of
+                  // borrowing the word for one.
                   const slug = record.mounted_path.split("/").filter(Boolean).pop() ?? "";
                   const mechanism = query.data?.mechanisms?.[slug];
                   if (!mechanism) return null;
@@ -83,7 +85,8 @@ export function SessionSkillsSection({ sessionId }: { sessionId: string }) {
                     },
                     "copy-ro": {
                       label: "只读副本",
-                      title: "只读副本：agent 无法覆盖，但可新建文件",
+                      title:
+                        "只读副本：冻结的副本（不是挂载），文件为只读位，agent 无法改写；目录不可写时也无法新建文件",
                     },
                     copy: {
                       label: "副本（未只读）",

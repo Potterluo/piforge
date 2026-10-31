@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
+	"strings"
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
@@ -57,8 +59,29 @@ func (s *server) handleSessionTooling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp.MountedAt = root
-	resp.Mounted = materialize.Read(root)
+	resp.Mounted = s.readMountedTooling(r.Context(), root)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// readMountedTooling reads the projection manifest behind one checkout.
+//
+// Through the workspace abstraction rather than os.ReadFile: with a container
+// sandbox the checkout is inside the sandbox (stage 2 of
+// docs/EXECUTION-BOUNDARY.md removed the shared volume entirely), and the
+// workspace already knows how to fetch a file from there. A deployment whose
+// files are local answers from disk, unchanged.
+//
+// A missing manifest is not an error: it means nothing was projected yet, and the
+// UI renders "none".
+func (s *server) readMountedTooling(ctx context.Context, root string) materialize.Manifest {
+	if s.deps.Workspace == nil || strings.TrimSpace(root) == "" {
+		return materialize.ParseManifest(nil)
+	}
+	content, err := s.deps.Workspace.ReadFile(ctx, root, materialize.ManifestRel)
+	if err != nil || content == nil {
+		return materialize.ParseManifest(nil)
+	}
+	return materialize.ParseManifest([]byte(content.Body))
 }
 
 // sessionSkillsResponse is what a session was actually mounted with (FR-14.5).
@@ -94,7 +117,7 @@ func (s *server) handleSessionSkills(w http.ResponseWriter, r *http.Request) {
 	resp := sessionSkillsResponse{Skills: list}
 	if sess.WorktreeID != "" {
 		if root, rerr := s.worktreeRoot(r.Context(), user.ID, sess); rerr == nil {
-			resp.Mechanisms = materialize.Read(root).Mechanisms
+			resp.Mechanisms = s.readMountedTooling(r.Context(), root).Mechanisms
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)

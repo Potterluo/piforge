@@ -36,6 +36,17 @@
 #   the daemon resolves the name, not a path), and Docker Engine 25+ for the
 #   subpath. It works unchanged on Linux hosts and on Docker Desktop.
 #
+# There is a second shape, and it is the one -agent-in-sandbox uses
+# (docs/EXECUTION-BOUNDARY.md stage 2, docs/SANDBOX-DEPLOY.md §1.4.4): each
+# sandbox gets a volume of its own (`piforge-ws-<pair hash>`) and nothing else in
+# the deployment mounts it. The control plane then reaches the workspace only
+# through the sandbox API, so it needs no workspace mount at all, and
+# SANDBOX_WORKSPACE_VOLUME / SANDBOX_WORKSPACE_VOLUME_ROOT must be **removed**
+# before setting PIFORGE_AGENT_IN_SANDBOX=1: the two shapes contradict each other
+# and the provider refuses the combination at construction rather than picking
+# one. With the flag on, this service no longer needs `piforge-data:/data`
+# either — SANDBOX_DATA_ROOT is then only a path inside this container.
+#
 # Sandbox containers join `piforge-sandboxes` and are addressed by container name
 # (SANDBOX_CONTAINER_ENDPOINT=1), so no sandbox port is published on the host.
 # piforge joins that network to reach them; the runner joins it too because the

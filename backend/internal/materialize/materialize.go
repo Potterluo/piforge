@@ -6,9 +6,16 @@
 // settings only take effect once they exist on disk inside the worktree — this
 // package is that projection step.
 //
-// It is deliberately small and pure: given a root and a list of things to
-// mount, it writes files and reports what it did. No database, no network, so
-// it is cheap to test and impossible to get subtly wrong at a distance.
+// It is deliberately small and pure: given a filesystem, a root and a list of
+// things to mount, it writes files and reports what it did. No database, no
+// network, so it is cheap to test and impossible to get subtly wrong at a
+// distance.
+//
+// Two filesystems. The projection writes into the control plane's own disk when
+// the sandbox's workspace is a directory this process can open, and into the
+// sandbox's file API when it is not (stage 2 of docs/EXECUTION-BOUNDARY.md;
+// see fs.go). The decision of *what* to project is the same code either way —
+// that is the point of splitting it this way.
 package materialize
 
 import (
@@ -29,9 +36,13 @@ import (
 // Layout constants. Pi's convention is one directory per skill containing a
 // SKILL.md, and a single JSON file listing MCP servers.
 const (
-	SkillsRoot  = ".pi/skills"
-	MCPConfig   = ".mcp.json"
-	manifestRel = ".pi/mounted.json"
+	SkillsRoot = ".pi/skills"
+	MCPConfig  = ".mcp.json"
+	// ManifestRel is the record of what was projected, relative to a checkout
+	// root. It is exported because the tooling panel reads it back through the
+	// workspace abstraction instead of assuming the file is on this disk.
+	ManifestRel = ".pi/mounted.json"
+	manifestRel = ManifestRel
 	mcpKey      = "mcpServers"
 	// snapshotRel is the fallback location for frozen bind-mount sources when
 	// Options.SnapshotDir is empty. A deployment passes a directory outside the
@@ -113,6 +124,10 @@ type MountedSkill struct {
 	Name string
 	// Dir is the absolute directory inside the worktree that holds SKILL.md.
 	Dir string
+	// Slug is the directory name Dir ends with. It is carried instead of being
+	// re-derived from Dir, because a container path and a Windows host path do
+	// not split the same way.
+	Slug string
 	// Mechanism is how that directory came to exist: "bind-ro" or "copy-ro".
 	Mechanism string
 }
@@ -142,6 +157,9 @@ type Options struct {
 	// bundle_key does not resolve to an existing directory is skipped rather
 	// than mounted as an empty stub: an instruction-free skill is worse than a
 	// missing one, because the agent will try to use it.
+	//
+	// Bundles are always on the control plane's disk, even when the tree they
+	// are projected into is not: they are uploaded here and read here.
 	SkillsDir string
 	// SnapshotDir is where a bind mount's frozen copy lives. It is outside the
 	// worktree in a deployment, so the mounted tree cannot be reached through a
@@ -161,21 +179,35 @@ type Options struct {
 	Unmount func(target string) error
 }
 
-// Mount writes the project's tooling into root.
+// Mount writes the project's tooling into root on the control plane's own disk.
 //
 // The operation is idempotent: mounting the same configuration twice leaves the
 // same files, and mounting a smaller configuration removes what it previously
 // managed. Files this package did not write are never deleted.
 func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServer, opts Options) (Result, error) {
+	return MountFS(hostFS{opts: opts}, root, skills, servers, opts)
+}
+
+// MountFS writes the project's tooling into root through fs.
+//
+// fs is the control plane's disk for a workspace it can open, and the sandbox's
+// file API for a workspace that exists only inside the container. The rules are
+// identical — this is the same function — and only the mechanism a skill can be
+// given differs: a bind mount needs somewhere to mount, which a file API does
+// not have.
+func MountFS(fs FileSystem, root string, skills []*contracts.Skill, servers []*contracts.MCPServer, opts Options) (Result, error) {
+	if fs == nil {
+		return Result{}, errors.New("materialize: a filesystem is required")
+	}
 	if strings.TrimSpace(root) == "" {
 		return Result{}, errors.New("materialize: root is required")
 	}
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	if err := fs.MkdirAll(root); err != nil {
 		return Result{}, fmt.Errorf("materialize: create root: %w", err)
 	}
 
 	result := Result{Skills: []string{}, Mounted: []MountedSkill{}, MCPServers: []string{}, Skipped: map[string]string{}, Warnings: []string{}}
-	previous := readManifest(root)
+	previous := readManifestFS(fs, root)
 
 	// --- skills ---------------------------------------------------------
 	wanted := map[string]wantedSkill{} // dir name -> name and source dir
@@ -191,7 +223,7 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 		source := ""
 		if opts.SkillsDir != "" && skill.BundleKey != "" {
 			candidate := filepath.Join(opts.SkillsDir, skill.BundleKey)
-			if inside, cerr := safeJoin(opts.SkillsDir, skill.BundleKey); cerr == nil {
+			if inside, cerr := hostSafeJoin(opts.SkillsDir, skill.BundleKey); cerr == nil {
 				candidate = inside
 			}
 			if info, serr := os.Stat(candidate); serr == nil && info.IsDir() {
@@ -213,11 +245,11 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 		wanted[slug] = wantedSkill{name: skill.Name, source: source, scope: skill.Scope, id: skill.ID}
 	}
 
-	skillsRoot, err := safeJoin(root, SkillsRoot)
+	skillsRoot, err := safeJoin(fs, root, SkillsRoot)
 	if err != nil {
 		return Result{}, err
 	}
-	if err := os.MkdirAll(skillsRoot, 0o755); err != nil {
+	if err := fs.MkdirAll(skillsRoot); err != nil {
 		return Result{}, fmt.Errorf("materialize: create skills root: %w", err)
 	}
 
@@ -235,7 +267,7 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 
 	for _, slug := range names {
 		entry := wanted[slug]
-		target := filepath.Join(skillsRoot, slug)
+		target := fs.Join(skillsRoot, slug)
 
 		// A target that already carries SKILL.md from the same skill row is this
 		// worktree's frozen copy from an earlier pass. Keep it: re-copying would
@@ -243,60 +275,60 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 		// what FR-14.2/14.5 say must not happen. A *different* row winning the
 		// same name (a shared skill after its private shadow was disabled) is a
 		// configuration change, not an edit, and is re-installed.
-		if isMountedSkill(target) && previous.SkillIDs[slug] == entry.id {
+		if isMountedSkillFS(fs, target) && previous.SkillIDs[slug] == entry.id {
 			mechanism := previous.Mechanisms[slug]
 			if mechanism == "" {
 				// A copy written by an older build (before mechanisms were
 				// recorded) is a plain directory; hardening it in place is safe
 				// and makes the read-only promise hold for it too.
 				mechanism = string(MechanismCopyRO)
-				if err := chmodTree(target, true); err != nil {
+				if _, err := fs.MakeReadOnly(target); err != nil {
 					result.Warnings = append(result.Warnings,
 						fmt.Sprintf("skill %s: could not make the existing copy read-only: %v", slug, err))
 				}
 			}
-			absTarget, err := filepath.Abs(target)
+			absTarget, err := fs.Abs(target)
 			if err != nil {
 				return Result{}, fmt.Errorf("materialize: resolve mounted skill %s: %w", slug, err)
 			}
 			result.Skills = append(result.Skills, slug)
-			result.Mounted = append(result.Mounted, MountedSkill{Name: entry.name, Dir: absTarget, Mechanism: mechanism})
+			result.Mounted = append(result.Mounted, MountedSkill{Name: entry.name, Dir: absTarget, Slug: slug, Mechanism: mechanism})
 			continue
 		}
 
 		// A stale mount or a stale read-only copy must not break provisioning:
 		// unmount best-effort, clear read-only bits, retry once. Only a target
 		// that still will not move is skipped, and the session keeps working.
-		if err := clearMountedTree(target, opts); err != nil {
+		if err := fs.RemoveAll(target); err != nil {
 			result.Skipped[slug] = "a stale mount could not be removed: " + err.Error()
 			continue
 		}
 
-		used, warning, err := installSkill(root, snapshots, target, entry.source, slug, plan, opts)
+		used, warning, err := installSkillFS(fs, root, snapshots, target, entry.source, slug, plan, opts)
 		if err != nil {
 			// A bundle that cannot be installed is not a transient condition:
 			// a symlink inside it, a full disk, or a denied write would keep
 			// failing and the agent would silently have no skill. Fail the
 			// provisioning pass instead of reporting a mount that is not there.
-			_ = clearMountedTree(target, opts)
+			_ = fs.RemoveAll(target)
 			return Result{}, fmt.Errorf("materialize: mount skill %s: %w", slug, err)
 		}
 		if warning != "" {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("skill %s: %s", slug, warning))
 		}
-		if _, err := os.Stat(filepath.Join(target, "SKILL.md")); err != nil {
+		if kind, lerr := fs.Lookup(fs.Join(target, "SKILL.md")); lerr != nil || kind != KindFile {
 			// A directory without SKILL.md is invisible to Pi, and silently
 			// mounting it would look like the feature works when it does not.
-			_ = clearMountedTree(target, opts)
+			_ = fs.RemoveAll(target)
 			result.Skipped[slug] = "bundle has no SKILL.md"
 			continue
 		}
-		absTarget, err := filepath.Abs(target)
+		absTarget, err := fs.Abs(target)
 		if err != nil {
 			return Result{}, fmt.Errorf("materialize: resolve mounted skill %s: %w", slug, err)
 		}
 		result.Skills = append(result.Skills, slug)
-		result.Mounted = append(result.Mounted, MountedSkill{Name: entry.name, Dir: absTarget, Mechanism: used})
+		result.Mounted = append(result.Mounted, MountedSkill{Name: entry.name, Dir: absTarget, Slug: slug, Mechanism: used})
 	}
 
 	// Remove skills we mounted last time that are no longer configured.
@@ -304,7 +336,7 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 		if _, keep := wanted[stale]; keep {
 			continue
 		}
-		if err := clearMountedTree(filepath.Join(skillsRoot, stale), opts); err != nil {
+		if err := fs.RemoveAll(fs.Join(skillsRoot, stale)); err != nil {
 			// A directory we cannot remove must not take the whole session down;
 			// say so and keep the rest of the projection intact.
 			result.Warnings = append(result.Warnings,
@@ -332,8 +364,8 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 
 	// Remove the file older builds wrote. It is ours by construction — the path is a
 	// constant of this package — and leaving it would keep a config Pi never reads.
-	configPath := filepath.Join(root, MCPConfig)
-	if err := os.Remove(configPath); err != nil && !os.IsNotExist(err) {
+	configPath := fs.Join(root, MCPConfig)
+	if err := removeIfPresent(fs, configPath); err != nil {
 		return Result{}, fmt.Errorf("materialize: remove legacy mcp config: %w", err)
 	}
 
@@ -341,7 +373,7 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 	// .git/info/exclude instead of .gitignore keeps the repository's tracked
 	// files untouched (we have no business editing the user's commit contents)
 	// while `git status` stays an honest description of *their* work.
-	if err := excludeFromGit(root, []string{"/" + SkillsRoot, "/" + manifestRel, "/" + MCPConfig, "/" + snapshotRel}); err != nil {
+	if err := excludeFromGitFS(fs, root, []string{"/" + SkillsRoot, "/" + ManifestRel, "/" + MCPConfig, "/" + snapshotRel}); err != nil {
 		return Result{}, err
 	}
 
@@ -351,10 +383,9 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 	mechanisms := make(map[string]string, len(result.Mounted))
 	skillIDs := make(map[string]string, len(result.Mounted))
 	for _, mounted := range result.Mounted {
-		slug := filepath.Base(mounted.Dir)
-		mechanisms[slug] = mounted.Mechanism
-		if entry, ok := wanted[slug]; ok {
-			skillIDs[slug] = entry.id
+		mechanisms[mounted.Slug] = mounted.Mechanism
+		if entry, ok := wanted[mounted.Slug]; ok {
+			skillIDs[mounted.Slug] = entry.id
 		}
 	}
 	next := Manifest{
@@ -364,7 +395,7 @@ func Mount(root string, skills []*contracts.Skill, servers []*contracts.MCPServe
 		Mechanisms: mechanisms,
 		SkillIDs:   skillIDs,
 	}
-	if err := writeManifest(root, next); err != nil {
+	if err := writeManifestFS(fs, root, next); err != nil {
 		return Result{}, err
 	}
 	return result, nil
@@ -432,8 +463,9 @@ func slugify(name string) (string, error) {
 	return slug, nil
 }
 
-// safeJoin joins base and rel, refusing anything that escapes base.
-func safeJoin(base, rel string) (string, error) {
+// hostSafeJoin joins base and rel on the control plane's disk, refusing anything
+// that escapes base. It is used for bundle sources, which are always here.
+func hostSafeJoin(base, rel string) (string, error) {
 	if base == "" {
 		return "", errors.New("materialize: base is required")
 	}
@@ -462,18 +494,17 @@ func snapshotRoot(root string, opts Options) string {
 	return filepath.Join(root, filepath.FromSlash(snapshotRel))
 }
 
-// isMountedSkill reports whether a directory already holds a mounted skill.
+// isMountedSkillFS reports whether a directory already holds a mounted skill.
 //
 // It is the whole freeze rule: once a worktree has a skill, later passes leave
 // it alone. Editing the bundle therefore reaches only sessions provisioned
 // after the edit, while the running session keeps the content it was given.
-func isMountedSkill(target string) bool {
-	info, err := os.Lstat(target)
-	if err != nil || !info.IsDir() {
+func isMountedSkillFS(fs FileSystem, target string) bool {
+	if kind, err := fs.Lookup(target); err != nil || kind != KindDir {
 		return false
 	}
-	_, err = os.Stat(filepath.Join(target, "SKILL.md"))
-	return err == nil
+	kind, err := fs.Lookup(fs.Join(target, "SKILL.md"))
+	return err == nil && kind == KindFile
 }
 
 // platformPlan resolves the decision for this pass: the capability override when
@@ -486,51 +517,48 @@ func platformPlan(opts Options) Plan {
 	return PlatformPlan(opts.Platform, caps)
 }
 
-// installSkill creates the mounted tree for one skill and reports the mechanism
-// that actually succeeded.
+// installSkillFS creates the mounted tree for one skill and reports the
+// mechanism that actually succeeded.
 //
-// bind-ro is tried first when the process may bind: a snapshot is taken first,
-// then bind-mounted read-only, so the mount is both frozen and cheap. Everywhere
-// else — another platform, or Linux without CAP_SYS_ADMIN — the tree is a
+// bind-ro is tried first when the filesystem may bind: a snapshot is taken
+// first, then bind-mounted read-only, so the mount is both frozen and cheap.
+// Everywhere else — another platform, Linux without CAP_SYS_ADMIN, or a
+// sandbox whose files are only reachable through its API — the tree is a
 // read-only copy, which needs no capability. The copy's read-only promise is
-// probed rather than assumed (copy-ro when the bits hold for this process, copy
-// when root can still bypass them); the reverse never happens: a platform
-// without bind mounts does not pretend.
-func installSkill(root, snapshots, target, source, slug string, plan Plan, opts Options) (string, string, error) {
+// probed rather than assumed (copy-ro when the bits hold against the account
+// that reads the tree, copy when they do not); the reverse never happens: a
+// placement without bind mounts does not pretend.
+func installSkillFS(fs FileSystem, root, snapshots, target, source, slug string, plan Plan, opts Options) (string, string, error) {
 	warning := ""
-	if plan.CanBind {
+	if binder, ok := fs.(Binder); ok && plan.CanBind && fs.CanBind() {
 		snapshot := filepath.Join(snapshots, slug)
 		if err := ensureSnapshot(snapshot, source, opts); err != nil {
 			warning = fmt.Sprintf("could not take a mount snapshot (%v); copying instead", err)
+		} else if err := binder.BindReadOnly(snapshot, target); err == nil {
+			return string(MechanismBindRO), "", nil
 		} else {
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return "", warning, fmt.Errorf("mount skill: %w", err)
-			}
-			bind := opts.BindMount
-			if bind == nil {
-				bind = bindReadOnly
-			}
-			if err := bind(snapshot, target); err == nil {
-				return string(MechanismBindRO), "", nil
-			} else {
-				// The capability was there but the kernel still said no (a
-				// seccomp profile, an AppArmor rule, a filesystem that refuses
-				// mounts). The copy below is still read-only where this process
-				// honours the bits, and the warning names what happened.
-				warning = fmt.Sprintf("bind mount refused (%v); using a read-only copy", err)
-			}
+			// The capability was there but the kernel still said no (a
+			// seccomp profile, an AppArmor rule, a filesystem that refuses
+			// mounts). The copy below is still read-only where this process
+			// honours the bits, and the warning names what happened.
+			warning = fmt.Sprintf("bind mount refused (%v); using a read-only copy", err)
 		}
 	}
-	if err := copyReadOnly(source, target); err != nil {
+	if err := copyTreeFS(fs, source, target); err != nil {
 		return "", warning, fmt.Errorf("mount skill: %w", err)
 	}
-	// Permission bits are not a guarantee: root ignores them. Probe by opening
-	// the mounted SKILL.md for writing (without truncating). If it opens, the
-	// tree is a frozen copy but not a read-only one, and the mechanism has to
-	// say so — a process that still carries CAP_DAC_OVERRIDE would otherwise
-	// report a guarantee it does not have.
-	if mountedFileIsWritable(target) {
-		return string(MechanismCopy), "the mounted copy is writable by this process (root without CAP_SYS_ADMIN and with CAP_DAC_OVERRIDE); the tree is frozen but not read-only", nil
+	// Permission bits are not a guarantee: a privileged account ignores them.
+	// Probe by opening the mounted SKILL.md for writing (without truncating) —
+	// on the control plane's disk, or, for a sandbox tree, by asking the
+	// sandbox's own shell as the account the agent runs as. A process that still
+	// carries CAP_DAC_OVERRIDE would otherwise report a guarantee it does not
+	// have.
+	writable, err := fs.MakeReadOnly(target)
+	if err != nil {
+		return "", warning, fmt.Errorf("mount skill: make read-only: %w", err)
+	}
+	if writable {
+		return string(MechanismCopy), "the mounted copy is writable by the account that reads it (root without CAP_SYS_ADMIN and with CAP_DAC_OVERRIDE); the tree is frozen but not read-only", nil
 	}
 	return string(MechanismCopyRO), warning, nil
 }
@@ -551,13 +579,25 @@ func mountedFileIsWritable(target string) bool {
 // freezes the mounted tree: the snapshot belongs to this session and is never
 // refreshed from a bundle that changed under a running session.
 func ensureSnapshot(snapshot, source string, opts Options) error {
-	if isMountedSkill(snapshot) {
+	if hostIsMountedSkill(snapshot) {
 		return nil
 	}
 	if err := clearMountedTree(snapshot, opts); err != nil {
 		return err
 	}
 	return copyTree(source, snapshot)
+}
+
+// hostIsMountedSkill is isMountedSkillFS for the control plane's own disk, used
+// by the snapshot path, which is host-only by construction (a bind mount needs a
+// source on the host).
+func hostIsMountedSkill(target string) bool {
+	info, err := os.Lstat(target)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(target, "SKILL.md"))
+	return err == nil
 }
 
 // copyReadOnly copies a bundle and marks the result read-only.
@@ -614,7 +654,7 @@ func chmodTree(root string, readOnly bool) error {
 	return nil
 }
 
-// clearMountedTree removes a previous mount or copy.
+// clearMountedTree removes a previous mount or copy from the host.
 //
 // A stale mount must not break provisioning, so this is deliberately forgiving:
 // detach best-effort (the kernel says EINVAL when it was never a mount point),
@@ -640,10 +680,7 @@ func clearMountedTree(target string, opts Options) error {
 	if err := chmodTree(target, false); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if err := os.RemoveAll(target); err != nil {
-		return err
-	}
-	return nil
+	return os.RemoveAll(target)
 }
 
 // copyTree copies a directory recursively, skipping nothing: a skill bundle is
@@ -674,12 +711,61 @@ func copyTree(source, target string) error {
 	})
 }
 
-// Read reports what is currently mounted in root, from the manifest this
-// package writes. A missing manifest is not an error: it means nothing was
-// mounted yet.
-func Read(root string) Manifest { return readManifest(root).normalized() }
+// copyTreeFS copies a bundle from the control plane's disk into fs.
+//
+// The source is always local: bundles are uploaded to, and stored on, the
+// control plane. Only the destination can be remote, which is why the walk is
+// os.WalkDir and the writes go through the filesystem.
+func copyTreeFS(fs FileSystem, source, target string) error {
+	return filepath.WalkDir(source, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, rerr := filepath.Rel(source, p)
+		if rerr != nil {
+			return rerr
+		}
+		dest := target
+		if rel != "." {
+			dest = fs.Join(target, filepath.ToSlash(rel))
+		}
+		if d.IsDir() {
+			return fs.MkdirAll(dest)
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("skill bundle contains a symlink: %s", rel)
+		}
+		data, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return rerr
+		}
+		return fs.WriteFile(dest, data, 0o644)
+	})
+}
 
-// Digest is a stable fingerprint of a mounted skill bundle (FR-14.5).
+// Read reports what is currently mounted in root, from the manifest this
+// package writes on the control plane's own disk. A missing manifest is not an
+// error: it means nothing was mounted yet.
+func Read(root string) Manifest { return readManifestFS(hostFS{}, root) }
+
+// ReadFS reports what is mounted in root through fs. It is what a deployment
+// whose checkout lives inside a container reads through the sandbox API.
+func ReadFS(fs FileSystem, root string) Manifest { return readManifestFS(fs, root) }
+
+// ParseManifest turns the manifest file's bytes into a Manifest, applying the
+// same "empty means none" normalisation Read does. It exists for callers that
+// read the file through the workspace abstraction (which hands back bytes)
+// rather than through a FileSystem.
+func ParseManifest(raw []byte) Manifest {
+	var m Manifest
+	if len(raw) == 0 || json.Unmarshal(raw, &m) != nil {
+		return Manifest{}.normalized()
+	}
+	return m.normalized()
+}
+
+// Digest is a stable fingerprint of a mounted skill bundle (FR-14.5) on the
+// control plane's own disk.
 //
 // It hashes every file's path and bytes, in sorted path order, so the same
 // files always produce the same value regardless of directory-walk order and a
@@ -688,16 +774,69 @@ func Read(root string) Manifest { return readManifest(root).normalized() }
 // the same shape the upload path hashes — an unchanged bundle therefore has the
 // same digest in `skills.content_hash` and in the session's record.
 func Digest(dir string) (string, error) {
+	files, err := walkDigest(dir)
+	if err != nil {
+		return "", err
+	}
+	return hashFiles(files), nil
+}
+
+// DigestFS is Digest over fs: the fingerprint of what the sandbox actually
+// stores, read back through the API. Reading it back rather than hashing the
+// source bundle is deliberate — the record says what the agent reads, and the
+// round trip is also the proof that the copy landed.
+func DigestFS(fs FileSystem, dir string) (string, error) {
+	if fs == nil {
+		return "", errors.New("materialize: digest: a filesystem is required")
+	}
 	if strings.TrimSpace(dir) == "" {
 		return "", errors.New("materialize: digest: directory is required")
 	}
-
-	type file struct {
-		rel  string
-		data []byte
+	files := make([]digestFile, 0, 8)
+	var walk func(dir, prefix string) error
+	walk = func(dir, prefix string) error {
+		entries, err := fs.List(dir)
+		if err != nil {
+			return err
+		}
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+		for _, entry := range entries {
+			rel := entry.Name
+			if prefix != "" {
+				rel = prefix + "/" + entry.Name
+			}
+			full := fs.Join(dir, entry.Name)
+			if entry.IsDir {
+				if err := walk(full, rel); err != nil {
+					return err
+				}
+				continue
+			}
+			data, rerr := fs.ReadFile(full)
+			if rerr != nil {
+				return rerr
+			}
+			files = append(files, digestFile{rel: rel, data: data})
+		}
+		return nil
 	}
-	files := make([]file, 0, 8)
+	if err := walk(dir, ""); err != nil {
+		return "", fmt.Errorf("materialize: digest %s: %w", dir, err)
+	}
+	return hashFiles(files), nil
+}
 
+// digestFile is one file's contribution to a bundle's fingerprint.
+type digestFile struct {
+	rel  string
+	data []byte
+}
+
+// walkDigest collects a bundle's files from the host, refusing symlinks: a
+// bundle with a symlink is refused at mount time too, and hashing the link's
+// target would make the digest depend on the host.
+func walkDigest(dir string) ([]digestFile, error) {
+	files := make([]digestFile, 0, 8)
 	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -706,8 +845,6 @@ func Digest(dir string) (string, error) {
 			return nil
 		}
 		if d.Type()&os.ModeSymlink != 0 {
-			// A bundle with a symlink is refused at mount time; hashing the
-			// link's target would make the digest depend on the host.
 			return fmt.Errorf("skill bundle contains a symlink: %s", p)
 		}
 		rel, rerr := filepath.Rel(dir, p)
@@ -718,26 +855,27 @@ func Digest(dir string) (string, error) {
 		if rerr != nil {
 			return rerr
 		}
-		files = append(files, file{rel: filepath.ToSlash(rel), data: data})
+		files = append(files, digestFile{rel: filepath.ToSlash(rel), data: data})
 		return nil
 	})
-	if err != nil {
-		return "", fmt.Errorf("materialize: digest %s: %w", dir, err)
-	}
+	return files, err
+}
 
+// hashFiles is the one framing both digest paths share: path, NUL, content,
+// NUL, in sorted order. Without the separators "ab"+"c" and "a"+"bc" would hash
+// the same.
+func hashFiles(files []digestFile) string {
 	sort.Slice(files, func(i, j int) bool { return files[i].rel < files[j].rel })
 	hasher := sha256.New()
 	for _, f := range files {
-		// Same framing as the upload path: path, NUL, content, NUL. Without the
-		// separators "ab"+"c" and "a"+"bc" would hash the same.
 		fmt.Fprintf(hasher, "%s\x00%s\x00", f.rel, f.data)
 	}
-	return hex.EncodeToString(hasher.Sum(nil)), nil
+	return hex.EncodeToString(hasher.Sum(nil))
 }
 
-func readManifest(root string) Manifest {
+func readManifestFS(fs FileSystem, root string) Manifest {
 	var m Manifest
-	data, err := os.ReadFile(filepath.Join(root, manifestRel))
+	data, err := fs.ReadFile(fs.Join(root, manifestRel))
 	if err != nil {
 		return Manifest{}
 	}
@@ -747,37 +885,49 @@ func readManifest(root string) Manifest {
 	return m
 }
 
-func writeManifest(root string, m Manifest) error {
-	path := filepath.Join(root, manifestRel)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("materialize: create manifest dir: %w", err)
-	}
+func writeManifestFS(fs FileSystem, root string, m Manifest) error {
+	p := fs.Join(root, manifestRel)
 	payload, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return fmt.Errorf("materialize: encode manifest: %w", err)
 	}
-	if err := os.WriteFile(path, append(payload, '\n'), 0o644); err != nil {
+	if err := fs.WriteFile(p, append(payload, '\n'), 0o644); err != nil {
 		return fmt.Errorf("materialize: write manifest: %w", err)
 	}
 	return nil
 }
 
-// excludeFromGit appends entries to the repository's info/exclude, which is the
-// per-checkout ignore file that is never committed.
-func excludeFromGit(root string, entries []string) error {
-	gitDir, err := resolveGitDir(root)
-	if err != nil || gitDir == "" {
+// removeIfPresent removes one file, treating "not there" as success.
+func removeIfPresent(fs FileSystem, p string) error {
+	kind, err := fs.Lookup(p)
+	if err != nil {
+		return err
+	}
+	if kind == KindMissing {
+		return nil
+	}
+	return fs.RemoveAll(p)
+}
+
+// excludeFromGitFS appends entries to the repository's info/exclude, which is
+// the per-checkout ignore file that is never committed.
+func excludeFromGitFS(fs FileSystem, root string, entries []string) error {
+	gitDir, err := resolveGitDirFS(fs, root)
+	if err != nil {
+		return err
+	}
+	if gitDir == "" {
 		// Not a repository (yet): nothing to exclude from, and that is fine.
 		return nil
 	}
-	infoDir := filepath.Join(gitDir, "info")
-	if err := os.MkdirAll(infoDir, 0o755); err != nil {
+	infoDir := fs.Join(gitDir, "info")
+	if err := fs.MkdirAll(infoDir); err != nil {
 		return fmt.Errorf("materialize: create git info dir: %w", err)
 	}
-	path := filepath.Join(infoDir, "exclude")
+	p := fs.Join(infoDir, "exclude")
 
 	existing := ""
-	if data, rerr := os.ReadFile(path); rerr == nil {
+	if data, rerr := fs.ReadFile(p); rerr == nil {
 		existing = string(data)
 	}
 	present := map[string]bool{}
@@ -802,24 +952,27 @@ func excludeFromGit(root string, entries []string) error {
 		existing = "# Written by PiForge: platform-mounted tooling is not your change.\n"
 	}
 	existing += strings.Join(add, "\n") + "\n"
-	if err := os.WriteFile(path, []byte(existing), 0o644); err != nil {
+	if err := fs.WriteFile(p, []byte(existing), 0o644); err != nil {
 		return fmt.Errorf("materialize: write git exclude: %w", err)
 	}
 	return nil
 }
 
-// resolveGitDir finds the real git directory for root, following a worktree's
+// resolveGitDirFS finds the real git directory for root, following a worktree's
 // `.git` file. It returns "" when root is not inside a repository.
-func resolveGitDir(root string) (string, error) {
-	dotGit := filepath.Join(root, ".git")
-	info, err := os.Stat(dotGit)
+func resolveGitDirFS(fs FileSystem, root string) (string, error) {
+	dotGit := fs.Join(root, ".git")
+	kind, err := fs.Lookup(dotGit)
 	if err != nil {
 		return "", nil
 	}
-	if info.IsDir() {
+	if kind == KindMissing {
+		return "", nil
+	}
+	if kind == KindDir {
 		return dotGit, nil
 	}
-	data, err := os.ReadFile(dotGit)
+	data, err := fs.ReadFile(dotGit)
 	if err != nil {
 		return "", fmt.Errorf("materialize: read .git: %w", err)
 	}
@@ -829,8 +982,8 @@ func resolveGitDir(root string) (string, error) {
 		return "", nil
 	}
 	target := strings.TrimSpace(strings.TrimPrefix(line, prefix))
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(root, target)
+	if !fs.IsAbs(target) {
+		target = fs.Join(root, target)
 	}
-	return filepath.Clean(target), nil
+	return fs.Join(target), nil
 }

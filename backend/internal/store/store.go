@@ -231,6 +231,13 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if err := addColumn(ctx, db, "sandboxes", "api_key_cipher", "BLOB"); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
+	// Where a sandbox's files are, as this process can reach them
+	// (contracts.WorkspaceMode). An older row reads back empty, which normalises
+	// to "host": the workspace is a directory the control plane can open, which is
+	// what every build before stage 2 assumed.
+	if err := addColumn(ctx, db, "sandboxes", "workspace", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("store: migrate: %w", err)
+	}
 	// Where this project opens pull requests, and the sealed token for it
 	// (FR-12.6). Old projects read back empty, which the UI describes as "not
 	// configured yet" instead of guessing a forge from the repository URL.

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -58,6 +59,15 @@ type Config struct {
 	// <sandbox root>/wt/<slug>, which keeps every checkout of one sandbox
 	// under a single directory that is trivial to snapshot.
 	WorktreePath func(sb *contracts.Sandbox, slug string) string
+	// WorkspaceFiles opens the file system behind a sandbox whose workspace does
+	// not exist on this disk (contracts.WorkspaceAPI, stage 2 of
+	// docs/EXECUTION-BOUNDARY.md). It is how the skill projection and the
+	// "does this path already exist" probe reach the sandbox: through its own API,
+	// never through a volume.
+	//
+	// Nil means this deployment has no such sandbox — and a sandbox that needs it
+	// then fails loudly instead of writing a tree the agent never sees.
+	WorkspaceFiles func(ctx context.Context, sb *contracts.Sandbox) (materialize.FileSystem, error)
 }
 
 // Service provisions working directories.
@@ -81,15 +91,40 @@ func New(cfg Config) *Service {
 }
 
 func defaultWorktreePath(sb *contracts.Sandbox, slug string) string {
-	return filepath.Join(RepoDir(sb), "..", "worktrees", slug)
+	return joinWorkspace(RepoDir(sb), "..", "worktrees", slug)
 }
 
 // RepoDir is the primary checkout of a sandbox. The local provider lays a
 // sandbox out as <root>/repo plus <root>/worktrees/<name>; nesting worktrees
 // inside the checkout would show up as untracked noise in the main status, so
 // they live beside it instead.
+//
+// With a detached workspace RootDir is the container path ("/workspace"), and so
+// is everything derived from it: those paths are what the store keeps and what
+// the panels and the sandbox API address, because the control plane has no other
+// name for them.
 func RepoDir(sb *contracts.Sandbox) string {
-	return filepath.Join(sb.RootDir, "repo")
+	return joinWorkspace(sb.RootDir, "repo")
+}
+
+// joinWorkspace joins path elements under a sandbox root in the syntax that root
+// uses: a container root is POSIX whatever this process runs on, and
+// filepath.Join would turn "/workspace/repo" into "\workspace\repo" on a Windows
+// control plane — a path the sandbox has never heard of.
+func joinWorkspace(root string, parts ...string) string {
+	if strings.HasPrefix(root, "/") {
+		return path.Join(append([]string{root}, parts...)...)
+	}
+	return filepath.Join(append([]string{root}, parts...)...)
+}
+
+// cleanWorkspacePath normalises a path in the syntax it is written in, so a
+// stored row and a freshly derived path compare equal on every platform.
+func cleanWorkspacePath(p string) string {
+	if strings.HasPrefix(p, "/") {
+		return path.Clean(p)
+	}
+	return filepath.Clean(p)
 }
 
 // EnsureWorktree makes sure the session has a usable worktree and returns it.
@@ -121,7 +156,17 @@ func (s *Service) EnsureWorktree(
 	if sess.WorktreeID != "" {
 		wt, err := s.cfg.Store.Worktree(ctx, userID, sess.WorktreeID)
 		if err == nil {
-			if merr := s.mountTooling(ctx, userID, sess.ID, wt.Path); merr != nil {
+			// The projection needs to know which sandbox holds the checkout: a
+			// detached workspace is written through the sandbox API, and a
+			// missing row would otherwise silently become a host write into a
+			// path that does not exist.
+			sb, serr := s.cfg.Store.Sandbox(ctx, userID, wt.SandboxID)
+			if serr != nil {
+				slog.Warn("tooling refresh skipped: the worktree's sandbox could not be loaded",
+					"session", sess.ID, "sandbox", wt.SandboxID, "error", serr)
+				return wt, nil
+			}
+			if merr := s.mountTooling(ctx, userID, sess.ID, sb, wt.Path); merr != nil {
 				slog.Warn("tooling refresh on an existing worktree failed",
 					"session", sess.ID, "error", merr)
 			}
@@ -181,14 +226,14 @@ func (s *Service) EnsureWorktree(
 			if err := s.attach(ctx, userID, sess.ID, existing.ID); err != nil {
 				return nil, err
 			}
-			if err := s.mountTooling(ctx, userID, sess.ID, existing.Path); err != nil {
+			if err := s.mountTooling(ctx, userID, sess.ID, sb, existing.Path); err != nil {
 				return nil, err
 			}
 			return existing, nil
 		}
 
 		base := ""
-		if head, err := s.cfg.Git.Head(ctx, repoDir); err == nil {
+		if head, err := s.headCommit(ctx, sb, repoDir); err == nil {
 			base = head
 		}
 		wt, err := s.cfg.Store.CreateWorktree(ctx, userID, store.NewWorktree{
@@ -203,7 +248,7 @@ func (s *Service) EnsureWorktree(
 		if err := s.attach(ctx, userID, sess.ID, wt.ID); err != nil {
 			return nil, err
 		}
-		if err := s.mountTooling(ctx, userID, sess.ID, wt.Path); err != nil {
+		if err := s.mountTooling(ctx, userID, sess.ID, sb, wt.Path); err != nil {
 			return nil, err
 		}
 		return wt, nil
@@ -241,7 +286,7 @@ func (s *Service) EnsureWorktree(
 		// A branch session has its own checkout, so the mount has to happen here
 		// too: sharing the projection with the main checkout would leave the
 		// agent with no skills at all.
-		if err := s.mountTooling(ctx, userID, sess.ID, existing.Path); err != nil {
+		if err := s.mountTooling(ctx, userID, sess.ID, sb, existing.Path); err != nil {
 			return nil, err
 		}
 		return existing, nil
@@ -249,8 +294,12 @@ func (s *Service) EnsureWorktree(
 
 	// A directory with no row is not a worktree this service made: reusing it
 	// would put two sessions in whatever files happen to be there. Report it
-	// rather than letting `git worktree add` fail with its own phrasing.
-	if _, err := os.Stat(path); err == nil {
+	// rather than letting `git worktree add` fail with its own phrasing. For a
+	// detached workspace the question is asked through the sandbox API, because
+	// that is the only place the directory exists.
+	if exists, err := s.pathExists(ctx, sb, path); err != nil {
+		return nil, err
+	} else if exists {
 		return nil, fmt.Errorf("provision: worktree path %q already exists; refusing to reuse it", path)
 	}
 
@@ -259,7 +308,7 @@ func (s *Service) EnsureWorktree(
 	}
 
 	base := ""
-	if head, err := s.cfg.Git.Head(ctx, RepoDir(sb)); err == nil {
+	if head, err := s.headCommit(ctx, sb, RepoDir(sb)); err == nil {
 		base = head
 	}
 
@@ -275,7 +324,7 @@ func (s *Service) EnsureWorktree(
 	if err := s.attach(ctx, userID, sess.ID, wt.ID); err != nil {
 		return nil, err
 	}
-	if err := s.mountTooling(ctx, userID, sess.ID, wt.Path); err != nil {
+	if err := s.mountTooling(ctx, userID, sess.ID, sb, wt.Path); err != nil {
 		return nil, err
 	}
 	return wt, nil
@@ -315,12 +364,25 @@ func (s *Service) addWorktree(ctx context.Context, sb *contracts.Sandbox, repoDi
 // reach existing sessions the next time they are touched, and the mount is
 // idempotent by construction. The *record*, however, is written once: a later
 // pass cannot rewrite what this session was mounted with.
-func (s *Service) mountTooling(ctx context.Context, userID, sessionID, root string) error {
-	// A provider that creates the worktree itself (the docker sandbox) already
-	// has it on this path; a provider that has not must not be second-guessed by
-	// creating a *host* directory that the sandbox will never see. The old bug
-	// this guards against is the host's git touching a container-owned checkout.
-	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+func (s *Service) mountTooling(ctx context.Context, userID, sessionID string, sb *contracts.Sandbox, root string) error {
+	if sb == nil {
+		return fmt.Errorf("provision: mount tooling: the sandbox is required")
+	}
+	remote := sb.Workspace == contracts.WorkspaceAPI
+	var fs materialize.FileSystem
+	if remote {
+		// The checkout is only inside the sandbox: the projection is a request to
+		// the sandbox's own API, made as the account that owns the tree.
+		opened, err := s.workspaceFiles(ctx, sb)
+		if err != nil {
+			return fmt.Errorf("provision: mount tooling: %w", err)
+		}
+		fs = opened
+	} else if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		// A provider that creates the worktree itself (the docker sandbox) already
+		// has it on this path; a provider that has not must not be second-guessed by
+		// creating a *host* directory that the sandbox will never see. The old bug
+		// this guards against is the host's git touching a container-owned checkout.
 		slog.Warn("tooling not mounted: the checkout is not on this filesystem", "root", root)
 		return nil
 	}
@@ -353,7 +415,7 @@ func (s *Service) mountTooling(ctx context.Context, userID, sessionID, root stri
 	if s.cfg.SnapshotDir != "" {
 		snapshotDir = skillsnap.Dir(s.cfg.SnapshotDir, sessionID)
 	}
-	result, err := materialize.Mount(root, skills, servers, materialize.Options{
+	options := materialize.Options{
 		SkillsDir: s.cfg.SkillsDir,
 		// One snapshot directory per session: the mounted tree is frozen, so a
 		// new session gets a new snapshot while a running one keeps its own.
@@ -362,7 +424,13 @@ func (s *Service) mountTooling(ctx context.Context, userID, sessionID, root stri
 		// is named after the session id so the delete path (and the janitor's
 		// sweep) can map it back to a session without a second index.
 		SnapshotDir: snapshotDir,
-	})
+	}
+	var result materialize.Result
+	if remote {
+		result, err = materialize.MountFS(fs, root, skills, servers, options)
+	} else {
+		result, err = materialize.Mount(root, skills, servers, options)
+	}
 	if err != nil {
 		return fmt.Errorf("provision: mount tooling: %w", err)
 	}
@@ -389,8 +457,17 @@ func (s *Service) mountTooling(ctx context.Context, userID, sessionID, root stri
 				continue
 			}
 			// The digest is taken from the mounted copy, not from the source
-			// bundle: what the agent reads is the fact worth recording.
-			digest, derr := materialize.Digest(mounted.Dir)
+			// bundle: what the agent reads is the fact worth recording. For a
+			// detached workspace that copy is read back through the sandbox API,
+			// which costs a request per file and doubles as the proof that the
+			// projection landed.
+			var digest string
+			var derr error
+			if remote {
+				digest, derr = materialize.DigestFS(fs, mounted.Dir)
+			} else {
+				digest, derr = materialize.Digest(mounted.Dir)
+			}
 			if derr != nil {
 				slog.Warn("mounted skill could not be fingerprinted",
 					"skill", mounted.Name, "error", derr)
@@ -417,6 +494,62 @@ func (s *Service) mountTooling(ctx context.Context, userID, sessionID, root stri
 		}
 	}
 	return nil
+}
+
+// workspaceFiles opens the file system behind a sandbox that exists only inside
+// its container. A deployment without that seam reports it instead of writing the
+// projection into a path nothing will read.
+func (s *Service) workspaceFiles(ctx context.Context, sb *contracts.Sandbox) (materialize.FileSystem, error) {
+	if s.cfg.WorkspaceFiles == nil {
+		return nil, fmt.Errorf("sandbox %s has no workspace on this filesystem (Workspace=%s) and no sandbox file API is configured",
+			sb.ID, sb.Workspace.Normalized())
+	}
+	fs, err := s.cfg.WorkspaceFiles(ctx, sb)
+	if err != nil {
+		return nil, fmt.Errorf("open the workspace of sandbox %s through its API: %w", sb.ID, err)
+	}
+	return fs, nil
+}
+
+// pathExists reports whether a path already exists in the sandbox's workspace.
+//
+// It is the guard that stops a branch session from adopting a directory no row
+// owns. On this disk it is a stat; for a detached workspace it is a question for
+// the sandbox, because the directory is not here to stat.
+func (s *Service) pathExists(ctx context.Context, sb *contracts.Sandbox, p string) (bool, error) {
+	if sb.Workspace != contracts.WorkspaceAPI {
+		if _, err := os.Stat(p); err != nil {
+			if os.IsNotExist(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("provision: inspect worktree path %q: %w", p, err)
+		}
+		return true, nil
+	}
+	fs, err := s.workspaceFiles(ctx, sb)
+	if err != nil {
+		return false, err
+	}
+	kind, err := fs.Lookup(p)
+	if err != nil {
+		return false, fmt.Errorf("provision: inspect worktree path %q in sandbox %s: %w", p, sb.ID, err)
+	}
+	return kind != materialize.KindMissing, nil
+}
+
+// headCommit reads the checkout's HEAD as the base commit a worktree record
+// keeps. It is informational, so a failure is reported to the caller (which
+// records an empty base) rather than failing the provisioning pass.
+//
+// Only a workspace on this disk can be read with this process's git. A detached
+// workspace would need the same command through the sandbox, and the worktree
+// creation that just ran there already proved the repository exists; the record's
+// base_commit stays empty for it (docs/EXECUTION-BOUNDARY.md, remaining work).
+func (s *Service) headCommit(ctx context.Context, sb *contracts.Sandbox, repoDir string) (string, error) {
+	if sb.Workspace == contracts.WorkspaceAPI {
+		return "", fmt.Errorf("provision: the checkout of sandbox %s is only inside the container", sb.ID)
+	}
+	return s.cfg.Git.Head(ctx, repoDir)
 }
 
 // ensureSandbox returns the project's sandbox, creating it when absent.
@@ -458,6 +591,10 @@ func (s *Service) ensureSandbox(
 		Node:      live.Node,
 		Image:     live.Image,
 		RootDir:   live.RootDir,
+		// Where the workspace is, as this process can reach it. It decides every
+		// later write: a detached sandbox (stage 2) has no directory here, and the
+		// projection has to go through the sandbox's API instead.
+		Workspace: live.Workspace,
 		ExpiresAt: live.ExpiresAt,
 		// One key per sandbox, generated where the container was created (or the
 		// fixed -sandbox-api-key override). It is sealed by the store and used for
@@ -479,7 +616,7 @@ func (s *Service) findWorktreeByPath(
 		return nil, fmt.Errorf("provision: list worktrees: %w", err)
 	}
 	for _, wt := range list {
-		if filepath.Clean(wt.Path) == filepath.Clean(path) {
+		if cleanWorkspacePath(wt.Path) == cleanWorkspacePath(path) {
 			return wt, nil
 		}
 	}

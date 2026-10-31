@@ -748,6 +748,11 @@ func TestDockerProviderCheckoutCrossesTheSandboxAPI(t *testing.T) {
 //
 // It must not appear on the ready path: re-running it would also loosen the
 // 0444/0555 copies materialise writes, which are the read-only guarantee itself.
+//
+// The last case is stage 2's: with a detached workspace there is no second writer
+// (the projection is written through the sandbox API as gem), so opening the tree
+// to a control plane that no longer writes into it would be loosening it for
+// nobody.
 func TestPlanCheckout(t *testing.T) {
 	open := []string{"chmod", "-R", "a+rwX", "/workspace"}
 	tests := []struct {
@@ -755,6 +760,7 @@ func TestPlanCheckout(t *testing.T) {
 		ready    bool
 		repoURL  string
 		branch   string
+		detached bool
 		want     [][]string
 		wantName []string
 		fallback []string
@@ -803,11 +809,23 @@ func TestPlanCheckout(t *testing.T) {
 			// than failing; the container does the same on the second attempt.
 			fallback: []string{"git", "checkout", "-q", "-b", "develop"},
 		},
+		{
+			name:     "detached workspace: one writer, so the tree is not opened",
+			repoURL:  "https://example.invalid/acme/widgets.git",
+			branch:   "main",
+			detached: true,
+			want: [][]string{
+				{"git", "clone", "--quiet", "--", "https://example.invalid/acme/widgets.git", "."},
+				{"git", "checkout", "-q", "main"},
+			},
+			wantName: []string{"clone", "checkout"},
+			fallback: []string{"git", "checkout", "-q", "-b", "main"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			steps := planCheckout(tt.ready, tt.repoURL, tt.branch)
+			steps := planCheckout(tt.ready, tt.repoURL, tt.branch, !tt.detached)
 			var argv [][]string
 			var names []string
 			var fallbacks [][]string
@@ -1034,6 +1052,7 @@ func TestPlanBranchWorktree(t *testing.T) {
 	tests := []struct {
 		name        string
 		ready       bool
+		detached    bool
 		worktreeDir string
 		branch      string
 		want        [][]string
@@ -1065,6 +1084,17 @@ func TestPlanBranchWorktree(t *testing.T) {
 			wantName: []string{"check-ref-format", "worktree", "permissions"},
 		},
 		{
+			name:        "detached workspace: the worktree belongs to gem alone",
+			detached:    true,
+			worktreeDir: worktreeDir,
+			branch:      "piforge/fix-cache",
+			want: [][]string{
+				{"git", "check-ref-format", "--branch", "piforge/fix-cache"},
+				{"git", "worktree", "add", "-b", "piforge/fix-cache", "--", worktreeDir},
+			},
+			wantName: []string{"check-ref-format", "worktree"},
+		},
+		{
 			name:        "an existing worktree is left exactly as it is",
 			ready:       true,
 			worktreeDir: worktreeDir,
@@ -1086,7 +1116,7 @@ func TestPlanBranchWorktree(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			steps, err := planBranchWorktree(tt.ready, repoDir, tt.worktreeDir, tt.branch)
+			steps, err := planBranchWorktree(tt.ready, repoDir, tt.worktreeDir, tt.branch, !tt.detached)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("planBranchWorktree error = %v, want %q", err, tt.wantErr)
@@ -1405,6 +1435,134 @@ func assertArgsAbsent(t *testing.T, args []string, flag string) {
 	for _, arg := range args {
 		if arg == flag {
 			t.Fatalf("args contain %q, which this shape must not use: %v", flag, args)
+		}
+	}
+}
+
+// Stage 2 of docs/EXECUTION-BOUNDARY.md: with -agent-in-sandbox the sandbox's
+// workspace is a volume of its own, so the argv must mount that volume at
+// /workspace with no host path and no shared subpath. Anything else would put the
+// tree back on a mount this process can reach.
+func TestContainerArgsDetachedWorkspace(t *testing.T) {
+	provider := &Docker{cfg: DockerConfig{
+		Image:             "sandbox:1.11.0",
+		DataRoot:          "/data/sandboxes",
+		Network:           "piforge-sandboxes",
+		APIPort:           8080,
+		APIKey:            "sandbox-key",
+		ContainerEndpoint: true,
+		DetachedWorkspace: true,
+	}}
+	args := provider.containerArgs("piforge-abc12345", "usr_1", "prj_1", "/data/sandboxes/usr_1/prj_1", "sandbox-key")
+	assertArgsContain(t, args, "--mount", "type=volume,source=piforge-ws-abc12345,target=/workspace")
+	assertArgsAbsent(t, args, "-v")
+	for _, arg := range args {
+		if strings.Contains(arg, "volume-subpath") {
+			t.Fatalf("a detached workspace named a shared subpath: %q", arg)
+		}
+		if strings.Contains(arg, "/data/sandboxes") {
+			t.Fatalf("a detached workspace leaked the control plane's path: %q", arg)
+		}
+	}
+	// The image still has to chown the mount to its sandbox user; that is what
+	// makes the checkout creatable as gem without the control plane opening it.
+	assertArgsContain(t, args, "-e", "WORKSPACE=/workspace")
+}
+
+// A detached container is recognised from its own mount record, not from a flag,
+// so a process that adopted it (a restarted control plane, the stateless runner)
+// reaches the same answer.
+func TestDetachedMountIsRecognised(t *testing.T) {
+	const name = "piforge-abc12345"
+	cases := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{
+			name: "this sandbox's own volume",
+			out:  `[{"Type":"volume","Source":"piforge-ws-abc12345","Target":"/workspace"}]`,
+			want: true,
+		},
+		{
+			name: "another sandbox's volume is not ours",
+			out:  `[{"Type":"volume","Source":"piforge-ws-ffffffff","Target":"/workspace"}]`,
+			want: false,
+		},
+		{
+			name: "the shared volume shape carries a subpath",
+			out:  `[{"Type":"volume","Source":"piforge-ws-abc12345","Target":"/workspace","VolumeOptions":{"Subpath":"sandboxes/usr_1/prj_1"}}]`,
+			want: false,
+		},
+		{
+			name: "a bind mount is the single-host shape",
+			out:  `[{"Type":"bind","Source":"/data/sandboxes/usr_1/prj_1","Target":"/workspace"}]`,
+			want: false,
+		},
+		{
+			name: "nothing at /workspace",
+			out:  `[{"Type":"volume","Source":"piforge-ws-abc12345","Target":"/cache"}]`,
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := detachedMount(tc.out, name); got != tc.want {
+				t.Fatalf("detachedMount = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A detached workspace built by the sandbox user is not a foreign-owned tree, and
+// `safe.directory` disables an ownership check: injecting it where nothing needs
+// it would be loosening the sandbox for no reason.
+func TestCheckoutCommandInjectsSafeDirectoryOnlyWhenItIsNeeded(t *testing.T) {
+	shared, err := checkoutCommand([]string{"git", "status"}, "/workspace/repo", true)
+	if err != nil {
+		t.Fatalf("checkoutCommand: %v", err)
+	}
+	if !strings.Contains(shared, "safe.directory=/workspace/repo") {
+		t.Fatalf("a shared checkout did not get safe.directory: %s", shared)
+	}
+	owned, err := checkoutCommand([]string{"git", "status"}, "/workspace/repo", false)
+	if err != nil {
+		t.Fatalf("checkoutCommand: %v", err)
+	}
+	if strings.Contains(owned, "safe.directory") {
+		t.Fatalf("a sandbox-owned checkout got safe.directory anyway: %s", owned)
+	}
+	// The command itself is unchanged; only the trust flag differs.
+	if owned != `'git' 'status'` {
+		t.Fatalf("command = %s", owned)
+	}
+}
+
+// The two workspace shapes cannot both be true: one says "this process mounts the
+// tree", the other says it must not.
+func TestNewDockerRefusesDetachedPlusSharedVolume(t *testing.T) {
+	_, err := NewDockerAPI(DockerConfig{
+		DataRoot:            "/data/sandboxes",
+		APIPort:             8080,
+		DetachedWorkspace:   true,
+		WorkspaceVolume:     "piforge-data",
+		WorkspaceVolumeRoot: "/data",
+	})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("NewDockerAPI = %v, want an error naming the contradiction", err)
+	}
+}
+
+// The reported mode is what every later write branches on, so it has to follow the
+// root: a container path names a tree this process cannot open.
+func TestWorkspaceModeFollowsTheReportedRoot(t *testing.T) {
+	cases := []struct{ root string; want contracts.WorkspaceMode }{
+		{"/workspace", contracts.WorkspaceAPI},
+		{"/data/sandboxes/usr_1/prj_1", contracts.WorkspaceHost},
+	}
+	for _, tc := range cases {
+		if got := workspaceModeOf(tc.root); got != tc.want {
+			t.Fatalf("workspaceModeOf(%q) = %q, want %q", tc.root, got, tc.want)
 		}
 	}
 }
