@@ -266,6 +266,51 @@ func TestWatchdogInterruptsARunWhoseProcessDied(t *testing.T) {
 	}
 }
 
+// TestReconcileInterruptsARunningSessionWithNoRunRow covers the older shape a
+// crash can leave: the session says running but no run row survived. It must
+// still be repaired, and the person opening it must still see why — there is no
+// run to attach a run.settled event to.
+func TestReconcileInterruptsARunningSessionWithNoRunRow(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	project, err := f.store.CreateProject(ctx, f.userID, store.NewProject{Name: "no-run", DefaultBranch: "main"})
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	session, err := f.store.CreateSession(ctx, f.userID, store.NewSession{
+		ProjectID: project.ID, Kind: contracts.KindMain, Title: "no run row",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	running := contracts.StatusRunning
+	if _, err := f.store.UpdateSession(ctx, f.userID, session.ID, store.SessionPatch{Status: &running}); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+
+	report, err := f.rec.Project(ctx, f.userID, project.ID, ReasonRestart, "startup")
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	if report.Scanned != 1 || report.Interrupted != 1 || report.Runs != 0 {
+		t.Fatalf("report = %+v, want one session and no run rows", report)
+	}
+	sess, err := f.store.Session(ctx, f.userID, session.ID)
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if sess.Status != contracts.StatusInterrupted {
+		t.Fatalf("session status = %q, want interrupted", sess.Status)
+	}
+	events, err := f.store.ListEvents(ctx, f.userID, session.ID, 0, 100)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].Type != contracts.EvPlatformErr {
+		t.Fatalf("events = %+v, want one platform.error", events)
+	}
+}
+
 // TestReconcileWithoutARegistryInterruptsNothing is the conservative rule: if
 // the process cannot prove a run is dead, it leaves it running and says why.
 func TestReconcileWithoutARegistryInterruptsNothing(t *testing.T) {
