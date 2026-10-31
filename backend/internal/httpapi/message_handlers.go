@@ -130,25 +130,28 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		sess = updated
 	}
 
-	// A session pinned to a model that cannot answer must fail here, before a
-	// process starts and before Pi sees the prompt.
+	// A model reference that no longer resolves is re-resolved here, before a
+	// process starts and before Pi sees the prompt; a provider that exists but
+	// cannot answer still fails here with its specific reason.
 	//
-	// This is the acceptance pass's keyless trap: picking `shared-anthropic` in
-	// the new-session dialog wrote `model_ref = shared-anthropic/...` and the
-	// send was accepted, so the gateway answered 502 provider_unavailable and Pi
-	// retried it three times (~30s) before a half-raw error reached the
-	// transcript. `explainMissingModel` already knew how to say this; it only ran
-	// after a failure, which never happened because nothing had tried yet.
+	// This is where the acceptance pass's dead session is revived: its provider
+	// had been deleted and re-created, the stored reference still named the old
+	// one, and nothing re-read the provider list. A conversation must survive an
+	// operator rotating configuration — the alternative is that every open
+	// session has to be created again.
 	//
-	// Only an explicit reference is checked. An empty model_ref follows the
-	// deployment default, which the first-run bar and the composer already
-	// explain; resolving it here would make a fake-agent deployment with a
-	// keyless default refuse every send (and the e2e suite runs exactly that).
-	if strings.TrimSpace(sess.ModelRef) != "" {
-		if modelErr := s.explainMissingModel(r.Context(), user.ID, sess.ModelRef); modelErr != nil {
-			s.fail(w, r, modelErr)
-			return
-		}
+	// The keyless trap is unchanged: picking `shared-anthropic` in the
+	// new-session dialog still fails before the agent is touched, instead of
+	// costing three retries and a raw 502.
+	resolved, modelErr := s.resolveSessionModel(r.Context(), user.ID, sess)
+	if modelErr != nil {
+		s.fail(w, r, modelErr)
+		return
+	}
+	if resolved.FallbackFrom != "" && resolved.Ref != sess.ModelRef {
+		s.log.WarnContext(r.Context(), "session model re-resolved to a working provider",
+			"session", sess.ID, "from", resolved.FallbackFrom, "to", resolved.Ref)
+		s.pinSessionModel(r.Context(), user.ID, sess, resolved.Ref)
 	}
 
 	// The first prompt for a session should run inside its checkout. Best
@@ -169,6 +172,14 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	// the model it resolved at startup, so the two have to be reconciled before
 	// the next turn or the picker is decoration (QA-14, MAJOR).
 	if _, err := s.restartForModelSwitch(r.Context(), user.ID, sess); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	// A process spawned while the provider was missing keeps that empty model
+	// configuration for its whole life. Now that a model resolves again, the old
+	// process is the only thing left between the session and a working run.
+	if _, err := s.restartForUnconfiguredAgent(r.Context(), user.ID, sess); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -213,6 +224,14 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		}
 		s.fail(w, r, err)
 		return
+	}
+
+	// Tell the client which model this turn used when it was not the one on the
+	// session row, so the transcript and the header cannot disagree with what
+	// the agent actually ran on.
+	if resolved.FallbackFrom != "" {
+		res.ModelRef = sess.ModelRef
+		res.ModelFallbackFrom = resolved.FallbackFrom
 	}
 
 	// The new-session dialog promises 留空则用第一条消息自动命名. A session that keeps

@@ -114,7 +114,7 @@ func (s *server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, sessionDetail{
 		Session: sess,
-		Status:  s.bestEffortStatus(r.Context(), sess.ID),
+		Status:  s.bestEffortStatus(r.Context(), user.ID, sess),
 		Project: project,
 	})
 }
@@ -194,7 +194,7 @@ func (s *server) handleSessionStatus(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.bestEffortStatus(r.Context(), sess.ID))
+	writeJSON(w, http.StatusOK, s.bestEffortStatus(r.Context(), user.ID, sess))
 }
 
 // handleSessionStats aggregates token, cost and context usage.
@@ -595,8 +595,19 @@ func (s *server) requireRuntime() (contracts.AgentRuntime, error) {
 // bestEffortStatus returns the runtime status, degrading to a stopped-looking
 // status when the runtime is missing or unhappy. Session detail must render
 // even when the agent process is down: the transcript still matters.
-func (s *server) bestEffortStatus(ctx context.Context, sessionID string) contracts.RuntimeStatus {
+func (s *server) bestEffortStatus(ctx context.Context, userID string, sess *contracts.Session) contracts.RuntimeStatus {
+	sessionID := ""
+	if sess != nil {
+		sessionID = sess.ID
+	}
 	st := contracts.RuntimeStatus{SessionID: sessionID}
+	// The control plane can name the model this session would use even before an
+	// agent exists: the header must never show an internal `unknown`, and
+	// "未配置" is a conclusion it can reach on its own.
+	if sess != nil {
+		st.ResolvedModelRef = s.resolvedModelRef(ctx, userID, sess)
+		st.ModelUnavailable = st.ResolvedModelRef == ""
+	}
 	if s.deps.Runtime == nil {
 		return st
 	}
@@ -609,6 +620,13 @@ func (s *server) bestEffortStatus(ctx context.Context, sessionID string) contrac
 	if live.SessionID == "" {
 		live.SessionID = sessionID
 	}
+	if live.ResolvedModelRef == "" {
+		live.ResolvedModelRef = st.ResolvedModelRef
+	}
+	// The runtime knows its own model reference, but only the control plane can
+	// say whether anything is configured to answer; both are needed for an
+	// honest header.
+	live.ModelUnavailable = live.ResolvedModelRef == ""
 	return live
 }
 
@@ -809,10 +827,16 @@ func (s *server) branchHasHistory(r *http.Request, sessionID string) bool {
 }
 
 // modelAwareRuntime is implemented by a runtime that remembers which platform
-// model reference its live process was started with. It is optional so a fake or
+// model reference its live process was started with, and whether that process
+// got a usable platform model configuration at all. It is optional so a fake or
 // an alternative runtime does not have to answer it.
 type modelAwareRuntime interface {
 	StartedModelRef(sessionID string) (string, bool)
+	// StartedModelConfig reports whether the live process was spawned with a
+	// model configuration the platform wrote (models.json + gateway env). A
+	// process started while the provider was missing answered false for its
+	// whole life, and only a new process can fix it.
+	StartedModelConfig(sessionID string) (configured bool, live bool)
 }
 
 // restartForModelSwitch stops a live agent whose model differs from the session

@@ -1,5 +1,7 @@
+import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 vi.mock("@/lib/api/client", () => ({
   api: {
@@ -51,12 +53,18 @@ const sessionRecord: SessionSkill = {
   recorded_at: "2026-01-01T00:00:00.000Z",
 };
 
+/** The composer reads the query client after a send; the app always provides one. */
+function renderWithClient(ui: ReactElement) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>);
+}
+
 function renderComposer(options: {
   skills?: Skill[];
   sessionSkills?: SessionSkill[];
   running?: boolean;
 } = {}) {
-  render(
+  renderWithClient(
     <Composer
       sessionId="s1"
       running={options.running ?? false}

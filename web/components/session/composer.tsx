@@ -1,6 +1,7 @@
 "use client";
 
 import { useId, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUp,
   CornerDownLeft,
@@ -54,6 +55,7 @@ import {
 import { api } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
 import { shortModel, truncate } from "@/lib/session/format";
+import { qk } from "@/lib/session/queries";
 import type { QueuedPrompt } from "@/lib/session/reduce";
 import { mountableSkills, overridesShared } from "@/lib/skills";
 import { ApiError, type SessionSkill, type Skill } from "@/lib/types";
@@ -120,7 +122,7 @@ interface ImageDraft {
 }
 
 const THINKING_OPTIONS = [
-  { value: "default", label: "跟随默认" },
+  { value: "default", label: "默认" },
   { value: "off", label: "不推理" },
   { value: "low", label: "低" },
   { value: "medium", label: "中" },
@@ -234,6 +236,9 @@ export function Composer({
   // slash". Any further typing reopens it: the user is editing the command.
   const [paletteDismissed, setPaletteDismissed] = useState(false);
   const [paletteIndex, setPaletteIndex] = useState(0);
+  // A re-resolved model changes the session row and its runtime status; both
+  // are read elsewhere (header, picker), so they are refreshed after the send.
+  const queryClient = useQueryClient();
   const model = modelOverride ?? (modelRef || "inherit");
   const thinking = thinkingOverride ?? (thinkingLevel || "default");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -309,12 +314,33 @@ export function Composer({
           description: behavior === "steer" ? "立即打断并改口" : "下一轮执行",
         });
       }
+      // The control plane had to replace a model reference that no longer
+      // resolved (its provider was deleted or re-created). Say so, name the
+      // model the turn actually used, and refresh the header so it agrees.
+      if (result.model_fallback_from) {
+        toast.info("已自动切换模型", {
+          description: `原模型「${result.model_fallback_from}」已不可用，本轮改用「${
+            result.model_ref ?? "默认模型"
+          }」。要恢复原配置，请到「设置 → 模型与凭据」检查该服务商。`,
+        });
+        void queryClient.invalidateQueries({ queryKey: qk.session(sessionId) });
+        void queryClient.invalidateQueries({ queryKey: ["session-status", sessionId] });
+      }
     } catch (error) {
       // The server explained exactly what is running (FR-3.3). Show that
       // sentence, keep the draft, and do not dress it up as a generic failure.
       if (error instanceof ApiError && error.status === 429) {
         setRefusal(humanizeError(error));
         return;
+      }
+      // A refused send is also new information about the account: the provider
+      // it pinned may have just been deleted. Refreshing the session, its
+      // status and the provider list makes the header and the no-model bar say
+      // what is true now, instead of waiting for the next poll.
+      if (error instanceof ApiError && error.code === "no_model") {
+        void queryClient.invalidateQueries({ queryKey: qk.session(sessionId) });
+        void queryClient.invalidateQueries({ queryKey: ["session-status", sessionId] });
+        void queryClient.invalidateQueries({ queryKey: qk.providers });
       }
       toast.error("发送失败", {
         description: humanizeError(error),
@@ -696,6 +722,7 @@ export function Composer({
               size="sm"
               variant="ghost"
               data-testid={testIds?.stop ?? "composer-stop"}
+              aria-label="停止"
               onClick={() => void interrupt()}
               disabled={disabled || interrupting}
               title="停止并清空队列（Esc）"

@@ -245,6 +245,14 @@ export interface RuntimeStatus {
   last_seq: number;
   process_id?: number;
   session_file?: string;
+  /**
+   * The model the control plane would use for this session right now. Present
+   * even when no agent exists yet, so the header can name a real model (or
+   * 未配置) instead of an internal `unknown`.
+   */
+  resolved_model_ref?: string;
+  /** Nothing to send to at all: the header says 未配置. */
+  model_unavailable?: boolean;
 }
 
 export interface PromptResult {
@@ -252,6 +260,10 @@ export interface PromptResult {
   disposition: "started" | "queued" | "handled";
   queue_position: number;
   run_id: string;
+  /** The model this turn used when the stored reference had to be re-resolved. */
+  model_ref?: string;
+  /** The reference (or provider) that no longer resolved, when that happened. */
+  model_fallback_from?: string;
 }
 
 export interface InterruptResult {
@@ -439,6 +451,10 @@ export interface SetupStatus {
   is_admin: boolean;
   shared_provider_available: boolean;
   bootstrap?: { name: string; base_url?: string; model: string };
+  /** The deployment's fallback provider (`-default-provider`). */
+  default_provider?: string;
+  /** True when that name does not resolve for this account. */
+  default_provider_missing?: boolean;
 }
 
 export interface Skill {

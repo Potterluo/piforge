@@ -83,8 +83,13 @@ type session struct {
 	// ensure() refreshes the spec from the session row even while the process
 	// that was spawned with the old model is still running.
 	startedRef string
-	file       string
-	bridge     *Bridge
+	// modelConfigured records whether this process was given the platform's
+	// model configuration (models.json via PI_CODING_AGENT_DIR). A process
+	// spawned while the session's provider did not exist has none, and that
+	// cannot be repaired in place: the control plane has to spawn a new one.
+	modelConfigured bool
+	file            string
+	bridge          *Bridge
 	norm       *Normalizer
 	sub        *Subscription
 	// lastUsed is when this process was last asked to do anything, in unix nanos.
@@ -245,13 +250,14 @@ func (r *Runtime) spawn(ctx context.Context, spec contracts.SessionSpec) (*sessi
 		}
 	}
 	s := &session{
-		id:         spec.SessionID,
-		spec:       spec,
-		startedRef: spec.ModelRef,
-		file:       file,
-		bridge:     bridge,
-		norm:       norm,
-		sub:        sub,
+		id:              spec.SessionID,
+		spec:            spec,
+		startedRef:      spec.ModelRef,
+		modelConfigured: hasPlatformModelConfig(cfg.Env),
+		file:            file,
+		bridge:          bridge,
+		norm:            norm,
+		sub:             sub,
 	}
 	if spec.ModelRef != "" {
 		modelRef := spec.ModelRef
@@ -490,6 +496,36 @@ func (r *Runtime) StartedModelRef(sessionID string) (string, bool) {
 	return s.startedRef, true
 }
 
+// StartedModelConfig reports whether the live process was spawned with the
+// platform's model configuration, and whether it is still alive.
+//
+// The control plane uses it to recognise the one broken state it cannot explain
+// away: an agent started while the session's provider did not exist. Pi's
+// models.json and the gateway token are written per spawn, so that process will
+// keep answering "No API key found for the selected model" until a new one
+// replaces it — no retry and no provider change reaches it.
+func (r *Runtime) StartedModelConfig(sessionID string) (bool, bool) {
+	r.mu.Lock()
+	s, ok := r.sessions[sessionID]
+	r.mu.Unlock()
+	if !ok || s == nil || !s.bridge.Alive() {
+		return false, false
+	}
+	return s.modelConfigured, true
+}
+
+// hasPlatformModelConfig reports whether an environment carries the pointer to
+// the agent directory this control plane wrote. Without it Pi falls back to its
+// own configuration and has no gateway token.
+func hasPlatformModelConfig(env []string) bool {
+	for _, entry := range env {
+		if name, value, ok := strings.Cut(entry, "="); ok && name == "PI_CODING_AGENT_DIR" && strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // Interrupt clears the queue and aborts the running turn.
 //
 // The cleared texts are returned so the composer can put them back in the input
@@ -598,6 +634,17 @@ func (r *Runtime) Status(ctx context.Context, sessionID string) (contracts.Runti
 }
 
 func modelRefOf(provider, model string) string {
+	// "unknown" is Pi's placeholder for a model it never resolved (a process
+	// spawned with no model configuration). It is not a model name and must not
+	// reach the UI: the header printed `跟随默认（unknown）` because of it.
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if strings.EqualFold(provider, "unknown") {
+		provider = ""
+	}
+	if strings.EqualFold(model, "unknown") {
+		model = ""
+	}
 	switch {
 	case provider == "" && model == "":
 		return ""

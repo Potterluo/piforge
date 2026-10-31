@@ -350,7 +350,10 @@ type fakeRuntime struct {
 	// live process", which is the state most tests do not care about.
 	startedModel string
 	modelLive    bool
-	stops        []string
+	// modelConfigMissing models an agent spawned while no provider existed:
+	// the process is alive but was never given a model configuration.
+	modelConfigMissing bool
+	stops              []string
 }
 
 func newFakeRuntime() *fakeRuntime {
@@ -400,6 +403,18 @@ func (f *fakeRuntime) StartedModelRef(_ string) (string, bool) {
 		return "", false
 	}
 	return f.startedModel, true
+}
+
+// StartedModelConfig is the second optional capability the recovery path needs.
+// Unless a test says otherwise, a live process counts as configured, so every
+// other test keeps its single start/stop.
+func (f *fakeRuntime) StartedModelConfig(_ string) (bool, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.modelLive {
+		return false, false
+	}
+	return !f.modelConfigMissing, true
 }
 
 func (f *fakeRuntime) Prompt(_ context.Context, req contracts.PromptRequest) (contracts.PromptResult, error) {

@@ -585,3 +585,80 @@ func TestNothingToCompactIsRecognized(t *testing.T) {
 		}
 	}
 }
+
+// TestModelRefOfNeverReportsUnknown: Pi answers get_state with provider/model
+// "unknown" for a process it could not resolve a model for. That is an internal
+// placeholder, not a model name — propagated, it produced the header string
+// `跟随默认（unknown）` in the acceptance pass. An unresolved model must read as
+// empty so the UI can say 未配置.
+func TestModelRefOfNeverReportsUnknown(t *testing.T) {
+	cases := []struct {
+		provider, model, want string
+	}{
+		{"unknown", "unknown", ""},
+		{"unknown", "", ""},
+		{"", "unknown", ""},
+		{"piforge", "deepseek-v4-flash", "piforge/deepseek-v4-flash"},
+		{"", "deepseek-v4-flash", "deepseek-v4-flash"},
+		{"piforge", "", "piforge"},
+		{"", "", ""},
+	}
+	for _, tc := range cases {
+		if got := modelRefOf(tc.provider, tc.model); got != tc.want {
+			t.Errorf("modelRefOf(%q, %q) = %q, want %q", tc.provider, tc.model, got, tc.want)
+		}
+	}
+}
+
+// TestStartedModelConfigTracksTheSpawnEnvironment: the control plane needs to
+// tell a working agent from one spawned while no provider existed. The platform
+// pointer (PI_CODING_AGENT_DIR) is exactly the difference: without it Pi uses
+// its own configuration and has no gateway token, and the only cure is a new
+// process.
+func TestStartedModelConfigTracksTheSpawnEnvironment(t *testing.T) {
+	spawn := func(t *testing.T, env []string) *Runtime {
+		t.Helper()
+		rt := NewRuntime(RuntimeConfig{
+			Config: Config{
+				Dir:          t.TempDir(),
+				CloseTimeout: time.Second,
+				Env:          env,
+			},
+			Dial: func(spec contracts.SessionSpec, sessionFile string) (io.ReadWriteCloser, error) {
+				ours, theirs := pitest.NewPipe()
+				go func() {
+					defer theirs.Close()
+					_ = pitest.Serve(pitest.ScriptOK, 0, sessionFile, theirs, theirs)
+				}()
+				return ours, nil
+			},
+		})
+		t.Cleanup(func() { _ = rt.Close() })
+		return rt
+	}
+
+	ctx, cancel := ctxFor(t)
+	defer cancel()
+
+	configured := spawn(t, []string{"PI_CODING_AGENT_DIR=/tmp/agent"})
+	spec := sessionSpec(t, "ses_configured", contracts.KindMain)
+	spec.ModelRef = "volc/deepseek-v4-flash"
+	if _, err := configured.Start(ctx, spec); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if ok, live := configured.StartedModelConfig("ses_configured"); !live || !ok {
+		t.Fatalf("configured process = (%v, %v), want (true, true)", ok, live)
+	}
+
+	bare := spawn(t, nil)
+	bareSpec := sessionSpec(t, "ses_bare", contracts.KindMain)
+	if _, err := bare.Start(ctx, bareSpec); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if ok, live := bare.StartedModelConfig("ses_bare"); !live || ok {
+		t.Fatalf("bare process = (%v, %v), want (false, true)", ok, live)
+	}
+	if _, live := bare.StartedModelConfig("ses_absent"); live {
+		t.Fatal("StartedModelConfig reported a live process for an unknown session")
+	}
+}

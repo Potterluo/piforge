@@ -1,5 +1,7 @@
+import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 vi.mock("@/lib/api/client", () => ({
   api: {
@@ -18,8 +20,18 @@ import { Composer } from "@/components/session/composer";
 const send = vi.mocked(api.sessions.send);
 const interrupt = vi.mocked(api.sessions.interrupt);
 
+/**
+ * The composer refreshes the session and status queries after a re-resolved
+ * model, so it needs the same provider the app gives it. A fresh client per
+ * render keeps one test's cache out of another's.
+ */
+function renderWithClient(ui: ReactElement) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>);
+}
+
 function renderComposer(running: boolean) {
-  render(<Composer sessionId="s1" running={running} queue={[]} />);
+  renderWithClient(<Composer sessionId="s1" running={running} queue={[]} />);
   const textarea = screen.getByLabelText("消息输入") as HTMLTextAreaElement;
   fireEvent.change(textarea, { target: { value: "修一下缓存" } });
   return textarea;
@@ -116,7 +128,8 @@ describe("Composer", () => {
     await waitFor(() => expect(interrupt).toHaveBeenCalledTimes(1));
   });
 
-  it("renders queued prompts above the input", () => {    render(
+  it("renders queued prompts above the input", () => {
+    renderWithClient(
       <Composer
         sessionId="s1"
         running

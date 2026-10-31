@@ -286,6 +286,15 @@ type PromptResult struct {
 	Disposition   string `json:"disposition"` // started|queued|handled
 	QueuePosition int    `json:"queue_position"`
 	RunID         string `json:"run_id"`
+	// ModelRef is the model this turn actually used when the control plane had
+	// to re-resolve the session's reference (its provider was deleted). It is
+	// empty when the stored reference was used as-is, so a replay of the same
+	// message still compares equal to the first answer.
+	ModelRef string `json:"model_ref,omitempty"`
+	// ModelFallbackFrom is the reference (or provider name) that no longer
+	// resolved. The UI turns the pair into one sentence so a run never silently
+	// answers from a different model than the one on screen.
+	ModelFallbackFrom string `json:"model_fallback_from,omitempty"`
 }
 
 // InterruptResult carries back the text the user had queued, so the composer
@@ -336,6 +345,17 @@ type RuntimeStatus struct {
 	LastSeq     int64  `json:"last_seq"`
 	ProcessID   int    `json:"process_id,omitempty"`
 	SessionFile string `json:"session_file,omitempty"`
+	// ResolvedModelRef is the model the *control plane* would use for this
+	// session right now: the pinned reference when it resolves, otherwise the
+	// deployment default (or the fallback the next send would pick). It exists
+	// so the header can name a real model before an agent process exists; an
+	// empty value is honestly "未配置", never the word "unknown".
+	ResolvedModelRef string `json:"resolved_model_ref,omitempty"`
+	// ModelUnavailable says there is nothing to send to at all: the pinned
+	// provider is gone and no fallback exists, or the account has no usable
+	// provider. The UI renders 未配置 from this fact rather than from a stale
+	// provider list it may still be caching.
+	ModelUnavailable bool `json:"model_unavailable,omitempty"`
 }
 
 // AgentRuntime is the only way the HTTP layer talks to an agent.

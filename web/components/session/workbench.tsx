@@ -35,7 +35,8 @@ import { api } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
 import { ApiError } from "@/lib/types";
 import { toast } from "sonner";
-import { sessionKindLabel, shortModel } from "@/lib/session/format";
+import { sessionKindLabel } from "@/lib/session/format";
+import { sessionModelLabel } from "@/lib/session/model-display";
 import { qk, useProject, useProviders, useSession, useSessionSkills, useSkills } from "@/lib/session/queries";
 import { buildModelChoices } from "@/lib/session/model-options";
 import { collectBashOutput, runningToolCount, selectTimeline, type Turn } from "@/lib/session/reduce";
@@ -247,7 +248,7 @@ function WorkbenchBody({
     // three automatic retries and a raw 502. Hiding it entirely would leave
     // "why is my provider gone?" unanswered, so the row keeps its reason.
     const { options } = buildModelChoices(providers.data?.providers);
-    return [{ value: "inherit", label: "跟随默认" }, ...options];
+    return [{ value: "inherit", label: "默认模型" }, ...options];
   }, [providers.data]);
 
   const detail = session.data?.session;
@@ -277,15 +278,18 @@ function WorkbenchBody({
     [timeline],
   );
 
-  const effectiveModel = detail?.model_ref
-    ? shortModel(detail.model_ref)
-    : runtimeModel && runtimeModel !== "unknown"
-      ? `跟随默认（${shortModel(runtimeModel)}）`
-      : // "unknown" is an internal state, not a model name. When the account
-        // has nothing to resolve, say so instead of printing it.
-        hasModel === false
-        ? "未配置"
-        : "跟随默认";
+  // The header names a model a person can act on. `status.resolved_model_ref` is
+  // the control plane's answer (it resolves the deployment default and the
+  // fallback a dead reference would use), so a session whose provider was
+  // deleted shows the model the next send will actually run on — and an account
+  // with nothing to send to reads 未配置. `unknown` never renders: Pi reports it
+  // when it has no model, and it is not a model name.
+  const effectiveModel = sessionModelLabel({
+    stored: detail?.model_ref,
+    resolved: runtime.data?.resolved_model_ref ?? runtimeModel,
+    unavailable: runtime.data?.model_unavailable,
+    hasUsableModel: hasModel,
+  });
   // Branches are titled from their label; repeating it under the title reads as a
   // stutter rather than information.
   const showLabel = Boolean(detail?.label) && detail?.label !== title;
