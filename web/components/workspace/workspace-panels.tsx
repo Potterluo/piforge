@@ -261,7 +261,7 @@ export function WorkspacePanels({
           else handleOpenFile(path);
         }}
       />
-      <GitProvider sessionId={sessionId}>
+      <GitProvider sessionId={sessionId} fsRevision={revision}>
         <div className="flex h-full min-h-0 min-w-0">
         <Tabs
           value={tab}

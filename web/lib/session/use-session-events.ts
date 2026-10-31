@@ -23,6 +23,19 @@ export interface SessionEventsResult {
    * deliberately not every event — message deltas arrive per token.
    */
   workspace: number;
+  /**
+   * Bumped on every run-level event (started / settled / aborted / interrupted).
+   * The workbench uses it to re-read `GET /v1/sessions/{id}/status`, which is the
+   * only source that knows whether a run is in flight: the event stream can say
+   * what happened, not what is happening now.
+   */
+  runSignal: number;
+  /**
+   * Applies the server's answer about whether a run is in flight. It overrides
+   * the transcript's guess, which is why the header, the composer and the
+   * context meter all agree with the API after it lands.
+   */
+  reconcileRunning: (running: boolean) => void;
 }
 
 const MAX_RESYNCS = 2;
@@ -39,6 +52,30 @@ const MAX_DELAY_MS = 15_000;
  * turn a streaming answer into a request per token.
  */
 const WORKSPACE_EVENT_TYPES = new Set<string>(["tool.ended", "run.settled"]);
+
+/**
+ * Run-level events. They are the ones whose presence changes whether a run is
+ * in flight, so each one is a cue to re-ask the status endpoint.
+ */
+const RUN_EVENT_TYPES = new Set<string>([
+  "run.started",
+  "run.settled",
+  "run.aborted",
+  "run.interrupted",
+]);
+
+/**
+ * How long the stream must be quiet before its events count as live.
+ *
+ * A first connection replays the whole stored log in one burst; those events are
+ * history. `run.started` in that burst proves a run began at some point, not
+ * that one is running now — a forked branch's copied transcript can end
+ * mid-run, and reading it as current made the header claim 运行中 while the
+ * status API said `running:false`. Liveness therefore comes from the status API
+ * plus events that arrive after the burst, which is what this gap measures.
+ * A reconnect starts at the last seen seq, so its events are already live.
+ */
+const REPLAY_GAP_MS = 300;
 
 /**
  * Every named event the server can emit.
@@ -101,11 +138,20 @@ export function useSessionEvents(sessionId: string | null): SessionEventsResult 
   const [status, setStatus] = useState<StreamStatus>("connecting");
   const [leafEntryId, setLeafEntryId] = useState<string | null>(null);
   const [workspace, setWorkspace] = useState(0);
+  const [runSignal, setRunSignal] = useState(0);
   const [generation, setGeneration] = useState(0);
 
   const lastSeqRef = useRef(0);
   const resyncsRef = useRef(0);
   const resyncingRef = useRef(false);
+  // Is the stream past its opening replay? See REPLAY_GAP_MS.
+  const liveRef = useRef(false);
+  const lastEventAtRef = useRef(0);
+  const liveTimerRef = useRef<number | undefined>(undefined);
+
+  const reconcileRunning = useCallback((running: boolean) => {
+    dispatch({ type: "status", running });
+  }, []);
 
   const resync = useCallback(async () => {
     if (!sessionId || resyncingRef.current) return;
@@ -163,6 +209,24 @@ export function useSessionEvents(sessionId: string | null): SessionEventsResult 
     let timer: number | undefined;
     let attempt = 0;
 
+    // A fresh subscription (first load, or an explicit resync) replays history;
+    // a reconnect resumes at the last seq and its events are live right away.
+    liveRef.current = lastSeqRef.current > 0;
+    lastEventAtRef.current = Date.now();
+
+    // The opening replay is over once the stream has been quiet for
+    // REPLAY_GAP_MS: the server drains the stored log in one burst and only then
+    // sleeps between polls. Scheduling it here as well as per event means a
+    // session whose log is empty starts live instead of staying "history"
+    // forever.
+    const markLiveAfterQuiet = () => {
+      if (liveTimerRef.current !== undefined) window.clearTimeout(liveTimerRef.current);
+      liveTimerRef.current = window.setTimeout(() => {
+        liveRef.current = true;
+      }, REPLAY_GAP_MS);
+    };
+    if (!liveRef.current) markLiveAfterQuiet();
+
     const connect = () => {
       if (disposed) return;
       setStatus(attempt === 0 ? "connecting" : "reconnecting");
@@ -188,10 +252,23 @@ export function useSessionEvents(sessionId: string | null): SessionEventsResult 
         if (event.seq <= lastSeqRef.current) return;
 
         lastSeqRef.current = event.seq;
-        dispatch({ type: "event", event });
+        // A burst of replayed events is contiguous; the first event after a gap
+        // is the live one. Each event pushes the quiet timer out, so a burst
+        // stays "history" until it actually stops.
+        const now = Date.now();
+        if (!liveRef.current && now - lastEventAtRef.current >= REPLAY_GAP_MS) {
+          liveRef.current = true;
+        }
+        lastEventAtRef.current = now;
+        if (!liveRef.current) markLiveAfterQuiet();
+
+        dispatch({ type: "event", event, live: liveRef.current });
 
         if (WORKSPACE_EVENT_TYPES.has(event.type)) {
           setWorkspace((value) => value + 1);
+        }
+        if (RUN_EVENT_TYPES.has(event.type)) {
+          setRunSignal((value) => value + 1);
         }
       };
 
@@ -220,8 +297,9 @@ export function useSessionEvents(sessionId: string | null): SessionEventsResult 
       disposed = true;
       source?.close();
       if (timer !== undefined) window.clearTimeout(timer);
+      if (liveTimerRef.current !== undefined) window.clearTimeout(liveTimerRef.current);
     };
   }, [sessionId, generation]);
 
-  return { state, status, leafEntryId, workspace };
+  return { state, status, leafEntryId, workspace, runSignal, reconcileRunning };
 }

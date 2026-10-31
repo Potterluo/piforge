@@ -27,6 +27,15 @@ export type Block =
        * group after every interrupt — a normal outcome shown as a failure.
        */
       aborted?: boolean;
+      /**
+       * The transcript records this call as started and never records its end,
+       * and the server says the session is idle. A forked branch copies the
+       * parent's event log up to a bounded point, so its last tool call can be
+       * one whose `tool.ended` was never copied. Calling that 运行中 claims a
+       * command is executing right now; calling it 完成 invents a result. The
+       * honest label is that no result was recorded.
+       */
+      unfinished?: boolean;
       durationMs?: number;
       index?: number;
     };
@@ -129,6 +138,12 @@ export interface SessionState {
   lastSeq: number;
   /** Set when a seq gap is detected; the hook repairs the stream. */
   needsResync: boolean;
+  /**
+   * The status API last answered "no run in flight". It lets a replayed
+   * tool.started be stored as 结束未记录 from the start, instead of briefly
+   * claiming 运行中 for a call whose end the copied transcript never carried.
+   */
+  idleConfirmed: boolean;
   error: string | null;
   /**
    * The message currently being streamed. The normalizer's delta payloads do
@@ -176,6 +191,7 @@ export const initialSessionState: SessionState = {
   settled: 0,
   lastSeq: 0,
   needsResync: false,
+  idleConfirmed: false,
   error: null,
 };
 
@@ -442,6 +458,36 @@ function terminalizeTools(turns: Turn[]): Turn[] {
 }
 
 /**
+ * Closes tool calls the transcript never finished, without claiming an outcome.
+ *
+ * This is the status API's correction, not the event stream's: when the server
+ * says no run is in flight, a tool call that still has no `tool.ended` cannot be
+ * running now. `unfinished` is a state of the *record*, so the trace can say
+ * 「没有结果记录」 instead of either 「运行中」 or a made-up 「完成」.
+ */
+function markUnfinishedTools(turns: Turn[]): Turn[] {
+  return turns.map((turn) => {
+    let changed = false;
+    const blocks = turn.blocks.map((block) => {
+      if (block.kind !== "tool" || block.done) return block;
+      changed = true;
+      return { ...block, done: true, unfinished: true };
+    });
+    return changed ? { ...turn, blocks } : turn;
+  });
+}
+
+/** Whether any tool block is still in the "started, never ended" state. */
+function hasDanglingTool(turns: Turn[]): boolean {
+  for (const turn of turns) {
+    for (const block of turn.blocks) {
+      if (block.kind === "tool" && !block.done) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Adds an interruption marker, collapsing the duplicate the reconciler writes.
  *
  * A reconciled run produces three events (settled, run.interrupted,
@@ -468,8 +514,12 @@ function withInterruption(state: SessionState, marker: InterruptionMarker): Sess
   };
 }
 
-function applyEvent(state: SessionState, event: PfEvent): SessionState {
+function applyEvent(state: SessionState, event: PfEvent, live: boolean): SessionState {
   const payload = asRecord(event.payload);
+  // Replay can end a run but cannot start one: a historical run.started is not
+  // evidence of a run happening now (see reduceEvent).
+  const running = live ? true : state.running;
+  const streaming = live ? true : state.streaming;
 
   switch (event.type) {
     case EV.runStarted: {
@@ -477,8 +527,8 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
       // in the transcript, but it must stop offering 继续.
       return {
         ...state,
-        running: true,
-        streaming: true,
+        running,
+        streaming,
         error: null,
         aborted: false,
         activeInterruption: undefined,
@@ -553,7 +603,7 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
     case EV.turnStarted:
       // A turn is a run container, not a message: creating a turn here would
       // render an empty assistant bubble before every message.started.
-      return { ...state, running: true, streaming: true };
+      return { ...state, running: running || state.running, streaming: streaming || state.streaming };
 
     case EV.turnEnded:
       // Intentionally does not touch `streaming`: a run can span several
@@ -584,8 +634,8 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
         ...state,
         turns: [...state.turns, turn],
         activeMessageId: id,
-        streaming: role === "assistant" ? true : state.streaming,
-        running: role === "assistant" ? true : state.running,
+        streaming: role === "assistant" ? streaming : state.streaming,
+        running: role === "assistant" ? running : state.running,
       };
     }
 
@@ -609,7 +659,7 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
         turns = [...turns, created];
         index = turns.length - 1;
       }
-      const base = { ...state, turns, activeMessageId: id, streaming: true, running: true };
+      const base = { ...state, turns, activeMessageId: id, streaming, running };
       return replaceTurn(base, index, (turn) => ({
         ...turn,
         blocks: appendDelta(turn.blocks, contentIndex, kind, delta),
@@ -671,6 +721,10 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
 
     case EV.toolStarted: {
       const id = str(payload.tool_call_id) ?? `tool-${event.seq}`;
+      // A replayed call in a session the server calls idle has no live command
+      // behind it: its end was never copied. Store it as 结束未记录 up front so
+      // the trace never claims 运行中 for something that is not running.
+      const closed = !live && state.idleConfirmed;
       // message.final already carries the tool call as a block, and it can
       // arrive before tool.started. Update that block instead of adding a
       // second row for the same invocation.
@@ -684,7 +738,8 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
               ...block,
               name: str(payload.name) ?? block.name,
               args: payload.args ?? block.args,
-              done: false,
+              done: closed ? true : false,
+              unfinished: closed ? true : undefined,
             };
           }
           return { ...turn, blocks };
@@ -697,7 +752,8 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
         name: str(payload.name) ?? "tool",
         args: payload.args,
         chunk: "",
-        done: false,
+        done: closed,
+        unfinished: closed ? true : undefined,
       };
       const tail = assistantTail(state, event.ts);
       return {
@@ -705,8 +761,8 @@ function applyEvent(state: SessionState, event: PfEvent): SessionState {
           ...turn,
           blocks: [...turn.blocks, block],
         })),
-        running: true,
-        streaming: true,
+        running,
+        streaming,
       };
     }
 
@@ -900,8 +956,21 @@ function updateToolBlock(
  * `seq` is monotonic per session: duplicates and out-of-order replays are
  * dropped, and a gap marks the stream for repair instead of silently leaving a
  * hole in the transcript.
+ *
+ * `live` says whether this event arrived while the stream was keeping up, as
+ * opposed to being part of the initial replay of the stored log. A replayed
+ * `run.started` is history: it proves a run began, not that one is running now.
+ * Treating it as current made a forked branch — whose copied transcript can end
+ * in the middle of a run — claim 「运行中 · 3 个工具」 for minutes while
+ * `GET /v1/sessions/{id}/status` said `running:false`. So replay may *clear*
+ * liveness (a settle is a settle) but never assert it; only the status API or a
+ * live event can say a run is in flight.
  */
-export function reduceEvent(state: SessionState, event: PfEvent): SessionState {
+export function reduceEvent(
+  state: SessionState,
+  event: PfEvent,
+  options: { live?: boolean } = {},
+): SessionState {
   if (!Number.isFinite(event.seq)) return state;
   if (event.seq <= state.lastSeq) return state;
 
@@ -911,11 +980,17 @@ export function reduceEvent(state: SessionState, event: PfEvent): SessionState {
     lastSeq: event.seq,
     needsResync: state.needsResync || gap,
   };
-  return applyEvent(base, event);
+  return applyEvent(base, event, options.live !== false);
 }
 
 export type SessionAction =
-  | { type: "event"; event: PfEvent }
+  | { type: "event"; event: PfEvent; live?: boolean }
+  /**
+   * The server's answer to "is a run in flight?". It is the source of truth the
+   * API reports, so it overrides whatever the transcript implied, and an idle
+   * answer closes tool calls whose end was never recorded.
+   */
+  | { type: "status"; running: boolean }
   | { type: "reset" }
   | { type: "clear-queue" }
   | { type: "clear-error" };
@@ -923,7 +998,9 @@ export type SessionAction =
 export function sessionReducer(state: SessionState, action: SessionAction): SessionState {
   switch (action.type) {
     case "event":
-      return reduceEvent(state, action.event);
+      return reduceEvent(state, action.event, { live: action.live });
+    case "status":
+      return applyStatus(state, action.running);
     case "reset":
       return { ...initialSessionState };
     case "clear-queue":
@@ -933,6 +1010,17 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
     default:
       return state;
   }
+}
+
+/** Folds the status API's answer into the render model. */
+function applyStatus(state: SessionState, running: boolean): SessionState {
+  if (!running) {
+    const turns = hasDanglingTool(state.turns) ? markUnfinishedTools(state.turns) : state.turns;
+    if (!state.running && !state.streaming && state.idleConfirmed && turns === state.turns) return state;
+    return { ...state, running: false, streaming: false, idleConfirmed: true, turns };
+  }
+  if (state.running && !state.idleConfirmed) return state;
+  return { ...state, running: true, idleConfirmed: false };
 }
 
 // ---------------------------------------------------------------------------

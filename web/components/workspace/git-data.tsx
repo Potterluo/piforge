@@ -34,9 +34,17 @@ const GitDataContext = React.createContext<GitData | null>(null);
 
 export function GitProvider({
   sessionId,
+  fsRevision = 0,
   children,
 }: {
   sessionId: string;
+  /**
+   * A counter the workbench bumps when something outside git changed the
+   * checkout: the terminal printed output, the editor saved, a drag-drop wrote
+   * a file. The session event stream cannot carry a PTY command, so this is how
+   * 变更 hears about it — debounced below, never polled.
+   */
+  fsRevision?: number;
   children: React.ReactNode;
 }) {
   const [revision, setRevision] = React.useState(0);
@@ -69,6 +77,15 @@ export function GitProvider({
     if (workspace === 0 && settled === 0) return;
     scheduleRefresh();
   }, [workspace, settled, scheduleRefresh]);
+
+  // A command typed in the terminal changes the worktree with no session event
+  // addressed to this panel. The acceptance pass watched `echo … >> square.js`
+  // leave 变更 saying 干净 until the refresh button was pressed; this is the
+  // existing coalesced signal the file tree already listens to.
+  React.useEffect(() => {
+    if (fsRevision === 0) return;
+    scheduleRefresh();
+  }, [fsRevision, scheduleRefresh]);
 
   // A command typed in the terminal or a run in a background tab changes the
   // worktree with no event addressed to this panel. Regaining focus is the one

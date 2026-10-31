@@ -28,7 +28,12 @@ function event(type: string, payload?: unknown, extra: Partial<PfEvent> = {}): P
 }
 
 function reduceAll(events: PfEvent[]): SessionState {
-  return events.reduce(reduceEvent, initialSessionState);
+  return events.reduce((state, item) => reduceEvent(state, item), initialSessionState);
+}
+
+/** The same fold, but every event is part of the opening replay of stored history. */
+function reduceReplay(events: PfEvent[]): SessionState {
+  return events.reduce((state, item) => reduceEvent(state, item, { live: false }), initialSessionState);
 }
 
 function delta(
@@ -990,4 +995,75 @@ it("turns git events into timeline notes", () => {
     "已推送 main abc1234",
     "已拉取 main def5678",
   ]);
+});
+
+// The acceptance pass's fork: a copied transcript that ends in the middle of a run
+// made the header claim 运行中 while `GET /sessions/{id}/status` said running:false.
+describe("running comes from the status API, not from replayed history", () => {
+  const copiedTail = [
+    event(EV.runStarted, {}, { seq: 1 }),
+    event(EV.turnStarted, {}, { seq: 2 }),
+    event(EV.msgStarted, { message_id: "u1", role: "user" }, { seq: 3 }),
+    event(EV.msgFinal, { message_id: "u1", role: "user", text: "继续", blocks: [{ kind: "text", text: "继续" }] }, { seq: 4 }),
+    event(EV.msgStarted, { message_id: "a1", role: "assistant" }, { seq: 5 }),
+    event(EV.toolStarted, { tool_call_id: "t1", name: "bash", args: { command: "ls" } }, { seq: 6 }),
+    delta(7, "a1", 0, "partial output…"),
+  ];
+
+  it("a replayed run.started does not claim a run is in flight", () => {
+    const state = reduceReplay(copiedTail);
+
+    expect(state.running).toBe(false);
+    expect(state.streaming).toBe(false);
+    // The transcript is still built: history is history.
+    expect(state.turns.length).toBeGreaterThanOrEqual(2);
+    expect(state.lastSeq).toBe(7);
+  });
+
+  it("a live run.started does claim it", () => {
+    const state = reduceAll(copiedTail);
+    expect(state.running).toBe(true);
+    expect(state.streaming).toBe(true);
+  });
+
+  it("the status answer clears a stuck run and closes tools with no recorded end", () => {
+    // A live-ish state that could not settle (process gone, or replay treated as
+    // current by an older build).
+    const stuck = reduceAll(copiedTail);
+    expect(stuck.running).toBe(true);
+    expect(runningToolCount(stuck)).toBe(1);
+
+    const settled = sessionReducer(stuck, { type: "status", running: false });
+
+    expect(settled.running).toBe(false);
+    expect(settled.streaming).toBe(false);
+    expect(runningToolCount(settled)).toBe(0);
+    const tool = settled.turns.flatMap((turn) => turn.blocks).find((block) => block.kind === "tool");
+    expect(tool).toMatchObject({ kind: "tool", done: true, unfinished: true });
+  });
+
+  it("the status answer starts a run the transcript has not announced yet", () => {
+    const idle = sessionReducer(initialSessionState, { type: "status", running: false });
+    expect(idle.running).toBe(false);
+
+    const running = sessionReducer(idle, { type: "status", running: true });
+    expect(running.running).toBe(true);
+    expect(running.idleConfirmed).toBe(false);
+  });
+
+  it("a replayed tool call in a session the server calls idle is 结束未记录 from the start", () => {
+    // The status answer can arrive before the replay does; a later replayed
+    // tool.started must not wait for a second answer to stop saying 运行中.
+    const idleFirst = sessionReducer(initialSessionState, { type: "status", running: false });
+    const state = reduceEvent(
+      idleFirst,
+      event(EV.toolStarted, { tool_call_id: "t9", name: "bash", args: {} }, { seq: 1 }),
+      { live: false },
+    );
+
+    expect(state.running).toBe(false);
+    expect(runningToolCount(state)).toBe(0);
+    const tool = state.turns.flatMap((turn) => turn.blocks).find((block) => block.kind === "tool");
+    expect(tool).toMatchObject({ done: true, unfinished: true });
+  });
 });

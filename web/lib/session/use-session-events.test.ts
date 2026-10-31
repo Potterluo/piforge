@@ -60,6 +60,19 @@ function event(seq: number, type: string, payload: unknown = {}) {
   };
 }
 
+/**
+ * Waits out the opening replay window.
+ *
+ * A fresh connection replays the whole stored log in one burst, and events from
+ * that burst are history: a replayed `run.started` must not make the header
+ * claim a run (that is the fork bug). The hook only treats an event as live
+ * once the stream has been quiet for REPLAY_GAP_MS, so tests that exercise live
+ * behaviour wait for that.
+ */
+async function streamIsLive(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 400));
+}
+
 describe("useSessionEvents", () => {
   beforeEach(() => {
     FakeEventSource.instances = [];
@@ -83,16 +96,37 @@ describe("useSessionEvents", () => {
   it("marks the run as running when a named run.started arrives", async () => {
     const { result } = renderHook(() => useSessionEvents("ses_test"));
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    await streamIsLive();
 
     FakeEventSource.instances[0].emit("run.started", event(1, "run.started"));
 
     await waitFor(() => expect(result.current.state.running).toBe(true));
   });
 
+  it("does not claim a run from the opening replay of stored history", async () => {
+    // A fork's copied transcript can end in the middle of a run. Replaying it
+    // used to set `running`, and the header said 运行中 for minutes while the
+    // status API said idle. History proves a run began, not that one is running.
+    const { result } = renderHook(() => useSessionEvents("ses_test"));
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+
+    FakeEventSource.instances[0].emit("run.started", event(1, "run.started"), "1");
+    FakeEventSource.instances[0].emit(
+      "tool.started",
+      event(2, "tool.started", { tool_call_id: "t1", name: "bash", args: { command: "ls" } }),
+      "2",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(result.current.state.running).toBe(false);
+    expect(result.current.state.turns.length).toBeGreaterThan(0);
+  });
+
   it("only ends the run on run.settled, never on turn.ended", async () => {
     const { result } = renderHook(() => useSessionEvents("ses_test"));
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
     const source = FakeEventSource.instances[0];
+    await streamIsLive();
 
     source.emit("run.started", event(1, "run.started"), "1");
     await waitFor(() => expect(result.current.state.running).toBe(true));
@@ -109,6 +143,7 @@ describe("useSessionEvents", () => {
     const { result } = renderHook(() => useSessionEvents("ses_test"));
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
     const source = FakeEventSource.instances[0];
+    await streamIsLive();
 
     source.emit("run.started", event(1, "run.started"), "1");
     source.emit("message.started", event(2, "message.started", { role: "assistant" }), "2");

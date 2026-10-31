@@ -105,8 +105,19 @@ export function ToolTrace({ block }: { block: ToolBlock }) {
   // as an error, which used to paint the interrupt red and then blame the
   // provider's key (QA-14).
   const aborted = block.aborted === true;
-  const status = block.done ? (aborted ? undefined : block.isError ? "error" : undefined) : "running";
-  const statusLabel = block.done ? (aborted ? "已中断" : block.isError ? "失败" : "完成") : "运行中";
+  // The record has a start and no end, and the session is not running. Saying
+  // 运行中 claims a command is executing; saying 完成 invents a result.
+  const unfinished = block.unfinished === true;
+  const status = unfinished ? undefined : block.done ? (aborted ? undefined : block.isError ? "error" : undefined) : "running";
+  const statusLabel = unfinished
+    ? "结束未记录"
+    : block.done
+      ? aborted
+        ? "已中断"
+        : block.isError
+          ? "失败"
+          : "完成"
+      : "运行中";
   const argsText = (() => {
     if (!block.args || typeof block.args !== "object") return "";
     const keys = Object.keys(block.args as Record<string, unknown>);
@@ -196,6 +207,7 @@ export function ToolGroup({ blocks }: { blocks: ToolBlock[] }) {
   const failed = blocks.filter((block) => block.isError && !block.aborted).length;
   const aborted = blocks.filter((block) => block.aborted).length;
   const running = blocks.filter((block) => !block.done).length;
+  const unfinished = blocks.filter((block) => block.unfinished).length;
   const totalMs = blocks.reduce((sum, block) => sum + (block.durationMs ?? 0), 0);
   const names = Array.from(new Set(blocks.map((block) => toolMeta(block.name).label)));
   const label = names.length <= 2 ? names.join("、") : `${names[0]} 等 ${names.length} 类`;
@@ -218,6 +230,15 @@ export function ToolGroup({ blocks }: { blocks: ToolBlock[] }) {
             ) : null}
             {running > 0 ? (
               <span className="shrink-0 text-[11px] text-muted-foreground">{running} 个运行中</span>
+            ) : null}
+            {running === 0 && unfinished > 0 ? (
+              <span
+                data-testid="tool-group-unfinished"
+                className="shrink-0 text-[11px] text-muted-foreground"
+                title="这些调用有开始时间但没有结束记录；会话已空闲，所以它们现在没有在运行"
+              >
+                {unfinished} 个结束未记录
+              </span>
             ) : null}
             {totalMs > 0 ? <TraceDescription>{formatDuration(totalMs)}</TraceDescription> : null}
           </TraceLine>

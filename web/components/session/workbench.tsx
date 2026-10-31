@@ -160,7 +160,7 @@ function WorkbenchBody({
   projectId: string;
   session: SessionQuery;
 }) {
-  const { state, status } = useSessionEventState();
+  const { state, status, runSignal, reconcileRunning } = useSessionEventState();
   /**
    * The server's refusal for a send that had no usable model behind it.
    *
@@ -209,6 +209,28 @@ function WorkbenchBody({
     // a reload (FR-1.9).
     refetchInterval: 15_000,
   });
+
+  /**
+   * `running` comes from the server, not from the transcript.
+   *
+   * A fork copies the parent's event log, and that copy can end in the middle of
+   * a run: replaying it made the header claim 「运行中 · 3 个工具」 for minutes
+   * while `GET /v1/sessions/{id}/status` said `running:false`. The answer to
+   * "is a run in flight" is the status endpoint's, so every consumer — header,
+   * composer, context meter — reads a state that this effect keeps aligned with
+   * it. A run-level event triggers a re-read, because the event stream can say
+   * what happened but not what is happening now.
+   */
+  React.useEffect(() => {
+    const data = runtime.data;
+    if (!data) return;
+    reconcileRunning(Boolean(data.running || data.streaming));
+  }, [runtime.data, runtime.dataUpdatedAt, reconcileRunning]);
+
+  React.useEffect(() => {
+    if (runSignal === 0) return;
+    void runtime.refetch();
+  }, [runSignal, runtime.refetch]);
   const forkPoints = useQuery({
     queryKey: ["session-fork-points", sessionId],
     queryFn: () => api.sessions.forkPoints(sessionId),
@@ -319,7 +341,7 @@ function WorkbenchBody({
 
         <div className="ml-auto flex shrink-0 items-center gap-3">
           {state.running ? (
-            <Badge variant="outline" className="gap-1">
+            <Badge variant="outline" className="gap-1" data-testid="run-badge">
               <span className="size-1.5 animate-pulse rounded-full bg-primary" />
               运行中
               {tools > 0 ? ` · ${tools} 个工具` : ""}
