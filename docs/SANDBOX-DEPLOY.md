@@ -168,8 +168,12 @@ record 是 `{id, state, root_dir, container_path_root, endpoint, api_key?}`：`i
 校验两侧对挂载点的一致理解），`endpoint` 是控制面可达的沙箱 API 地址，`api_key` **只在
 create 的响应里出现一次**（见下）。
 
-**没有第七个端点**：没有 health、没有 exec、没有文件读写。"在沙箱里跑命令"继续走沙箱
-自己的 `/v1/shell/exec` 与文件 API（§0 第 6 条），runner 不复制它。
+**没有第七个端点？2026-10-31 起有一个**：`POST /v1/sandboxes/{id}/attach`
+（`{argv, dir, env, user}` → 一条 hijack 的双向字节流）。它不是给用户用的 shell：它是
+`-agent-in-sandbox` 把 `pi --mode rpc` 的 stdio 接给控制面的通道，用同一个 bearer token，
+参数是 argv 而不是 shell 字符串。仍然**没有** health、没有文件读写——这些继续走沙箱自己的
+API。为什么不能用 `/v1/shell/exec` 代替它、以及这个端点的代价，见 §1.4.3 与
+`docs/EXECUTION-BOUNDARY.md` §2/§9。
 
 ### 每个沙箱一个 key（替代部署级 `SANDBOX_API_KEY`）
 
@@ -691,7 +695,9 @@ marker 是**死掉的 launcher 最后一次心跳**，所以 2 分钟 TTL 到期
 
 #### 还没修、但仍然为真（不要当成已验证）
 
-1. **agent 在控制面容器里执行，不在沙箱里。** 上面的 `ps`、pi 的 cwd
+1. **agent 在控制面容器里执行，不在沙箱里。**（**2026-10-31 部分成立**：这一节描述的是默认
+   行为；`-agent-in-sandbox` 下 `pi` 已经在沙箱里跑，`/data` 也读不到了，证据与代价见 §1.4.3。
+   默认仍然是"控制面里执行"，因为这个 flag 还没经过阶段二/三。）上面的 `ps`、pi 的 cwd
    （`/data/sandboxes/<u>/<p>/repo`）、以及 marker 位置（`<pair>/.piforge/live/…`，由控制面
    写、经沙箱 API 读）都是同一条事实。后果：
    - **"agent 代码在沙箱里跑"这句话，对本地实现不成立**——沙箱是**工作区**边界（文件、终端、
@@ -741,7 +747,177 @@ marker 是**死掉的 launcher 最后一次心跳**，所以 2 分钟 TTL 到期
 `pf-local` 的前后指纹：容器 `7dc14e4a7525…`、`/healthz` 200，未变。
 
 
-为什么是它：
+### 1.4.3 阶段一：agent 进程搬进沙箱（`-agent-in-sandbox`，2026-10-31）
+
+§1.4.2 最后一条"还没修"是这一轮唯一的目标：**`pi` 跑在控制面容器里，读得到 `/data`**。
+设计写在 `docs/EXECUTION-BOUNDARY.md`（为什么走容器的 exec 字节流、`materialize` 怎么
+离开共享卷、`models.json` 与 provider key 的边界、远端心跳、四个阶段的验收）。这里是
+**已经落地的那一步**和它的原始证据。
+
+**做了什么**（只此一件）：控制面不再 `exec.Command("pi")`，而是让沙箱启动同一个 argv，
+把 RPC 流接过来。`internal/pi` 的 `RuntimeConfig.Dial` 本来就是为这件事留的缝（它的注释
+写着"sandbox shim's stdio channel"），所以 JSONL 分帧、命令/响应按 id 关联、事件扇出、
+settle 判定全部是原来那份代码；变的只有文件描述符的来源。
+
+- **通道**：runner 新增第七个端点 `POST /v1/sandboxes/{id}/attach`，把连接 hijack 掉之后
+  直接接 `docker exec -i -u gem -w /workspace …` 的 stdio：响应体是 stdout，请求的写端是
+  stdin，半关闭就是 EOF。同一个 bearer token。**没有**用沙箱自己的 `/v1/shell/exec`：那是
+  终端面板的行式持久 shell，没有 EOF、不保证二进制安全、和用户的终端混在一个会话里，
+  JSONL 不能从那儿过（理由见设计 §2）。
+- **agent 从哪来**：镜像里。`deploy/Dockerfile.sandbox-agent` 在 AIO 镜像上叠两样东西——
+  `pi`（与 `piforge:local` 同一版本 1.4.0）和 `piforged`（只当 `agent-launcher` 用）。
+  不按会话上传 150 MB 的 npm 树，也不在沙箱里联网装。
+- **以谁的身份跑**：`gem`（uid 1000），也就是 checkout 和面板的属主。§1.4.2 的两个属主
+  缺陷（面板改不了 root 写的文件、agent 的 git 报 dubious ownership）在这个摆法下不成立，
+  因为只有一个写者。`GIT_CONFIG_*` 因此不再注入。
+- **配置从哪进**：`models.json` 走沙箱**文件 API** 写进
+  `/workspace/.piforge/agents/<session>/`，`PI_CODING_AGENT_DIR` 指到那里。里面只有
+  gateway URL 和**每会话 HMAC token**，没有 provider key（见下面的 grep）。**MCP 配置
+  没有跟着进**：`mcp.json` 里是解密后的凭据，进沙箱就等于把这条路重新打开；带 MCP 的
+  会话在这个 flag 下暂时没有 MCP（设计 §4 写明这是 stage 3 的凭据代理）。
+- **心跳**：`piforged agent-launcher` 在**沙箱里**跑，marker 仍然是
+  `/workspace/.piforge/live/<session>`，探针（`internal/liveness` 的 AIO 读法）一行没改。
+- **会话文件**：从 `/tmp/.piforge/sessions/…` 移到 `<pair>/.piforge/sessions/…`（沙箱里是
+  `/workspace/.piforge/sessions/…`），一边是共享卷，两边看到同一份字节；cwd header 的
+  对齐由**沙箱用户**经文件 API 做（控制面重写会把文件变成 root 所有，gem 就写不回去了）。
+
+#### 实测（Windows 11 / Docker Desktop，7723，一次性实例）
+
+形状与 §1.4.2 相同，只多一个环境变量；`pf-local`（7722）全程未动：
+
+```powershell
+# 控制面镜像：pwsh scripts/build-app-image.ps1 -Tag piforge:agent-drill
+# runner：docker build -f deploy/Dockerfile.runner -t piforge/sandbox-runner:agentdrill .
+# 沙箱：docker build -f deploy/Dockerfile.sandbox-agent --build-arg AGENT_IMAGE=piforge:agent-drill -t piforge/sandbox-agent:agentdrill .
+docker run -d --name pf-drill-control --network pf-drill-net -p 7723:7700 \
+  -v pf-drill-data:/data --cap-drop DAC_OVERRIDE \
+  -e PIFORGE_PORT=7700 -e PIFORGE_DATA=/data \
+  -e PIFORGE_GATEWAY_URL=http://pf-drill-control:7700 \
+  -e PIFORGE_SANDBOX=runner -e PIFORGE_AGENT_IN_SANDBOX=1 \
+  -e PIFORGE_SANDBOX_RUNNER_URL=http://pf-drill-runner:7801 \
+  -e PIFORGE_SANDBOX_RUNNER_TOKEN=$tok -e PIFORGE_SANDBOX_IMAGE=piforge/sandbox-agent:agentdrill \
+  … piforge:agent-drill
+```
+
+启动日志（新增的一行是 `the agent runs inside the sandbox`，旧的
+`container agents run under a heartbeat launcher` 不再出现——它描述的是本地 spawn）：
+
+```
+msg="the agent runs inside the sandbox" sandbox=runner user=gem pi=pi launcher=/opt/piforge/piforged
+     detail="RPC over the sandbox exec stream; the provider key never enters the container"
+```
+
+**1. agent 在沙箱里，控制面里没有**（同一次任务，两个 `ps`）：
+
+```
+docker exec piforge-79f3b298a4d9d366 ps -ef
+gem  1048  0  /opt/piforge/piforged agent-launcher -root /workspace -session ses_01M698J1… \
+              -interval 15s -- pi --mode rpc --model piforge/deepseek-v4-flash \
+              --skill /workspace/repo/.pi/skills --session /workspace/.piforge/sessions/ses_01M698J1….jsonl
+gem  1061  1048  pi
+
+docker exec pf-drill-control ps -ef      # 只有 piforged / next-server / tini
+docker exec pf-drill-control sh -c 'ps -ef | grep "p[i] --mode rpc" || echo NO_PI'  -> NO_PI
+```
+
+**2. 沙箱里没有 `/data`**（这就是这一轮的全部意义）：
+
+```
+docker exec -u gem <sandbox> sh -lc 'ls /data; cat /data/piforge.db; ls /data/sandboxes'
+ls: cannot access '/data': No such file or directory
+cat: /data/piforge.db: No such file or directory
+ls: cannot access '/data/sandboxes': No such file or directory
+
+docker exec pf-drill-control sh -lc 'ls /data'
+master.key  pi-agents  piforge.db  piforge.db-shm  piforge.db-wal  sandboxes  secret.key  skills
+```
+
+**3. 一个真实任务跑完，提交在沙箱的 worktree 里**（"写一个 Node 脚本输出前 10 个素数，
+配一个测试并运行，然后提交"）：
+
+```
+run.started -> run.settled          12 s（首条），随后一条行内评论 12 s
+docker exec -u gem <sandbox> sh -lc 'cd /workspace/repo && git log --format="%h %an|%ae %s" -5'
+de5061b PiForge Sandbox|sandbox@piforge.local 新增输出前 10 个素数的脚本及其测试
+a90414c PiForge Sandbox|sandbox@piforge.local piforge: initial commit
+git status --porcelain -> 空
+```
+
+**4. 面板 / 测试面板 / 行内评论照常**（它们本来就只走沙箱 API）：
+
+```
+GET  /files/tree                -> primes.js、test/primes.test.js
+GET  /files?path=primes.js      -> 200，body 559 字节
+PUT  /files?path=panel-note.md  -> 200；git status 显示 1 insertion
+POST /git/stage + /git/commit   -> 200，e30cbb5 "panel: a note from the changes panel"
+GET  …/test-runs                -> node --test，passed 2/2，source=agent，
+                                   command="cd /workspace/repo && node primes.js && node --test"
+POST /messages {review_comment: primes.js:3}  -> 21 ms 接受；agent 改名并提交 3661297，
+                                   测试仍 2/2
+```
+
+**5. 属主只有一个写者**（§1.4.2 缺陷 2 在这个摆法下不存在）：
+
+```
+-rw-r--r-- 1 gem gem 577 /workspace/repo/primes.js        # agent 写的，gem 所有
+-rw-r--r-- 1 gem gem 524 /workspace/repo/test/primes.test.js
+stat /workspace/repo            -> 2096:437653 gem 777
+stat（控制面侧同一目录）          -> 2096:437653      # 同一个 inode
+```
+
+**6. 沙箱里没有 provider key**（只给命中数，key 从未打印）：
+
+```
+docker exec -u gem <sandbox> sh -c 'env | grep -c VOLCE'                 -> 0
+docker exec <sandbox> sh -c 'grep -c VOLCE /workspace/.piforge/agents/*/models.json' -> 0
+models.json 的 baseUrl = http://pf-drill-control:7700/gw/llm/eyJzIjoic2VzXzAx…  # 每会话 token
+docker inspect pf-drill-control 的 env 里有 PIFORGE_BOOTSTRAP_PROVIDER_KEY（控制面持有，按设计）
+```
+
+**7. 重启控制面：agent 会死，而且死得诚实。**（这一条是这一轮最重要的"没做到"）
+
+```
+before:  sandbox 71935c04271f StartedAt=15:16:56Z RestartCount=0
+         gem 1048 agent-launcher / gem 1061 pi；marker pid=1061
+docker restart pf-drill-control        # 沙箱容器 id / StartedAt / RestartCount 全不变
+after :  ps 里没有 agent-launcher，也没有 pi；/workspace/.piforge/live 为空（marker 被
+         launcher 删掉，不是等 TTL 过期）
+         之后发一条消息 -> 4 s 内新的 pi（pid 3110）在沙箱里起来，marker 重新变成 pid=3110
+```
+
+原因是**通道的所有权**：阶段一的 RPC 是一条由控制面持有的 TCP 连接，控制面一重启，连接
+断开，`docker exec` 看到 stdin EOF，`pi` 退出，launcher 删 marker，于是对账立刻答"死"
+（而不是像 §1.4.2 那样先 `kept_live=1` 两分钟）。**要让它活着，得让沙箱里有一个不随控制面
+存亡的 supervisor**，控制面重连它——那是设计里的阶段三，本轮没做。诚实地说：这一轮把
+**执行边界**换掉了（agent 读不到 `/data`），**没有**换掉"agent 与控制面同生共死"。
+
+#### 本轮的门禁与清理
+
+| 门 | 结果 |
+|---|---|
+| `go build ./...` / `go vet ./...` | 干净 |
+| `go test ./... -count=1` | 全部包 ok（`internal/sandbox` 含真镜像生命周期，12.7 s；新增 attach 的 4 个用例） |
+| `pnpm --dir web test -- --run` | **272 / 272**（34 文件） |
+| `pnpm --dir e2e test` | **182 / 182 passed（8.6m）**，exit 0 |
+| `pwsh scripts/deliver-check.ps1 -Image piforge:agent-drill` | run `20261031-235815`：**119 PASS / 0 FAIL**，`failure` 为空，105 s，镜像 `sha256:30cbba72…`（本轮构建；`-agent-in-sandbox` 关，local 路径不变） |
+
+`pf-local` 前后同一个容器 id `7dc14e4a7525…`、`/healthz` 200。本轮的一次性实例已删：
+`pf-drill-control`、`pf-drill-runner`、四个 `piforge-*` 沙箱（只按 `^piforge-[0-9a-f]+$`
+删）、卷 `pf-drill-data`、网络 `pf-drill-net`、三个 `*:agentdrill` 镜像。
+
+**仍然不是默认**：`-agent-in-sandbox` 默认关闭。它要求沙箱镜像里有 `pi` 和
+`/opt/piforge/piforged`（否则启动失败，不会静默退回控制面），要求控制面能按名字访问
+gateway，而且上面第 7 条的代价还在。阶段二/三/四（`materialize` 走文件 API、脱离共享卷、
+常驻 supervisor、K8s 的 `pods/exec`）见 `docs/EXECUTION-BOUNDARY.md` §10。
+
+上面第 1–6 条的证据来自第一次演练（`de5061b` / `e30cbb5` / `3661297`）。此后代码又加了两处
+防御性改动（fork 把 Pi 报回的**容器路径**原样接受；`models.json` 不存在时按本地同样的
+"让 Pi 自己报错"处理，而不是 500），于是把整套一次性实例**重建并重跑了一遍**最终树：
+`ps` 里仍是沙箱内 `gem … agent-launcher -root /workspace …` + `gem … pi`、控制面 `NO_PI`，
+`cat /data/piforge.db` 仍是 `No such file or directory`，一条真实任务 10 s 完成并提交
+`34f92a6`（作者 `PiForge Sandbox|sandbox@piforge.local`）。写完这段后实例再次删除。
+
+为什么选它（对照 §1.1–§1.3 的另外三条路）：
 
 - 控制面不再需要 root，runner 是唯一持有 socket 的进程，而它的接口面是**六个动作**，
   不是"整个 Docker API"。审一个几百行的 runner 比审"控制面里每一处 shell 调用"容易；

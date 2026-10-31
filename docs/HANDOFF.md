@@ -26,11 +26,14 @@ Shape of the system:
   plane's host — no isolation), `docker` (needs the docker CLI), `runner` (an HTTP
   client for `sandbox-runner`, the only process that mounts `/var/run/docker.sock`).
   A Kubernetes/E2B provider is a design in `docs/SANDBOX-DEPLOY.md`, not code.
-- **Runners**: `backend/cmd/sandbox-runner` exposes exactly six actions
+- **Runners**: `backend/cmd/sandbox-runner` exposes six JSON actions
   (`POST /v1/sandboxes`, `GET /v1/sandboxes/{id}`, `…/pause`, `…/resume`,
-  `DELETE /v1/sandboxes/{id}`, `POST …/worktrees`), bearer-token authenticated, with no
-  exec and no file endpoint. It reuses `sandbox.Docker` rather than reimplementing it,
-  and is stateless: container names derive from `sha256(user/project)[:8]`.
+  `DELETE /v1/sandboxes/{id}`, `POST …/worktrees`) plus one **stream**,
+  `POST /v1/sandboxes/{id}/attach` (argv, dir, env, user → a hijacked duplex byte
+  stream; it is how `-agent-in-sandbox` reaches the agent's stdio and it is not a
+  user-facing shell). Bearer-token authenticated, with no file endpoint: files still go
+  through the sandbox's own API. It reuses `sandbox.Docker` rather than reimplementing
+  it, and is stateless: container names derive from `sha256(user/project)[:8]`.
 - **Workspaces**: one `(user, project)` → one directory → (docker/runner) one container.
   Branch worktrees live under it; `.pi/skills` and `.mcp.json` are materialised into the
   checkout on every provisioning pass.
@@ -322,6 +325,27 @@ Ordered roughly by how much they will hurt. Nothing here is softened.
    the panel writes as `gem`). Making the sentence "agent code runs in the sandbox"
    literally true needs pi inside the sandbox plus `materialize` through the sandbox file
    API; that is not done.
+
+   **Stage 1 of that is now done, behind a flag (`-agent-in-sandbox`, default off).**
+   With the flag, the control plane does not spawn `pi`; it asks the sandbox to run
+   `piforged agent-launcher … -- pi --mode rpc` and bridges the JSONL stream over the
+   runner's new `attach` endpoint (`docker exec -i` stdio, hijacked). Proven on a
+   throwaway 7723 runner deployment: `ps -ef` **inside** the sandbox shows
+   `gem … agent-launcher -root /workspace … -- pi` and `gem … pi`, the control plane shows
+   neither, and `cat /data/piforge.db` inside the sandbox is `No such file or directory`.
+   One real prompt ("write a Node script for the first 10 primes, test it, run it,
+   commit") settled in 12 s with commit `de5061b` in the sandbox worktree, tests 2/2 via
+   the tests panel, panel write/stage/commit `e30cbb5`, and an inline review comment
+   accepted in 21 ms that the agent answered with commit `3661297`. `models.json` reaches
+   the sandbox through its file API and holds only the gateway URL and a per-session
+   token (0 hits for the provider key in the sandbox, in its env and in that file).
+   Two limits are unchanged and stated in `SANDBOX-DEPLOY.md` §1.4.3: **the agent still
+   dies with a control-plane restart** (stage 1's RPC pipe belongs to the control plane;
+   the detached supervisor is stage 3 — what improves is that the marker is now removed,
+   so reconciliation says "dead" immediately instead of keeping it live for the TTL), and
+   **`materialize`/`provision` still write through the shared volume**, so the workspace
+   mount is still a hard requirement for the control plane (stage 2). MCP configuration is
+   deliberately not staged into the sandbox until there is a credential broker.
 2. **Interrupt, then send another message: the agent resumes the interrupted request.**
    Verified on 2026-10-31, deterministically (6/6 runs; `e2e/scripts/fix-interrupt-context-probe.mjs`,
    raw runs in `e2e/.artifacts/fix-interrupt-context/`). Send "Count from 1 to 200" and stop it
@@ -362,6 +386,12 @@ Ordered roughly by how much they will hurt. Nothing here is softened.
    startup inside this image. Runner mode needs a second service, a shared volume, the
    same path on both sides, and Engine ≥ 25 for `volume-subpath`. Two of the five failure
    modes in `SANDBOX-DEPLOY.md` §1.4.1 are *silent* when the volume mapping is wrong.
+   `-agent-in-sandbox` adds two requirements of its own: the sandbox image must carry `pi`
+   and `/opt/piforge/piforged` (`deploy/Dockerfile.sandbox-agent` builds that image from
+   the control-plane image, so the two cannot drift on the pi version), and the control
+   plane must reach the sandbox's gateway by name. A sandbox image without them fails the
+   first prompt with a clear error; it never falls back to running beside the control
+   plane.
 6. **No restart policy here.** `RestartPolicy: "no"` — a daemon restart or host reboot
    leaves the product down until someone starts it, and when it does come back every
    agent, PTY and Chromium is gone (reconciliation marks the runs interrupted; it does

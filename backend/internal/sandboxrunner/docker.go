@@ -3,6 +3,7 @@ package sandboxrunner
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -166,6 +167,22 @@ func (p *DockerProvider) AddWorktree(ctx context.Context, sandboxID string, requ
 		return err
 	}
 	return provider.AddWorktree(ctx, sandboxID, request.RepoDir, request.Path, request.Branch)
+}
+
+// Attach starts a process inside an existing container and hands back its stdio.
+//
+// It is the seventh operation and the only streaming one. It does not go through
+// `p.api` (which builds the *API* client): attach is a Docker CLI operation on
+// the container, exactly what `sandbox.Docker.Attach` implements for the
+// in-process provider. The container name IS the sandbox id here — the same rule
+// that makes the runner stateless — and `docker exec` on a stopped container
+// fails with Docker's own message, which the client maps to its own error.
+func (p *DockerProvider) Attach(ctx context.Context, sandboxID string, spec sandbox.AttachSpec) (io.ReadWriteCloser, error) {
+	provider, err := p.api("")
+	if err != nil {
+		return nil, err
+	}
+	return provider.Attach(ctx, sandboxID, spec)
 }
 
 // creator builds a provider that can create a container: image and CLI required.

@@ -134,6 +134,15 @@ type options struct {
 	sandboxNetwork string
 	sandboxCPUs    string
 	sandboxMemory  string
+	// agentInSandbox runs the agent process inside the container instead of as a
+	// child of this process (docs/EXECUTION-BOUNDARY.md stage 1). Only meaningful
+	// for docker/runner; -sandbox local rejects it.
+	agentInSandbox bool
+	// sandboxAgentLauncher and sandboxAgentPi name the binaries *inside* the
+	// sandbox: the control-plane binary that provides `agent-launcher` (the
+	// heartbeat supervisor) and the agent itself.
+	sandboxAgentLauncher string
+	sandboxAgentPi       string
 	// sandboxRunnerURL and sandboxRunnerToken address the sandbox-runner service
 	// under -sandbox runner; they are rejected under any other provider.
 	sandboxRunnerURL   string
@@ -274,6 +283,15 @@ func run() error {
 		"base URL of the sandbox-runner service, with -sandbox runner (e.g. http://sandbox-runner:7801)")
 	flag.StringVar(&opt.sandboxRunnerToken, "sandbox-runner-token", envOr("PIFORGE_SANDBOX_RUNNER_TOKEN", ""),
 		"shared bearer token of the sandbox-runner service, with -sandbox runner")
+	// Stage 1 of docs/EXECUTION-BOUNDARY.md. Off by default so a deployment keeps
+	// the proven behaviour until this path has been exercised on it; the flag is
+	// rejected for -sandbox local, where there is no container to run in.
+	flag.BoolVar(&opt.agentInSandbox, "agent-in-sandbox", envOr("PIFORGE_AGENT_IN_SANDBOX", "0") == "1",
+		"run the agent process inside the sandbox (docker/runner) instead of beside the control plane")
+	flag.StringVar(&opt.sandboxAgentLauncher, "sandbox-agent-launcher", envOr("PIFORGE_SANDBOX_AGENT_LAUNCHER", "/opt/piforge/piforged"),
+		"path of the piforged binary inside the sandbox (it provides agent-launcher: the heartbeat supervisor)")
+	flag.StringVar(&opt.sandboxAgentPi, "sandbox-agent-pi", envOr("PIFORGE_SANDBOX_AGENT_PI", "pi"),
+		"path of the pi executable inside the sandbox")
 	flag.StringVar(&opt.chrome, "chrome", envOr("PIFORGE_CHROME", ""),
 		"chrome/chromium binary for the browser panel (empty disables it)")
 	flag.BoolVar(&opt.headlessBrowser, "headless-browser", envOr("PIFORGE_HEADLESS_BROWSER", "1") != "0",
@@ -317,6 +335,12 @@ func run() error {
 	// fails on the first session.
 	if err := validateSandboxFlags(opt.sandboxKind, opt.sandboxRunnerURL, opt.sandboxRunnerToken); err != nil {
 		return err
+	}
+	// Stage 1 of the execution boundary: the agent can only move into a container
+	// that exists. -sandbox local has no process namespace to attach to, and
+	// pretending otherwise would leave a flag that silently does nothing.
+	if opt.agentInSandbox && opt.sandboxKind == "local" {
+		return fmt.Errorf("-agent-in-sandbox needs a container provider (-sandbox docker or -sandbox runner); the local provider has no sandbox to run the agent in (docs/EXECUTION-BOUNDARY.md §8)")
 	}
 
 	// Where the browser, the terminal and the file panel look is one decision, not
@@ -541,6 +565,19 @@ func run() error {
 		localSandboxRoot = localRoot
 	}
 
+	// Stage 1 of docs/EXECUTION-BOUNDARY.md: the agent process runs *inside* the
+	// sandbox, not beside this one. The provider has to be able to attach a byte
+	// stream to a process in the container; local has no container, and a
+	// provider without that surface would otherwise fail at the first prompt.
+	var agentAttacher sandbox.Attacher
+	if opt.agentInSandbox {
+		attacher, ok := sb.(sandbox.Attacher)
+		if !ok {
+			return fmt.Errorf("-agent-in-sandbox: the %q provider cannot attach a process stream; use -sandbox docker or -sandbox runner", opt.sandboxKind)
+		}
+		agentAttacher = attacher
+	}
+
 	// 3. Git and the filesystem. fsx takes gitx as its git backend so file
 	// listings and diffs agree about what is modified.
 	git := gitx.New(gitx.Config{})
@@ -726,9 +763,39 @@ func run() error {
 	// heartbeat marker inside the sandbox workspace (internal/liveness). The
 	// marker is what restart reconciliation reads after a control-plane restart;
 	// without it the new process could only see its own empty registry.
-	agentLauncher := sessionAgentLauncher(opt, st, remoteSB, logger)
+	//
+	// Under -agent-in-sandbox the marker is written by the same supervisor, but
+	// running inside the sandbox (see below), so there is nothing to wrap here.
 
-	rt, err := newRuntime(opt, logger, setupFor, modelFor, launcher, agentLauncher)
+	// One resolver for every sandbox API call this process makes: the file panel,
+	// the terminal, the browser, the worktree request and — under
+	// -agent-in-sandbox — the model configuration written through the file API
+	// all present the same key the container was created with.
+	keys := sandboxKeys{store: st, fixed: opt.sandboxAPIKey}
+
+	// Stage 1 of docs/EXECUTION-BOUNDARY.md. Under -agent-in-sandbox the agent is
+	// a process inside the sandbox and this one only owns its stdio; the
+	// heartbeat launcher then travels in the sandbox-side argv (agent_sandbox.go)
+	// rather than wrapping a local spawn, which would describe a process that no
+	// longer exists.
+	var agent *sandboxAgent
+	var agentLauncher func(context.Context, contracts.SessionSpec, []string) ([]string, error)
+	if opt.agentInSandbox {
+		agent, err = newSandboxAgent(remoteSB, agentAttacher, keys, st, setupFor, opt, logger)
+		if err != nil {
+			return err
+		}
+		logger.Info("the agent runs inside the sandbox",
+			"sandbox", opt.sandboxKind,
+			"user", agentSandboxUser,
+			"pi", opt.sandboxAgentPi,
+			"launcher", opt.sandboxAgentLauncher,
+			"detail", "RPC over the sandbox exec stream; the provider key never enters the container")
+	} else {
+		agentLauncher = sessionAgentLauncher(opt, st, remoteSB, logger)
+	}
+
+	rt, err := newRuntime(opt, logger, setupFor, modelFor, launcher, agentLauncher, agent)
 	if err != nil {
 		return err
 	}
@@ -747,10 +814,8 @@ func run() error {
 		IdleTimeout: opt.browserIdleTimeout,
 		Logger:      logger,
 	}
-	// One resolver for every sandbox API call this process makes: the file panel,
-	// the terminal, the browser and the worktree request all present the same key
-	// the container was created with.
-	keys := sandboxKeys{store: st, fixed: opt.sandboxAPIKey}
+	// keys was resolved above, before the agent wiring: the sandbox-side model
+	// configuration uses the same per-sandbox key the panels do.
 	if remoteSB != nil {
 		if strings.TrimSpace(opt.sandboxAPIKey) != "" {
 			logger.Warn("sandbox API keys are fixed by -sandbox-api-key for every sandbox; this is for debugging one deployment, not for tenants",
@@ -1178,7 +1243,7 @@ func stopAgentsOnSandbox(ctx context.Context, logger *slog.Logger, st *store.Sto
 // child and the in-process registry is the whole truth. A container provider
 // passes the heartbeat launcher, so the agent that outlives a restart is also an
 // agent the next process can see.
-func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSpec) agentSetup, modelFor func(contracts.SessionSpec, string) string, launcher isolate.Launcher, wrapArgv func(context.Context, contracts.SessionSpec, []string) ([]string, error)) (*pi.Runtime, error) {
+func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSpec) agentSetup, modelFor func(contracts.SessionSpec, string) string, launcher isolate.Launcher, wrapArgv func(context.Context, contracts.SessionSpec, []string) ([]string, error), agent *sandboxAgent) (*pi.Runtime, error) {
 	bin := opt.piBin
 	args := []string{"--mode", "rpc"}
 
@@ -1193,7 +1258,7 @@ func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSp
 		logger.Info("using the fake pi peer", "binary", resolved)
 	}
 
-	return pi.NewRuntime(pi.RuntimeConfig{
+	cfg := pi.RuntimeConfig{
 		Config: pi.Config{
 			BinaryPath: bin,
 			Args:       args,
@@ -1208,7 +1273,23 @@ func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSp
 			return setup(spec).Env
 		},
 		WrapArgv: wrapArgv,
-	}), nil
+	}
+	if agent != nil {
+		// The process is not ours to spawn: Dial starts it in the sandbox and
+		// returns the stream, which is the same shape the bridge already accepts
+		// from a child's pipes. The worktree translation has to be in place before
+		// the session file's cwd header is written (AgentWorktree), and the
+		// session file itself moves into the workspace both sides can see.
+		cfg.Dial = agent.Dial
+		cfg.AgentWorktree = func(spec contracts.SessionSpec) string {
+			return agent.ContainerWorktree(context.Background(), spec)
+		}
+		cfg.SessionFileFor = agent.SessionFile
+		// A jail wraps a local argv; there is no local argv here. The isolation
+		// boundary is the container the process now runs in.
+		cfg.Launcher = nil
+	}
+	return pi.NewRuntime(cfg), nil
 }
 
 // agentSetup is per-session launch configuration: the model selection Pi needs

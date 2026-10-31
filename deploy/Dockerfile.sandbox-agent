@@ -1,0 +1,51 @@
+# The sandbox image the agent runs in (-agent-in-sandbox).
+#
+# Stage 1 of docs/EXECUTION-BOUNDARY.md runs `pi --mode rpc` inside the sandbox
+# container. The published AIO image has Node and Python but no `pi`, so the
+# agent runtime has to be *in* the image: installing it per sandbox would make a
+# network round trip part of every session, and uploading it per session would
+# put a 150 MB payload through the file API for no benefit.
+#
+# Two things are copied out of the PiForge image, and both are deliberate:
+#
+#   - the pinned `pi` package (same version the control plane image ships, so a
+#     deployment cannot end up with two agents on two versions);
+#   - the `piforged` binary, used only as `agent-launcher`: it is the heartbeat
+#     supervisor, and it has to be a process *inside* the sandbox so the marker
+#     at /workspace/.piforge/live/<session> describes an agent the sandbox is
+#     actually hosting.
+#
+# It carries nothing secret: no provider key, no master key, no database. The
+# model configuration arrives per session, through the sandbox's own file API,
+# and holds only the gateway URL and the per-session token.
+#
+# Build:
+#   docker build -f deploy/Dockerfile.sandbox-agent \
+#     --build-arg AGENT_IMAGE=piforge:local -t piforge/sandbox-agent:dev .
+#
+# Then deploy with PIFORGE_SANDBOX_IMAGE=piforge/sandbox-agent:dev.
+
+ARG BASE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0
+ARG AGENT_IMAGE=piforge:local
+
+FROM ${AGENT_IMAGE} AS agent
+
+FROM ${BASE}
+
+# The agent runtime, from the same builder that produced the control plane.
+COPY --from=agent /usr/local/lib/node_modules/@earendil-works /usr/local/lib/node_modules/@earendil-works
+COPY --from=agent /app/bin/piforged /opt/piforge/piforged
+
+# `pi` is a symlink in the control-plane image; recreate it here. The package is
+# world-readable (the agent runs as `gem`, not as root) and piforged is only
+# executable, so the sandbox user cannot modify either.
+RUN ln -sf ../lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js /usr/local/bin/pi \
+ && chmod -R a+rX /usr/local/lib/node_modules/@earendil-works \
+ && chmod 0755 /opt/piforge/piforged
+
+# Fail the build, not the first session, when the agent cannot start as the
+# account -agent-in-sandbox uses (user gem, uid 1000, created by the image's
+# own entrypoint).
+RUN node --version \
+ && pi --version \
+ && test -x /opt/piforge/piforged

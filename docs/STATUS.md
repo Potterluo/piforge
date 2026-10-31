@@ -33,6 +33,8 @@
 本批（终端输入的三个缺陷）同样不改变任何 FR 状态：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。三处都是「实现声称支持、实际会丢用户输入」，不是缺功能：①**快速输入丢字**——`use-pty.ts` 在 socket 未 OPEN 时直接把按键丢掉（不是客户端合并、不是 PTY 读循环、也没有 debounce），量到「输入开始 → socket open」的窗口后按 `send` 逐条排队并在 open 时按序逐帧 flush；②**`git log` 进分页器**——PTY 环境没有 `GIT_PAGER`/`PAGER`，`less` 吃掉后续按键，现在 PTY 环境固定 `PAGER=cat`/`GIT_PAGER=cat`/`GIT_TERMINAL_PROMPT=0`；③**分叉对话框的「创建分支」无故禁用**——补上「分支名称必填」说明与按钮 `title`。根因测量、fail-first 与门禁见文末「本批：终端输入的三个缺陷」。
 本批（中断后下一条消息）不改变任何 FR 状态：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。它修的是 HANDOFF §2 那条「未核实」的报告，而且**不是**我们这一侧的交付/归属缺陷：探针证明 follow-up 以自己的 run 送达了模型、run id 是新的、transcript 归属正确；Pi 把被中断的半截回答留在会话里，模型于是继续/重做上一条请求。修法是在「中断后的第一条消息」前由服务端拼一句「上一轮已作废，只回答这条」——与行内评论、继续同一条 compose 原则，transcript 显示的就是 agent 收到的。实测 0/6 → 5/5（最终措辞两批共 10/10；旧措辞 4/5），是强缓解而非保证。报告里的 29 ms 没有复现（13 次中断里新 run 最短 1.4 s），证据与边界见文末「本批：中断后下一条消息被拿去回答上一条请求」。
 
+本批（agent 进程进入沙箱，stage 1）同样不改变任何 FR 状态：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。它改的是 HANDOFF Known limit #1 里那句"控制面不是执行边界"：`-agent-in-sandbox`（默认关闭）下 `pi` 由沙箱容器启动、控制面通过 runner 的新 `attach` 端点桥接它的 stdio，沙箱里 `cat /data/piforge.db` 变成 `No such file or directory`，属主缺陷（面板改不了 agent 写的文件）在这个摆法下消失。代价与没做的部分同样明确：agent 仍随控制面重启而死（阶段三才换常驻 supervisor），`materialize`/`provision` 仍写共享卷，MCP 配置故意不进沙箱。证据见 `docs/SANDBOX-DEPLOY.md` §1.4.3，设计与四阶段见 `docs/EXECUTION-BOUNDARY.md`。
+
 ---
 # PiForge 对照 PRD 的实现审计
 
@@ -1294,3 +1296,35 @@ Node 24 直接执行测试文件（`node x.test.js`，没有 `--test`）时默�
 - **不改 Pi 的 session**：曾试过删掉被截断的 assistant entry（`context_edit`/截断文件 + 重启进程），实测模型改为去补做那条没人回答的旧请求，更糟；所以最终没有做文件手术。
 
 
+
+
+## 本批：agent 进程进入沙箱（stage 1，`-agent-in-sandbox`，默认关闭）
+
+这一条不是 FR：PRD 没有"执行边界"这一行，它是 `docs/HANDOFF.md` Known limit #1 与
+`docs/SANDBOX-DEPLOY.md` §1.4.2 最后一条"还没修"的内容。设计写在
+`docs/EXECUTION-BOUNDARY.md`（RPC 通道的三种做法与取舍、`materialize` 怎么离开共享卷、
+`models.json` 与 provider key 的边界、远端心跳、四个阶段的验收），落地的是**阶段一**。
+
+**改了什么**：控制面不再 `exec.Command("pi")`。`internal/pi` 的 `RuntimeConfig.Dial`
+原本就为此留了缝，现在填进去的是"让沙箱启动同一个 argv、把 stdio 接回来"：
+runner 新增 `POST /v1/sandboxes/{id}/attach`（hijack + `docker exec -i -u gem`），
+`piforged agent-launcher` 与 `pi` 都在沙箱里，`/workspace/.piforge/live/<session>` 的
+marker 由沙箱内的 supervisor 写、探针一行没改，`models.json` 经沙箱文件 API 写进
+`/workspace/.piforge/agents/<session>/`，会话文件放在 `<pair>/.piforge/sessions/`（共享卷
+上同一份字节，cwd header 由沙箱用户对齐）。`-sandbox local` 完全不变：该 flag 在 local 下
+是启动错误。
+
+**没改什么（必须这么说）**：agent 仍会随控制面重启而死——阶段一的 RPC 是控制面持有的
+TCP 连接，重启即 EOF，`pi` 退出、marker 被 launcher 删除，于是对账**立刻**答"死"（比
+§1.4.2 的 `kept_live=1` 两分钟更诚实，但不是"活下来了"）；`materialize`/`provision` 仍
+写共享卷，所以控制面仍必须挂载工作区；MCP 配置故意不进沙箱（`mcp.json` 里是解密后的
+凭据），带 MCP 的会话在该 flag 下暂时没有 MCP。
+
+**验证**：7723 一次性 runner 实例（`pf-local` 未动，前后 `7dc14e4a7525…`、`/healthz` 200）。
+沙箱内 `ps` 有 `gem … agent-launcher -root /workspace … -- pi` 与 `gem … pi`，控制面
+`ps` 没有 `pi`；沙箱内 `/data` 不存在；一条真实任务 12 s 完成并提交 `de5061b`，测试面板
+2/2，面板写/暂存/提交 `e30cbb5`，行内评论 21 ms 被接受后 agent 改名并提交 `3661297`；
+`models.json` 与沙箱 env 里 provider key 命中数 0。门禁：`go build/vet/test` 全绿、
+`pnpm --dir web test -- --run` 272/272、e2e 182/182、`deliver-check.ps1 -Image
+piforge:agent-drill` 119 PASS（run `20261031-235815`）。清理：两个服务容器、四个
+`piforge-*` 沙箱、卷 `pf-drill-data`、网络 `pf-drill-net`、三个镜像已删。

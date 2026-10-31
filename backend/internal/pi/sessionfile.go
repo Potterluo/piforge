@@ -52,46 +52,10 @@ func alignSessionCwd(path, worktree string) (bool, error) {
 		}
 		return false, fmt.Errorf("read session file: %w", err)
 	}
-	first, rest, found := bytes.Cut(raw, []byte("\n"))
-	if !found {
-		// A single line without a newline is still a header Pi can open.
-		rest = nil
+	next, changed, err := AlignSessionBytes(raw, worktree)
+	if err != nil || !changed {
+		return false, err
 	}
-	var header sessionHeader
-	if err := json.Unmarshal(bytes.TrimSpace(first), &header); err != nil {
-		return false, nil
-	}
-	if header.Type != "session" {
-		return false, nil
-	}
-	if header.Cwd == worktree {
-		return false, nil
-	}
-
-	// Re-encode only this line, keeping every other byte of the file intact:
-	// the entries below it are the conversation, and round-tripping them through
-	// a decoder would risk changing what the model reads.
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(bytes.TrimSpace(first), &fields); err != nil {
-		return false, nil
-	}
-	encoded, err := json.Marshal(worktree)
-	if err != nil {
-		return false, fmt.Errorf("encode cwd: %w", err)
-	}
-	fields["cwd"] = encoded
-	line, err := json.Marshal(fields)
-	if err != nil {
-		return false, fmt.Errorf("encode session header: %w", err)
-	}
-	// json.Marshal sorts map keys, which is fine for JSON but loses the order Pi
-	// wrote. Order is not part of the format; round-tripping the map keeps every
-	// field, which is what matters.
-
-	next := make([]byte, 0, len(line)+len(rest)+1)
-	next = append(next, line...)
-	next = append(next, '\n')
-	next = append(next, rest...)
 
 	// Write-then-rename: a half-written session file would lose the conversation,
 	// and the rename is atomic on both Linux and Windows.
@@ -117,4 +81,58 @@ func alignSessionCwd(path, worktree string) (bool, error) {
 		return false, fmt.Errorf("replace session file: %w", err)
 	}
 	return true, nil
+}
+
+// AlignSessionBytes is alignSessionCwd for a caller that owns the file through
+// something other than this process's filesystem — a sandbox's file API, where
+// the bytes must be replaced by the account that owns them.
+//
+// The rule is identical: only a file whose first line is a session header is
+// touched, and only the `cwd` field of that line changes. It reports whether the
+// bytes differ from what was passed in, so a caller can skip the write.
+func AlignSessionBytes(raw []byte, worktree string) ([]byte, bool, error) {
+	if len(raw) == 0 || worktree == "" {
+		return raw, false, nil
+	}
+	first, rest, found := bytes.Cut(raw, []byte("\n"))
+	if !found {
+		// A single line without a newline is still a header Pi can open.
+		rest = nil
+	}
+	var header sessionHeader
+	if err := json.Unmarshal(bytes.TrimSpace(first), &header); err != nil {
+		return raw, false, nil
+	}
+	if header.Type != "session" {
+		return raw, false, nil
+	}
+	if header.Cwd == worktree {
+		return raw, false, nil
+	}
+
+	// Re-encode only this line, keeping every other byte of the file intact:
+	// the entries below it are the conversation, and round-tripping them through
+	// a decoder would risk changing what the model reads.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimSpace(first), &fields); err != nil {
+		return raw, false, nil
+	}
+	encoded, err := json.Marshal(worktree)
+	if err != nil {
+		return raw, false, fmt.Errorf("encode cwd: %w", err)
+	}
+	fields["cwd"] = encoded
+	line, err := json.Marshal(fields)
+	if err != nil {
+		return raw, false, fmt.Errorf("encode session header: %w", err)
+	}
+	// json.Marshal sorts map keys, which is fine for JSON but loses the order Pi
+	// wrote. Order is not part of the format; round-tripping the map keeps every
+	// field, which is what matters.
+
+	next := make([]byte, 0, len(line)+len(rest)+1)
+	next = append(next, line...)
+	next = append(next, '\n')
+	next = append(next, rest...)
+	return next, true, nil
 }

@@ -26,6 +26,7 @@
 package sandboxrunner
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -34,6 +35,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -104,6 +106,10 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("POST /v1/sandboxes/{id}/resume", server.handleResume)
 	mux.HandleFunc("DELETE /v1/sandboxes/{id}", server.handleDestroy)
 	mux.HandleFunc("POST /v1/sandboxes/{id}/worktrees", server.handleWorktree)
+	// The one route that is a stream rather than a JSON object. It exists for the
+	// agent's RPC channel and for nothing else; see attach.go and
+	// docs/EXECUTION-BOUNDARY.md §2.
+	mux.HandleFunc("POST /v1/sandboxes/{id}/attach", server.handleAttach)
 	server.handler = server.authenticate(server.logRequests(mux))
 	return server, nil
 }
@@ -317,6 +323,16 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(status int) {
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)
+}
+
+// Hijack forwards the connection upgrade the attach route needs. Without it the
+// recorder would hide http.Hijacker and attach could only answer 500.
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("sandboxrunner: the response writer cannot hijack")
+	}
+	return hijacker.Hijack()
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

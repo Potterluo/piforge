@@ -56,6 +56,16 @@ type RuntimeConfig struct {
 	// receives the launch context, so it may look up where the session's
 	// workspace lives.
 	WrapArgv func(ctx context.Context, spec contracts.SessionSpec, argv []string) ([]string, error)
+	// AgentWorktree translates spec.Worktree into the path the *agent process*
+	// uses for the same directory, or returns "" to keep the host path.
+	//
+	// It matters only when the agent runs in another filesystem namespace — a
+	// sandbox container — where /data/sandboxes/<u>/<p>/repo is not the checkout
+	// but /workspace/repo is. It is applied before the session file's cwd header
+	// is aligned, because Pi takes the working directory of its tools from that
+	// header: a header naming the control plane's path is a session whose tools
+	// run in a directory that does not exist.
+	AgentWorktree func(spec contracts.SessionSpec) string
 }
 
 // Runtime implements contracts.AgentRuntime with one Pi child process per
@@ -203,8 +213,16 @@ func (r *Runtime) ensure(ctx context.Context, spec contracts.SessionSpec) (*sess
 func (r *Runtime) spawn(ctx context.Context, spec contracts.SessionSpec) (*session, error) {
 	file := r.sessionFileFor(spec.SessionID)
 	cfg := r.cfg.Config
-	if spec.Worktree != "" {
-		cfg.Dir = spec.Worktree
+	// The agent's own view of the checkout. Local spawns leave this alone; a
+	// sandbox-hosted agent gets the container path (see RuntimeConfig.AgentWorktree).
+	worktree := spec.Worktree
+	if r.cfg.AgentWorktree != nil {
+		if translated := r.cfg.AgentWorktree(spec); strings.TrimSpace(translated) != "" {
+			worktree = translated
+		}
+	}
+	if worktree != "" {
+		cfg.Dir = worktree
 	}
 	cfg.SessionFile = file
 	// Pi takes its working directory from the session file, not from the process:
@@ -212,8 +230,16 @@ func (r *Runtime) spawn(ctx context.Context, spec contracts.SessionSpec) (*sessi
 	// would run its tools in the parent's checkout. Aligning it here covers every
 	// way a process is created — a fresh start, a fork, a clone, a crash restart
 	// and a resume after the control plane or the sandbox restarted.
-	if _, err := alignSessionCwd(file, spec.Worktree); err != nil {
-		return nil, fmt.Errorf("pi: session %s: %w", spec.SessionID, err)
+	//
+	// Not when the agent lives in another filesystem namespace (AgentWorktree is
+	// set): the file then belongs to the sandbox user, and rewriting it from here
+	// would leave a control-plane-owned file that user can no longer append to.
+	// The Dial implementation aligns it through the sandbox's file API instead,
+	// as the account that owns it — same bytes, same rule, right owner.
+	if r.cfg.AgentWorktree == nil {
+		if _, err := alignSessionCwd(file, worktree); err != nil {
+			return nil, fmt.Errorf("pi: session %s: %w", spec.SessionID, err)
+		}
 	}
 	if r.cfg.ArgsFor != nil {
 		if extra := r.cfg.ArgsFor(spec); len(extra) > 0 {
