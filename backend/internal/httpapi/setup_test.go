@@ -1,12 +1,14 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/piforge/piforge/backend/internal/bootstrap"
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/store"
 )
 
 type setupBody struct {
@@ -14,6 +16,8 @@ type setupBody struct {
 	IsAdmin                 bool                `json:"is_admin"`
 	SharedProviderAvailable bool                `json:"shared_provider_available"`
 	Bootstrap               *bootstrap.Defaults `json:"bootstrap"`
+	DefaultProvider         string              `json:"default_provider"`
+	DefaultProviderMissing  bool                `json:"default_provider_missing"`
 }
 
 func (e *testEnv) setup(c *creds) setupBody {
@@ -103,6 +107,55 @@ func TestSetupReportsFirstRunState(t *testing.T) {
 	late := env.login("late-user@example.test", "late-user-pw")
 	if got := env.setup(late); got.NeedsProvider || !got.SharedProviderAvailable {
 		t.Fatalf("a new account did not inherit the shared provider: %+v", got)
+	}
+}
+
+// TestSetupReportsAMissingDefaultProvider: the acceptance deployment started
+// with PIFORGE_DEFAULT_PROVIDER=volc while no volc provider existed. Nothing
+// complained at boot and the first send failed with 400 no_model; the first-run
+// panel needs the fact, not a guess made from the provider list.
+func TestSetupReportsAMissingDefaultProvider(t *testing.T) {
+	env := newTestEnv(t)
+	admin := env.mkUser("setup-default@example.test", "setup-default-pw", contracts.RoleAdmin)
+	c := env.login("setup-default@example.test", "setup-default-pw")
+
+	env.deps.DefaultProvider = "volc"
+	env.rebuild()
+
+	got := env.setup(c)
+	if got.DefaultProvider != "volc" {
+		t.Fatalf("default_provider = %q, want volc", got.DefaultProvider)
+	}
+	if !got.DefaultProviderMissing {
+		t.Fatalf("a default provider that does not exist was reported as present: %+v", got)
+	}
+
+	// Adding the provider the deployment names is the documented fix, and the
+	// field must follow it without a restart.
+	env.ensureProvider(admin.ID, "volc", "deepseek-v4-flash")
+	got = env.setup(c)
+	if got.DefaultProviderMissing {
+		t.Fatalf("default provider still reported missing after it was added: %+v", got)
+	}
+
+	// A disabled provider is not a usable default either: the name exists but
+	// nothing can send to it, so calling it present would repeat the bug.
+	providers, err := env.store.ListProviders(context.Background(), admin.ID)
+	if err != nil {
+		t.Fatalf("ListProviders: %v", err)
+	}
+	var volcID string
+	for _, provider := range providers {
+		if provider.Name == "volc" {
+			volcID = provider.ID
+		}
+	}
+	disabled := false
+	if _, err := env.store.UpdateProvider(context.Background(), admin.ID, volcID, store.ProviderPatch{Enabled: &disabled}); err != nil {
+		t.Fatalf("UpdateProvider: %v", err)
+	}
+	if got = env.setup(c); !got.DefaultProviderMissing {
+		t.Fatalf("a disabled default provider counted as present: %+v", got)
 	}
 }
 

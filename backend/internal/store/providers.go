@@ -182,6 +182,30 @@ func (s *Store) ResolveProvider(ctx context.Context, userID, name string) (*cont
 	return provider, keyCipher, nil
 }
 
+// ProviderNamed reports whether any enabled provider with this name exists,
+// regardless of who owns it.
+//
+// It is the deployment-level question a startup check asks: "-default-provider
+// volc" naming a provider nobody created is a misconfiguration, and the answer
+// must not depend on which account happens to be first. Per-account resolution
+// stays in ResolveProvider; this is only used to decide whether to warn.
+func (s *Store) ProviderNamed(ctx context.Context, name string) (bool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false, nil
+	}
+	var one int
+	err := s.r.QueryRowContext(ctx,
+		`SELECT 1 FROM providers WHERE name = ? AND enabled = 1 LIMIT 1`, name).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: provider %q exists: %w", name, err)
+	}
+	return true, nil
+}
+
 // InheritedProviders lists the admin-scope providers every user can see.
 //
 // This is the one read that is not scoped to rows the caller owns, and that is

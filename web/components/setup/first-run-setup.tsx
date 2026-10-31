@@ -85,6 +85,15 @@ export function FirstRunSetup({ className }: { className?: string }) {
             这个账号还没有可用的模型，现在发送消息会被拒绝（<code className="font-mono">400 no_model</code>
             ）。{missing}
           </p>
+          {/* The deployment names a fallback provider that does not exist
+              (PIFORGE_DEFAULT_PROVIDER=volc with no volc). The acceptance pass
+              only found this out when the first send failed; the panel says it
+              up front, naming the value to change. */}
+          {setup.data?.default_provider_missing && setup.data.default_provider ? (
+            <p className="mt-1 text-amber-700 dark:text-amber-300" data-testid="setup-default-provider-missing">
+              默认服务商「{setup.data.default_provider}」不存在，请添加或更改默认值。
+            </p>
+          ) : null}
         </div>
       </div>
 

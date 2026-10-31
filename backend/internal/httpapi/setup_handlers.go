@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/bootstrap"
@@ -26,6 +27,14 @@ type setupResponse struct {
 	// has no key field on purpose: the startup environment owns the secret, the
 	// UI only offers the non-secret parts.
 	Bootstrap *bootstrap.Defaults `json:"bootstrap,omitempty"`
+	// DefaultProvider is the name the deployment falls back to when a session
+	// pins no model (`-default-provider` / PIFORGE_DEFAULT_PROVIDER).
+	DefaultProvider string `json:"default_provider,omitempty"`
+	// DefaultProviderMissing reports that this name does not resolve for the
+	// signed-in account. The deployment came up with a default nobody created;
+	// the first-run panel can then say so instead of letting the first send
+	// discover it as a failure. Not fatal by design: an admin may add it later.
+	DefaultProviderMissing bool `json:"default_provider_missing,omitempty"`
 }
 
 // handleSetup reports what a signed-in account needs to send its first message.
@@ -57,6 +66,15 @@ func (s *server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		NeedsProvider:           needsProvider,
 		IsAdmin:                 user.Role == contracts.RoleAdmin,
 		SharedProviderAvailable: sharedUsable,
+	}
+	// The deployment default is what a session with no model_ref uses, so a name
+	// that resolves to nothing is the reason the first send fails. Report it as
+	// a fact about this account, not a guess.
+	if def := strings.TrimSpace(s.deps.DefaultProvider); def != "" {
+		resp.DefaultProvider = def
+		if _, _, err := s.deps.Store.ResolveProvider(r.Context(), user.ID, def); err != nil {
+			resp.DefaultProviderMissing = true
+		}
 	}
 	if defaults := s.deps.SetupDefaults; !defaults.Empty() {
 		resp.Bootstrap = &defaults

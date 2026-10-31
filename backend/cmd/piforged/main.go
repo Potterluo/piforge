@@ -325,6 +325,15 @@ func run() error {
 			logger.Warn("bootstrap provider was not created", "error", berr.Error())
 		}
 	}
+	// The deployment's fallback provider is configuration too. Saying it at boot
+	// turns "the first send failed for no visible reason" into a log line an
+	// operator can act on; it is never fatal, because the provider can be added
+	// from the UI while this process runs.
+	if warning, werr := defaultProviderWarning(ctx, st, opt.defaultProvider); werr != nil {
+		logger.Warn("could not check the default provider", "error", werr.Error())
+	} else if warning != "" {
+		logger.Warn(warning, "default_provider", opt.defaultProvider)
+	}
 	signingKey := make([]byte, 32)
 	if _, rerr := rand.Read(signingKey); rerr != nil {
 		return fmt.Errorf("init gateway signer: %w", rerr)
