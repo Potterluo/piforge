@@ -28,6 +28,8 @@
 
 本批（最终验收的三处「界面说了后端不知道的事」）之后，FR 状态不变：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**（按表格行重数）。三处都是「界面承诺了后端并不知道的事」，所以改的是来源而不是文案：①**测试面板**从 agent 真实跑过的 `node primes.test.js`（没有 `--test` 标志）里一个字都记不下来——检测只认 `node --test`，现在按 node 自己的测试文件命名约定识别，并用 node 22 的真实 TAP 输出做夹具；②**状态说谎**——fork 复制过来的转录可能停在一次 run 中间，回放它会让会话头声称「运行中 · 3 个工具」而 `/v1/sessions/{id}/status` 说 `running:false`，现在 running 只由状态 API 与真正实时的 run 事件决定，回放只能结束 run 不能开始 run；同时「变更」面板订阅终端的输出（复用文件树已有的那条去抖信号），不再需要手点刷新；③**管理页的数字**把「运行中的 agent」（其实是活进程数，打开一个空闲 fork 就会 +1）拆成「进行中的运行」与「agent 进程」，行内评论入口从 `opacity-0` 改成常驻低对比度，新会话对话框说出「默认模型」到底解析成哪个模型、并说明缺 key 的 provider 不影响它。证据见文末「本批：最终验收的三处真相修复」。
 
+本批（fork 转录的截断 + Node 24 spec reporter）之后，FR 状态不变：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**（按表格行重数）。fork 不再复制父会话的事件，而是记录 `sessions.forked_at_seq`，读取时把父日志（cut 之前）与分支自己的事件合并成一条单调转录；那条把长会话截断在 1000 条的 `ListEvents` 复制路径已经删除。测试面板补上 Node 24 默认的 spec reporter（`ℹ pass N`），直接 `node x.test.js` 的输出不再记为未识别格式。证据见文末「本批：fork 转录的截断（lineage）+ Node 24 spec reporter」。
+
 ---
 # PiForge 对照 PRD 的实现审计
 
@@ -1115,3 +1117,66 @@ UI：徽章的 `title` 与 `aria-label` 各一句可访问说明，区别是真�
 - 镜像只用 `pwsh scripts/build-app-image.ps1` 重建（`sha256:40f6efa8…` 的 manifest，tag `piforge:local`）；`pf-local` 用**同一个数据卷** `9ce20975…` 重建（旧容器 `88707cf4…` → 新容器 `2507e794…`，端口 7722→7700，`PIFORGE_DEFAULT_PROVIDER=volc`、`volc` 仍可用、`CapDrop=["CAP_DAC_OVERRIDE"]`、`CapAdd=null`、沙箱配额默认 2 GiB），`/healthz` 200。
 - 部署收尾：探针项目已删除（API 200），`GET /v1/admin/status` 为 `runs_running=0`、`agents_running=0`、`sandboxes_up=0`、`projects=6`（都是此前验收留下的，不是本批）、`sessions=7`；逐个会话 `GET …/status` 全部 `running:false`。
 - 证据目录：`e2e/.artifacts/fix-truth/`（`fix1-failfirst.log`、`fix1-pass.log`、`fix2-failfirst.log`、`fix2-pass*.log`、`fix3-failfirst.log`、`fix3-pass.log`、`full-e2e.log`、`gate-go-test.log`、`gate-web-test.log`、`build-image.log`、`deliver-check.log`、`deployed-*.json`、`90…96-*.png`）。
+
+## 本批：fork 转录的截断（lineage）+ Node 24 spec reporter
+
+### 1. 选择：lineage（(a)），不是无上限复制（(b)）
+
+旧代码 `seedForkedHistory` 用 `ListEvents(ctx, userID, parentID, 0, 1000)` 复制父会话的整段事件日志。`ListEvents` 是 SSE 回放查询，一页最多 1000 条（`store/events.go` 把 `limit` 夹到 1000），返回值没有「还有下一页 / 还有多少」的信号；更早设计里按 `entry_id → parent_id` 走父链选窗口的代码在这个构建里也是死的——`pi/normalize.go` 明确不在事件上写 `EntryID`（Pi 的事件流不报 entry id），所以 `parentOf` 永远为空，函数落到「复制它读到的全部」的兜底。父会话超过 1000 条事件时，fork 的转录从第 1001 条起静默丢失：没有缺口标记，也没有提示。
+
+选 (a) 而不是 (b)：
+
+- (b) 仍要写一份完整副本（一次 fork 复制 5 万条事件），还要新增 `history_complete` 标志与「历史不完整，已复制前 N 条」的 UI；副本会与父会话分叉，父会话以后被清理时两边不一致。
+- (a) 只写一个数。父日志是唯一事实来源，fork 是 O(1)，结构上不可能被任何页大小截断。
+- (a) 唯一的代价是读要合并；用「转录 seq」把每段映射进同一个单调光标即可，调用方的 `seq > after, asc, limit` 契约不变。
+
+数据与读法：
+
+- `contracts.Session.ForkedAtSeq` + `sessions.forked_at_seq INTEGER NOT NULL DEFAULT 0`；老库由 `store.migrate` 的 `addColumn` 加列。旧 fork 的 0 表示「不是 lineage fork」，它们保留当年复制的事件，不会被追溯合并。
+- `handleFork` 在 `rt.Fork` **之前**用 `MergedSeqRange` 量出父会话合并转录的最后 seq；`branchHasHistory` 为真时把 cut 写进分支行。为假（在第一条用户消息处 fork，Pi 给空会话）不写：模型没看过的对话不显示。
+- `Store.sessionLineage` 从根到叶构造块：`transcript seq = base + own seq`，块首尾相接；父的 cut 之后的块被丢弃。`ListMergedEvents` 按块分页（沿用 after/limit），`MergedSeqRange` 供 SSE 的 409 缺口检测。嵌套 fork（fork 的 fork）截断在父的**合并** seq 上，而不是父自己的行号上；`TestMergedTranscriptHonoursNestedCuts` 覆盖。
+- 父会话删除：`DELETE /v1/sessions/{id}` 在存在 lineage 分叉时返回 409（「这个会话有 N 个分叉，它们的历史直接继承自这里；先删除分叉，再删除它」）。store 层仍防御性降级：父行真的不见了也能读，只是没有继承段，不报错也不伪造父事件。项目级删除按外键级联，整棵树一起走。
+- 父会话之后写入的事件 seq 都在 cut 之后，任何块都读不到，所以「later events never leak in」。
+- 合并读是只读；`hub.applyDerivedState` 只处理实时 pump 事件，父的 `run.started` 不可能把分支状态改成 running。前端 reducer 的「回放只能结束 run、不能开始 run」规则与 `87-fork-status-truth.spec.ts` 继续作为证据。
+- 读路径全部改到 `ListMergedEvents`：`sse.go`（UI 唯一转录来源）、`session_export.go`（MD/HTML 导出）、`pr.go` 的 `firstUserText`（分支开 PR 的标题）、`session_handlers.go` 的 `forkPointsFromEvents`/`entryTimestamps`（无 agent 兜底）、`store.LastContextUsage`（fork 建好就显示继承的上下文，而不是 0%）。另外 `sidecar_promote.go` 的 `copyEvents`（clone 与 promote 共用）也改成无上限分页——那是同一个页大小的另一个受害者；它们没有 lineage，所以仍然复制，只是不再截断。
+
+### 2. Node 24 spec reporter
+
+Node 24 直接执行测试文件（`node x.test.js`，没有 `--test`）时默认打印 spec reporter，而不是 TAP：摘要是 `ℹ pass N` / `ℹ fail N` / `ℹ tests N`，套件是 `▶`，通过/失败是 `✔`/`✖`，失败详情在 `✖ failing tests:` 段（`test at file:line:col` + `✖ name` + 缩进消息 + 栈）。旧 `testrun` 只认 TAP，所以这条真实路径记成「未识别格式」。
+
+- `backend/internal/testrun/parse_spec.go` 读摘要计数与 `duration_ms`，失败只从失败段读（不数 `✖` 行：套件行也是 `✖`，会把套件当测试），跳过栈帧；`Parse` 对 `node`/`tsx` 先 TAP 后 spec，对 `npm`/`jest`/`vitest` 在 JS 摘要后再 TAP/spec，`make` 与未知 family 的 `parseAny` 也包含它；`Complete` 认 `ℹ pass|fail|tests`，终端命令不会因为 spec 输出一直停在 running。
+- 真正未知的格式仍返回 `Recognized=false`，计数清零、保留原文尾部（`TestParseUnrecognisedKeepsNoCounts` 不变）。
+- 测试：`parse_spec_test.go` 5 例（node v24.11.1 真实字节夹具的 3/2/1 与失败位置 `suite.test.js:5`、通过运行、npm/make 包装、skipped+todo、半个摘要不算）；`TestParseRealNodeTestRun` 追加真实 runner 的「直接执行 pass/fail 两个文件」断言；`TestComplete` 增 3 条。
+
+### 3. 测试与 fail-first
+
+- **fail-first（旧代码，e2e）**：`e2e/tests/89-fork-long-transcript.spec.ts` 先建 32 轮（父会话 >1200 事件，测试自己断言过），fork 后的页面 `turn-user` = **24**，期望 **32**（`Expected: 32 / Received: 24`，重试同样失败）。日志 `e2e/.artifacts/fix-fork-copy/fail-first-before-fix.log`。这就是「fork 丢掉尾巴」的直接证据，不是推测。
+- 修后同一 spec：32 轮全部在页面上，第一轮与最后一轮文本都在，最后一条助手消息也在；日志 `after-fix.log`、`full-e2e.log`（`[fork-long] parent seq=… prompts=32`）。
+- Go：`store/lineage_test.go` 5 例（1500 条完整、cut 之后不泄漏、嵌套 cut、父删除降级、继承的 context.usage）；`httpapi/fork_history_test.go` 4 例（会话转录、1500 条 SSE 读到 `"seq":1500`、cut 冻结、父删除 409 且分支先删后父可删）；`httpapi/session_clone_test.go` 新增「1200 条 clone 不再截断」。
+- `web/lib/session/reduce.test.ts` 的 5 例「running comes from the status API, not from replayed history」保持通过；`web/lib/types.ts` 补上 `forked_at_seq` 字段与转录 seq 的说明。
+- e2e `87-fork-status-truth.spec.ts` 与 `89-fork-long-transcript.spec.ts` 都在最终代码上通过。
+
+### 4. 部署实测（最终镜像）
+
+- 镜像只用 `pwsh scripts/build-app-image.ps1` 重建：`sha256:9a5b41cde16e12f9943e0dcfa504fc0a5149387d487a7d5a6e8d13b8cc765e63`（tag `piforge:local`）。
+- `pf-local` 用**同一个数据卷** `9ce20975339ab49b4b933f5a4b77acbb406eb4b426ba7ab79c3977ab15111f36` 重建：旧容器 `2507e794…` → `60c4c79f…`（第一版修复）→ 最终 `98abb92021acede76efbcb18a06cc34861e84fd4c48e53289fc7d29c7568d9d3`；端口 7722→7700；`PIFORGE_DEFAULT_PROVIDER=volc`；`CapDrop=["CAP_DAC_OVERRIDE"]`、`CapAdd=null`；启动日志 `sandbox disk quota limit="2.0 GiB"`；`/healthz` 200。
+- `e2e/scripts/fix-fork-copy-probe.mjs` 对着 :7722 跑真实模型（volc/deepseek-v4-flash）：父会话 5 轮真实回复后 `last_seq=1162`（> 1000）；fork 响应 `forked_at_seq=1162`；分支页面 `turn-user=5/5`，第一轮是「第 1 轮」、最后一轮是「第 5 轮」，最后一条助手消息含 `END-5`；`GET …/export?format=md` 有 5 条「## 我」且含 `END-5`。**17/17 检查 PASS**（`deployed-probe.log`、`deployed-probe-log.json`、`deployed-fork-export.md`）。
+- 截图（部署实例）：`deployed-fork-top.png`（第一轮 + `END-1`）与 `deployed-fork-bottom.png`（第 5 轮 + `END-5`）；探针会先把转录滚到顶部/底部并**验证 `scrollTop` 真的到位**再截图（自动锚定会把一次性的 scrollTo 拉回去）。
+- 探针自删 fork / parent / project（200/200/200）；复查 `probe_projects=0`、`probe_sessions=0`、`running_sessions=0`（`projects=6`/`sessions=7` 都是此前验收留下的）。
+
+### 5. 门禁（本批）
+
+- `go build ./...` 退出 0（`go-build.log`）；`go vet ./...` 退出 0（`go-vet.log`）；`go test ./... -count=1` **35 个包全 ok、0 FAIL**、退出 0（`go-test.log`）。
+- `pnpm --dir web test -- --run`：**268 passed（33 个文件）**（`web-test.log`）；`pnpm --dir web exec next build` 退出 0（`web-build.log`）。
+- 完整 e2e：**178 passed**（原 177 + 新 `89-fork-long-transcript.spec.ts`，同一份 `.data`，8.3 分钟；最终代码重跑 `full-e2e.log`，其中 `[fork-long] parent seq=1368 prompts=32`）。
+- `pwsh scripts/deliver-check.ps1`：`PIFORGE_DRILL_KEY` 从 `~/.dsh/.credentials.yaml` 的 `VOLCE_API_KEY` 读入（只在本进程环境里，未打印、未落盘），run `20261031-192241`，**119 条 `[PASS]` / 0 FAIL / 0 SKIP，`failure` 为 null**；drill 断言的镜像 id 就是部署的 `sha256:9a5b41cd…`；一次性容器 `pf-drill` 与 volume `pf-drill-data` 已删除，`pf-local` 全程未被触碰（前后容器 id 都是 `98abb920…`，`/healthz` 200）；`deliver-check.log`。
+- 提交：`9584ee9`（代码 + 测试 + e2e probe/spec + `web/lib/types.ts`），本文件单独一笔。只 `git add`/`git commit -- <paths>` 自己的 22 个路径，`git show --name-only` 已核对。
+
+### 6. 边界（明确没做的）
+
+- **旧 fork 不追溯**：本批之前生成的 fork 行 `forked_at_seq=0`，它们保留当年复制的事件（可能已被截断）。要完整历史，需要在父会话上重新 fork 一次；本批不重写旧分支的转录。
+- **在更早的用户消息处 fork**：本批仍继承「fork 当时的整段父转录」，而不是只到所选消息。旧 copy 也一样（entry id 为空时复制全部），本批没有收窄，避免引入新的静默截断；代价是界面可能显示 Pi 的 agent 会话文件在所选消息之后的对话。要精确，需要把 entry id 写进事件或把 fork point 映射到 seq，本批不做。
+- **clone / promote 仍复制**（它们要独立于源会话继续存在），只是不再被 1000 条页大小截断；它们不是 lineage，删源会话不影响它们。
+- **父会话删除被拒绝**（有 lineage 分叉时 409）是刻意选择：宁可让用户先删分叉，也不静默丢掉分叉的历史。项目级删除仍级联整棵树。
+- **Node <24 的 TAP 路径不变**；spec parser 只覆盖 `node:test` 的 spec 形状，自定义 reporter 仍按未知格式诚实显示原文。
+- **合并后的 `seq` 是转录级**，不是分支行自己的行号；`status.last_seq` 仍是该进程自己的序号（当前前端不使用它做游标）。
