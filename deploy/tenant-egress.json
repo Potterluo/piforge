@@ -1,0 +1,7 @@
+{
+  "comment": "PiForge tenant egress policy: what a sandbox may reach beyond the control plane and the model gateway. 'none' (the default) creates each tenant's bridge with `docker network create --internal`, so the sandbox has no route to the public internet while it still reaches /gw/llm and /gw/mcp on the control plane, which is joined to that bridge. 'open' is the historical behaviour and must be chosen explicitly. 'allowlist' is modelled but NOT enforced by this release and is refused at startup (see docs/EXECUTION-BOUNDARY.md 12.5): Docker filters a bridge, not a hostname. Mounted read-only into the control plane and the sandbox-runner at /etc/piforge/tenant-egress.json (PIFORGE_TENANT_EGRESS_FILE). Per-tenant overrides are keyed by user id or email and need -sandbox-network-mode tenant, because a per-tenant policy needs a bridge per tenant.",
+  "default": {
+    "mode": "none"
+  },
+  "tenants": {}
+}

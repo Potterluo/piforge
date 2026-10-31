@@ -34,7 +34,12 @@
 #     creation, and publish no port on the host. There is no shared sandbox
 #     bridge any more: two tenants' sandboxes have no route to each other, which
 #     is what makes "a sandbox cannot reach another sandbox" true rather than
-#     "the image's nginx says 401" (docs/EXECUTION-BOUNDARY.md §11).
+#     "the image's nginx says 401" (docs/EXECUTION-BOUNDARY.md §11);
+#   - each tenant bridge is created `--internal` (deploy/tenant-egress.json,
+#     default `none`), so a sandbox has no route to the public internet while the
+#     gateway on that same bridge stays reachable. `open` is an explicit policy
+#     value, and a mode this deployment cannot enforce ("allowlist") fails the
+#     start instead of being ignored (docs/EXECUTION-BOUNDARY.md §12.5).
 #
 # Requirements: Docker Engine 25+ (volume-subpath), Go 1.25+ for the preflight,
 # a daemon the runner can reach through /var/run/docker.sock, and the three
@@ -104,11 +109,22 @@ services:
       # Read-only, from deploy/tenant-limits.json unless up-isolated.ps1 was
       # pointed at another file. A policy that cannot be parsed fails the start.
       PIFORGE_TENANT_LIMITS_FILE: /etc/piforge/tenant-limits.json
+      # What a sandbox may reach beyond this control plane. `none` creates each
+      # tenant's bridge with `docker network create --internal`: the sandbox has
+      # no route to the public internet, while /gw/llm and /gw/mcp keep working
+      # because this container is joined to that bridge. The default of the
+      # mounted file is closed, and a mode this deployment cannot enforce
+      # ("allowlist") fails the start rather than being ignored.
+      PIFORGE_TENANT_EGRESS_FILE: /etc/piforge/tenant-egress.json
     volumes:
       - piforge-data:/data
       # The quota policy is configuration, reviewed with the deployment and
       # mounted read-only; the container never needs to write it.
       - ${PIFORGE_TENANT_LIMITS_MOUNT:-./deploy/tenant-limits.json}:/etc/piforge/tenant-limits.json:ro
+      # The egress policy, read-only, for the admin report and for the mode each
+      # create carries. The runner reads the same file and is the side that
+      # enforces it (it creates the tenant bridges).
+      - ${PIFORGE_TENANT_EGRESS_MOUNT:-./deploy/tenant-egress.json}:/etc/piforge/tenant-egress.json:ro
     networks:
       - default
       - sandbox-control
@@ -157,6 +173,14 @@ services:
       # Report http://piforge-<hash8>:8080 instead of a published loopback port:
       # piforged is a container here, so 127.0.0.1:<port> would be its own loopback.
       SANDBOX_CONTAINER_ENDPOINT: "1"
+      # The egress policy *this* process applies: it creates the tenant bridges,
+      # and `--internal` on that bridge is the whole of "none". It reads the same
+      # file the control plane does, validates it at boot, and refuses a mode it
+      # cannot enforce (allowlist) or one the network shape cannot hold (none on a
+      # shared bridge). Empty SANDBOX_EGRESS_MODE follows the network mode:
+      # closed with per-tenant bridges, open with a shared one.
+      SANDBOX_EGRESS_FILE: /etc/piforge/tenant-egress.json
+      SANDBOX_EGRESS_MODE: ${PIFORGE_TENANT_EGRESS_MODE:-}
       # No SANDBOX_WORKSPACE_VOLUME / SANDBOX_WORKSPACE_VOLUME_ROOT: those describe
       # the *shared volume* shape, which contradicts the sandboxed placement (each
       # sandbox gets a volume of its own). The provider refuses the combination.
@@ -165,6 +189,8 @@ services:
       # socket mount's read-only flag does not restrict the API, and writing it
       # that way would suggest a boundary that is not there.
       - /var/run/docker.sock:/var/run/docker.sock
+      # Read-only policy, the same file the control plane mounts.
+      - ${PIFORGE_TENANT_EGRESS_MOUNT:-./deploy/tenant-egress.json}:/etc/piforge/tenant-egress.json:ro
     networks:
       - sandbox-control
       - piforge-sandboxes

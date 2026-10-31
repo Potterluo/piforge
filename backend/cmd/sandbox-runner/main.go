@@ -31,6 +31,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/sandbox"
 	"github.com/piforge/piforge/backend/internal/sandboxrunner"
+	"github.com/piforge/piforge/backend/internal/tenantegress"
 )
 
 func main() {
@@ -58,6 +59,10 @@ func run() error {
 			"name prefix of a tenant's bridge (default piforge-t-)")
 		joinContainers = flag.String("join-containers", envOr("SANDBOX_JOIN_CONTAINERS", ""),
 			"comma-separated containers joined to every tenant bridge: the control plane (panels and the model gateway) and this runner (the checkout)")
+		egressMode = flag.String("egress-mode", envOr("SANDBOX_EGRESS_MODE", ""),
+			`fallback egress mode for a create that carries none: "none" (bridge created --internal, no route out) or "open"; empty follows the network mode (closed with tenant bridges)`)
+		egressFile = flag.String("egress-file", envOr("SANDBOX_EGRESS_FILE", ""),
+			"JSON egress policy this runner validates at boot; the control plane reads the same file and sends each tenant's mode with the create")
 		cpus = flag.String("cpus", envOr("SANDBOX_CPUS", ""),
 			"default CPU limit per sandbox, when a create request carries none")
 		memory = flag.String("memory", envOr("SANDBOX_MEMORY", ""),
@@ -94,6 +99,29 @@ func run() error {
 		return fmt.Errorf("-network-mode tenant needs -join-containers (SANDBOX_JOIN_CONTAINERS): name the control plane and this runner, e.g. piforge,piforge-sandbox-runner")
 	}
 
+	// The egress policy is this process's business because this process creates
+	// the bridge: `--internal` is the enforcement. A policy it cannot apply (an
+	// allowlist, "none" on a shared bridge) fails the start here, and a mode named
+	// by a create request is parsed and refused per request in the provider.
+	egress, err := runnerEgress(*egressMode, *egressFile, mode)
+	if err != nil {
+		return err
+	}
+	if egress == sandbox.EgressNone && mode != sandbox.NetworkTenant {
+		return fmt.Errorf(`-egress-mode none cannot be enforced on the shared network: Docker cannot make ` +
+			`one tenant's traffic closed while another's is open on the same bridge; use ` +
+			`-network-mode tenant, or -egress-mode open (and mean it)`)
+	}
+	if egress == sandbox.EgressOpen {
+		logger.Warn("sandboxes created here can reach the internet",
+			"egress", "open",
+			"detail", "open is explicit; per-tenant closure needs -network-mode tenant and egress none")
+	} else {
+		logger.Info("sandboxes created here have no route out",
+			"egress", string(egress),
+			"detail", "tenant bridges are created --internal; the control plane and this runner are joined to them, so /gw/llm and the checkout still work")
+	}
+
 	provider, err := sandboxrunner.NewDockerProvider(sandboxrunner.DockerOptions{
 		DataRoot:            *dataRoot,
 		Image:               *image,
@@ -101,6 +129,8 @@ func run() error {
 		NetworkMode:         mode,
 		TenantNetworkPrefix: *tenantNetworkPrefix,
 		JoinContainers:      splitList(*joinContainers),
+		// The fallback a create that carries no mode gets (see runnerEgress).
+		Egress:              egress,
 		CPUs:                *cpus,
 		Memory:              *memory,
 		Pids:                *pids,
@@ -145,6 +175,8 @@ func run() error {
 		"image", *image,
 		"network", *network,
 		"network_mode", string(mode),
+		"egress_mode", string(egress),
+		"egress_file", *egressFile,
 		"join_containers", strings.Join(splitList(*joinContainers), ","),
 		"container_endpoint", *containerEndpoint)
 
@@ -162,6 +194,48 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	return httpServer.Shutdown(shutdownCtx)
+}
+
+// runnerEgress resolves this runner's fallback egress mode and validates the
+// policy file, if one was mounted.
+//
+// The fallback is what a create request that carries no mode gets. With tenant
+// bridges it is *closed* when nothing says otherwise: a runner that builds
+// isolated bridges and leaves them unrestricted because nobody configured a
+// policy is the exact failure the policy exists to prevent. The shared shape
+// keeps the historical open default, and the boot log says which one is running.
+//
+// A file is read for its own sake: the control plane reads the same file and
+// sends each tenant's mode, but a runner that would happily accept "allowlist"
+// must refuse to start rather than wait for the first such request.
+func runnerEgress(modeFlag, file string, networkMode sandbox.NetworkMode) (sandbox.EgressMode, error) {
+	fallback := sandbox.EgressNone
+	if trimmed := strings.TrimSpace(modeFlag); trimmed != "" {
+		parsed, err := sandbox.ParseEgressMode(trimmed)
+		if err != nil {
+			return "", fmt.Errorf("-egress-mode: %w", err)
+		}
+		fallback = parsed
+	} else if networkMode != sandbox.NetworkTenant {
+		fallback = sandbox.EgressOpen
+	}
+	if path := strings.TrimSpace(file); path != "" {
+		policy, err := tenantegress.LoadFile(path, tenantegress.Egress{Mode: fallback})
+		if err != nil {
+			return "", err
+		}
+		if err := policy.Check(networkMode); err != nil {
+			return "", fmt.Errorf("egress policy %s: %w", path, err)
+		}
+		// The file's default is this runner's fallback too: a direct API call that
+		// carries no mode must get the same answer the policy would give the
+		// control plane, not a second opinion invented here.
+		fallback = policy.Default().Mode
+	}
+	if err := fallback.Enforceable(); err != nil {
+		return "", err
+	}
+	return fallback, nil
 }
 
 func envOr(name, fallback string) string {

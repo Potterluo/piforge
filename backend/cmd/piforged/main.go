@@ -165,6 +165,13 @@ type options struct {
 	// tenantMaxSandboxes is how many sandboxes one tenant may have at once (0
 	// disables the guard). A per-tenant entry in the file overrides it.
 	tenantMaxSandboxes int
+	// tenantEgressFile is the JSON policy named by PIFORGE_TENANT_EGRESS_FILE: what
+	// each tenant's sandbox may reach beyond the control plane and the gateway.
+	tenantEgressFile string
+	// tenantEgressMode is the deployment-wide fallback mode ("none" or "open") used
+	// when no file is configured. "allowlist" is refused at startup: this release
+	// cannot enforce a hostname filter on a bridge (docs/EXECUTION-BOUNDARY.md §12.5).
+	tenantEgressMode string
 	// agentInSandbox is gone as a *choice* (stage 4 of
 	// docs/EXECUTION-BOUNDARY.md): a container placement always runs the agent
 	// inside its sandbox, and -sandbox local always runs it here. The old knob is
@@ -325,6 +332,10 @@ func run() error {
 		"JSON file of per-tenant quota overrides; the flags above are its default (env PIFORGE_TENANT_LIMITS_FILE)")
 	flag.IntVar(&opt.tenantMaxSandboxes, "tenant-max-sandboxes", envInt("PIFORGE_TENANT_MAX_SANDBOXES", 0),
 		"how many sandboxes one tenant may have at once, 0 disables the guard (env PIFORGE_TENANT_MAX_SANDBOXES)")
+	flag.StringVar(&opt.tenantEgressFile, "tenant-egress-file", envOr("PIFORGE_TENANT_EGRESS_FILE", ""),
+		"JSON file of the per-tenant egress policy (none/allowlist/open, per account); with -sandbox-network-mode tenant its default is closed (env PIFORGE_TENANT_EGRESS_FILE)")
+	flag.StringVar(&opt.tenantEgressMode, "tenant-egress-mode", envOr("PIFORGE_TENANT_EGRESS_MODE", ""),
+		`fallback egress mode for every tenant when no file is configured: "none" (no internet, the gateway stays reachable) or "open" (explicit); "allowlist" is refused (env PIFORGE_TENANT_EGRESS_MODE)`)
 	flag.StringVar(&opt.sandboxRunnerURL, "sandbox-runner-url", envOr("PIFORGE_SANDBOX_RUNNER_URL", ""),
 		"base URL of the sandbox-runner service, with -sandbox runner (e.g. http://sandbox-runner:7801)")
 	flag.StringVar(&opt.sandboxRunnerToken, "sandbox-runner-token", envOr("PIFORGE_SANDBOX_RUNNER_TOKEN", ""),
@@ -545,6 +556,36 @@ func run() error {
 			"fix", "set -sandbox-cpus/-sandbox-memory/-sandbox-pids and -tenant-max-sandboxes, or -tenant-limits-file")
 	}
 
+	// The tenant egress policy, resolved once and checked before any container
+	// exists: a mode this deployment cannot apply (an allowlist, "none" on a
+	// shared bridge, "none" on the host placement) fails the boot instead of
+	// becoming an admin page that describes a boundary nobody enforces.
+	egress, err := resolveTenantEgress(opt.tenantEgressFile, opt.tenantEgressMode, networkMode)
+	if err != nil {
+		return fmt.Errorf("tenant egress: %w", err)
+	}
+	if err := checkTenantEgress(opt.sandboxKind, networkMode, egress); err != nil {
+		return fmt.Errorf("tenant egress: %w", err)
+	}
+	tenants.egress = egress
+	// Only wire the provider when a policy exists: a nil EgressFor means "this
+	// deployment configured nothing" and keeps the historical open shape, while a
+	// function that answers nothing means the policy has no answer and closes.
+	var egressModeFor func(ctx context.Context, userID string) sandbox.EgressMode
+	if egress != nil {
+		egressModeFor = tenants.egressFor
+		logger.Info("tenant egress policy",
+			"source", egress.Source(),
+			"default", egress.Default().Describes(),
+			"overrides", len(egress.Tenants()),
+			"network_mode", string(networkMode),
+			"detail", "none = the tenant bridge is created --internal: no route out, the gateway on that bridge stays reachable")
+	} else {
+		logger.Warn("no tenant egress policy is configured: every sandbox can reach the internet exactly as the host can",
+			"fix", "set -tenant-egress-file (the isolated stack mounts deploy/tenant-egress.json) or -tenant-egress-mode",
+			"note", "with -sandbox-network-mode tenant the default is closed even without a file")
+	}
+
 	// A run left "running" belongs to a command whose output died with the
 	// previous process. This daemon is the only writer, so settling it here is
 	// honest; leaving it running would make the test panel lie forever.
@@ -649,7 +690,11 @@ func run() error {
 			// A per-tenant quota and a per-tenant bridge, both resolved here rather
 			// than inside the provider: the policy is the deployment's, and the
 			// provider only applies what it is given.
-			LimitsFor:           tenants.sandboxLimits,
+			LimitsFor: tenants.sandboxLimits,
+			// And the egress policy, applied when this process creates the
+			// tenant's bridge: `--internal` for "none", an ordinary bridge for
+			// "open". Nil keeps the historical open shape (logged above).
+			EgressFor:           egressModeFor,
 			NetworkMode:         networkMode,
 			TenantNetworkPrefix: opt.sandboxTenantNetworkPrefix,
 			JoinContainers:      opt.sandboxJoinContainers,
@@ -687,8 +732,13 @@ func run() error {
 			// And the network mode travels too: the runner owns the Docker CLI, so
 			// it is the process that creates the per-tenant bridges.
 			TenantNetworks: networkMode == sandbox.NetworkTenant,
-			Network:        opt.sandboxNetwork,
-			APIPort:        8080,
+			// The egress mode travels for the same reason: the bridge the runner
+			// creates is the enforcement, and this process is where the policy is
+			// read. The runner refuses a mode it cannot apply instead of building
+			// a bridge with the wrong posture.
+			EgressFor: egressModeFor,
+			Network:   opt.sandboxNetwork,
+			APIPort:   8080,
 			// Stage 2: the create request asks the runner for a workspace volume
 			// of this sandbox's own, which no service in the deployment mounts.
 			// Stage 4 removed the switch: a runner placement is always detached.
@@ -1158,33 +1208,38 @@ func run() error {
 		// and the answer follows the placement: a container deployment runs every
 		// agent in its sandbox, so a stdio server cannot be staged there
 		// (internal/mcpstage).
-		AgentIsolated:      opt.agentInSandbox,
-		SandboxDiskQuota:   opt.sandboxDiskQuota,
-		SkillMaxBytes:      opt.skillMaxBytes,
+		AgentIsolated:    opt.agentInSandbox,
+		SandboxDiskQuota: opt.sandboxDiskQuota,
+		SkillMaxBytes:    opt.skillMaxBytes,
 		// The quota policy and the network mode are what the admin status page
 		// reports next to each tenant's sandbox count: "what limit is this tenant
 		// running with" has to be answerable without reading the deployment file.
-		TenantLimits:      tenants.policy,
+		TenantLimits:       tenants.policy,
 		SandboxNetworkMode: string(networkMode),
-		Sandbox:            sb,
-		Secrets:            box,
-		WebUpstream:        opt.webUpstream,
-		SkillsDir:          filepath.Join(opt.dataDir, "skills"),
-		SnapshotDir:        skillSnapshotDir,
-		AgentDir:           filepath.Join(opt.dataDir, "pi-agents"),
-		ArtifactsDir:       filepath.Join(opt.dataDir, "artifacts"),
-		SandboxSnapshotDir: filepath.Join(opt.dataDir, "snapshots"),
-		DataDir:            abs(opt.dataDir),
-		LLMGateway:         gateway,
-		Browser:            browsers,
-		Term:               termAdapter{m: terminals},
-		Provisioner:        prov,
-		SetupDefaults:      setupDefaults,
-		BrowserTakeoverTTL: opt.browserTakeoverTTL,
-		Reconciler:         rec,
-		Probe:              livenessProbe,
-		Now:                time.Now,
-		Logger:             logger,
+		// The egress policy, so the admin screen can answer "who can reach the
+		// internet" per tenant — the same reason the quota is reported there.
+		TenantEgress: egress,
+		// The mode is only a boundary when something creates a container for it.
+		SandboxEgressApplied: opt.sandboxKind != "local",
+		Sandbox:              sb,
+		Secrets:              box,
+		WebUpstream:          opt.webUpstream,
+		SkillsDir:            filepath.Join(opt.dataDir, "skills"),
+		SnapshotDir:          skillSnapshotDir,
+		AgentDir:             filepath.Join(opt.dataDir, "pi-agents"),
+		ArtifactsDir:         filepath.Join(opt.dataDir, "artifacts"),
+		SandboxSnapshotDir:   filepath.Join(opt.dataDir, "snapshots"),
+		DataDir:              abs(opt.dataDir),
+		LLMGateway:           gateway,
+		Browser:              browsers,
+		Term:                 termAdapter{m: terminals},
+		Provisioner:          prov,
+		SetupDefaults:        setupDefaults,
+		BrowserTakeoverTTL:   opt.browserTakeoverTTL,
+		Reconciler:           rec,
+		Probe:                livenessProbe,
+		Now:                  time.Now,
+		Logger:               logger,
 	})
 
 	srv := &http.Server{

@@ -45,6 +45,10 @@ const status: DeploymentStatus = {
     source: "/etc/piforge/tenant-limits.json",
     network_mode: "tenant",
     enforced: true,
+    egress_mode: "none",
+    egress_source: "/etc/piforge/tenant-egress.json",
+    egress_configured: true,
+    egress_applied: true,
     tenants: [
       {
         user_id: "usr_1",
@@ -56,6 +60,8 @@ const status: DeploymentStatus = {
         sandboxes: 1,
         effective: true,
         override: false,
+        egress: "none",
+        egress_override: false,
       },
       {
         user_id: "usr_2",
@@ -67,6 +73,8 @@ const status: DeploymentStatus = {
         sandboxes: 2,
         effective: true,
         override: true,
+        egress: "open",
+        egress_override: true,
       },
     ],
   },
@@ -117,6 +125,47 @@ describe("admin status: tenant limits", () => {
     expect(heavy).toHaveTextContent("已达上限");
   });
 
+  it("shows the effective egress mode for the deployment and for every tenant", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByTestId("stat-tenant-limits")).toBeInTheDocument());
+
+    // "Who can reach the internet" is the other half of the tenant boundary, and
+    // it has to be on the page: a mode only in a config file is one an operator
+    // cannot act on.
+    const block = screen.getByTestId("tenant-limits-egress");
+    expect(block).toHaveAttribute("data-egress", "none");
+    expect(block).toHaveTextContent("关闭（仅控制面网关）");
+    expect(block).toHaveTextContent("/etc/piforge/tenant-egress.json");
+
+    const closed = screen.getByTestId("tenant-egress-usr_1");
+    expect(closed).toHaveAttribute("data-egress", "none");
+    expect(closed).toHaveTextContent("出口：关闭");
+    expect(closed).not.toHaveTextContent("单独配置");
+
+    const open = screen.getByTestId("tenant-egress-usr_2");
+    expect(open).toHaveAttribute("data-egress", "open");
+    expect(open).toHaveTextContent("出口：开放");
+    expect(open).toHaveTextContent("单独配置");
+  });
+
+  it("says the egress is open when no policy was configured", async () => {
+    statusSpy.mockImplementationOnce(async () => ({
+      ...status,
+      tenant_limits: {
+        ...status.tenant_limits,
+        egress_mode: "open",
+        egress_source: "none",
+        egress_configured: false,
+        egress_applied: true,
+      },
+    }));
+    renderPage();
+    await waitFor(() => expect(screen.getByTestId("tenant-limits-egress")).toBeInTheDocument());
+    // The page must not leave a blank that reads as "closed".
+    expect(screen.getByTestId("tenant-limits-egress")).toHaveTextContent("开放（未配置策略）");
+    expect(screen.getByTestId("tenant-limits-egress")).toHaveTextContent("没有配置出口策略");
+  });
+
   it("says so when the deployment configured no quota at all", async () => {
     statusSpy.mockImplementationOnce(async () => ({
       ...status,
@@ -125,6 +174,10 @@ describe("admin status: tenant limits", () => {
         source: "none",
         network_mode: "shared",
         enforced: false,
+        egress_mode: "open",
+        egress_source: "none",
+        egress_configured: false,
+        egress_applied: true,
         tenants: [],
       },
     }));

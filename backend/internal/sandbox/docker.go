@@ -135,6 +135,22 @@ type DockerConfig struct {
 	// NetworkMode decides whether sandboxes share one network (NetworkShared) or
 	// each tenant gets its own (NetworkTenant). See network.go.
 	NetworkMode NetworkMode
+	// Egress is the deployment-wide outbound-network posture (EgressNone /
+	// EgressOpen). EgressFor, when set, decides per tenant instead.
+	//
+	// The zero value is NOT read as "open": when both fields are empty this
+	// provider assumes its caller configured no policy at all, which is the
+	// historical open shape — a shape the boot log and the admin status page
+	// both name. A policy that exists always answers, and an empty answer from
+	// it is read as closed (see egressFor in network.go).
+	Egress EgressMode
+	// EgressFor resolves one tenant's egress mode. Nil means Egress decides.
+	//
+	// It lives here for the same reason LimitsFor does: the provider creates
+	// containers for many tenants, and the policy is the deployment's. The
+	// enforcement is this package's (the tenant bridge's `--internal` flag); the
+	// decision is not.
+	EgressFor func(ctx context.Context, userID string) EgressMode
 	// TenantNetworkPrefix overrides the name prefix of a tenant's bridge; empty
 	// uses DefaultTenantNetworkPrefix.
 	TenantNetworkPrefix string
@@ -400,7 +416,11 @@ func (d *Docker) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 	// (or runner) container that was recreated, and a sandbox that predates the
 	// tenant-network mode. Both are repaired here, which is why this runs before
 	// the adopt/create decision rather than inside it.
-	if err := d.ensureTenantNetwork(ctx, userID); err != nil {
+	//
+	// This is also where the tenant's egress policy is applied (the bridge's
+	// `--internal` flag) or refused, so a deployment cannot create a sandbox
+	// whose egress posture it cannot enforce.
+	if err := d.ensureNetwork(ctx, userID); err != nil {
 		return nil, err
 	}
 

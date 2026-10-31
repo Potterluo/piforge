@@ -112,6 +112,12 @@ type RunnerConfig struct {
 	// LimitsFor resolves one tenant's limits. Nil means every create carries
 	// CPUs/Memory/Pids, which is the single-tenant shape.
 	LimitsFor func(ctx context.Context, userID string) Limits
+	// EgressFor resolves one tenant's egress mode. It travels with the create
+	// request, because the runner is the process that creates the bridge and the
+	// control plane is the process that owns the policy (the same split as
+	// LimitsFor). Nil means no mode is sent and the runner's own configuration
+	// decides; an empty answer is sent as-is and read as closed on the far side.
+	EgressFor func(ctx context.Context, userID string) EgressMode
 	// TenantNetworks asks the runner for a bridge per tenant instead of one shared
 	// network (sandbox.NetworkTenant). It is the control plane's statement that
 	// sandboxes must not share an L2 segment; the runner is where it is carried
@@ -224,6 +230,12 @@ func (r *Runner) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 		// would put the container back on it.
 		Network:  r.cfg.Network,
 		Detached: r.cfg.DetachedWorkspace,
+	}
+	// The egress mode is the tenant's, not the runner's: the control plane owns
+	// the policy and the runner is a shared service. Sending it with the create
+	// keeps one reader of the policy file and one place a mode can be wrong.
+	if r.cfg.EgressFor != nil {
+		request.EgressMode = string(r.cfg.EgressFor(ctx, userID))
 	}
 	if r.cfg.TenantNetworks {
 		request.Network = ""
@@ -538,6 +550,16 @@ type RunnerRequest struct {
 	// container on two bridges is reachable from both, and the isolation would be
 	// nominal.
 	TenantNetwork bool `json:"tenant_network,omitempty"`
+	// EgressMode is the tenant's outbound-network posture ("none", "allowlist" or
+	// "open"), resolved by the control plane from the deployment's policy. Empty
+	// means the control plane sent none and the runner applies its own default —
+	// which is closed when it runs with per-tenant bridges (sandbox.EgressNone).
+	//
+	// It travels with the create for the same reason the limits do: the runner is
+	// a shared service that serves whichever tenant the control plane names, and
+	// the bridge it creates is the enforcement. A mode the runner cannot enforce
+	// is refused with a 400 rather than ignored.
+	EgressMode string `json:"egress_mode,omitempty"`
 	// Detached asks for a workspace volume of this sandbox's own, with the
 	// container path as the reported root: the control plane never mounts it and
 	// reaches the files only through the sandbox API

@@ -37,6 +37,8 @@
 
 本批（多租户成为可运营属性）不改变 FR 状态：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。它补的是验收报告 `e2e/.artifacts/final-isolated/VERDICT.md` §8 第 3 条——"隔离"在执行与文件上成立，租户之间却只隔着认证。三件事，各有命令与证据（设计与取舍见 `docs/EXECUTION-BOUNDARY.md` §12，运维见 `docs/SANDBOX-DEPLOY.md` §1.7）：①**网络**：沙箱不再共享 `piforge-sandboxes`，每个租户一条桥 `piforge-t-<hash>`（runner 建、带 `piforge.tenant` 标签），只有该租户的沙箱 + 控制面 + runner 在上面；从沙箱 A 到 B 按名字 `no such host`、按地址 `curl` 4.0 s 超时/`nc` 无路由，同时 A 到自己的模型网关 200、到控制面 `/v1/*` 仍 401（`e2e/.artifacts/tenancy/isolation-probes.txt`）。选"每租户"而不是"每沙箱"的理由是产品规则（一个 (user, project) 一个沙箱、授权边界是用户）加地址池硬墙：本机 Docker 29.9.2 第 17 条网络就报 `all predefined address pools have been fully subnetted`。**同租户的两个沙箱仍互通 8080**（镜像的每沙箱 key 仍是 401），文档明说不宣称这一点。②**配额**：CPU/内存/进程数来自按租户的策略文件（`deploy/tenant-limits.json`，`PIFORGE_TENANT_LIMITS_FILE`，启动时校验、出错指出租户），经 `docker run --cpus/--memory/--pids-limit` 生效，从容器 `HostConfig` 读回并存进沙箱行，`/v1/admin/status` 的管理页「租户配额与网络」按租户并排显示策略与用量；并发沙箱上限在建之前数行，拒绝是 typed 的 `409 tenant_sandbox_limit` + `{limit,current,tenant}`（此前只写一行 WARN，用户看到的是三层之后的 500）。③**审计**：`GET /v1/admin/audit`（仅管理员、分页、可过滤、`format=csv`）跨租户读 `tool_calls`：谁/什么/何时/成败 + 会话 + 项目 + 用户，另有 `/admin/audit` 页面。`scripts/soak-tenancy.ps1` 用 4 个租户同时各跑一条会调用工具的 prompt，一次跑完隔离、配额、审计与磁盘/网络探测：**0 failures，exit 0**。
 
+本批（租户出口策略，tenancy 的最后一块）不改变 FR 状态：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。它补的是上一批 §12.4 自己写下的那条"没有出口控制"：沙箱在租户桥上仍能上公网，`npm install`、`curl`、被投毒的依赖都拿到宿主的出网能力，而部署里没有一处表达这是不是故意的。现在有 `deploy/tenant-egress.json`（`PIFORGE_TENANT_EGRESS_FILE`，控制面与 runner 都读，启动校验），三种取值：`none`（默认，桥用 `docker network create --internal` 创建，没有默认路由与 NAT，外部 DNS 也不再解析；控制面与 runner 在这条桥上，所以 `/gw/llm`、`/gw/mcp` 与 checkout 照常）、`open`（显式的今天行为）、`allowlist`（**建模但不执行，启动时拒绝并指出租户**——Docker 只能按桥过滤，按 hostname 需要内网桥上的过滤代理或宿主 iptables，两个都没做，所以不假装支持）。同一道闸门还拒绝 `none` + 共享网络、共享网络 + 按租户覆盖、`-sandbox local` + 任何关闭模式；改模式要重建桥，代码宁可拒绝建沙箱并给出 `docker network rm`，也不让"看着建好了、其实还开着"的桥存在。管理页 `/admin/status` 的「租户配额与网络」多了一行「沙箱出口」并按账号显示 `出口：关闭/开放`（`GET /v1/admin/status` 的 `tenant_limits.egress_*`）。证据：`scripts/probe-egress.ps1` 在同一个一次性栈上把默认租户设成 `none`、另一个设成 `open`，从沙箱内部量 DNS、按名字与按字面地址的公网请求、控制面 `/healthz` 200、`/v1/*` 401、自己的网关 200，并在**被关闭的租户**里跑一条真实 prompt（能跑通，因为 agent 需要的是网关不是公网）。设计与不宣称的东西见 `docs/EXECUTION-BOUNDARY.md` §13，运维与排查见 `docs/SANDBOX-DEPLOY.md` §1.7.5。
+
 ---
 
 ---
@@ -1375,3 +1377,45 @@ piforge:agent-drill` 119 PASS（run `20261031-235815`）。清理：两个服务
 `models.json` 的 provider key 命中数 0。门禁：`go build/vet/test` 全绿、`pnpm --dir web test --
 --run` 272/272、e2e 182/182、`deliver-check.ps1` 119 PASS。清理：两个服务容器、`piforge-*` 沙箱、
 卷 `piforge-ws-*` 与 `pf-drill-data`、网络 `pf-drill-net`、三个镜像已删。
+
+
+## 本批：租户出口策略（`none` 默认关闭，`open` 显式，`allowlist` 启动即拒绝）
+
+这不是 FR：它是上一批 `docs/EXECUTION-BOUNDARY.md` §12.4 自己写下的那条"没有出口控制"。补之前的事实是：沙箱在租户桥上仍能上公网，`npm install`、`curl`、被投毒的依赖都拿到宿主的出网能力，而部署里没有一处表达"这是不是故意的"。设计与取舍写在 `docs/EXECUTION-BOUNDARY.md` §13，运维与排查写在 `docs/SANDBOX-DEPLOY.md` §1.7.5。
+
+**策略**：`internal/tenantegress`，文件 `deploy/tenant-egress.json`（`PIFORGE_TENANT_EGRESS_FILE`；控制面与 runner **都**读，启动校验；runner 之所以要读，是因为桥是它建的）。与配额分两个文件而不合成一份：配额只由控制面读、随 create 下发，出口必须由 runner 也读，而两个解析器都刻意拒绝未知字段——合成一份会让一个配额笔误能拖垮 runner 的启动。三种取值：
+
+| 模式 | 执行 | 覆盖 / 不覆盖 |
+|---|---|---|
+| `none`（默认） | 该租户的桥 `docker network create --internal`（标签 `piforge.egress=none`） | 公网 TCP/UDP 无路由、外部 DNS 不解析；控制面与 runner 在这条桥上，所以 `/gw/llm`、`/gw/mcp`、checkout 照常。不覆盖：同租户桥上其它容器、控制面自己的出网、共享桥形状、`-sandbox local` |
+| `allowlist` | **不执行，启动拒绝**（指出租户） | 全部。Docker 只能按桥过滤，按 hostname 需要内网桥上的过滤代理或宿主 iptables，两个都没做，所以不假装支持 |
+| `open` | 普通桥 + Docker NAT | 和宿主一样 |
+
+同一道启动闸门还拒绝：`none` + 共享网络、共享网络 + 按租户覆盖、`-sandbox local` + 任何关闭模式。没有配置文件又没给 `-tenant-egress-mode` 时，**每租户桥的形状默认关闭**（source=`network-mode`），共享桥的形状保持 open 并在日志 WARN、管理页写"未配置"——方向是"有边界的地方默认关，没有边界的地方说清楚"。改模式要重建桥：代码宁可拒绝建沙箱并给出 `docker network rm <name>`，也不留下"页面说关、桥还开着"的状态。
+
+**可见性**：`GET /v1/admin/status` 的 `tenant_limits` 新增 `egress_mode`/`egress_source`/`egress_configured`/`egress_applied`，每行加 `egress`/`egress_override`；`/admin/status` 的「租户配额与网络」多一行「沙箱出口」，每个账号一个 `出口：关闭/开放`（单独配置会标出来）。`egress_applied=false` 只出现在 `-sandbox local`：模式被报出来，但它不是边界。
+
+**实测**（`pwsh scripts/probe-egress.ps1 -Port 7723 -Project pf-egress`，一次性栈、自带 down/up、默认卷；同一栈上默认租户 `none`、`dev@piforge.local` `open`，**0 failures，exit 0**，产物 `e2e/.artifacts/egress/`）：
+
+```
+closed: network=piforge-t-29ec2c7a2fa8 Internal=true  label piforge.egress=none
+opened: network=piforge-t-6a0e6d79cf7c Internal=false label piforge.egress=open
+
+closed: getent hosts example.com -> DNS-FAILED
+        curl -m 5 http://example.com  -> curl: (6) Could not resolve host: example.com   (000)
+        curl -m 5 https://1.1.1.1     -> curl: (7) Couldn't connect to server             (000)
+opened: getent hosts example.com -> 172.66.147.243 / 104.20.23.154
+        curl -m 5 http://example.com  -> 200
+        curl -m 5 https://1.1.1.1     -> 301
+
+两个租户都: http://piforge:7700/healthz -> 200 ; /v1/projects -> 401
+admin status: egress_mode=none source=/etc/piforge/tenant-egress.json configured=true applied=true
+              admin=none / dev=open (override)
+被关闭的租户里跑真实 prompt: settled=true，助手回复 DONE，
+        http://piforge:7700/gw/llm/<token>/v1/chat/completions -> 200
+pf-local (7722): 同一个容器 7dc14e4a7525…、StartedAt 不变、healthz 200（前后）
+```
+
+**门禁**：`go build ./...`、`go vet ./...`、`go test ./... -count=1` 全绿（新增 `internal/tenantegress`、`sandbox` 出口单测、两个 wiring 单测、httpapi 出口报告测试）；`pnpm --dir web test -- --run` 288/288；`pnpm --dir web exec next build` 通过；e2e 182/182；`deliver-check.ps1` 在 local 形态下用同一把 key 跑（见下）。
+
+**没有宣称的**：出口是开关不是过滤器（`allowlist` 启动即拒绝）；共享单机形状与 `-sandbox local` 下没有出口边界；它不阻止沙箱让网关把 prompt 里的内容发出去（那是产品本身）；同租户两个沙箱仍互通 8080（§12.1 的既有边界）。

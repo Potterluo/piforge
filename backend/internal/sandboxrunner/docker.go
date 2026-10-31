@@ -51,6 +51,12 @@ type DockerOptions struct {
 	// sandbox on Network, "tenant" gives each tenant its own bridge (see
 	// sandbox.NetworkMode). Empty is shared, the pre-multi-tenant behaviour.
 	NetworkMode sandbox.NetworkMode
+	// Egress is this service's fallback outbound-network posture, used for a
+	// create request that carries none. Empty means "no policy was configured
+	// here", which is open for the shared shape and closed for the tenant one —
+	// the runner refuses to build a per-tenant bridge with unrestricted egress
+	// just because nobody configured a policy.
+	Egress sandbox.EgressMode
 	// TenantNetworkPrefix overrides the name prefix of a tenant's bridge.
 	TenantNetworkPrefix string
 	// JoinContainers names the containers that must keep reaching every sandbox —
@@ -228,6 +234,44 @@ func (p *DockerProvider) networkPlan(request sandbox.RunnerRequest) (sandbox.Net
 	return sandbox.NetworkShared, firstNonEmpty(request.Network, p.opts.Network)
 }
 
+// egressPlan is the create's egress decision, in one place so it can be tested
+// without a daemon.
+//
+// The request wins; the runner's own configuration is the fallback. The one
+// asymmetry with networkPlan is deliberate: when neither says anything and the
+// create is going onto a per-tenant bridge, the answer is *closed*. A runner
+// that builds isolated bridges and leaves them with unrestricted egress because
+// nobody configured a policy is exactly the "believes it is closed" failure the
+// policy exists to prevent; the shared shape keeps the historical open default
+// and its boot log says so.
+func (p *DockerProvider) egressPlan(request sandbox.RunnerRequest) (sandbox.EgressMode, error) {
+	raw := strings.TrimSpace(request.EgressMode)
+	if raw == "" {
+		raw = strings.TrimSpace(string(p.opts.Egress))
+	}
+	if raw == "" {
+		if p.networkMode(request) == sandbox.NetworkTenant {
+			return sandbox.EgressNone, nil
+		}
+		return sandbox.EgressOpen, nil
+	}
+	mode, err := sandbox.ParseEgressMode(raw)
+	if err != nil {
+		return "", fmt.Errorf("sandboxrunner: %w", err)
+	}
+	if err := mode.Enforceable(); err != nil {
+		return "", fmt.Errorf("sandboxrunner: refusing this create: %w", err)
+	}
+	return mode, nil
+}
+
+// networkMode is the plan's mode without the network name, for callers that only
+// need to know whether the bridge is per tenant.
+func (p *DockerProvider) networkMode(request sandbox.RunnerRequest) sandbox.NetworkMode {
+	mode, _ := p.networkPlan(request)
+	return mode
+}
+
 // creator builds a provider that can create a container: image and CLI required.
 func (p *DockerProvider) creator(request sandbox.RunnerRequest) (*sandbox.Docker, error) {
 	image := firstNonEmpty(request.Image, p.opts.Image)
@@ -240,12 +284,21 @@ func (p *DockerProvider) creator(request sandbox.RunnerRequest) (*sandbox.Docker
 	// creates the bridges). Either way the shared network name must not travel
 	// with the create — a container on two bridges is reachable from both.
 	mode, network := p.networkPlan(request)
+	// The egress mode is per tenant and travels with the create; the runner's own
+	// configuration is the fallback for a caller that sends none. It is parsed and
+	// refused here, not passed through: a mode this process cannot enforce must
+	// fail the create visibly instead of producing a bridge with the wrong posture.
+	egress, err := p.egressPlan(request)
+	if err != nil {
+		return nil, err
+	}
 	return sandbox.NewDocker(sandbox.DockerConfig{
 		Image:               image,
 		Network:             network,
 		NetworkMode:         mode,
 		TenantNetworkPrefix: p.opts.TenantNetworkPrefix,
 		JoinContainers:      p.opts.JoinContainers,
+		Egress:              egress,
 		CPUs:                firstNonEmpty(request.CPUs, p.opts.CPUs),
 		Memory:              firstNonEmpty(request.Memory, p.opts.Memory),
 		Pids:                firstInt(request.Pids, p.opts.Pids),

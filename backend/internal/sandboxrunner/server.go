@@ -282,6 +282,12 @@ func (s *Server) fail(r *http.Request, w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, sandbox.ErrInvalidID):
 		status = http.StatusBadRequest
+	case errors.Is(err, sandbox.ErrEgressUnenforceable):
+		// The create asked for an egress posture this runner cannot apply (an
+		// unimplemented allowlist, "none" on a shared bridge, a bridge whose flag
+		// disagrees with the policy). It is a rejected request with a reason, not a
+		// daemon failure: 400 tells the caller that the policy has to change.
+		status = http.StatusBadRequest
 	case errors.Is(err, context.DeadlineExceeded):
 		status = http.StatusGatewayTimeout
 	case errors.Is(err, context.Canceled):

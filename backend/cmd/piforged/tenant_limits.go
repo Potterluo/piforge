@@ -10,6 +10,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/sandbox"
 	"github.com/piforge/piforge/backend/internal/store"
+	"github.com/piforge/piforge/backend/internal/tenantegress"
 	"github.com/piforge/piforge/backend/internal/tenantlimits"
 )
 
@@ -26,6 +27,11 @@ import (
 // tenantResolver answers "what is this tenant's quota" for the control plane.
 type tenantResolver struct {
 	policy *tenantlimits.Policy
+	// egress is the per-tenant outbound-network policy, resolved by
+	// newTenantEgress (tenant_egress.go). Nil means the deployment configured
+	// none: the providers keep their historical open shape and both the boot log
+	// and the admin page say so.
+	egress *tenantegress.Policy
 	store  *store.Store
 	// emails caches user id -> address. A policy is consulted on every sandbox
 	// create and on every admin status read; the mapping never changes for an

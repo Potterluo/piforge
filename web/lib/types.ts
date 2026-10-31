@@ -693,6 +693,18 @@ export interface TenantLimitsReport {
   network_mode: string;
   /** False when the deployment configured no limits at all. */
   enforced: boolean;
+  /**
+   * The default outbound-network mode: "none" (no internet; the control plane's
+   * gateway stays reachable), "open", or "allowlist" (modelled, refused at boot
+   * because Docker cannot filter a bridge by hostname).
+   */
+  egress_mode: string;
+  /** Where the egress policy came from: a file path, "flags", "network-mode" or "none". */
+  egress_source: string;
+  /** False when the deployment configured no egress policy at all — that is open. */
+  egress_configured: boolean;
+  /** False for -sandbox local, where there is no bridge and the mode is no boundary. */
+  egress_applied: boolean;
   tenants: TenantLimitRow[];
 }
 
@@ -710,6 +722,10 @@ export interface TenantLimitRow {
   effective: boolean;
   /** True when the policy names this tenant explicitly. */
   override: boolean;
+  /** This tenant's effective outbound mode: "none" or "open". */
+  egress?: string;
+  /** True when the egress policy names this tenant explicitly. */
+  egress_override?: boolean;
 }
 
 /**

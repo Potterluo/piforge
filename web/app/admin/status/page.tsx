@@ -199,6 +199,31 @@ export default function AdminStatusPage() {
                       : "（所有沙箱同一网段，只靠每沙箱 API key 区分）"}
                   </span>
                 </span>
+                {/* The outbound half of the tenant boundary: a mode that is only
+                    in a config file is one an operator cannot act on. */}
+                <span data-testid="tenant-limits-egress" data-egress={data.tenant_limits.egress_mode}>
+                  沙箱出口：
+                  <span
+                    className={`ml-1 font-mono ${
+                      data.tenant_limits.egress_mode === "open" &&
+                      data.tenant_limits.egress_configured
+                        ? "text-amber-600"
+                        : "text-foreground"
+                    }`}
+                  >
+                    {formatEgress(data.tenant_limits.egress_mode, data.tenant_limits.egress_configured)}
+                  </span>
+                  <span className="ml-1">
+                    {!data.tenant_limits.egress_configured
+                      ? "（这个部署没有配置出口策略：沙箱能到达宿主机能到达的一切。用 -tenant-egress-file 或 -tenant-egress-mode 声明）"
+                      : !data.tenant_limits.egress_applied
+                        ? "（-sandbox local 下 agent 与宿主同网络，这个模式不是边界）"
+                        : data.tenant_limits.egress_mode === "none"
+                          ? "（租户桥以 --internal 创建：没有出网路由，控制面网关仍可达）"
+                          : "（显式开放：沙箱可以访问公网）"}
+                  </span>
+                  <span className="ml-1 font-mono">来自 {data.tenant_limits.egress_source}</span>
+                </span>
                 <span>
                   默认：
                   <span className="ml-1 font-mono text-foreground">
@@ -227,6 +252,20 @@ export default function AdminStatusPage() {
                         {row.override ? (
                           <span className="ml-1.5 rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
                             单独配置
+                          </span>
+                        ) : null}
+                        {row.egress ? (
+                          <span
+                            data-testid={`tenant-egress-${row.user_id}`}
+                            data-egress={row.egress}
+                            className={`ml-1.5 rounded px-1 py-0.5 text-[10px] ${
+                              row.egress === "open"
+                                ? "bg-amber-500/15 text-amber-600"
+                                : "bg-muted text-muted-foreground"
+                            }`}
+                          >
+                            出口：{row.egress === "open" ? "开放" : row.egress === "none" ? "关闭" : row.egress}
+                            {row.egress_override ? " · 单独配置" : ""}
                           </span>
                         ) : null}
                       </span>
@@ -330,6 +369,21 @@ export default function AdminStatusPage() {
       ) : null}
     </div>
   );
+}
+
+/** The outbound mode in the operator's words: closed, open, or unconfigured. */
+function formatEgress(mode: string, configured: boolean): string {
+  if (!configured) return "开放（未配置策略）";
+  switch (mode) {
+    case "none":
+      return "关闭（仅控制面网关）";
+    case "open":
+      return "开放（可访问公网）";
+    case "allowlist":
+      return "白名单（本版本不实现）";
+    default:
+      return mode || "未知";
+  }
 }
 
 /** One tenant's container limits on one line: "2 CPU · 4 GiB · 1024 进程". */

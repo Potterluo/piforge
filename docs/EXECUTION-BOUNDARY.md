@@ -630,9 +630,11 @@ which is the question the acceptance pass could not answer at all.
 ### 12.4 What this section does not claim
 
 - **Not sandbox-vs-sandbox within a tenant** (§12.1), stated with its cost.
-- **Not egress control.** A sandbox can still reach the internet if the host allows it;
-  what changed is that it can no longer reach another tenant. Per-tenant egress policy
-  (an allowlist, a proxy) is a separate piece of work and is not here.
+- **Not egress control beyond what §12.5 states.** §12.5 closed the default: on the
+  isolated shape a sandbox has no route to the public internet unless its tenant's policy
+  says `open`. Still absent: a *filtered* allowlist, an egress policy on the shared
+  single-host shape, and any control over what a sandbox does through the control plane's
+  gateway. Read §12.5 before claiming anything about a tenant's reach.
 - **Not a per-tenant disk budget.** Disk is still per sandbox, measured and refused per
   sandbox; a tenant's total disk is the sum of its sandboxes' budgets, which is a
   consequence, not a policy.
@@ -642,3 +644,200 @@ which is the question the acceptance pass could not answer at all.
 - **Not a proof at fifty tenants.** Four tenants, concurrently, on one Docker Desktop
   host is the measured number (`scripts/soak-tenancy.ps1`); the address-pool ceiling in
   §12.1 is the first thing a larger deployment will hit.
+
+## 13. Tenant egress: what a sandbox can reach
+
+§12 closed the *inward* hole and named this one: a sandbox on its tenant bridge could
+still reach the public internet, so `npm install`, a `curl` to an exfiltration endpoint, a
+compromised dependency, or a build script had exactly the reach the host has — and nothing
+in the deployment said whether that was intended. This section is what now decides it,
+what each mode covers, what it does not, and why one of the three shapes is refused
+instead of half-implemented.
+
+### 13.1 The policy: three shapes, a file, and a default that is closed
+
+`internal/tenantegress` holds a policy with a default and per-tenant overrides, mounted
+read-only into both services from `deploy/tenant-egress.json`
+(`PIFORGE_TENANT_EGRESS_FILE`), validated at startup:
+
+```json
+{
+  "default": {"mode": "none"},
+  "tenants": {"dev@piforge.local": {"mode": "open"}}
+}
+```
+
+- **`none`** — no egress beyond the containers on the tenant's own bridge: the control
+  plane (so `/gw/llm` and `/gw/mcp` keep working) and the runner. The shipped default.
+- **`allowlist`** — "these hosts/CIDRs/ports". Modelled and validated (host **or** CIDR,
+  ports 1–65535, no wildcards, no scheme), and **refused at startup**. See §13.3.
+- **`open`** — the historical behaviour: an ordinary bridge, Docker NATs it, the sandbox
+  reaches whatever the host reaches. It is now a value somebody wrote down.
+
+**Why a second file** rather than a section of `deploy/tenant-limits.json`: the two
+policies are read by different processes. The quota is read only by the control plane,
+which sends the resolved numbers with each create. Egress must be read by the *runner*
+too, because the runner is the process that creates the bridge. Both files reject unknown
+fields on purpose, so one document would force each process to parse the other's schema,
+and a quota typo would be able to fail the runner's boot for no reason. Two files, mounted
+side by side, validated separately, reviewed together.
+
+**Where the default comes from**, in order:
+
+| Situation | Effective mode | Where it is said |
+|---|---|---|
+| a file is mounted | the file's `default` | boot log (`tenant egress policy source=…`), admin page |
+| `-tenant-egress-mode none\|open` | that value | boot log, admin page (`flags`) |
+| per-tenant bridges, nothing configured | **none** | boot log (`network-mode`), admin page |
+| one shared bridge, nothing configured | open | boot log WARN, admin page (`未配置`) |
+
+The third row is deliberate: where the boundary *exists*, it starts closed. The fourth is
+the single-host shape, which has no per-tenant anything, so a "none" there would be a
+promise the deployment cannot keep — it is reported as open, at boot and on the page,
+instead of being accepted and ignored.
+
+### 13.2 Enforcement: `--internal` on the tenant bridge, and nothing else
+
+**Chosen: `docker network create --internal`** for the tenant's bridge when its mode is
+closed, and an ordinary bridge when it is open. That is the whole mechanism, and it is a
+good one for this platform: an internal bridge has no default route, no NAT, and Docker's
+embedded DNS does not forward external names on it. A container on it can reach the other
+containers on that bridge and nothing else — which is exactly the set §12.1 put there:
+
+- the **control plane**, so `http://piforge:7700/gw/llm/<token>/v1` and `/gw/mcp/<token>`
+  keep answering (the sandbox holds a per-session gateway token, never a provider key);
+- the **runner**, which provisions the checkout through the sandbox's own API.
+
+The mode is labelled onto the bridge (`piforge.egress=none|open`) as well as configured, so
+`docker network ls --filter label=piforge.egress=none` answers "who is closed" from the
+daemon — the side that actually enforces it — without reading a config file.
+
+**Changing a mode is a bridge rebuild, and the code refuses rather than improvises.** A
+network's `Internal` flag cannot be changed in place; recreating it under running sandboxes
+would cut them off mid-turn and would leave the containers that are already up with the
+route they were created with. So a create against an existing bridge whose flag disagrees
+with the policy fails and names the command:
+
+```
+sandbox: tenant network piforge-t-… was created "open" but this tenant's egress policy is
+"none": … Remove it with `docker network rm piforge-t-…` (its sandboxes have to be
+recreated) and the next create will build it "none"
+```
+
+**The policy travels with the create** (`sandbox.RunnerRequest.egress_mode`), the same way
+the quota does: the control plane owns the file, the runner owns the Docker CLI and parses
+and refuses the mode per request. A request that carries no mode gets the runner's own
+answer, which is closed when it runs with per-tenant bridges.
+
+### 13.3 `allowlist`: modelled, validated, and refused at boot
+
+Docker cannot filter a bridge by hostname. There is no `--allow-host`; the bridge is
+either routed or not. The two honest ways to get a per-host allowlist on this platform
+are:
+
+1. **a filtering proxy on the tenant's internal bridge** — with `--internal` the proxy is
+   the *only* egress path, so it can enforce a host:port allowlist (CONNECT + absolute-URI)
+   and everything that does not use `HTTP(S)_PROXY` fails closed. It costs a long-running
+   process per tenant bridge, a source-address→tenant map, and the proxy configuration
+   injected into every sandbox;
+2. **host iptables rules** (`DOCKER-USER`) installed by a process with host privileges —
+   the runner would need `--net=host`/`NET_ADMIN` on the host, which is a larger trust
+   change than the socket mount §1 of SANDBOX-DEPLOY.md already argues about.
+
+Neither is in this release, so `allowlist` is **refused at startup**, naming the tenant and
+the reason:
+
+```
+tenant egress: tenant "bob@piforge.local": egress mode "allowlist" is not implemented and is
+refused rather than accepted: Docker filters a bridge, not a hostname, so a per-host
+allowlist needs either a filtering proxy on the tenant's internal bridge (the only egress
+path) or iptables rules installed on the host by a privileged process, and this deployment
+does neither. Use "none" (closed: the gateway stays reachable) or "open" (explicit, the
+historical behaviour)
+```
+
+The refusal is the point. A policy that accepts `allowlist` and then lets the sandbox out
+anyway is the worst outcome this feature exists to prevent: the operator reads "allowlist",
+the agent gets the internet.
+
+### 13.4 What each mode covers, and what it does not
+
+Covered by `none`:
+
+- TCP/UDP to any address outside the tenant bridge — no route, so a connection attempt
+  times out or reports "network unreachable" rather than being quietly refused;
+- external DNS — the embedded DNS on an internal network resolves container names on that
+  network and forwards nothing, so `example.com` does not even resolve (this is what an
+  agent sees first: `curl: (6) Could not resolve host`);
+- the browser inside the sandbox — same network namespace, same rules;
+- the agent, `npm`, `pip`, `git`, `curl` — anything the sandbox process runs.
+
+Not covered by `none`, stated because a reader will ask:
+
+- **containers on the same tenant bridge.** The control plane and the runner are reachable
+  by design; so is another sandbox of the *same* tenant (§12.1). Egress policy is about the
+  outside world, not about intra-bridge reach.
+- **the control plane's own egress.** The sandbox reaches the gateway, and the gateway
+  makes the model call with the deployment's provider key. A sandbox that can prompt a
+  model can therefore cause *content* to leave; that is the product, not a hole in this
+  policy.
+- **host paths that are not the bridge.** `--internal` says nothing about the Docker
+  socket (no sandbox mounts it), about a `--network host` container (this deployment never
+  creates one), or about the host's own processes.
+- **disk, CPU, PIDs** — §12.2, a different boundary.
+- **the shared single-host shape** (`-sandbox-network-mode shared`). One bridge for every
+  sandbox cannot hold a per-tenant answer; a policy that asks for one is a boot error, and
+  an unconfigured deployment reports open.
+- **`-sandbox local`.** The agent runs on the host and shares its network namespace; a
+  policy that asks for `none` there is refused at boot rather than reported as applied.
+- **`-sandbox docker` with per-tenant bridges.** There the control plane is a host
+  process, so `-sandbox-join-containers` has nothing to join: the sandbox reaches it only
+  at an address the bridge routes to (`-gateway-url`), and nothing about this policy adds
+  that. The isolated deployment ships the runner shape, where both services are
+  containers and the join is real.
+
+### 13.5 Visibility: the operator's screen answers "who can reach the internet"
+
+`GET /v1/admin/status` → `tenant_limits` now carries `egress_mode`, `egress_source`,
+`egress_configured`, `egress_applied`, and each tenant row carries its effective `egress`
+plus `egress_override`. `/admin/status` renders it in the tenant card (沙箱出口), with the
+per-tenant badge, so the answer does not require reading the mounted file on the host.
+
+`egress_applied: false` is not a failure: it is the honest flag for a placement with no
+container (`-sandbox local`), where the mode is reported but is not a boundary.
+
+### 13.6 Evidence
+
+`pwsh scripts/probe-egress.ps1` (throwaway stack on 7723, its own project and volume,
+torn down at the end) starts the isolated stack with a policy that leaves the default
+closed and opens one account, then measures, from inside each sandbox, DNS resolution, a
+public HTTPS fetch by name and by literal address, the control plane's `/healthz` and
+`/v1/*`, the sandbox's own gateway URL, the bridge's `Internal` flag and label, the admin
+report, and a real prompt in the *closed* tenant. Last run: **0 failures, exit 0**,
+artifacts in `e2e/.artifacts/egress/`:
+
+```
+closed: network=piforge-t-29ec2c7a2fa8 Internal=true  label piforge.egress=none
+opened: network=piforge-t-6a0e6d79cf7c Internal=false label piforge.egress=open
+
+closed: getent hosts example.com -> DNS-FAILED
+        curl -m 5 http://example.com -> curl: (6) Could not resolve host: example.com   (000)
+        curl -m 5 https://1.1.1.1    -> curl: (7) Couldn't connect to server             (000)
+opened: getent hosts example.com -> 172.66.147.243 / 104.20.23.154
+        curl -m 5 http://example.com -> 200
+        curl -m 5 https://1.1.1.1    -> 301
+
+both tenants:   http://piforge:7700/healthz -> 200 ; /v1/projects -> 401
+admin status:   egress_mode=none source=/etc/piforge/tenant-egress.json
+                configured=true applied=true ; admin=none, dev=open (override)
+closed tenant:  a real prompt settled, the assistant answered DONE, and
+                http://piforge:7700/gw/llm/<token>/v1/chat/completions -> 200
+pf-local (7722): same container id 7dc14e4a7525…, same StartedAt, healthz 200 before/after
+```
+
+The public target is plain HTTP plus a literal IP because this host's TLS to some public
+sites is intercepted (`curl: (35) unexpected eof`) — a property of the network, not of
+the policy, and pinning `https://example.com` would have made the probe measure the
+firewall instead of the bridge. The closed tenant's `https://1.1.1.1` failure is a
+*transport* failure (`curl: (7)`), and its DNS failure is the one an agent sees first.
+

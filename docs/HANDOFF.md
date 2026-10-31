@@ -58,7 +58,17 @@ three images, and that the sandbox image really contains `/opt/piforge/piforged`
 `pi`), then starts the stack on 7723 with a fresh volume and waits for `/healthz`. It
 prints the URL and the seeded accounts at the end. `-Check` runs only the preflight;
 `-Down` removes the stack, its sandboxes and their volumes; `-Rebuild` rebuilds all three
-images after a source change.
+images after a source change; `-EgressFile` points at another egress policy than
+`deploy/tenant-egress.json` (the probe below uses that).
+
+The stack's sandboxes have **no route to the public internet** by default: each tenant's
+bridge is created `--internal` from the policy in `deploy/tenant-egress.json`, while the
+control plane and the runner are joined to that bridge, so `/gw/llm` (the model gateway)
+and the checkout keep working. `-tenant-egress-mode open` (or a tenant entry with
+`"mode": "open"` in the policy file) is the only way out, and it is explicit. The
+allowlist mode is refused at startup on purpose — see `docs/EXECUTION-BOUNDARY.md` §13.
+`pwsh scripts/probe-egress.ps1` starts a throwaway stack that is closed for one tenant and
+open for another and measures both from inside the sandboxes.
 
 `.env.example` is the same configuration for the manual
 `docker compose -f docker-compose.runner.yml up` path. It names
@@ -438,6 +448,22 @@ Ordered roughly by how much they will hurt. Nothing here is softened.
      reads `tool_calls` across tenants: who / what / when / outcome with session,
      project and user. There is an `/admin/audit` page with the same filters and an
      export link.
+   - **Egress:** the same batch's last piece (2026-11-01, `docs/EXECUTION-BOUNDARY.md`
+     §13, `docs/SANDBOX-DEPLOY.md` §1.7.5). A tenant's sandbox has **no route to the
+     public internet** unless its policy says `open`: the tenant bridge is created with
+     `docker network create --internal`, so `npm install`, `curl` and a poisoned
+     dependency cannot leave, while `/gw/llm`, `/gw/mcp` and the checkout still work
+     because the control plane and the runner are on that same bridge. The policy is
+     `deploy/tenant-egress.json` (`PIFORGE_TENANT_EGRESS_FILE`, read by the control plane
+     *and* the runner), default `none`, per-tenant overrides by user id or email. `open`
+     is explicit; `allowlist` is modelled and **refused at startup** because Docker
+     cannot filter a bridge by hostname and a half-enforced allowlist is exactly the lie
+     this feature exists to prevent; `none` on a shared bridge or under `-sandbox local`
+     is refused too. `GET /v1/admin/status` reports each tenant's effective mode and the
+     admin page shows it (`沙箱出口`). Probe: `pwsh scripts/probe-egress.ps1 -Port 7723`
+     — one closed tenant and one open tenant on the same stack, measured from inside the
+     sandboxes, plus a real prompt in the closed one; artifacts in
+     `e2e/.artifacts/egress/`.
    - **Soak:** `pwsh scripts/soak-tenancy.ps1 -Port 7723` — four tenants, four
      projects, four concurrent runs, then the probes above plus the quota refusal and
      the audit query. Last run: 0 failures, exit 0, artifacts in
@@ -447,9 +473,11 @@ Ordered roughly by how much they will hurt. Nothing here is softened.
    share their tenant bridge and can reach each other's 8080 (the image's per-sandbox
    key still says 401) — per-sandbox networks were rejected because each one costs a
    network and this daemon refuses the 17th (`all predefined address pools have been
-   fully subnetted`); there is no egress policy (a sandbox can still reach the
-   internet); disk is per sandbox, not per tenant; and the number is four tenants on
-   one Docker Desktop host, not fifty.
+   fully subnetted`); egress is a **switch, not a filter** (no host allowlist: that mode
+   is refused at boot), it does not exist on the shared single-host shape or under
+   `-sandbox local`, and it does not stop a sandbox from asking the model gateway to send
+   whatever the prompt contains; disk is per sandbox, not per tenant; and the number is
+   four tenants on one Docker Desktop host, not fifty.
 
 
 

@@ -276,6 +276,13 @@ type tenantLimitRow struct {
 	Effective bool `json:"effective"`
 	// Override is true when the policy names this tenant explicitly.
 	Override bool `json:"override"`
+	// Egress is this tenant's effective outbound-network mode ("none", "open", or
+	// "allowlist" for a policy the deployment refuses to start with). It is on the
+	// row because "who can reach the internet" is a per-tenant question, and the
+	// answer belongs next to the tenant's other limits.
+	Egress string `json:"egress,omitempty"`
+	// EgressOverride is true when the egress policy names this tenant.
+	EgressOverride bool `json:"egress_override,omitempty"`
 }
 
 // tenantLimitsReport is the admin status block.
@@ -293,6 +300,18 @@ type tenantLimitsReport struct {
 	// tell "unlimited" apart from "we did not think about it".
 	Enforced bool             `json:"enforced"`
 	Tenants  []tenantLimitRow `json:"tenants"`
+
+	// EgressMode is the default outbound-network posture ("none", "open", or
+	// "allowlist" for a file the deployment refuses to start with). EgressSource
+	// names where it came from; EgressConfigured is false when this deployment
+	// configured no egress policy at all, which is open and is said out loud.
+	EgressMode       string `json:"egress_mode"`
+	EgressSource     string `json:"egress_source"`
+	EgressConfigured bool   `json:"egress_configured"`
+	// EgressApplied is false when there is no container to apply it to: with
+	// -sandbox local the agent shares the host's network namespace, so the mode is
+	// reported but it is not a boundary (and the page says so).
+	EgressApplied bool `json:"egress_applied"`
 }
 
 // tenantLimitsReport builds the tenant block from the policy and one count query.
@@ -300,11 +319,20 @@ type tenantLimitsReport struct {
 // Every account is listed, not only the ones with an override: a tenant with no
 // entry runs with the default, and "there is no row for me" is exactly the
 // confusion this block exists to remove.
+//
+// The egress policy is reported in the same block, per tenant, for the same
+// reason: "what is this account allowed to use" and "what can it reach" are one
+// operator question, and a mode an operator cannot see is a mode nobody can act
+// on.
 func (s *server) tenantLimitsReport(ctx context.Context, callerID string) tenantLimitsReport {
 	report := tenantLimitsReport{
-		NetworkMode: s.deps.SandboxNetworkMode,
-		Source:      "none",
-		Tenants:     []tenantLimitRow{},
+		NetworkMode:      s.deps.SandboxNetworkMode,
+		Source:           "none",
+		Tenants:          []tenantLimitRow{},
+		EgressApplied:    s.deps.SandboxEgressApplied,
+		EgressConfigured: s.deps.TenantEgress != nil,
+		EgressMode:       "open",
+		EgressSource:     "none",
 	}
 	if report.NetworkMode == "" {
 		report.NetworkMode = "shared"
@@ -317,15 +345,22 @@ func (s *server) tenantLimitsReport(ctx context.Context, callerID string) tenant
 			s.log.WarnContext(ctx, "admin status: sandbox counts unavailable", "error", err.Error())
 		}
 	}
-	if s.deps.TenantLimits == nil {
+	if s.deps.TenantEgress != nil {
+		egress := s.deps.TenantEgress
+		report.EgressMode = string(egress.Default().Mode)
+		report.EgressSource = egress.Source()
+	}
+	if s.deps.TenantLimits == nil && s.deps.TenantEgress == nil {
 		return report
 	}
 	policy := s.deps.TenantLimits
-	def := policy.Default()
-	report.CPUs, report.Memory, report.Pids = def.CPUs, def.Memory, def.Pids
-	report.MaxSandboxes = def.MaxSandboxes
-	report.Source = policy.Source()
-	report.Enforced = !def.Sandbox().IsZero() || def.MaxSandboxes > 0
+	if policy != nil {
+		def := policy.Default()
+		report.CPUs, report.Memory, report.Pids = def.CPUs, def.Memory, def.Pids
+		report.MaxSandboxes = def.MaxSandboxes
+		report.Source = policy.Source()
+		report.Enforced = !def.Sandbox().IsZero() || def.MaxSandboxes > 0
+	}
 
 	users, err := s.deps.Store.AdminListUsers(ctx, callerID)
 	if err != nil {
@@ -333,23 +368,34 @@ func (s *server) tenantLimitsReport(ctx context.Context, callerID string) tenant
 		return report
 	}
 	named := map[string]bool{}
-	for _, key := range policy.Tenants() {
-		named[strings.ToLower(key)] = true
+	var egressNamed map[string]bool
+	if policy != nil {
+		for _, key := range policy.Tenants() {
+			named[strings.ToLower(key)] = true
+		}
+	}
+	if s.deps.TenantEgress != nil {
+		egressNamed = map[string]bool{}
+		for _, key := range s.deps.TenantEgress.Tenants() {
+			egressNamed[strings.ToLower(key)] = true
+		}
 	}
 	for _, user := range users {
-		limits := policy.For(user.ID, user.Email)
-		report.Tenants = append(report.Tenants, tenantLimitRow{
-			UserID:       user.ID,
-			Email:        user.Email,
-			CPUs:         limits.CPUs,
-			Memory:       limits.Memory,
-			Pids:         limits.Pids,
-			MaxSandboxes: limits.MaxSandboxes,
-			Sandboxes:    counts[user.ID],
-			Effective:    !limits.Sandbox().IsZero() || limits.MaxSandboxes > 0,
-			Override: named[strings.ToLower(user.ID)] ||
-				(user.Email != "" && named[strings.ToLower(user.Email)]),
-		})
+		row := tenantLimitRow{UserID: user.ID, Email: user.Email, Sandboxes: counts[user.ID]}
+		if policy != nil {
+			limits := policy.For(user.ID, user.Email)
+			row.CPUs, row.Memory, row.Pids = limits.CPUs, limits.Memory, limits.Pids
+			row.MaxSandboxes = limits.MaxSandboxes
+			row.Effective = !limits.Sandbox().IsZero() || limits.MaxSandboxes > 0
+			row.Override = named[strings.ToLower(user.ID)] ||
+				(user.Email != "" && named[strings.ToLower(user.Email)])
+		}
+		if s.deps.TenantEgress != nil {
+			row.Egress = string(s.deps.TenantEgress.For(user.ID, user.Email).Mode)
+			row.EgressOverride = egressNamed[strings.ToLower(user.ID)] ||
+				(user.Email != "" && egressNamed[strings.ToLower(user.Email)])
+		}
+		report.Tenants = append(report.Tenants, row)
 	}
 	return report
 }

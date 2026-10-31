@@ -37,6 +37,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/reconcile"
 	"github.com/piforge/piforge/backend/internal/runtimedirs"
 	"github.com/piforge/piforge/backend/internal/store"
+	"github.com/piforge/piforge/backend/internal/tenantegress"
 	"github.com/piforge/piforge/backend/internal/tenantlimits"
 )
 
@@ -120,6 +121,14 @@ type Deps struct {
 	// cannot reach each other" and "tenants are separated by an API key", and an
 	// operator has to be able to see which one this deployment runs.
 	SandboxNetworkMode string
+	// TenantEgress is the per-tenant outbound-network policy (internal/tenantegress).
+	// It is reported next to the quota because "who can reach the internet" is the
+	// other half of "what may this account do"; nil means the deployment
+	// configured none, which is open and is named as such on the page.
+	TenantEgress *tenantegress.Policy
+	// SandboxEgressApplied is false for a placement with no container (-sandbox
+	// local), where the mode is reported but is not a boundary.
+	SandboxEgressApplied bool
 	// DiskQuotaReportTTL is how long the admin screen may reuse a measurement.
 	// Zero uses diskquota.DefaultReportTTL.
 	DiskQuotaReportTTL time.Duration

@@ -1614,6 +1614,96 @@ curl.exe -sS -b cookies.txt -o audit.csv "http://127.0.0.1:7723/v1/admin/audit?o
 
 `pwsh scripts/soak-tenancy.ps1 -Port 7723` 在一次性栈上建 4 个租户、各建一个项目并**同时**发一条会调用工具的 prompt，然后探测：跨租户不可达（名字 + 地址）、自己网关可达、控制面 `/v1/*` 仍 401、每个沙箱的 CPU/内存/进程数与策略一致、租户到达上限被 409 拒绝并带数字、审计里能查到这四条 run 的工具调用并可导出 CSV。产物在 `e2e/.artifacts/tenancy/`（`soak.txt`、`isolation-probes.txt`、`admin-status-tenant-limits.json`、`audit.csv`）。最近一次：**0 failures，exit 0**。
 
+#### 1.7.5 出口：一个租户能不能上公网（2026-11-01）
+
+§1.7.1 解决的是"租户之间能不能互通"，这一节解决的是它的另一面：沙箱**能不能上公网**。补之前它是能的——`npm install`、`curl`、被投毒的依赖都拿到宿主的全部出网能力，而部署里没有任何一处表达"这是不是故意的"。设计与取舍写在 `docs/EXECUTION-BOUNDARY.md` §13。
+
+策略文件是 `deploy/tenant-egress.json`（只读挂进**控制面和 runner 两个容器**，`/etc/piforge/tenant-egress.json`，`PIFORGE_TENANT_EGRESS_FILE` / `SANDBOX_EGRESS_FILE`）。为什么不在 `tenant-limits.json` 里加一节：配额只由控制面读，出口策略必须由 **runner** 读（桥是它建的），而两个文件的解析器都刻意拒绝未知字段；合成一份会让一个配额笔误能拖垮 runner 的启动。
+
+```json
+{
+  "default": {"mode": "none"},
+  "tenants": {"dev@piforge.local": {"mode": "open"}}
+}
+```
+
+三种取值，各自的执行方式与覆盖范围：
+
+| 模式 | 怎么执行 | 覆盖 | 不覆盖 |
+|---|---|---|---|
+| `none`（默认） | 该租户的桥用 `docker network create --internal` 创建：没有默认路由、没有 NAT，Docker 内建 DNS 也不再转发外部名字 | 公网（TCP/UDP）完全不可达；`example.com` 连解析都失败；沙箱里的浏览器、`npm`、`git`、`curl` 全在同一网络命名空间里，同样规则；控制面与 runner 也在这条桥上，所以 `/gw/llm`、`/gw/mcp` 仍然可达 | 同一租户桥上的其它容器（控制面、runner、**同租户的另一个沙箱**，见 §1.7.1）；控制面自己的出网（网关代它去调模型，这是产品本身）；`-sandbox-network-mode shared` 的单机形状；`-sandbox local` |
+| `allowlist` | **不执行**：启动时拒绝 | —— | 全部。理由见下 |
+| `open` | 普通桥，Docker 做 NAT | 和宿主一样 | —— |
+
+`allowlist` 是"想按域名放行"时最自然的写法，也是这个功能里最容易撒谎的地方：Docker 只能按**桥**过滤，不能按 hostname。诚实的做法只有两种——在租户的内网桥上跑一个过滤代理（`--internal` 下它是唯一出口，但要多一个常驻进程、一张源地址→租户的表、并把 `HTTP(S)_PROXY` 注入每个沙箱），或用宿主上的 `DOCKER-USER` iptables 规则（runner 需要 `--net=host`/`NET_ADMIN`，比已经讨论过的 socket 挂载是更大的信任变更）。两个都没做，所以 `allowlist` **在启动时被拒绝并指出租户**，而不是"接受了但其实是开放的"：
+
+```
+tenant egress: tenant "bob@piforge.local": egress mode "allowlist" is not implemented and is
+refused rather than accepted: Docker filters a bridge, not a hostname, ...
+```
+
+同一道启动闸门还拒绝另外三种说不通的配置：`none` + 共享网络（一条桥装不下两种答案）、共享网络 + 任何按租户的覆盖、`-sandbox local` + 任何 `none`/`allowlist`（宿主上与宿主同网络，没有桥可关）。没有配置文件、又没给 `-tenant-egress-mode` 时：**每租户桥的形状默认关闭**，共享桥的形状保持 open 并在启动日志 WARN、管理页写明"未配置"。方向是"有边界的地方默认关，没有边界的地方说清楚"，不是"沉默即开放"。
+
+改模式要重建桥（`Internal` 不能原地改）：
+
+```powershell
+# 当前谁被关着（标签在桥上，不在配置文件里）
+docker network ls --filter label=piforge.egress=none
+docker network inspect piforge-t-<hash> --format '{{.Internal}} {{index .Labels "piforge.egress"}}'
+# 改：编辑 deploy/tenant-egress.json（或 -tenant-egress-mode）→ 重启栈 → 删掉旧桥
+docker network rm piforge-t-<hash>
+```
+
+不删旧桥就新建沙箱，会得到一条**指名道姓的拒绝**（而不是一条"看起来建好了、其实还开着"的桥）：
+
+```
+sandbox: tenant network piforge-t-… was created "open" but this tenant's egress policy is
+"none": … Remove it with `docker network rm piforge-t-…` (its sandboxes have to be
+recreated) and the next create will build it "none"
+```
+
+**排查：沙箱说它没网。** 先分清是策略还是坏了。在 `none` 下 agent 看到的是这几种，都**不是**故障：
+
+```
+$ docker exec -u gem <sandbox> curl -m 5 -sS -o /dev/null -w '%{http_code}\n' https://example.com
+curl: (6) Could not resolve host: example.com          # 内网桥不转发外部 DNS
+$ docker exec -u gem <sandbox> curl -m 5 -sS -o /dev/null -w '%{http_code}\n' https://1.1.1.1
+curl: (28) Connection timed out after 5001 milliseconds   # 字面地址：没有路由（也可能直接 Network is unreachable）
+$ docker exec -u gem <sandbox> npm install
+npm error code ENOTFOUND / EAI_AGAIN …
+```
+
+三条自检，全都要成立才算"策略生效、产品正常"：
+
+```powershell
+docker network inspect piforge-t-<hash> --format '{{.Internal}}'          # true
+docker exec -u gem <sandbox> curl -m 5 -sS -o /dev/null -w '%{http_code}\n' http://piforge:7700/healthz   # 200
+docker exec -u gem <sandbox> curl -m 5 -sS -o /dev/null -w '%{http_code}\n' http://piforge:7700/v1/projects # 401
+```
+
+（沙箱自己的模型网关地址在 `/workspace/.piforge/agents/*/models.json` 的 `baseUrl`，`<baseUrl>/models` 在 `none` 下也是 200 —— 这条链路是 agent 唯一的"外面"，也是"关掉公网不等于关掉产品"的证据。）
+
+要放行某个租户：把它的 `mode` 改成 `open`、重启栈、`docker network rm` 旧桥，下一次建沙箱就是普通桥。**别用 `--internal` 的桥去试白名单**：那等于 `none`，白名单条目不会生效（也不会被读取，因为 `allowlist` 启动就失败了）。管理页 `/admin/status` 的「租户配额与网络」里，`沙箱出口` 一行给出默认模式、来源，以及每个账号的 `出口：关闭 / 开放`，不用登录宿主去看配置文件。
+
+证据：`pwsh scripts/probe-egress.ps1 -Port 7723`（自带 down/up，结束自动拆栈）在同一个栈上把默认租户设成 `none`、把 `dev@piforge.local` 设成 `open`，从**沙箱内部**量 DNS、按名字与按字面地址的公网请求、控制面 `/healthz` 与 `/v1/*`、自己的网关 URL、桥的 `Internal` 与标签、管理页报告，并在**被关闭的租户**里跑一条真实 prompt。产物在 `e2e/.artifacts/egress/`。最近一次（0 failures，exit 0）：
+
+```
+closed: network=piforge-t-29ec2c7a2fa8 Internal=true  label piforge.egress=none
+opened: network=piforge-t-6a0e6d79cf7c Internal=false label piforge.egress=open
+closed: getent hosts example.com -> DNS-FAILED
+        curl -m 5 http://example.com -> (6) Could not resolve host (000)
+        curl -m 5 https://1.1.1.1    -> (7) Couldn't connect to server (000)
+opened: getent hosts example.com -> 172.66.147.243 / 104.20.23.154
+        curl -m 5 http://example.com -> 200 ; https://1.1.1.1 -> 301
+both  : http://piforge:7700/healthz -> 200 ; /v1/projects -> 401
+admin : egress_mode=none source=/etc/piforge/tenant-egress.json configured=true applied=true
+        admin=none / dev=open (override)
+closed tenant prompt: settled，助手回复 DONE，
+        /gw/llm/<token>/v1/chat/completions -> 200
+```
+
+公网目标用明文 HTTP + 一个字面 IP，是因为本机到部分公网站的 TLS 被中间干扰（`curl: (35) unexpected eof`）——那是网络的性质，不是策略的性质；钉死 `https://example.com` 会让探针测防火墙而不是测桥。
+
 ---
 
 ## 2. Kubernetes：四种做法，各自什么时候是对的
