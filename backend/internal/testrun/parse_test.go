@@ -32,8 +32,22 @@ func TestDetect(t *testing.T) {
 		{command: "node --test", want: RunnerNode, ok: true},
 		{command: "node --test test/math.test.js", want: RunnerNode, ok: true},
 		{command: "node --experimental-strip-types --test src/", want: RunnerNode, ok: true},
+		// The acceptance pass's real invocation: the agent wrote a node:test file
+		// and ran it directly. node:test runs it and prints the same TAP summary,
+		// but there is no --test flag to see, so the file name is the signal.
+		{command: "node primes.test.js", want: RunnerNode, ok: true},
+		{command: "node primes.js && node primes.test.js", want: RunnerNode, ok: true},
+		{command: "cd app && node ./src/math.spec.mjs", want: RunnerNode, ok: true},
+		{command: "node --require ./setup.cjs --env-file .env test/math.test.js", want: RunnerNode, ok: true},
+		{command: "node test.js", want: RunnerNode, ok: true},
+		// Plain scripts are not test runs, whatever their output later looks like.
+		{command: "node primes.js", ok: false},
+		{command: "node scripts/check.js", ok: false},
+		{command: "node --version", ok: false},
+		{command: "node notes.md", ok: false},
 		{command: "tsx --test", want: RunnerTSX, ok: true},
 		{command: "tsx --test src/math.test.ts", want: RunnerTSX, ok: true},
+		{command: "tsx src/math.spec.ts", want: RunnerTSX, ok: true},
 		{command: "npx tsx --test", want: RunnerTSX, ok: true},
 		{command: "node script.js --test", ok: false},
 		{command: "poetry run pytest -q", want: RunnerPytest, ok: true},
@@ -478,6 +492,40 @@ func TestParseTAP(t *testing.T) {
 		"not ok - no test number\n" +
 		"# pass nope\n"
 
+	// The exact bytes the deployment's agent produced when it ran
+	// `node primes.test.js` (node v22.23.4, boxlite sandbox, piped stdout). The
+	// names and numbers are copied verbatim; only the Chinese assertions are
+	// shortened to keep the fixture readable. This is the shape the detection
+	// change exists for: no `--test` flag, but a TAP summary all the same.
+	agentRun := "TAP version 13\n" +
+		"# Subtest: firstPrimes(10)\n" +
+		"ok 1 - firstPrimes(10)\n" +
+		"  ---\n" +
+		"  duration_ms: 0.95619\n" +
+		"  type: 'test'\n" +
+		"  ...\n" +
+		"# Subtest: firstPrimes(0)\n" +
+		"ok 2 - firstPrimes(0)\n" +
+		"  ---\n" +
+		"  duration_ms: 0.077841\n" +
+		"  type: 'test'\n" +
+		"  ...\n" +
+		"# Subtest: isPrime recognizes a prime\n" +
+		"ok 3 - isPrime recognizes a prime\n" +
+		"  ---\n" +
+		"  duration_ms: 0.104025\n" +
+		"  type: 'test'\n" +
+		"  ...\n" +
+		"1..3\n" +
+		"# tests 3\n" +
+		"# suites 0\n" +
+		"# pass 3\n" +
+		"# fail 0\n" +
+		"# cancelled 0\n" +
+		"# skipped 0\n" +
+		"# todo 0\n" +
+		"# duration_ms 6.447074\n"
+
 	tests := []struct {
 		name       string
 		output     string
@@ -501,6 +549,10 @@ func TestParseTAP(t *testing.T) {
 		{name: "counts only keep total unknown", output: countsOnly, runner: RunnerNode, recognized: true,
 			total: 0, passed: 2, failed: 1, skipped: 0, durationMS: 0},
 		{name: "malformed", output: malformed, runner: RunnerNode, recognized: false},
+		// A `node x.test.js` run: detected without `--test`, parsed by the same
+		// TAP summary. This is the acceptance pass's empty-panel case.
+		{name: "agent ran the test file directly", output: agentRun, runner: RunnerNode, recognized: true,
+			total: 3, passed: 3, failed: 0, skipped: 0, durationMS: 6},
 		{name: "tsx reads the same tap", output: failing, runner: RunnerTSX, recognized: true,
 			total: 1, passed: 0, failed: 1, skipped: 0, durationMS: 12,
 			failure: &Failure{Name: "adds one and one", File: "/repo/math.test.js", Line: 12, Message: "1 == 2"}},

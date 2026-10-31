@@ -10,10 +10,12 @@
 // # Deliberate limits
 //
 // Detection is by command shape, matching the runners the PRD names: go test,
-// pytest, npm test/jest/vitest, cargo test, make test, mvn test, dotnet test.
-// Gradle, Maven's `verify`, `tox`, `bazel test` and friends are not recognised
-// today; a command that is not recognised is not recorded at all, which is
-// better than recording it and guessing.
+// pytest, npm test/jest/vitest, node --test, cargo test, make test, mvn test,
+// dotnet test. Node's runner has two shapes and both count: the `--test` flag,
+// and running a file that matches the naming convention `node --test` itself
+// discovers (`*.test.js`, `*-test.js`, `test.js`, ...). A script outside that
+// convention — `node check.js`, `./run-tests.sh` — is not recognised at all,
+// which is better than recording it and guessing.
 //
 // Parsing is by the runner's own summary lines, never by prose. When a
 // recognised command produces output this package cannot read — a compiler
@@ -297,8 +299,16 @@ func detectSegment(segment string) (Runner, bool) {
 		if hasTestFlag(rest) {
 			return RunnerNode, true
 		}
+		// `node primes.test.js` is the other way node:test runs: the file
+		// registers its tests and the harness executes them in-process. Node's
+		// own discovery is by exactly this naming convention, so a file that
+		// matches it *is* a test file rather than a script that happens to
+		// print test-looking output.
+		if nodeTestScript(rest) {
+			return RunnerNode, true
+		}
 	case "tsx":
-		if hasTestFlag(rest) {
+		if hasTestFlag(rest) || nodeTestScript(rest) {
 			return RunnerTSX, true
 		}
 	case "cargo":
@@ -343,6 +353,67 @@ func hasTestFlag(args []string) bool {
 		if i+1 < len(args) && !strings.HasPrefix(strings.Trim(args[i+1], `"'`), "-") {
 			i++ // skip a flag's value
 		}
+	}
+	return false
+}
+
+// nodeValueFlags are the node/tsx options that consume the next token. Without
+// them a value like `./setup.cjs` would be mistaken for the script being run,
+// and the real script after it would never be looked at.
+var nodeValueFlags = map[string]bool{
+	"-r": true, "--require": true, "--import": true, "--loader": true,
+	"--experimental-loader": true, "--env-file": true, "--test-reporter": true,
+	"--test-reporter-destination": true, "--test-name-pattern": true,
+	"--test-skip-pattern": true, "--test-timeout": true, "--test-concurrency": true,
+}
+
+// nodeTestScript reports whether the argv names a test file that Node's own
+// runner would have discovered.
+//
+// The acceptance pass watched an agent run `node primes.test.js`: node:test
+// executed the file and printed the same TAP summary `node --test` prints, but
+// the panel stayed empty because the command did not carry the `--test` flag.
+// A file named `*.test.js` is a test file by the runner's own convention (that
+// is the glob `node --test` uses), so recognising it is not a guess about what
+// the script does.
+func nodeTestScript(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		arg := strings.Trim(args[i], `"'`)
+		if strings.HasPrefix(arg, "-") {
+			// A flag whose value is the next token must not be read as the script.
+			// `--test` itself is handled before this function is called.
+			if nodeValueFlags[arg] && i+1 < len(args) {
+				i++
+			}
+			continue
+		}
+		// The first positional argument is the program node runs. Anything
+		// after it is an argument to that program.
+		return isNodeTestFile(arg)
+	}
+	return false
+}
+
+// isNodeTestFile mirrors the name patterns node --test uses to find tests:
+// `*.test.*`, `*.spec.*`, `*-test.*`, `*_test.*`, `test-*.*` and `test.*`.
+// Only script extensions are considered, so `node notes.md` stays a non-test.
+func isNodeTestFile(p string) bool {
+	p = strings.ReplaceAll(p, "\\", "/")
+	base := path.Base(p)
+	ext := strings.ToLower(path.Ext(base))
+	switch ext {
+	case ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts":
+	default:
+		return false
+	}
+	stem := strings.TrimSuffix(base, path.Ext(base))
+	switch {
+	case stem == "test", stem == "spec",
+		strings.HasSuffix(stem, ".test"), strings.HasSuffix(stem, ".spec"),
+		strings.HasSuffix(stem, "-test"), strings.HasSuffix(stem, "-spec"),
+		strings.HasSuffix(stem, "_test"), strings.HasSuffix(stem, "_spec"),
+		strings.HasPrefix(stem, "test-"), strings.HasPrefix(stem, "spec-"):
+		return true
 	}
 	return false
 }

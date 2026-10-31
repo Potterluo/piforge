@@ -32,6 +32,13 @@ const HoldChunkDelay = 250 * time.Millisecond
 // always produce the same outcome.
 const FailMarker = "[[failing-tests]]"
 
+// NodeTestFileMarker in a prompt asks the peer to run its scripted test the way
+// the acceptance pass's agent did: by executing the test file directly, with no
+// `--test` flag. The panel has to recognise the file naming convention on its
+// own; the marker exists so the end-to-end suite exercises that shape instead
+// of the flag.
+const NodeTestFileMarker = "[[node-test-file]]"
+
 // SlowLinesMarker in a prompt asks the peer to run a bash call that prints one
 // line every SlowLineDelay for about five seconds.
 //
@@ -145,6 +152,9 @@ func (s *server) run(text string, delay time.Duration, cancel chan struct{}) {
 	fail := s.script == ScriptError || strings.Contains(text, FailMarker)
 	slow := strings.Contains(text, SlowLinesMarker)
 	bigContext := strings.Contains(text, BigContextMarker)
+	// The node file shape: same node:test harness as the default script, run by
+	// executing the file rather than with `--test`.
+	nodeFile := strings.Contains(text, NodeTestFileMarker)
 
 	ts := time.Now().UnixMilli()
 
@@ -224,6 +234,9 @@ func (s *server) run(text string, delay time.Duration, cancel chan struct{}) {
 			"command": "for i in 1 2 3 4 5 6 7; do echo SLOW-LINE-$i; sleep 0.7; done",
 		}
 	}
+	if nodeFile {
+		toolArgs = map[string]any{"command": "node primes.test.js"}
+	}
 	argsJSON, _ := json.Marshal(toolArgs)
 	s.emit(map[string]any{"type": "message_update", "usage": usage{},
 		"assistantMessageEvent": map[string]any{
@@ -269,6 +282,15 @@ func (s *server) run(text string, delay time.Duration, cancel chan struct{}) {
 	output := "=== RUN   TestCacheEvict\n--- PASS: TestCacheEvict (0.02s)\nPASS\nok  \tinternal/cache\t0.031s\n"
 	if fail {
 		output = "=== RUN   TestCacheEvict\n--- FAIL: TestCacheEvict (0.02s)\n\tcache_test.go:42: race detected\nFAIL\nFAIL\tinternal/cache\t0.021s\n"
+	}
+	if nodeFile {
+		// The bytes node v22 actually prints for a directly executed node:test
+		// file (piped stdout), so the parser is tested against the real reporter
+		// and not a hand-written summary.
+		output = nodeTestTAP(false)
+		if fail {
+			output = nodeTestTAP(true)
+		}
 	}
 	var partial strings.Builder
 	if slow {
@@ -417,6 +439,54 @@ func (s *server) run(text string, delay time.Duration, cancel chan struct{}) {
 func (s *server) finishAborted() {
 	s.emit(map[string]any{"type": "agent_end", "messages": []any{}, "willRetry": false})
 	s.emit(map[string]any{"type": "agent_settled", "aborted": true})
+}
+
+// nodeTestTAP is the console output of `node primes.test.js` on node 22: TAP
+// v13 with the summary lines node:test prints. The failing variant adds a
+// `not ok` with a location, which is what the panel's failure row reads.
+func nodeTestTAP(fail bool) string {
+	if fail {
+		return "TAP version 13\n" +
+			"# Subtest: firstPrimes(10)\n" +
+			"not ok 1 - firstPrimes(10)\n" +
+			"  ---\n" +
+			"  duration_ms: 0.95\n" +
+			"  location: '/workspace/primes.test.js:8:3'\n" +
+			"  failureType: 'testCodeFailure'\n" +
+			"  error: 'expected 10 primes'\n" +
+			"  ...\n" +
+			"1..1\n" +
+			"# tests 1\n" +
+			"# suites 0\n" +
+			"# pass 0\n" +
+			"# fail 1\n" +
+			"# cancelled 0\n" +
+			"# skipped 0\n" +
+			"# todo 0\n" +
+			"# duration_ms 6.44\n"
+	}
+	return "TAP version 13\n" +
+		"# Subtest: firstPrimes(10)\n" +
+		"ok 1 - firstPrimes(10)\n" +
+		"  ---\n" +
+		"  duration_ms: 0.95619\n" +
+		"  type: 'test'\n" +
+		"  ...\n" +
+		"# Subtest: firstPrimes(0)\n" +
+		"ok 2 - firstPrimes(0)\n" +
+		"  ---\n" +
+		"  duration_ms: 0.077841\n" +
+		"  type: 'test'\n" +
+		"  ...\n" +
+		"1..2\n" +
+		"# tests 2\n" +
+		"# suites 0\n" +
+		"# pass 2\n" +
+		"# fail 0\n" +
+		"# cancelled 0\n" +
+		"# skipped 0\n" +
+		"# todo 0\n" +
+		"# duration_ms 6.447074\n"
 }
 
 func (s *server) handleCompact(c command) {

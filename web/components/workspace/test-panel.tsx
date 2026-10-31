@@ -359,9 +359,15 @@ export function TestResultsPanel({
             </EmptyMedia>
             <EmptyTitle>还没有测试运行</EmptyTitle>
             <EmptyDescription>
-              这里会显示 agent 或终端里运行的测试命令的结果：通过 / 失败数量、耗时，以及失败用例的文件、行号和断言。
-              让 agent 运行 <code className="font-mono">go test</code>、<code className="font-mono">pytest</code>、
-              <code className="font-mono">npm test</code> 等命令，或直接在终端里输入它们。
+              这里会显示它认识的测试命令的结果：通过 / 失败数量、耗时，以及失败用例的文件、行号和断言。
+              识别的命令是 <code className="font-mono">go test</code>、<code className="font-mono">pytest</code>、
+              <code className="font-mono">npm test</code> / <code className="font-mono">jest</code> /{" "}
+              <code className="font-mono">vitest</code>、<code className="font-mono">node --test</code>
+              或直接运行测试文件 <code className="font-mono">node x.test.js</code>、
+              <code className="font-mono">cargo test</code>、<code className="font-mono">mvn test</code>、
+              <code className="font-mono">dotnet test</code>，在终端里输入也算。
+              其他脚本（例如 <code className="font-mono">node check.js</code> 或{" "}
+              <code className="font-mono">./run-tests.sh</code>）不会被识别，这里也不会编造通过或失败。
             </EmptyDescription>
           </EmptyHeader>
         </Empty>

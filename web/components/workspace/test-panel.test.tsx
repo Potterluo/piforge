@@ -120,13 +120,21 @@ describe("TestResultsPanel", () => {
     expect(row).toHaveTextContent("go test ./...");
   });
 
-  it("says what will appear and how to trigger it when empty", () => {
+  it("says exactly which commands it recognises, and what it will not invent", () => {
     renderPanel([]);
     const empty = screen.getByTestId("test-empty");
     expect(empty).toHaveTextContent("还没有测试运行");
     expect(empty).toHaveTextContent("go test");
     expect(empty).toHaveTextContent("pytest");
+    // The agent's real invocation on this deployment: a test file, no --test.
+    expect(empty).toHaveTextContent("node --test");
+    expect(empty).toHaveTextContent("node x.test.js");
     expect(empty).toHaveTextContent("终端");
+    // The honest limit: a script outside the runner list is not recorded, and
+    // the panel says so instead of promising every test-ish command.
+    expect(empty).toHaveTextContent("其他脚本");
+    expect(empty).toHaveTextContent("./run-tests.sh");
+    expect(empty).toHaveTextContent("不会编造");
   });
 });
 
