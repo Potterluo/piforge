@@ -99,31 +99,40 @@ func TestRevokeEndsTheSessionToken(t *testing.T) {
 	}
 }
 
-// Revoke is idempotent and forgetting is bounded: a revocation older than the
-// TTL is dropped, because any token it could describe has expired by then.
-func TestRevokeIsIdempotentAndPruned(t *testing.T) {
+// Revoke is idempotent, and the token minted *after* it for the same session is
+// valid: that is the pause → resume path, where the stop revokes and the next
+// spawn mints. A set keyed only by session id (the first version of this fix)
+// rejected the new token too, and a session that was ever paused could not use
+// the gateway again until the TTL expired.
+func TestRevokeIsIdempotentAndTheNextTokenWorks(t *testing.T) {
 	signer, err := NewSigner([]byte("0123456789abcdef0123456789abcdef"), time.Hour)
 	if err != nil {
 		t.Fatalf("NewSigner: %v", err)
 	}
+	now := time.Now()
+	before, err := signer.Issue("ses_one", "usr_1", "volc", "", now)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
 	signer.Revoke("ses_one")
-	signer.Revoke("ses_one")
+	signer.Revoke("ses_one") // idempotent: same generation, same effect
 	signer.Revoke("")
 	if got := signer.RevokedCount(); got != 1 {
-		t.Fatalf("revocation set holds %d entries, want 1", got)
+		t.Fatalf("revocation state holds %d sessions, want 1", got)
 	}
-
-	short, err := NewSigner([]byte("0123456789abcdef0123456789abcdef"), time.Millisecond)
+	if _, err := signer.Verify(before, now); err == nil {
+		t.Fatal("a token issued before the revoke still verifies")
+	}
+	after, err := signer.Issue("ses_one", "usr_1", "volc", "", now)
 	if err != nil {
-		t.Fatalf("NewSigner: %v", err)
+		t.Fatalf("Issue after revoke: %v", err)
 	}
-	short.Revoke("ses_old")
-	time.Sleep(5 * time.Millisecond)
-	short.Revoke("ses_new") // the prune runs on write
-	if short.Revoked("ses_old") {
-		t.Fatal("a revocation older than the TTL was kept")
+	if _, err := signer.Verify(after, now); err != nil {
+		t.Fatalf("the token minted after the revoke does not verify: %v", err)
 	}
-	if !short.Revoked("ses_new") {
-		t.Fatal("the fresh revocation was pruned")
+	// A second stop kills the second token too, and the first stays dead.
+	signer.Revoke("ses_one")
+	if _, err := signer.Verify(after, now); err == nil {
+		t.Fatal("the second revoke left the current token valid")
 	}
 }

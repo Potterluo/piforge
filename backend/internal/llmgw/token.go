@@ -26,6 +26,18 @@ type Claims struct {
 	Model     string `json:"m,omitempty"`
 	IssuedAt  int64  `json:"iat"`
 	ExpiresAt int64  `json:"exp"`
+	// Generation is the session's revocation generation at the moment the token
+	// was minted. Revoke bumps the session's generation, so every token issued
+	// before the stop stops verifying — and the token minted for the *next* spawn
+	// of the same session (after a pause and resume) carries the new number and
+	// works immediately.
+	//
+	// It is a counter rather than a timestamp because the two events that matter
+	// here (a stop and the resume's spawn) can happen inside one second, and a
+	// timestamp compared against `iat` cannot tell them apart: either the new
+	// token is rejected for a second, or a just-revoked one is accepted for a
+	// second. A generation is exact.
+	Generation int64 `json:"g,omitempty"`
 }
 
 // DefaultTTL is how long a sandbox token lives.
@@ -52,17 +64,20 @@ const DefaultTTL = time.Hour
 
 // Signer issues and verifies tokens with HMAC-SHA256.
 //
-// It also holds the revocation set: the gateway asks Verify on every model call
+// It also holds the revocation state: the gateway asks Verify on every model call
 // and a session whose agent stopped must not be able to spend its token for
-// another hour. The set is in memory on purpose — it describes live processes,
-// which do not survive a restart either — and its entries are pruned once the
-// token they revoke would have expired anyway.
+// another hour. Each session has a generation counter — Revoke increments it and
+// every issue stamps the current value into the claims — so "tokens from before
+// the stop" and "tokens for the next spawn" are distinguished exactly, even when
+// a pause and the following resume happen inside one second. The state is in
+// memory on purpose: it describes live processes, which do not survive a restart
+// either.
 type Signer struct {
 	key []byte
 	ttl time.Duration
 
-	mu      sync.RWMutex
-	revoked map[string]time.Time
+	mu         sync.RWMutex
+	generation map[string]int64
 }
 
 // NewSigner builds a signer. The key should be random and process-local unless
@@ -74,56 +89,55 @@ func NewSigner(key []byte, ttl time.Duration) (*Signer, error) {
 	if ttl <= 0 {
 		ttl = DefaultTTL
 	}
-	return &Signer{key: key, ttl: ttl, revoked: map[string]time.Time{}}, nil
+	return &Signer{key: key, ttl: ttl, generation: map[string]int64{}}, nil
 }
 
 // TTL reports the lifetime this signer gives a token. The boot log prints it so
 // "how long is a leaked token worth" is answerable without reading the code.
 func (s *Signer) TTL() time.Duration { return s.ttl }
 
-// Revoke makes every token issued for sessionID invalid from now on, and prunes
-// revocations that are older than the TTL (their tokens have expired).
+// Revoke invalidates every token issued for sessionID so far.
 //
 // It is called when the session's agent stops: pause (manual or idle), archive,
-// delete, a model switch, and the project delete that stops every agent it
-// owns. Idempotent, and safe to call for a session that never had a token.
+// delete, a model switch, and the project delete that stops every agent it owns.
+// The next spawn of the same session gets the next generation and works; only the
+// tokens that were already in the sandbox die.
 func (s *Signer) Revoke(sessionID string) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return
 	}
-	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.revoked == nil {
-		s.revoked = map[string]time.Time{}
+	if s.generation == nil {
+		s.generation = map[string]int64{}
 	}
-	s.revoked[sessionID] = now
-	for id, at := range s.revoked {
-		if now.Sub(at) > s.ttl {
-			delete(s.revoked, id)
-		}
-	}
+	s.generation[sessionID]++
 }
 
-// Revoked reports whether sessionID's tokens were revoked and are still within
-// the window where one could otherwise verify.
+// Revoked reports whether sessionID has ever been revoked. It is diagnostics,
+// not the validity check: Verify compares the token's generation, so a token
+// minted after the revocation is valid while this still answers true.
 func (s *Signer) Revoked(sessionID string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	at, ok := s.revoked[sessionID]
-	if !ok {
-		return false
-	}
-	return time.Since(at) <= s.ttl
+	return s.generation[sessionID] > 0
 }
 
-// RevokedCount is the size of the revocation set. Tests and the admin log use it
-// to tell "nothing was revoked" from "revocation is not wired".
+// generationFor is the number a new token must carry.
+func (s *Signer) generationFor(sessionID string) int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.generation[sessionID]
+}
+
+// RevokedCount is the number of sessions with a revocation on record. Tests and
+// the admin log use it to tell "nothing was revoked" from "revocation is not
+// wired".
 func (s *Signer) RevokedCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return len(s.revoked)
+	return len(s.generation)
 }
 
 // Issue mints a token for a session.
@@ -132,12 +146,13 @@ func (s *Signer) Issue(sessionID, userID, provider, model string, now time.Time)
 		return "", errors.New("llmgw: session, user and provider are required to issue a token")
 	}
 	claims := Claims{
-		SessionID: sessionID,
-		UserID:    userID,
-		Provider:  provider,
-		Model:     model,
-		IssuedAt:  now.Unix(),
-		ExpiresAt: now.Add(s.ttl).Unix(),
+		SessionID:  sessionID,
+		UserID:     userID,
+		Provider:   provider,
+		Model:      model,
+		IssuedAt:   now.Unix(),
+		Generation: s.generationFor(sessionID),
+		ExpiresAt:  now.Add(s.ttl).Unix(),
 	}
 	payload, err := json.Marshal(claims)
 	if err != nil {
@@ -178,8 +193,10 @@ func (s *Signer) Verify(token string, now time.Time) (Claims, error) {
 	// The session-lifetime bound: a token outlives its signature check only as
 	// long as the agent it was minted for runs. This is what makes "pause the
 	// sandbox" also stop the spend, instead of leaving a working bearer
-	// credential behind for the rest of the TTL.
-	if s.Revoked(claims.SessionID) {
+	// credential behind for the rest of the TTL. The comparison is against the
+	// generation, so the token minted for the next spawn of the same session (a
+	// resume, a restart) verifies immediately.
+	if claims.Generation != s.generationFor(claims.SessionID) {
 		return Claims{}, errors.New("token revoked: the session's agent has stopped")
 	}
 	return claims, nil
