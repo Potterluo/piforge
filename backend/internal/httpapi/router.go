@@ -156,6 +156,21 @@ type Deps struct {
 	// Nil leaves the watchdog with the runtime stop alone, which is correct for
 	// the local placement (the agent is this process's child).
 	StopAgent func(ctx context.Context, sandboxID, sessionID string) error
+	// ProbeSandbox answers "can this sandbox still run a command" with one
+	// trivial command through the sandbox's own API, bounded to a few seconds.
+	//
+	// It is the liveness signal the sandbox watchdog needs
+	// (sandbox_watch.go): a fork storm that exhausts the pids cgroup leaves the
+	// container unable to spawn anything, so the only honest probe is "fork and
+	// run something". Nil disables the watchdog and the recover endpoint, with a
+	// log line saying so — a watchdog that cannot probe must not pretend.
+	ProbeSandbox func(ctx context.Context, sandboxID string) error
+	// SandboxWatchInterval is how often the watchdog probes one sandbox. Zero
+	// uses the package default (10s). Only used when ProbeSandbox is set.
+	SandboxWatchInterval time.Duration
+	// SandboxProbeTimeout bounds one probe as the watchdog applies it (it also
+	// bounds the sandbox's endpoint resolution). Zero uses 5s.
+	SandboxProbeTimeout time.Duration
 	// AgentIsolated reports that this deployment runs every agent inside a
 	// sandbox container (a docker or runner placement; stage 4 of
 	// docs/EXECUTION-BOUNDARY.md made that the only placement for them). It is a
@@ -288,6 +303,14 @@ type server struct {
 	// disk watchdog keeps (sandbox_disk_watch.go).
 	diskMu         sync.Mutex
 	diskWatchState map[string]diskWatch
+	// probeMu guards the liveness watchdog's bookkeeping (sandbox_watch.go):
+	// the last verdict per sandbox, the consecutive-failure counter, and the set
+	// of sandboxes a recovery is running for. It is one mutex because the three
+	// are read together by the status endpoint.
+	probeMu       sync.Mutex
+	probeState    map[string]sandboxProbeVerdict
+	probeStrikes  map[string]int
+	recovering    map[string]bool
 }
 
 // NewRouter builds the complete HTTP handler, including the recover middleware.
@@ -350,6 +373,9 @@ func newServer(d Deps) *server {
 		Now:        s.now,
 	})
 	s.diskWatchState = map[string]diskWatch{}
+	s.probeState = map[string]sandboxProbeVerdict{}
+	s.probeStrikes = map[string]int{}
+	s.recovering = map[string]bool{}
 	s.leases = browserlease.New(d.BrowserTakeoverTTL, s.now)
 	return s
 }
@@ -438,6 +464,10 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /v1/sessions/{id}/sandbox/snapshots", s.authed(s.handleSandboxSnapshots))
 	mux.Handle("POST /v1/sessions/{id}/sandbox/pause", s.mutatingBearer(s.handleSandboxPause))
 	mux.Handle("POST /v1/sessions/{id}/sandbox/resume", s.mutatingBearer(s.handleSandboxResume))
+	// One-click repair for a sandbox that stopped answering (sandbox_watch.go).
+	// It is the button behind 「沙箱无响应，正在恢复」, and it runs the same
+	// recovery the watchdog does, synchronously, so the click has an answer.
+	mux.Handle("POST /v1/sessions/{id}/sandbox/recover", s.mutatingBearer(s.handleSandboxRecover))
 	mux.Handle("POST /v1/sessions/{id}/git/hunk", s.mutatingBearer(s.handleGitHunk))
 	mux.Handle("POST /v1/sessions/{id}/git/discard", s.mutatingBearer(s.handleGitDiscardFile))
 	mux.Handle("GET /v1/sessions/{id}/git/remote", s.authed(s.handleGitRemote))

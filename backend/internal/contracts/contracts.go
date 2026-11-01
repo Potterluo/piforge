@@ -974,9 +974,23 @@ const (
 	// because the remedy is "pause or delete a project's sandbox", not "retry":
 	// the details name the limit and what the tenant is using.
 	ErrTenantSandboxLimit = "tenant_sandbox_limit"
-	ErrRateLimited      = "rate_limited"
-	ErrUpstreamOverload = "upstream_overloaded"
-	ErrConflict         = "conflict"
+	// ErrSandboxUnresponsive means the sandbox's own API could not run a trivial
+	// command: the container is alive but cannot fork, which is what a fork storm
+	// that exhausted its pids cgroup leaves behind. It is a platform.error in the
+	// session, not an API error, because the platform has already started the
+	// repair the user would otherwise have to ask for.
+	ErrSandboxUnresponsive = "sandbox_unresponsive"
+	// ErrSandboxRecovered follows ErrSandboxUnresponsive when the stop+start
+	// repair worked. It exists so the transcript says "it is back" instead of
+	// leaving the user on a warning that never resolves.
+	ErrSandboxRecovered = "sandbox_recovered"
+	// ErrSandboxRecoveryFailed follows ErrSandboxUnresponsive when the repair
+	// did not work. The workspace is untouched either way; the difference is that
+	// this one needs a person.
+	ErrSandboxRecoveryFailed = "sandbox_recovery_failed"
+	ErrRateLimited           = "rate_limited"
+	ErrUpstreamOverload      = "upstream_overloaded"
+	ErrConflict              = "conflict"
 	// ErrSharedProvider means the caller addressed a deployment-shared provider
 	// through the per-user provider routes. The provider exists; the endpoint is
 	// the wrong one. It is not `not_found`: a 404 there reads as "gone" and

@@ -104,7 +104,7 @@ services:
       # below can give one account more or less (internal/tenantlimits).
       PIFORGE_SANDBOX_CPUS: ${PIFORGE_SANDBOX_CPUS:-1}
       PIFORGE_SANDBOX_MEMORY: ${PIFORGE_SANDBOX_MEMORY:-2g}
-      PIFORGE_SANDBOX_PIDS: ${PIFORGE_SANDBOX_PIDS:-512}
+      PIFORGE_SANDBOX_PIDS: ${PIFORGE_SANDBOX_PIDS:-256}
       PIFORGE_TENANT_MAX_SANDBOXES: ${PIFORGE_TENANT_MAX_SANDBOXES:-3}
       # Read-only, from deploy/tenant-limits.json unless up-isolated.ps1 was
       # pointed at another file. A policy that cannot be parsed fails the start.
@@ -169,7 +169,7 @@ services:
       # policy, which wins; these keep a hand-made request from being unlimited.
       SANDBOX_CPUS: ${PIFORGE_SANDBOX_CPUS:-1}
       SANDBOX_MEMORY: ${PIFORGE_SANDBOX_MEMORY:-2g}
-      SANDBOX_PIDS: ${PIFORGE_SANDBOX_PIDS:-512}
+      SANDBOX_PIDS: ${PIFORGE_SANDBOX_PIDS:-256}
       # Report http://piforge-<hash8>:8080 instead of a published loopback port:
       # piforged is a container here, so 127.0.0.1:<port> would be its own loopback.
       SANDBOX_CONTAINER_ENDPOINT: "1"

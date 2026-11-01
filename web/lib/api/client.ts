@@ -278,6 +278,53 @@ export const sessions = {
     request<{ session: Session }>(`/v1/sessions/${id}`, { method: "PATCH", body: patch }),
   send: (id: string, input: SendMessageInput) =>
     request<PromptResult>(`/v1/sessions/${id}/messages`, { method: "POST", body: input }),
+  /**
+   * The sandbox behind this session: its state, and the liveness watchdog's last
+   * verdict (backend/internal/httpapi/sandbox_watch.go).
+   *
+   * `responsive: null` means this control plane has not probed the sandbox yet —
+   * unknown is not down, and the banner treats it as absent. These four methods
+   * live here rather than in `git` because the routes are session-scoped
+   * (`/v1/sessions/{id}/sandbox…`).
+   */
+  sandbox: (sessionId: string) =>
+    request<{
+      id: string;
+      state: string;
+      message?: string;
+      responsive?: boolean | null;
+      recovering?: boolean;
+      can_recover?: boolean;
+      probe?: {
+        ok: boolean;
+        error?: string;
+        at?: string;
+        recovered_at?: string;
+        restarts?: number;
+      };
+    }>(`/v1/sessions/${sessionId}/sandbox`),
+  pauseSandbox: (sessionId: string) =>
+    request<{ state: string }>(`/v1/sessions/${sessionId}/sandbox/pause`, { method: "POST" }),
+  resumeSandbox: (sessionId: string) =>
+    request<{ state: string }>(`/v1/sessions/${sessionId}/sandbox/resume`, { method: "POST" }),
+  /**
+   * Stop and start the sandbox, keeping its volume.
+   *
+   * The one-click half of 「沙箱无响应，正在恢复」: a fork storm can exhaust the
+   * sandbox's process budget so completely that it cannot fork — the container
+   * is "running", nothing inside it works, and only a restart brings it back.
+   * The server probes first, so pressing this on a healthy sandbox is a no-op
+   * that says so instead of throwing its /tmp away.
+   */
+  recoverSandbox: (sessionId: string) =>
+    request<{
+      state: string;
+      recovered: boolean;
+      restarted: boolean;
+      recovering?: boolean;
+      elapsed_ms?: number;
+      message?: string;
+    }>(`/v1/sessions/${sessionId}/sandbox/recover`, { method: "POST" }),
   remove: (id: string) => request<{ ok: boolean }>(`/v1/sessions/${id}`, { method: "DELETE" }),
   /** Carries a branch's work back to the session it came from (FR-2.6). */
   adopt: (id: string, message?: string) =>
@@ -472,12 +519,6 @@ export const git = {
       method: "POST",
       body: { path },
     }),
-  sandbox: (sessionId: string) =>
-    request<{ id: string; state: string; message?: string }>(`/v1/sessions/${sessionId}/sandbox`),
-  pauseSandbox: (sessionId: string) =>
-    request<{ state: string }>(`/v1/sessions/${sessionId}/sandbox/pause`, { method: "POST" }),
-  resumeSandbox: (sessionId: string) =>
-    request<{ state: string }>(`/v1/sessions/${sessionId}/sandbox/resume`, { method: "POST" }),
   remote: (sessionId: string) =>
     request<{ remote: boolean; ahead: number; behind: number }>(
       `/v1/sessions/${sessionId}/git/remote`,

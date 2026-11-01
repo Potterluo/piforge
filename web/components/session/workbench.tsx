@@ -55,6 +55,7 @@ import { FirstRunSetup } from "@/components/setup/first-run-setup";
 import { NoWorktreeState } from "./no-worktree-state";
 import { SessionEventsProvider, useSessionEventState } from "./session-events-provider";
 import { SessionStream } from "./session-stream";
+import { SandboxHealthBar } from "./sandbox-health-bar";
 import { SessionLogsSheet } from "./session-logs-sheet";
 import { SidecarDock } from "./sidecar-dock";
 
@@ -397,6 +398,10 @@ function WorkbenchBody({
           {/* Named so a test can assert the thing the user actually cares about:
               when a side folds, the transcript column gets the width back. */}
           <div data-testid="transcript-column" className="flex h-full min-h-0 w-full flex-col">
+            {/* 「沙箱无响应，正在恢复」: the watchdog's verdict and the one-click
+                repair. It renders nothing on a healthy sandbox, so it is always
+                mounted. */}
+            <SandboxHealthBar sessionId={sessionId} />
             <SessionStream
               sessionId={sessionId}
               sessionModel={detail?.model_ref}

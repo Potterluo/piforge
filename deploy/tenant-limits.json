@@ -1,9 +1,9 @@
 {
-  "comment": "PiForge tenant quota policy. 'default' is what every account gets; 'tenants' overrides one account by user id or by email. A field an override leaves out is inherited from the default; an explicit 0 means unlimited. Mounted read-only into the control plane at /etc/piforge/tenant-limits.json (PIFORGE_TENANT_LIMITS_FILE). The deployment-wide flags -sandbox-cpus/-sandbox-memory/-sandbox-pids are the fallback when this file is absent.",
+  "comment": "PiForge tenant quota policy. 'default' is what every account gets; 'tenants' overrides one account by user id or by email. A field an override leaves out is inherited from the default; an explicit 0 means unlimited. Mounted read-only into the control plane at /etc/piforge/tenant-limits.json (PIFORGE_TENANT_LIMITS_FILE). The deployment-wide flags -sandbox-cpus/-sandbox-memory/-sandbox-pids are the fallback when this file is absent. pids was 512 until 2026-11-01; it is 256 because the image's own runtime (gem.sh -> supervisord -> Jupyter/Chrome/node) idles at ~83 threads / 25 processes, so 256 leaves ~170 slots for the tenant's builds and halves what a fork storm can park in the cgroup on a shared daemon. Measured with scripts/measure-pids.ps1: a complete runtime does not come up at 64 (one node service fails), does at 128, and a bounded storm wedges `docker exec` at every limit from 64 to 1024 — the wedge is saturation, not the number, which is why the platform also watches and recovers (internal/httpapi/sandbox_watch.go).",
   "default": {
     "cpus": "1",
     "memory": "2g",
-    "pids": 512,
+    "pids": 256,
     "max_sandboxes": 3
   },
   "tenants": {}
