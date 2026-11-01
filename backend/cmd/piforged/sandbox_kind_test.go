@@ -64,7 +64,7 @@ func TestResolveSandboxKind(t *testing.T) {
 		{
 			name:    "an explicitly empty flag names the valid providers",
 			flag:    " ",
-			wantErr: []string{"-sandbox must be local, docker or runner"},
+			wantErr: []string{"-sandbox must be local, docker, runner or k8s"},
 		},
 	}
 

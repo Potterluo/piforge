@@ -118,6 +118,13 @@ func validateTenantWiring(kind, networkMode string, joinContainers []string, max
 		// and the runner unable to provision a checkout. Say which flag is missing.
 		return fmt.Errorf("-sandbox-network-mode tenant needs -sandbox-join-containers (PIFORGE_SANDBOX_JOIN_CONTAINERS) naming the control plane and the runner, e.g. piforge,piforge-sandbox-runner")
 	}
+	if mode == sandbox.NetworkTenant && kind == "k8s" {
+		// A bridge per tenant is a Docker construct. Kubernetes separates pods with
+		// NetworkPolicy, which this process does not create (the cluster's network
+		// plugin enforces it), so accepting the flag would promise a boundary that
+		// nobody implements.
+		return fmt.Errorf("-sandbox-network-mode tenant is a Docker bridge per tenant, and -sandbox k8s creates no such thing: a Kubernetes deployment separates sandboxes with NetworkPolicy (deploy/k8s/40-networkpolicy.yaml, docs/SANDBOX-K8S.md). Remove the flag for -sandbox k8s")
+	}
 	return nil
 }
 

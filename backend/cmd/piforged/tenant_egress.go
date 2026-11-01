@@ -70,6 +70,14 @@ func checkTenantEgress(kind string, networkMode sandbox.NetworkMode, policy *ten
 	if kind == "local" {
 		return policy.CheckHost()
 	}
+	if kind == "k8s" {
+		// The policy is enforced where the container is created. Under -sandbox k8s
+		// the container is a pod in a cluster whose egress is decided by NetworkPolicy
+		// (and by the CNI): this process creates neither, so a policy here would be a
+		// page that describes a boundary nobody applies — the exact failure
+		// checkTenantEgress exists to prevent.
+		return fmt.Errorf("a tenant egress policy cannot be applied by -sandbox k8s: this process creates no network for the sandbox. Enforce it in the cluster with a NetworkPolicy (deploy/k8s/40-networkpolicy.yaml, docs/SANDBOX-K8S.md §egress) and remove -tenant-egress-file / -tenant-egress-mode")
+	}
 	return policy.Check(networkMode)
 }
 

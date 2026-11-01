@@ -207,6 +207,25 @@ type options struct {
 	// under -sandbox runner; they are rejected under any other provider.
 	sandboxRunnerURL   string
 	sandboxRunnerToken string
+	// The Kubernetes provider's configuration (-sandbox k8s). The defaults are
+	// deliberately empty here: sandbox.K8sConfig fills "piforge", "gvisor", "10Gi"
+	// and "cluster.local", so validateK8sFlags can tell "the operator wrote this"
+	// from "nobody said anything". See sandbox_k8s.go.
+	k8sKubeconfig     string
+	k8sContext        string
+	k8sNamespace      string
+	k8sRuntimeClass   string
+	k8sAllowRunc      bool
+	k8sStorageClass   string
+	k8sDiskSize       string
+	k8sServiceAccount string
+	k8sRunAsUser      int64
+	k8sAllowRootUser  bool
+	k8sReadOnlyRootFS bool
+	k8sWritableDirs   string
+	k8sClusterDomain  string
+	k8sEndpoint       string
+	k8sGraceStop      time.Duration
 	// webUpstream makes this process serve the UI as well as the API, which is
 	// how a container exposes a single port.
 	webUpstream string
@@ -350,7 +369,7 @@ func run() error {
 		envDuration("PIFORGE_SESSION_RECONCILE_INTERVAL", 30*time.Second),
 		"how often sessions that claim a run is in flight are checked against the live agent registry (0 disables the periodic pass; the startup pass always runs)")
 	flag.StringVar(&opt.sandboxKind, "sandbox", envOr("PIFORGE_SANDBOX", ""),
-		"REQUIRED sandbox provider: local (directories, host placement, development only) or docker / runner (isolated, needs Docker). There is no default; a start that names none is refused (env PIFORGE_SANDBOX)")
+		"REQUIRED sandbox provider: local (directories, host placement, development only) or docker / runner / k8s (isolated: Docker here, a runner service, or a Kubernetes namespace). There is no default; a start that names none is refused (env PIFORGE_SANDBOX)")
 	flag.StringVar(&opt.sandboxBrowser, "sandbox-browser", envOr("PIFORGE_SANDBOX_BROWSER", "auto"),
 		"browser placement: auto (container providers: remote, local: host), host, or remote (inside the sandbox container)")
 	flag.StringVar(&opt.sandboxTerminal, "sandbox-terminal", envOr("PIFORGE_SANDBOX_TERMINAL", "auto"),
@@ -360,7 +379,7 @@ func run() error {
 	flag.StringVar(&opt.sandboxAPIKey, "sandbox-api-key", envOr("PIFORGE_SANDBOX_API_KEY", ""),
 		"fixed API key for every sandbox (debugging override; empty gives each sandbox its own key)")
 	flag.StringVar(&opt.sandboxImage, "sandbox-image", envOr("PIFORGE_SANDBOX_IMAGE", ""),
-		"image for the docker sandbox provider")
+		"image for the docker and Kubernetes sandbox providers")
 	flag.StringVar(&opt.sandboxNetwork, "sandbox-network", envOr("PIFORGE_SANDBOX_NETWORK", ""),
 		"docker network for sandboxes (empty: bridge)")
 	flag.StringVar(&opt.sandboxCPUs, "sandbox-cpus", envOr("PIFORGE_SANDBOX_CPUS", ""),
@@ -387,6 +406,7 @@ func run() error {
 		"base URL of the sandbox-runner service, with -sandbox runner (e.g. http://sandbox-runner:7801)")
 	flag.StringVar(&opt.sandboxRunnerToken, "sandbox-runner-token", envOr("PIFORGE_SANDBOX_RUNNER_TOKEN", ""),
 		"shared bearer token of the sandbox-runner service, with -sandbox runner")
+	defineK8sFlags(flag.CommandLine, &opt)
 	// Deprecated, and deliberately still parsed: stage 4 removed the choice, and a
 	// deployment that asks for the old, unsandboxed shape must fail loudly rather
 	// than run a multi-tenant instance with the agent beside the control plane.
@@ -468,6 +488,11 @@ func run() error {
 	// created: a typo here would otherwise start a process that looks healthy and
 	// fails on the first session.
 	if err := validateSandboxFlags(opt.sandboxKind, opt.sandboxRunnerURL, opt.sandboxRunnerToken); err != nil {
+		return err
+	}
+	// The Kubernetes flags are the runner credentials' mirror image: naming one
+	// under another provider is a command line that looks configured and is not.
+	if err := validateK8sFlags(flag.CommandLine, opt.sandboxKind, opt); err != nil {
 		return err
 	}
 	// Where the agent runs is not a decision any more: a container placement runs
@@ -853,9 +878,17 @@ func run() error {
 		return fmt.Errorf("init model gateway: %w", err)
 	}
 	if isContainerSandbox(opt.sandboxKind) {
+		// Where "the sandbox's own address" comes from differs per provider and is
+		// named here: a Docker bridge's peer address on a tenant bridge, or a
+		// Kubernetes pod's address (which the NetworkPolicy pins to the one source
+		// that may dial the gateway).
+		where := "the request must arrive from the sandbox's own address on the tenant bridge"
+		if opt.sandboxKind == "k8s" {
+			where = "the request must arrive from the sandbox pod's own address, which deploy/k8s/40-networkpolicy.yaml is what confines"
+		}
 		logger.Info("model gateway tokens are bound to their sandbox",
 			"sandbox", opt.sandboxKind,
-			"address", "the request must arrive from the sandbox's own address on the tenant bridge",
+			"address", where,
 			"proof", "X-PF-Sandbox-Proof = HMAC(per-sandbox secret, token), carried in the agent environment, never in models.json",
 			"covers", "a token copied out of the sandbox is refused from the host, from another sandbox and from another tenant")
 	} else {
@@ -963,6 +996,18 @@ func run() error {
 		logger.Info("sandbox lifecycle runs through the runner",
 			"url", opt.sandboxRunnerURL,
 			"detail", "no docker CLI and no daemon are needed in this process")
+	case "k8s":
+		// The same container story, one layer out: the sandbox is a pod in the
+		// deployment's namespace, its workspace is a volume only that pod mounts,
+		// and this process holds no Docker socket, no runner token and no host
+		// directory. The provider refuses to start against a cluster that cannot
+		// host it (namespace, RBAC, runtime class) — see newK8sSandbox.
+		k8sProvider, kerr := newK8sSandbox(ctx, opt, tenants, logger)
+		if kerr != nil {
+			return fmt.Errorf("init kubernetes sandbox provider: %w", kerr)
+		}
+		sb = k8sProvider
+		remoteSB = k8sProvider
 	default:
 		localRoot := filepath.Join(opt.dataDir, "sandboxes")
 		local, lerr := sandbox.NewLocal(sandbox.LocalConfig{
@@ -1545,8 +1590,12 @@ func run() error {
 		// The egress policy, so the admin screen can answer "who can reach the
 		// internet" per tenant — the same reason the quota is reported there.
 		TenantEgress: egress,
-		// The mode is only a boundary when something creates a container for it.
-		SandboxEgressApplied: opt.sandboxKind != "local",
+		// The mode is only a boundary when something creates a container for it,
+		// and the container's network is created by the process that runs it: this
+		// one for -sandbox docker, the runner for -sandbox runner. A Kubernetes
+		// placement's egress is the cluster's NetworkPolicy, which this process
+		// does not apply — so it must not report itself as applied.
+		SandboxEgressApplied: opt.sandboxKind == "docker" || opt.sandboxKind == "runner",
 		Sandbox:              sb,
 		Secrets:              box,
 		WebUpstream:          opt.webUpstream,

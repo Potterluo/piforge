@@ -124,11 +124,13 @@ func resolveSandboxPlacement(kind, browser, terminal, files string) (sandboxPlac
 // isContainerSandbox reports whether the provider puts a sandbox in a container.
 //
 // docker and runner are the same boundary reached through different processes:
-// docker runs the CLI here, runner asks a service that has the CLI. Everything
-// placement-related treats them alike.
+// docker runs the CLI here, runner asks a service that has the CLI. Kubernetes is
+// that boundary reached through an API server — the sandbox is a pod, which is a
+// container with a runtime class. Everything placement-related treats the three
+// alike.
 func isContainerSandbox(kind string) bool {
 	normalized := normalizedSandboxKind(kind)
-	return normalized == "docker" || normalized == "runner"
+	return normalized == "docker" || normalized == "runner" || normalized == "k8s"
 }
 
 // normalizedSandboxKind trims the flag value and lowercases the provider name, so
@@ -152,12 +154,15 @@ func normalizedSandboxKind(kind string) string {
 // The runner credentials are not a hint: if -sandbox is not runner they name a
 // service nothing will talk to, and if they are missing under -sandbox runner the
 // process would start and then fail on the first session. Both are startup
-// errors, named by the flag that has to change.
+// errors, named by the flag that has to change. The Kubernetes flags follow the
+// same rule in the other direction: they are accepted only by -sandbox k8s, and
+// they are not required (a deployment inside the cluster uses its service
+// account).
 func validateSandboxFlags(kind, runnerURL, runnerToken string) error {
 	switch kind {
-	case "local", "docker", "runner":
+	case "local", "docker", "runner", "k8s":
 	default:
-		return fmt.Errorf("-sandbox must be local, docker or runner, got %q", kind)
+		return fmt.Errorf("-sandbox must be local, docker, runner or k8s, got %q", kind)
 	}
 	runnerURL = strings.TrimSpace(runnerURL)
 	runnerToken = strings.TrimSpace(runnerToken)
@@ -199,7 +204,7 @@ func resolvePlacement(feature, requested string, container bool) (placement, err
 		// Naming the reason, not just the rule: the flag is not wrong in itself, it
 		// is wrong for this provider, and the operator needs to know which knob to
 		// turn instead of guessing.
-		return "", fmt.Errorf("-sandbox-%s remote needs -sandbox docker or -sandbox runner: with -sandbox local there is no container to talk to, so this feature can only run on the host", feature)
+		return "", fmt.Errorf("-sandbox-%s remote needs -sandbox docker, -sandbox runner or -sandbox k8s: with -sandbox local there is no container to talk to, so this feature can only run on the host", feature)
 	}
 	return placement(requested), nil
 }
@@ -338,7 +343,7 @@ func parseIsolationSwitch(raw string) (bool, bool) {
 func resolveSandboxKind(fs *flag.FlagSet, value, env string) (string, error) {
 	if fs != nil && setBy(fs, "sandbox") {
 		if strings.TrimSpace(value) == "" {
-			return "", fmt.Errorf("-sandbox was given an empty value: -sandbox must be local, docker or runner (local is development, host placement; docker and runner are isolated)")
+			return "", fmt.Errorf("-sandbox was given an empty value: -sandbox must be local, docker, runner or k8s (local is development, host placement; docker, runner and k8s are isolated)")
 		}
 		return normalizedSandboxKind(value), nil
 	}
@@ -347,7 +352,7 @@ func resolveSandboxKind(fs *flag.FlagSet, value, env string) (string, error) {
 	}
 	return "", fmt.Errorf("refusing to start without a sandbox provider: host placement is not a default any more. " +
 		"Pass -sandbox local for development (host placement: no container boundary; the agent, terminal, browser and files run on this host), " +
-		"or -sandbox runner / -sandbox docker for an isolated deployment. PIFORGE_SANDBOX is the environment spelling")
+		"or -sandbox runner / -sandbox docker / -sandbox k8s for an isolated deployment. PIFORGE_SANDBOX is the environment spelling")
 }
 
 // hostPlacementWarning is the boot line a local placement must carry.

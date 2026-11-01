@@ -41,6 +41,27 @@ func TestResolveSandboxPlacement(t *testing.T) {
 			want: sandboxPlacement{Browser: placeRemote, Terminal: placeRemote, Files: placeRemote, container: true},
 		},
 		{
+			// Kubernetes is the same boundary reached through an API server: the
+			// sandbox is a pod, so every panel that needs a container gets one.
+			name: "k8s defaults to remote",
+			kind: "k8s",
+			want: sandboxPlacement{Browser: placeRemote, Terminal: placeRemote, Files: placeRemote, container: true},
+		},
+		{
+			name: "k8s provider name is case-insensitive",
+			kind: " K8S ",
+			want: sandboxPlacement{Browser: placeRemote, Terminal: placeRemote, Files: placeRemote, container: true},
+		},
+		{
+			// A single host feature under k8s is the mixed deployment nobody picks
+			// on purpose, and the boot log has to say so.
+			name: "k8s with one host feature is mixed",
+			kind: "k8s", browser: "host",
+			want:     sandboxPlacement{Browser: placeHost, Terminal: placeRemote, Files: placeRemote, container: true},
+			wantHost: []string{"browser"},
+			mixed:    true,
+		},
+		{
 			name: "docker accepts auto spelled out",
 			kind: "docker", browser: "auto", terminal: "auto", files: "auto",
 			want: sandboxPlacement{Browser: placeRemote, Terminal: placeRemote, Files: placeRemote, container: true},
@@ -139,7 +160,7 @@ func TestResolveSandboxPlacementLocalRemoteIsRefused(t *testing.T) {
 			if !strings.Contains(msg, "-sandbox-"+req.feature+" remote") {
 				t.Fatalf("error does not name the offending flag: %q", msg)
 			}
-			if !strings.Contains(msg, "-sandbox docker or -sandbox runner") {
+			if !strings.Contains(msg, "-sandbox docker, -sandbox runner or -sandbox k8s") {
 				t.Fatalf("error does not name the providers that would work: %q", msg)
 			}
 			if !strings.Contains(msg, "no container") {
@@ -182,7 +203,9 @@ func TestValidateSandboxFlags(t *testing.T) {
 		{name: "local with a runner url is refused", kind: "local", url: url, token: token, wantErr: "-sandbox-runner-url"},
 		{name: "local with only a runner token is refused", kind: "local", token: token, wantErr: "-sandbox-runner-token"},
 		{name: "docker with runner credentials is refused", kind: "docker", url: url, token: token, wantErr: "-sandbox-runner-url"},
-		{name: "an unknown provider is refused", kind: "podman", wantErr: "-sandbox must be local, docker or runner"},
+		{name: "k8s without runner credentials is fine", kind: "k8s"},
+		{name: "k8s with runner credentials is refused", kind: "k8s", url: url, token: token, wantErr: "-sandbox-runner-url"},
+		{name: "an unknown provider is refused", kind: "podman", wantErr: "-sandbox must be local, docker, runner or k8s"},
 	}
 
 	for _, tc := range cases {
@@ -233,7 +256,10 @@ func TestValidateContainerWorkspace(t *testing.T) {
 		{name: "runner with a remote panel", kind: "runner", files: "remote"},
 		{name: "docker with a host panel is refused", kind: "docker", files: "host", wantErr: true},
 		{name: "runner with a host panel is refused", kind: "runner", files: "host", wantErr: true},
+		{name: "k8s with a remote panel", kind: "k8s", files: "remote"},
+		{name: "k8s with a host panel is refused", kind: "k8s", files: "host", wantErr: true},
 		{name: "the request value is refused", kind: "runner", files: "auto", wantErr: true},
+		{name: "the request value is refused under k8s too", kind: "k8s", files: "auto", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -112,4 +112,14 @@ func TestCheckTenantEgressRefusesWhatCannotBeEnforced(t *testing.T) {
 	if err := checkTenantEgress("local", sandbox.NetworkShared, nil); err != nil {
 		t.Fatalf("nil policy: %v", err)
 	}
+
+	// -sandbox k8s creates no network, so a policy here would describe a boundary
+	// nobody applies: it is refused, naming the NetworkPolicy that does apply.
+	if err := checkTenantEgress("k8s", sandbox.NetworkShared, open); err == nil ||
+		!strings.Contains(err.Error(), "NetworkPolicy") {
+		t.Fatalf("egress policy under -sandbox k8s = %v, want a refusal naming the NetworkPolicy", err)
+	}
+	if err := checkTenantEgress("k8s", sandbox.NetworkShared, nil); err != nil {
+		t.Fatalf("no policy under -sandbox k8s must still start: %v", err)
+	}
 }
