@@ -227,8 +227,17 @@ func (l *Local) WorktreePath(sandboxID, name string) (string, error) {
 
 // ID builds the deterministic sandbox id for a (user, project) pair.
 func ID(userID, projectID string) string {
+	return "sbx_" + pairHash(userID, projectID)
+}
+
+// pairHash is the 16 hex characters of the (user, project) hash every provider
+// derives its names from: "sbx_<hash>" for the row, "piforge-<hash>" for a
+// container or a pod, "piforge-ws-<hash>" for a detached workspace or a PVC. One
+// derivation, so the same pair always resolves to the same sandbox on any
+// deployment shape, and a restarted process can re-adopt what the last one made.
+func pairHash(userID, projectID string) string {
 	sum := sha256.Sum256([]byte(userID + "/" + projectID))
-	return "sbx_" + hex.EncodeToString(sum[:8])
+	return hex.EncodeToString(sum[:8])
 }
 
 // Ensure creates (or re-adopts) the sandbox for a (user, project) pair.

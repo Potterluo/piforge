@@ -2,8 +2,6 @@ package sandbox
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -330,8 +328,7 @@ var _ contracts.WorktreeSandbox = (*Docker)(nil)
 // does it: two sessions in one project must share one sandbox, and the name has to be
 // recoverable after a restart of the control plane.
 func (d *Docker) containerName(userID, projectID string) string {
-	sum := sha256.Sum256([]byte(userID + "/" + projectID))
-	return "piforge-" + hex.EncodeToString(sum[:8])
+	return "piforge-" + pairHash(userID, projectID)
 }
 
 // workspacePath is the host directory bind-mounted at /workspace for one (user,
@@ -850,30 +847,9 @@ func (d *Docker) ensureCheckout(ctx context.Context, name, apiKey, repoURL, bran
 	if err != nil {
 		return fmt.Errorf("sandbox: docker: checkout %s: %w", containerRepoDir, err)
 	}
-	steps := planCheckout(ready, repoURL, branch, !d.cfg.DetachedWorkspace)
-	if len(steps) == 0 {
-		return nil
-	}
-	if res, err := shell.Exec(ctx, "mkdir -p -- "+aio.Quote(containerRepoDir), containerWorkspace); err != nil {
-		return fmt.Errorf("sandbox: docker: prepare %s: %w", containerRepoDir, err)
-	} else if res.ExitCode != 0 {
-		return fmt.Errorf("sandbox: docker: prepare %s: %s", containerRepoDir, commandFailure(res))
-	}
-	for _, step := range steps {
-		err := runSandboxStep(ctx, shell, step, !d.cfg.DetachedWorkspace)
-		if err == nil {
-			continue
-		}
-		if step.fallback != nil {
-			ferr := runSandboxStep(ctx, shell, sandboxStep{name: step.name, dir: step.dir, argv: step.fallback}, !d.cfg.DetachedWorkspace)
-			if ferr == nil {
-				continue
-			}
-			return fmt.Errorf("sandbox: docker: %s %s: %w", step.name, containerRepoDir, ferr)
-		}
-		return fmt.Errorf("sandbox: docker: %s %s: %w", step.name, containerRepoDir, err)
-	}
-	return nil
+	// The plan and its execution are shared with every other provider that has a
+	// sandbox API (checkout.go); only the shell is Docker's.
+	return runCheckoutPlan(ctx, shell, ready, repoURL, branch, !d.cfg.DetachedWorkspace, d.Name())
 }
 
 // AddWorktree creates a branch session's linked worktree inside the sandbox, as
@@ -920,16 +896,8 @@ func (d *Docker) AddWorktree(ctx context.Context, sandboxID, repoDir, path, bran
 	if err != nil {
 		return fmt.Errorf("sandbox: docker: add worktree %s: %w", worktree, err)
 	}
-	steps, err := planBranchWorktree(ready, repo, worktree, branch, !d.cfg.DetachedWorkspace)
-	if err != nil {
-		return fmt.Errorf("sandbox: docker: add worktree %s: %w", worktree, err)
-	}
-	for _, step := range steps {
-		if err := runSandboxStep(ctx, shell, step, !d.cfg.DetachedWorkspace); err != nil {
-			return fmt.Errorf("sandbox: docker: %s %s: %w", step.name, worktree, err)
-		}
-	}
-	return nil
+	// Same execution as every other provider with a sandbox API (checkout.go).
+	return runWorktreePlan(ctx, shell, ready, repo, worktree, branch, !d.cfg.DetachedWorkspace, d.Name())
 }
 
 // probeWorktreeReady reports whether a session worktree already exists as a
@@ -1009,40 +977,11 @@ func (d *Docker) waitForSandboxShell(ctx context.Context, name, apiKey string, p
 		return nil, fmt.Errorf("the checkout runs through the sandbox API, but this provider publishes no api port (DockerConfig.APIPort); " +
 			"the docker CLI is not a fallback")
 	}
-	deadline := time.Now().Add(checkoutAPIWait)
-	var shell checkoutShell
-	var lastErr error
-	for {
-		// Resolve the endpoint once. It cannot move while this container exists
-		// (the port is assigned at creation), and `docker port` is an exec per
-		// call: retrying the probe must not spawn one every 250ms while the
-		// image's services come up.
-		if shell == nil {
-			opened, err := d.shellFor(ctx, name, apiKey)
-			if err == nil {
-				shell = opened
-			} else {
-				lastErr = err
-			}
-		}
-		if shell != nil {
-			if probeErr := probe(ctx, shell); probeErr == nil {
-				return shell, nil
-			} else {
-				lastErr = probeErr
-			}
-		}
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("the sandbox API did not answer within %s: %w", checkoutAPIWait, lastErr)
-		}
-		timer := time.NewTimer(checkoutAPIPoll)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
-	}
+	// The retry window itself is shared with the Kubernetes provider
+	// (checkout.go); what is Docker's is how a shell is opened.
+	return awaitSandboxShell(ctx, func(ctx context.Context) (checkoutShell, error) {
+		return d.shellFor(ctx, name, apiKey)
+	}, probe)
 }
 
 // probeCheckoutReady reports whether /workspace/repo already holds a repository
