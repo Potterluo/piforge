@@ -1,9 +1,14 @@
 # One command from a clean checkout to a working isolated PiForge.
 #
-#   pwsh scripts/up-isolated.ps1                 # build what is missing, preflight, start
+#   pwsh scripts/up-isolated.ps1                 # build what is stale, preflight, start
 #   pwsh scripts/up-isolated.ps1 -Check          # preflight only: no build, no start
+#   pwsh scripts/up-isolated.ps1 -BuildOnly      # build what is stale, print, stop
 #   pwsh scripts/up-isolated.ps1 -Rebuild        # rebuild all three images, then start
 #   pwsh scripts/up-isolated.ps1 -Down           # remove the stack, its sandboxes and volumes
+#
+# "Stale" is decided from file *content*, not timestamps: each image carries a
+# piforge.source-digest label (see the Freshness section below) and an image is
+# reused only when that label matches the tree.
 #
 # Why this exists: the isolated shape needs three images that agree with each
 # other (the control plane, the runner, and a sandbox image built *from* the
@@ -22,6 +27,10 @@ param(
     [string]$DataVolume = "",
     [switch]$Check,
     [switch]$NoBuild,
+    # Build what is stale and stop: no preflight, no start. It exists so the
+    # freshness decision can be exercised (scripts/verify-image-freshness.ps1)
+    # without bringing a stack up.
+    [switch]$BuildOnly,
     [switch]$Rebuild,
     [switch]$Down,
     [string]$Provider = "volc|https://api.example.com/v1|deepseek-v4-flash",
@@ -101,18 +110,44 @@ function Image-Id([string]$ref) {
 
 # Newest-Source is the last time anything this build compiles was touched, in UTC.
 #
-# Why: `up-isolated` used to build only what was *missing*, so after a source
-# change it happily started the previous image — and an audit probe then measured
-# the old binary (adversarial round 5, "the acceptance harness can test the wrong
-# binary"). Tracked files are enumerated through git, which is fast and exact;
-# untracked-but-not-ignored files count too, because a new file is a source
-# change. Without git the answer is the newest Dockerfile, which still rebuilds
-# on a Dockerfile edit and leaves -Rebuild for the rest.
-function Newest-Source([string]$root) {
+# It is the *fallback* signal, not the decision. Timestamps cannot tell "the same
+# bytes" from "the same bytes, touched", and a file edited with its mtime set
+# into the past made the old check print "is current" while the tree differed
+# (adversarial round 6) — which is how a "verified green" claim can measure a
+# stale image. The content digest below decides; this is consulted only when no
+# digest can be computed at all.
+function Newest-Source([string]$root, [string[]]$files) {
     $newest = [DateTime]::MinValue
-    $git = Get-Command git -ErrorAction SilentlyContinue
+    foreach ($rel in $files) {
+        $full = Join-Path $root $rel
+        if (-not (Test-Path -LiteralPath $full)) { continue }
+        $stamp = (Get-Item -LiteralPath $full -ErrorAction SilentlyContinue).LastWriteTimeUtc
+        if ($stamp -and $stamp -gt $newest) { $newest = $stamp }
+    }
+    if ($newest -eq [DateTime]::MinValue) { return $null }
+    return $newest
+}
+
+# ---------------------------------------------------------------------------
+# Freshness: the content digest.
+#
+# Every image is built with a label naming the digest of the inputs it was built
+# from:
+#
+#   --label piforge.source-digest=<sha256 over the source content, the
+#                                   Dockerfile and the build args>
+#
+# The next run recomputes the same digest from the tree and compares. Equal
+# content means "reuse the image", whatever the clock says; different content
+# means "rebuild", even when the edit looks older than the image.
+# ---------------------------------------------------------------------------
+
+# Source-Files lists what a build compiles: tracked files, plus untracked ones
+# that git does not ignore, under the four source roots. Stable order, because
+# the digest must not depend on the filesystem's iteration order.
+function Source-Files([string]$root) {
     $files = @()
-    if ($git) {
+    if (Get-Command git -ErrorAction SilentlyContinue) {
         Push-Location $root
         try {
             $tracked = & git ls-files -z -- backend web deploy Dockerfile docker-compose.runner.yml 2>$null
@@ -125,16 +160,79 @@ function Newest-Source([string]$root) {
         finally { Pop-Location }
     }
     if ($files.Count -eq 0) {
-        $files = @('Dockerfile', 'deploy/Dockerfile.runner', 'deploy/Dockerfile.sandbox-agent')
+        # No git: the Dockerfiles and the compose file are the whole list that
+        # can be trusted to exist, and an edit there is still a rebuild.
+        $files = @('Dockerfile', 'deploy/Dockerfile.runner', 'deploy/Dockerfile.sandbox-agent', 'docker-compose.runner.yml')
     }
-    foreach ($rel in $files) {
-        $full = Join-Path $root $rel
-        if (-not (Test-Path $full)) { continue }
-        $stamp = (Get-Item $full -ErrorAction SilentlyContinue).LastWriteTimeUtc
-        if ($stamp -and $stamp -gt $newest) { $newest = $stamp }
+    return @($files | Sort-Object -Unique)
+}
+
+# Source-Rows pairs each existing file with the hash of its *content*:
+# "<rel-path>`0<blob-sha>". `git hash-object` reads the working tree (not the
+# index) and does all 700 files in one process (~0.1 s). The .NET fallback is
+# for a checkout without git; the decision must not silently degrade to mtimes
+# just because a binary is missing.
+function Source-Rows([string]$root, [string[]]$files) {
+    $existing = @($files | Where-Object { Test-Path -LiteralPath (Join-Path $root $_) })
+    if ($existing.Count -eq 0) { return @() }
+    $blobs = @()
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        Push-Location $root
+        try { $blobs = @($existing | & git hash-object --stdin-paths 2>$null) }
+        finally { Pop-Location }
     }
-    if ($newest -eq [DateTime]::MinValue) { return $null }
-    return $newest
+    if ($blobs.Count -ne $existing.Count) {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $blobs = @(foreach ($rel in $existing) {
+                $stream = [System.IO.File]::OpenRead((Join-Path $root $rel))
+                try { [Convert]::ToHexString($sha.ComputeHash($stream)).ToLowerInvariant() }
+                finally { $stream.Dispose() }
+            })
+        }
+        finally { $sha.Dispose() }
+    }
+    $rows = New-Object 'System.Collections.Generic.List[string]'
+    for ($i = 0; $i -lt $existing.Count; $i++) {
+        $rows.Add(("{0}`0{1}" -f $existing[$i], ([string]$blobs[$i]).Trim()))
+    }
+    return $rows.ToArray()
+}
+
+# Source-Digest folds the rows, the Dockerfile and the build args into one
+# digest. The Dockerfile name and the args are inputs too: the three images are
+# built from the same tree but not from the same recipe, and the sandbox image's
+# AGENT_IMAGE names the control-plane image id it was built on top of.
+function Source-Digest([string[]]$rows, [string]$dockerfile, [string[]]$buildArgs) {
+    $salt = "piforge-source-digest-v1`n" + $dockerfile + "`n" + (@($buildArgs) -join "`n")
+    $text = $salt + "`n" + (@($rows) -join "`n")
+    $hash = [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($text))
+    return [Convert]::ToHexString($hash).ToLowerInvariant()
+}
+
+# Short-Digest is the 12-hex prefix the log lines print.
+function Short-Digest([string]$digest) {
+    if ([string]::IsNullOrWhiteSpace($digest)) { return 'none' }
+    if ($digest.Length -le 12) { return $digest }
+    return $digest.Substring(0, 12)
+}
+
+# Image-Digest reads piforge.source-digest off an image, or $null when it has
+# none (built before this check, or by hand).
+function Image-Digest([string]$ref) {
+    $value = & docker image inspect -f '{{index .Config.Labels "piforge.source-digest"}}' $ref 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $value = ($value | Out-String).Trim()
+    if ($value -eq '<no value>' -or [string]::IsNullOrWhiteSpace($value)) { return $null }
+    return $value
+}
+
+# Image-FullId is the untruncated id, for a digest salt that must change when the
+# image does.
+function Image-FullId([string]$ref) {
+    $id = & docker image inspect -f '{{.Id}}' $ref 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($id)) { return 'missing' }
+    return ($id | Out-String).Trim()
 }
 
 function Build-File([string]$dockerfile, [string]$tag, [string[]]$extraArgs) {
@@ -196,39 +294,96 @@ if ($Down) {
 # Build. Order matters: the sandbox image is built *from* the control plane, so
 # `pi` and /opt/piforge/piforged are exactly the version the control plane runs.
 # ---------------------------------------------------------------------------
+$script:ImageState = @{}
+
+# Write-ImageSummary prints, for each image, what actually ran and why: id,
+# build time, the decision (rebuilt for this reason / current) and the digest.
+# "The tag exists" is not the same claim as "the tag is this tree", and the log
+# line an operator reads is the only place that difference is visible.
+function Write-ImageSummary {
+    Write-Host "  images   : $controlPlaneImage, $runnerImage, $sandboxImage"
+    foreach ($ref in @($controlPlaneImage, $runnerImage, $sandboxImage)) {
+        $created = Image-Created $ref
+        $stamp = if ($created) { $created.ToString('yyyy-MM-dd HH:mm:ss') + 'Z' } else { 'missing' }
+        $state = $script:ImageState[$ref]
+        $decision = 'not checked (the build phase was skipped)'
+        if ($state -and $state.Rebuilt) { $decision = 'rebuilt (' + $state.Why + ')' }
+        elseif ($state -and $state.Why) { $decision = $state.Why }
+        $digest = 'none'
+        if ($state -and $state.Digest) { $digest = Short-Digest $state.Digest }
+        Write-Host ("             {0,-34} id {1}  built {2}  digest {3}  {4}" -f $ref, (Image-Id $ref), $stamp, $digest, $decision)
+    }
+}
+
 if (-not $NoBuild -and -not $Check) {
-    $newest = Newest-Source $root
-    # A tag that exists is not a tag built from this tree: compare the image's
-    # creation time with the newest source file and rebuild what is behind.
-    # -Rebuild forces all three; an image that is missing is built.
-    function Build-IfStale([string]$tag, [string]$dockerfile, [string[]]$extraArgs) {
+    $sourceFiles = Source-Files $root
+    $sourceRows = Source-Rows $root $sourceFiles
+    $newest = Newest-Source $root $sourceFiles
+    $digestable = $sourceRows.Count -gt 0
+    if ($digestable) {
+        Step ("source digest: {0} files, {1}" -f $sourceRows.Count, (Short-Digest (Source-Digest $sourceRows "Dockerfile" @())))
+    }
+    else {
+        Write-Host "    no source file list could be hashed; the freshness check falls back to mtimes" -ForegroundColor Yellow
+    }
+
+    # Build-IfStale decides from content: the digest label against the digest of
+    # this tree. -Rebuild forces; a missing image is built. Only when no digest
+    # exists at all (no git, no readable files) is the clock consulted, and then
+    # it is named as the fallback it is.
+    function Build-IfStale([string]$tag, [string]$dockerfile, [string[]]$extraArgs, [string[]]$saltArgs) {
         $created = Image-Created $tag
+        $want = if ($digestable) { Source-Digest $sourceRows $dockerfile $saltArgs } else { $null }
+        $have = if ($created) { Image-Digest $tag } else { $null }
         $why = $null
-        if ($null -eq $created) { $why = "missing" }
-        elseif ($newest -and $newest -gt $created) {
-            $why = "source is newer than the image ($($newest.ToString('yyyy-MM-dd HH:mm:ss'))Z > $($created.ToString('yyyy-MM-dd HH:mm:ss'))Z)"
+        if ($null -eq $created) {
+            $why = "the image was missing"
         }
-        if ($Rebuild) { $why = "-Rebuild" }
+        elseif ($Rebuild) {
+            $why = "-Rebuild"
+        }
+        elseif ($null -eq $want) {
+            if ($newest -and $newest -gt $created) {
+                $why = "source is newer than the image ($($newest.ToString('yyyy-MM-dd HH:mm:ss'))Z > $($created.ToString('yyyy-MM-dd HH:mm:ss'))Z; no digest available)"
+            }
+        }
+        elseif ($null -eq $have) {
+            $why = "the image carries no piforge.source-digest label (built before this check, or by hand)"
+        }
+        elseif ($have -ne $want) {
+            $why = "the source digest differs (image $(Short-Digest $have), tree $(Short-Digest $want))"
+        }
         if (-not $why) {
-            $stamp = if ($created) { $created.ToString('yyyy-MM-dd HH:mm:ss') + 'Z' } else { 'missing' }
-            Write-Host ("    {0} is current (id {1}, built {2})" -f $tag, (Image-Id $tag), $stamp)
+            Write-Host ("    {0} is current (id {1}, built {2}, digest {3})" -f $tag, (Image-Id $tag), ($created.ToString('yyyy-MM-dd HH:mm:ss') + 'Z'), (Short-Digest $want))
+            if ($newest -and $newest -gt $created) {
+                Write-Host "      a file is newer than the image, but its bytes are identical: not rebuilding"
+            }
+            $script:ImageState[$tag] = @{ Rebuilt = $false; Why = 'current'; Digest = $want }
             return $false
         }
         Step "rebuilding ${tag}: $why"
-        Build-File $dockerfile $tag $extraArgs
+        $labelArgs = @()
+        if ($want) { $labelArgs = @("--label", "piforge.source-digest=$want") }
+        Build-File $dockerfile $tag ($labelArgs + $extraArgs)
+        $script:ImageState[$tag] = @{ Rebuilt = $true; Why = $why; Digest = $want }
         return $true
     }
 
-    $rebuiltControlPlane = Build-IfStale $controlPlaneImage "Dockerfile" @()
-    Build-IfStale $runnerImage "deploy/Dockerfile.runner" @() | Out-Null
-    # The sandbox image is built *from* the control plane, so a rebuilt control
-    # plane makes it stale even when its own source file is older.
+    Build-IfStale $controlPlaneImage "Dockerfile" @() @() | Out-Null
+    Build-IfStale $runnerImage "deploy/Dockerfile.runner" @() @() | Out-Null
+    # The sandbox image is built *from* the control plane, so the control-plane
+    # image's id is part of its digest: a rebuilt control plane changes this
+    # digest and the sandbox is rebuilt by the same rule as everything else.
+    $agentId = Image-FullId $controlPlaneImage
     $sandboxArgs = @("--build-arg", "AGENT_IMAGE=$controlPlaneImage")
-    $rebuiltSandbox = Build-IfStale $sandboxImage "deploy/Dockerfile.sandbox-agent" $sandboxArgs
-    if ($rebuiltControlPlane -and -not $rebuiltSandbox -and -not $Rebuild) {
-        Step "rebuilding ${sandboxImage}: the control plane image it is built from changed"
-        Build-File "deploy/Dockerfile.sandbox-agent" $sandboxImage $sandboxArgs
-    }
+    Build-IfStale $sandboxImage "deploy/Dockerfile.sandbox-agent" $sandboxArgs @("AGENT_IMAGE=$agentId") | Out-Null
+}
+
+if ($BuildOnly) {
+    Write-Host ""
+    Write-ImageSummary
+    Write-Host "build only (-BuildOnly): nothing was started." -ForegroundColor Green
+    exit 0
 }
 
 # ---------------------------------------------------------------------------
@@ -308,15 +463,10 @@ Write-Host ""
 Write-Host "PiForge (isolated) is up: http://127.0.0.1:$Port/login" -ForegroundColor Green
 Write-Host "  accounts : admin@piforge.local / piforge-admin-123 (change before exposing)"
 Write-Host "              dev@piforge.local   / piforge-dev-123"
-Write-Host "  images   : $controlPlaneImage, $runnerImage, $sandboxImage"
-# The id and build time of what is actually running: "the tag exists" is not the
-# same claim as "the tag is this tree", and an audit measured the wrong binary
-# once because of the difference (adversarial round 5).
-foreach ($ref in @($controlPlaneImage, $runnerImage, $sandboxImage)) {
-    $created = Image-Created $ref
-    $stamp = if ($created) { $created.ToString('yyyy-MM-dd HH:mm:ss') + 'Z' } else { 'missing' }
-    Write-Host ("             {0,-34} id {1}  built {2}" -f $ref, (Image-Id $ref), $stamp)
-}
+# Each image's id, build time, digest and the reason it was or was not rebuilt:
+# "the tag exists" is not the same claim as "the tag is this tree", and an audit
+# measured the wrong binary once because of the difference (adversarial rounds 5-6).
+Write-ImageSummary
 Write-Host "  data     : volume $DataVolume"
 Write-Host "  provider : $DefaultProvider ($Provider)"
 Write-Host "  egress   : $EgressFile (default none: no route to the internet; the gateway on the tenant bridge still answers)"

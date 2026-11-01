@@ -56,14 +56,26 @@ then the sandbox image **from** the control plane so `pi` and `/opt/piforge/pifo
 inside it at the same version — runs `backend/cmd/preflight` (Docker Engine ≥ 25, all
 three images, and that the sandbox image really contains `/opt/piforge/piforged` and
 `pi`), then starts the stack on 7723 with a fresh volume and waits for `/healthz`. It
-prints the URL and the seeded accounts at the end, with each image's id and build time.
-`-Check` runs only the preflight; `-Down` removes the stack, its sandboxes and their
-volumes; `-Rebuild` forces all three images. Since 2026-11-01 it does not wait to be told:
-it compares each image's creation time with the newest tracked or untracked source file
-under `backend/`, `web/` and `deploy/`, rebuilds what is behind, and rebuilds the sandbox
-image when the control plane image it is built from changed. (Before that, a source change
-kept the previous image and an audit measured the old binary.) `-EgressFile` points at
+prints the URL and the seeded accounts at the end, with each image's id, build time,
+digest and the reason it was or was not rebuilt. `-Check` runs only the preflight; `-BuildOnly` builds what is stale and stops; `-Down` removes the stack, its
+sandboxes and their volumes; `-Rebuild` forces all three images. `-EgressFile` points at
 another egress policy than `deploy/tenant-egress.json` (the probe below uses that).
+
+**Freshness is decided from content, not timestamps** (adversarial round 6). Every image
+is built with `--label piforge.source-digest=<sha256>`: a digest over the working-tree
+content of every tracked — or untracked but not ignored — file under `backend/`, `web/`,
+`deploy/`, `Dockerfile` and `docker-compose.runner.yml`, plus the Dockerfile name and the
+build args. Each run recomputes it from the tree and reuses an image only when its label
+matches; an image that is missing, or that carries no label (built before this check, or
+by hand), is rebuilt. The sandbox image's digest includes the id of the control-plane
+image it was built on top of, so a rebuilt control plane rebuilds the sandbox by the same
+rule. A file touched without a content change never rebuilds; a **backdated** edit always
+does. The rule used to compare mtimes, and a source file edited with its mtime set into
+the past made the script print `piforge:isolated is current` while the tree differed — a
+"verified green" claim can measure a stale image that way. Mtimes survive only as the
+fallback for a tree where no digest can be computed at all (no git), and the log line says
+when that happens. `scripts/verify-image-freshness.ps1` runs the four cases and prints
+each decision.
 
 The stack's sandboxes have **no route to the public internet** by default: each tenant's
 bridge is created `--internal` from the policy in `deploy/tenant-egress.json`, while the
@@ -1050,10 +1062,12 @@ named by its final URL. (4) In host placement `ssh` must be on `PATH` at start-u
 remote fails closed with git's "cannot run" message instead of inheriting the repository's command.
 
 **Build/acceptance change.** `scripts/up-isolated.ps1` used to build only what was *missing*, so a
-source change kept the old image and an audit probe measured the previous binary. It now compares each
-image's creation time with the newest tracked or untracked source file under `backend/`, `web/` and
-`deploy/`, rebuilds what is behind (and the sandbox image when the control plane it is built from
-changed), and prints every image's id and build time. `-Rebuild` still forces all three.
+source change kept the old image and an audit probe measured the previous binary. It then compared each
+image's creation time with the newest tracked or untracked source file; round 6 showed that rule is not a
+decision (a backdated edit printed "is current" while the tree differed, and a `touch` rebuilt for
+nothing). It now labels every image with a content digest (`piforge.source-digest`) and compares that
+with the tree — see "The isolated shape: one command" above — and prints every image's id, build time,
+digest and decision. `-Rebuild` still forces all three; `-BuildOnly` builds and stops.
 `scripts/probe-data-flow.ps1` now creates its own fixtures, so it runs **18 of 18** checks on a fresh
 stack (it used to run 15 of the 17 this document claimed), prints the count, and exits 2 when an edge
 could not be measured.

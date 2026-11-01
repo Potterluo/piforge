@@ -2486,9 +2486,27 @@ ssh> -c core.pager= -c core.askPass= -c core.gitProxy= -c credential.helper= -c 
 自身分量在"解析"与"打开"之间仍可被换掉（能写这台机器磁盘的人）；容器放置里 git 在沙箱内跑，边界是沙箱出口策略。
 
 **验收工具本身也修了两处**（重要，因为上一轮就是被它们骗了）：`scripts/up-isolated.ps1` 不再"只建缺失的镜像"，
-而是把每个镜像的创建时间与 `backend/`、`web/`、`deploy/` 下最新的（已跟踪或未忽略的）源文件比，落后就重建
-（控制面重建时沙箱镜像跟着重建），并打印每个镜像的 id 与构建时间；`scripts/probe-data-flow.ps1` 自己建夹具，
+也不再拿 mtime 当判据——每个镜像都带 `piforge.source-digest` 标签，下一轮用**工作树内容的摘要**与它比，
+相等才复用（见 §1.12）；`scripts/probe-data-flow.ps1` 自己建夹具，
 在干净栈上跑满 **18/18** 条边（旧版会静默跳过 4 条、打印 15），打印计数，测不到就 exit 2。
+
+#### 1.12 第六轮的三个收尾（2026-11-01）
+
+第六轮（`e2e/.artifacts/adversarial6/EVIDENCE.md`）关掉了 G9–G13，同时留下三条：两条在验收工具里，
+一条在文件面板的语义里。三条都在这一节，数字见 `docs/STATUS.md`。
+
+**(1) 镜像新鲜度：按内容判，不按时间判。** 旧规则是"镜像创建时间 vs 最新的源文件 mtime"。它两头都错：
+`touch` 一个没改的文件会白重建；把一个**改过内容**的源文件的 mtime 设到过去，脚本会打印
+`piforge:isolated is current (…)` 而工作树其实不同——也就是说，任何"验证是绿的"结论都可能是在量旧镜像。
+
+现在的机制：构建时给每个镜像打一个标签 `--label piforge.source-digest=<sha256>`，摘要取自工作树里
+`backend/`、`web/`、`deploy/`、`Dockerfile`、`docker-compose.runner.yml` 下**每一个**已跟踪（或未跟踪但未被
+忽略）文件的**内容**，再把 Dockerfile 名与 build args 折进去。每次运行重新算一遍并只与标签比：相等就复用，
+镜像缺失或没有标签（旧镜像、手工构建）就重建；沙箱镜像的摘要里含它 `FROM` 的那个控制面镜像 **id**，所以
+控制面一重建，沙箱按同一条规则跟着重建。mtime 只在"算不出摘要"（没有 git）时作兜底，日志会明确说这是兜底。
+`-Rebuild` 照旧强制全部重建，新增的 `-BuildOnly` 只构建、不启动（`scripts/verify-image-freshness.ps1` 用它跑
+四个用例：改内容且回填旧 mtime → 重建；恢复时间戳 → 不重建；只 touch → 不重建；`-Rebuild` → 重建）。
+
 ## 2. Kubernetes：四种做法，各自什么时候是对的
 
 ### 2.1 方案（i）：一个 Pod 一个沙箱，控制面用 client-go 管
