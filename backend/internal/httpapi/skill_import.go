@@ -97,6 +97,15 @@ func (s *server) handleImportSkills(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// `file://` is not a URL this process fetches: it is a path it reads. It is
+	// the same class of boundary as a tenant-controlled tree (internal/tenantfs),
+	// so it is confined the same way — to the roots the deployment wrote down.
+	if strings.HasPrefix(url, "file://") {
+		if err := s.confineLocalImport(r.Context(), url); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 120*time.Second)
 	defer cancel()
@@ -576,6 +585,94 @@ func treeBytes(dir string) (int64, error) {
 		return nil
 	})
 	return total, err
+}
+
+// confineLocalImport answers the `file://` half of the import boundary: may git
+// be pointed at this path on this machine?
+//
+// Two refusals, both before git runs. No configured roots means the deployment
+// has not said which parts of its disk a tenant may name, so no path is
+// acceptable — the empty list is "none", not "all". With roots, the path must
+// resolve inside one of them: internal/tenantfs.Contains resolves symlinks, so a
+// link placed inside an allowed root is still outside when it points outside.
+func (s *server) confineLocalImport(ctx context.Context, raw string) error {
+	path, err := localPathFromFileURL(raw)
+	if err != nil {
+		return apiErr(contracts.ErrInvalidArgument, "%v", err)
+	}
+	roots := s.deps.SkillImportRoots
+	if len(roots) == 0 {
+		return apiErr(contracts.ErrInvalidArgument,
+			"这个部署不接受 file:// 形式的 Skill 导入：它会让 Git 读取控制平面的本地路径。"+
+				"请改用 https:// 仓库地址；自托管安装如果确实把 Skill 仓库放在同一块磁盘上，请用 "+
+				"-skill-import-roots / PIFORGE_SKILL_IMPORT_ROOTS 写出允许的目录")
+	}
+	for _, root := range roots {
+		ok, cerr := tenantfs.Contains(root, path)
+		if cerr != nil {
+			// An unreadable or missing root is a configuration problem, and
+			// falling through to "refuse" would blame the tenant for it. Say
+			// which root is wrong.
+			s.log.WarnContext(ctx, "skill import root is not usable",
+				"root", root, "error", cerr.Error())
+			continue
+		}
+		if ok {
+			return nil
+		}
+	}
+	return apiErr(contracts.ErrInvalidArgument,
+		"file:// 只允许导入 -skill-import-roots / PIFORGE_SKILL_IMPORT_ROOTS 里写出的目录："+
+			"这个路径不在任何一个允许的根目录下（%d 个根）", len(roots))
+}
+
+// localPathFromFileURL turns a file:// URL into the path it names.
+//
+// Three spellings, all of them a local path:
+//
+//	file:///tmp/x        POSIX (url.Parse: Path "/tmp/x")
+//	file:///C:/x         Windows, three slashes (Path "/C:/x")
+//	file://C:/x          Windows, two slashes (Host "C:", Path "/x")
+//
+// A host part that is not `localhost` and not a drive letter names another
+// machine's filesystem, which this process cannot read: it is refused rather
+// than silently interpreted as a local path.
+func localPathFromFileURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("不是有效的 file:// 地址：%v", err)
+	}
+	if !strings.EqualFold(parsed.Scheme, "file") {
+		return "", fmt.Errorf("%q 不是 file:// 地址", raw)
+	}
+	path := parsed.Path
+	switch {
+	case isDriveHost(parsed.Host):
+		// Windows two-slash form: the drive letter lands in Host.
+		path = parsed.Host + path
+	case parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost"):
+		return "", fmt.Errorf("file:// 只能指向本机，%q 指定了另一台主机", parsed.Host)
+	}
+	if path == "" {
+		return "", fmt.Errorf("file:// 地址里没有路径")
+	}
+	if len(path) >= 3 && path[0] == '/' && path[2] == ':' && isDriveLetter(path[1]) {
+		// Windows three-slash form: /C:/dir -> C:/dir.
+		path = path[1:]
+	}
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("file:// 地址必须指向绝对路径")
+	}
+	return filepath.Clean(path), nil
+}
+
+// isDriveHost reports whether a URL host is a Windows drive letter ("C:").
+func isDriveHost(host string) bool {
+	return len(host) == 2 && host[1] == ':' && isDriveLetter(host[0])
+}
+
+func isDriveLetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // gitURLForPolicy turns a scp-style `git@host:path` address into the https URL

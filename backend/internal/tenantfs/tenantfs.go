@@ -316,6 +316,72 @@ func (t *Tree) cleanRel(rel string) (string, error) {
 	return clean, nil
 }
 
+// Contains reports whether p resolves to root or below it.
+//
+// It is the "is this path one the caller already owns" half of the rule, for a
+// caller that has a path in hand rather than a tree to read: a tenant-supplied
+// filesystem path may be handed to a tool (git, a reader) only when it lives
+// under a root the deployment wrote down. Like Tree, it resolves symlinks — a
+// link inside the root naming something outside it is outside — and it accepts a
+// path that does not exist yet by resolving its nearest existing ancestor, which
+// is what a destination path needs.
+//
+// root must exist: a root that is not there is a configuration error, not an
+// empty answer.
+func Contains(root, p string) (bool, error) {
+	if strings.TrimSpace(root) == "" {
+		return false, fmt.Errorf("tenantfs: empty root")
+	}
+	if strings.ContainsRune(p, 0) {
+		return false, &Refusal{Path: p, Kind: KindInvalid, Detail: "it contains a NUL byte"}
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return false, fmt.Errorf("tenantfs: abs %q: %w", root, err)
+	}
+	rootReal, err := filepath.EvalSymlinks(filepath.Clean(rootAbs))
+	if err != nil {
+		return false, fmt.Errorf("tenantfs: resolve root %q: %w", root, err)
+	}
+	pAbs, err := filepath.Abs(p)
+	if err != nil {
+		return false, fmt.Errorf("tenantfs: abs %q: %w", p, err)
+	}
+	real, err := evalOrExisting(pAbs)
+	if err != nil {
+		return false, fmt.Errorf("tenantfs: resolve %q: %w", p, err)
+	}
+	return inside(rootReal, real), nil
+}
+
+// evalOrExisting resolves symlinks for p, falling back to its nearest existing
+// ancestor when p itself does not exist yet. The non-existent tail is appended
+// lexically (it is already clean), so it cannot climb out on its own.
+func evalOrExisting(p string) (string, error) {
+	cur := filepath.Clean(p)
+	for {
+		real, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			if cur == filepath.Clean(p) {
+				return real, nil
+			}
+			tail, terr := filepath.Rel(cur, p)
+			if terr != nil {
+				return real, nil
+			}
+			return filepath.Join(real, tail), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p, nil
+		}
+		cur = parent
+	}
+}
+
 // inside reports whether p is root or below it, comparing resolved paths.
 func inside(root, p string) bool {
 	root = filepath.Clean(root)

@@ -102,6 +102,12 @@ if (Test-Path $ArtifactDir) {
 }
 New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
 
+# The drill stages the repository it imports (the clone-cap check) under one
+# directory on the container's disk, and declares that directory as the only
+# place a file:// skill import may read -- the same thing an operator of a
+# self-hosted install does. Without it the import is refused before git runs,
+# which is the confinement's default (docs/DATA-FLOW-AUDIT.md G1).
+$DrillImportRoot = "/tmp/drill-imports"
 $BaseUrl = "http://127.0.0.1:$Port"
 $Key = $env:PIFORGE_DRILL_KEY
 $script:Checks = New-Object 'System.Collections.Generic.List[object]'
@@ -426,6 +432,7 @@ try {
         "-v", "${VolumeName}:/data",
         "-v", "${urlPolicyPath}:/etc/piforge/url-policy.json:ro",
         "-e", "PIFORGE_URL_ALLOW_FILE=/etc/piforge/url-policy.json",
+    "-e", "PIFORGE_SKILL_IMPORT_ROOTS=$DrillImportRoot",
         "-e", "PIFORGE_SEED_EMAIL=$SeedAdminEmail",
         "-e", "PIFORGE_SEED_PASSWORD=$SeedAdminPassword",
         "-e", "PIFORGE_SEED_USER_EMAIL=$SeedUserEmail",
@@ -563,9 +570,9 @@ try {
     # message names both the cap and the bytes measured.
     Write-Step "A repository over the clone cap is refused before it fills the disk"
 
-    $capRepo = "/tmp/drill-clone-cap.git"
-    $capWork = "/tmp/drill-clone-cap-work"
-    $capSetup = & docker exec $ContainerName sh -c "set -e; rm -rf '$capRepo' '$capWork'; git init -q --bare '$capRepo'; mkdir -p '$capWork'/s; cd '$capWork'; git init -q; git config user.email drill@piforge.local; git config user.name drill; echo cap-skill > s/SKILL.md; dd if=/dev/urandom of=s/blob.bin bs=1M count=20 status=none; git add -A; git commit -qm over-the-cap; git push -q '$capRepo' HEAD:refs/heads/main; git --git-dir='$capRepo' symbolic-ref HEAD refs/heads/main; du -sb '$capRepo'" 2>&1 | Out-String
+    $capRepo = "$DrillImportRoot/drill-clone-cap.git"
+    $capWork = "$DrillImportRoot/drill-clone-cap-work"
+    $capSetup = & docker exec $ContainerName sh -c "set -e; mkdir -p '$DrillImportRoot'; rm -rf '$capRepo' '$capWork'; git init -q --bare '$capRepo'; mkdir -p '$capWork'/s; cd '$capWork'; git init -q; git config user.email drill@piforge.local; git config user.name drill; echo cap-skill > s/SKILL.md; dd if=/dev/urandom of=s/blob.bin bs=1M count=20 status=none; git add -A; git commit -qm over-the-cap; git push -q '$capRepo' HEAD:refs/heads/main; git --git-dir='$capRepo' symbolic-ref HEAD refs/heads/main; du -sb '$capRepo'" 2>&1 | Out-String
     $capSetupCode = $LASTEXITCODE
     $capBytes = ($capSetup -split "`n" | Where-Object { $_ -match "^\d+\s" } | Select-Object -Last 1)
     Assert-Check "a 20 MiB repository exists inside the container" ($capSetupCode -eq 0 -and [bool]$capBytes) ("exit={0} repo={1}" -f $capSetupCode, $capBytes)

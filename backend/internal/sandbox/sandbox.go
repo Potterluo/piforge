@@ -66,6 +66,8 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/gitx"
+	"github.com/piforge/piforge/backend/internal/tenantfs"
+	"github.com/piforge/piforge/backend/internal/urlguard"
 )
 
 // Errors returned by the local provider.
@@ -111,6 +113,15 @@ type LocalConfig struct {
 	Node string
 	// Image is reported in contracts.Sandbox.Image (default "local").
 	Image string
+	// URLPolicy is the outbound-URL policy a clone target is checked against.
+	//
+	// This provider runs `git clone` on this machine, so a repo_url is a URL
+	// dialled from the control plane's own network position — the same act the
+	// MCP broker and the provider probe perform, and the same rule applies
+	// (internal/urlguard, docs/SANDBOX-DEPLOY.md §1.9). Nil leaves the check to
+	// the caller: a hand-built provider (tests, a laptop) keeps the old
+	// behaviour, and cmd/piforged always wires the deployment's policy.
+	URLPolicy *urlguard.Policy
 }
 
 func (c LocalConfig) normalise() LocalConfig {
@@ -295,7 +306,7 @@ func (l *Local) Ensure(ctx context.Context, userID, projectID, repoURL, branch s
 			return nil, fmt.Errorf("sandbox: create %s: %w", repoDir, err)
 		}
 		if strings.TrimSpace(repoURL) != "" {
-			if err := l.cloneRepo(ctx, repoDir, repoURL); err != nil {
+			if err := l.cloneRepo(ctx, userID, repoDir, repoURL); err != nil {
 				return nil, err
 			}
 		} else {
@@ -517,11 +528,81 @@ func (l *Local) checkoutBranch(ctx context.Context, dir, branch string) error {
 }
 
 // cloneRepo clones into an empty directory and checks out the branch.
-func (l *Local) cloneRepo(ctx context.Context, dir, repoURL string) error {
+func (l *Local) cloneRepo(ctx context.Context, userID, dir, repoURL string) error {
+	if err := l.refuseCloneTarget(ctx, userID, repoURL); err != nil {
+		return err
+	}
 	if err := l.git.Clone(ctx, repoURL, dir, ""); err != nil {
 		return fmt.Errorf("sandbox: %w", err)
 	}
 	return nil
+}
+
+// ErrRefusedCloneTarget is returned when a project's repository address names
+// something this deployment will not fetch or read.
+var ErrRefusedCloneTarget = errors.New("sandbox: refused clone target")
+
+// refuseCloneTarget is the one question a tenant-supplied repository address has
+// to answer before git sees it: is this something the control plane may reach?
+//
+// Two shapes, two rules:
+//
+//   - A URL (https, or the scp-like git over ssh form) is fetched from this
+//     machine's network position, so it goes through the same outbound policy as
+//     every other tenant fetch site.
+//   - A local path is read, not fetched: it may be any repository this host has
+//     (a development fixture), except one inside another account's sandbox. That
+//     is the copy that would put somebody else's checkout behind this account's
+//     files API.
+func (l *Local) refuseCloneTarget(ctx context.Context, userID, repoURL string) error {
+	target := strings.TrimSpace(repoURL)
+	if target == "" {
+		return nil
+	}
+	if fetch := cloneFetchURL(target); fetch != "" {
+		if l.cfg.URLPolicy == nil {
+			return nil
+		}
+		if _, err := l.cfg.URLPolicy.Check(ctx, fetch); err != nil {
+			return fmt.Errorf("%w: %v", ErrRefusedCloneTarget, err)
+		}
+		return nil
+	}
+	if !filepath.IsAbs(target) {
+		return nil
+	}
+	withinSandboxes, err := tenantfs.Contains(l.cfg.Root, target)
+	if err != nil || !withinSandboxes {
+		// Not under the sandboxes root: a fixture, a bare repository in a temp
+		// directory, the local-path case the product supports. Nothing to
+		// compare against.
+		return nil
+	}
+	own, ownErr := tenantfs.Contains(filepath.Join(l.cfg.Root, userID), target)
+	if ownErr == nil && own {
+		return nil
+	}
+	return fmt.Errorf("%w: %q is inside another tenant's sandbox", ErrRefusedCloneTarget, target)
+}
+
+// cloneFetchURL is the address the policy should judge, or "" for a local path.
+// The scp form (git@host:path) is the same host with a different transport, so
+// it is judged as an https URL of that host — the same mapping the skill
+// importer uses.
+func cloneFetchURL(raw string) string {
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+		return raw
+	}
+	if !strings.HasPrefix(raw, "git@") {
+		return ""
+	}
+	rest := strings.TrimPrefix(raw, "git@")
+	host, path, ok := strings.Cut(rest, ":")
+	if !ok || strings.TrimSpace(host) == "" {
+		return ""
+	}
+	return "https://" + host + "/" + strings.TrimPrefix(path, "/")
 }
 
 // touch updates LastActiveAt and persists it.

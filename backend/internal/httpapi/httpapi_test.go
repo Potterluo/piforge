@@ -103,7 +103,13 @@ func newTestEnv(t *testing.T) *testEnv {
 		// Creating a skill with a body writes its bundle, so every test server
 		// needs somewhere to put it.
 		SkillsDir: skillsDir,
-		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		// A `file://` import is confined to the roots the deployment wrote down.
+		// The fixtures stage their repositories under the OS temp directory, so
+		// that is the one root a test server declares — the same thing an
+		// operator of a self-hosted install does, and still a refusal for
+		// everything else on the disk.
+		SkillImportRoots: []string{os.TempDir()},
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	// The delete guard asks the registry before trusting a "running" row. The
 	// fake answers "alive" unless a test says otherwise (see markDead), so this

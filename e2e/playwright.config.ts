@@ -2,6 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const backendExe = path.resolve(
@@ -96,7 +97,10 @@ export default defineConfig({
 
   webServer: [
     {
-      command: `"${backendExe}" -addr 127.0.0.1:8080 -data "${dataDir}" -fake-pi -dev${chromeBinary ? ` -chrome "${chromeBinary}"` : ""}`,
+      // -skill-import-roots: the suite stages a repository under the OS temp
+      // directory and imports it over file://, which is confined to the roots
+      // the deployment writes down (docs/DATA-FLOW-AUDIT.md G1).
+      command: `"${backendExe}" -addr 127.0.0.1:8080 -data "${dataDir}" -fake-pi -dev -skill-import-roots "${tmpdir()}"${chromeBinary ? ` -chrome "${chromeBinary}"` : ""}`,
       url: "http://127.0.0.1:8080/healthz",
       reuseExistingServer: false,
       timeout: 30_000,

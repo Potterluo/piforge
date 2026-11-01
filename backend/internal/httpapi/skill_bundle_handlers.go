@@ -93,6 +93,15 @@ func bundleFiles(files []skillFile) (map[string]string, error) {
 		if rel == "" || rel == "." {
 			return nil, fmt.Errorf("path %q is not allowed", raw)
 		}
+		// A skill is instructions; `.git` is git's storage. Refusing it keeps a
+		// bundle from being turned into a repository on the control plane's disk
+		// — which is what a `file://` import would need to read it back as one —
+		// and keeps the bundle reader from serving repository metadata.
+		for _, segment := range strings.Split(rel, "/") {
+			if strings.EqualFold(segment, ".git") {
+				return nil, fmt.Errorf("path %q is not allowed: a skill bundle may not contain git storage", rel)
+			}
+		}
 		if len(file.Content) > maxSkillFileBytes {
 			return nil, fmt.Errorf("%s is larger than %d bytes", rel, maxSkillFileBytes)
 		}

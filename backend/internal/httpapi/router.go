@@ -193,6 +193,17 @@ type Deps struct {
 	// SkillsDir is where uploaded skill bundles live, one directory per skill.
 	// Empty means uploads are refused with a typed error.
 	SkillsDir string
+	// SkillImportRoots is the set of directories a `file://` skill import may
+	// name, from -skill-import-roots / PIFORGE_SKILL_IMPORT_ROOTS.
+	//
+	// `file://` is the one import transport whose URL is a path on this machine:
+	// git reads it with the control plane's own filesystem access, so an
+	// unrestricted value is "read any git repository this process can see and
+	// return its files as a skill bundle". The list is what the operator wrote
+	// down (the self-hosted install that keeps skills on the same disk); empty
+	// means no local import at all, never "any path". Symlinks are resolved, so
+	// a link inside a root is not a way back out (internal/tenantfs.Contains).
+	SkillImportRoots []string
 	// SkillMaxBytes caps the total bytes one skill import may expand on disk
 	// (FR-5.8), from -skill-max-bytes / PIFORGE_SKILL_MAX_BYTES. Zero uses
 	// DefaultSkillMaxBytes; an archive that would exceed it is refused whole,

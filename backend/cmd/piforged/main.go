@@ -218,6 +218,10 @@ type options struct {
 	// acceptance #4, attack 10: the clone ran before the 4 MB read cap, so a
 	// 268 MiB repository cost 268 MiB of /tmp before being refused).
 	skillCloneMaxBytes int64
+	// skillImportRootsRaw is -skill-import-roots: the directories a `file://`
+	// skill import may name. Empty is "no local import", never "any path": a
+	// file:// URL is a path git reads with this process's filesystem access.
+	skillImportRootsRaw string
 	// urlAllowFile is the outbound URL policy's allow-list: the only way this
 	// deployment may fetch a non-public host (docs/SANDBOX-DEPLOY.md §1.9).
 	urlAllowFile string
@@ -316,6 +320,9 @@ func run() error {
 	flag.Int64Var(&opt.skillCloneMaxBytes, "skill-clone-max-bytes",
 		httpapi.DefaultSkillCloneMaxBytes,
 		"checkout bytes one git skill import may write before git is stopped; 0 is refused (env PIFORGE_SKILL_CLONE_MAX_BYTES, default 16 MiB)")
+	flag.StringVar(&opt.skillImportRootsRaw, "skill-import-roots",
+		envOr("PIFORGE_SKILL_IMPORT_ROOTS", ""),
+		"comma-separated directories a file:// skill import may name; empty refuses every file:// import (env PIFORGE_SKILL_IMPORT_ROOTS)")
 	flag.StringVar(&opt.urlAllowFile, "url-allow-file", envOr("PIFORGE_URL_ALLOW_FILE", ""),
 		"JSON allow-list of outbound hosts/CIDRs the control plane may fetch; default empty, i.e. public http(s) only (env PIFORGE_URL_ALLOW_FILE)")
 	flag.DurationVar(&opt.agentIdleTTL, "agent-idle-ttl", envDuration("PIFORGE_AGENT_IDLE_TTL", 30*time.Minute),
@@ -717,7 +724,7 @@ func run() error {
 	logger.Info("outbound URL policy",
 		"policy", urlPolicy.Describes(),
 		"rule", "public http(s) only: a tenant-supplied URL is resolved, every address is checked, and the dial is pinned to the verified address",
-		"covers", "MCP server URL (save + /gw/mcp), provider base_url (save, /test, /gw/llm), project forge api_base, skill import over http(s)",
+		"covers", "MCP server URL (save + /gw/mcp), provider base_url (save, /test, /gw/llm), project forge api_base, skill import over http(s), local-provider repo_url clones",
 		"allow_file", opt.urlAllowFile)
 	logger.Info("model gateway token lifetime",
 		"ttl", signer.TTL().String(),
@@ -879,6 +886,9 @@ func run() error {
 		local, lerr := sandbox.NewLocal(sandbox.LocalConfig{
 			Root:          localRoot,
 			InitialBranch: "main",
+			// The local provider clones on this machine, so a project's repo_url
+			// is a fetch from the control plane's own network position.
+			URLPolicy: urlPolicy,
 		})
 		if lerr != nil {
 			return fmt.Errorf("init sandbox provider: %w", lerr)
@@ -1377,6 +1387,7 @@ func run() error {
 		SandboxDiskQuota:   opt.sandboxDiskQuota,
 		SkillMaxBytes:      opt.skillMaxBytes,
 		SkillCloneMaxBytes: opt.skillCloneMaxBytes,
+		SkillImportRoots:   splitList(opt.skillImportRootsRaw),
 		// The one outbound URL policy every fetcher shares: the MCP broker, the
 		// provider probe, the forge client and the skill importer
 		// (docs/SANDBOX-DEPLOY.md §1.9).

@@ -240,3 +240,48 @@ func TestRefusesTheReportsOwnTargets(t *testing.T) {
 		})
 	}
 }
+
+// Contains is the "may this path be handed to git" question. It has to answer
+// for a destination that does not exist yet (a clone target), and it has to
+// resolve links: a directory inside the allowed root that is a link to somewhere
+// else is somewhere else.
+func TestContains(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "repo/SKILL.md", "x\n")
+	outside := t.TempDir()
+	write(t, outside, "secret", "s\n")
+	link(t, outside, filepath.Join(root, "escape"))
+
+	cases := []struct {
+		name string
+		p    string
+		want bool
+	}{
+		{"the root itself", root, true},
+		{"a file under it", filepath.Join(root, "repo", "SKILL.md"), true},
+		{"a destination that does not exist yet", filepath.Join(root, "new", "repo"), true},
+		{"a sibling", outside, false},
+		{"a parent", filepath.Dir(root), false},
+		{"climbing out lexically", filepath.Join(root, "..", "elsewhere"), false},
+		{"through a link inside the root", filepath.Join(root, "escape", "secret"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Contains(root, tc.p)
+			if err != nil {
+				t.Fatalf("Contains(%q): %v", tc.p, err)
+			}
+			if got != tc.want {
+				t.Fatalf("Contains(%q) = %v, want %v", tc.p, got, tc.want)
+			}
+		})
+	}
+
+	// A root that does not exist is a configuration error, not "false".
+	if _, err := Contains(filepath.Join(root, "missing"), root); err == nil {
+		t.Fatal("Contains accepted a root that is not there")
+	}
+	if _, err := Contains("", root); err == nil {
+		t.Fatal("Contains accepted an empty root")
+	}
+}

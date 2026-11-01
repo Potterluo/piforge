@@ -575,6 +575,24 @@ func (s *server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Two of the body's fields are ids of rows this session will name. An id is a
+	// name a tenant wrote, so it is proved here rather than stored: both lookups
+	// are scoped by user, and a row that is not the caller's answers 404 like
+	// every other cross-account read. Doing it before the insert is what keeps a
+	// session from being born pointing at somebody else's worktree or history.
+	if strings.TrimSpace(in.WorktreeID) != "" {
+		if _, werr := s.deps.Store.Worktree(r.Context(), user.ID, in.WorktreeID); werr != nil {
+			s.fail(w, r, werr)
+			return
+		}
+	}
+	if strings.TrimSpace(in.ParentID) != "" {
+		if _, perr := s.deps.Store.Session(r.Context(), user.ID, in.ParentID); perr != nil {
+			s.fail(w, r, perr)
+			return
+		}
+	}
+
 	sess, err := s.deps.Store.CreateSession(r.Context(), user.ID, store.NewSession{
 		ProjectID:     projectID,
 		WorktreeID:    in.WorktreeID,
