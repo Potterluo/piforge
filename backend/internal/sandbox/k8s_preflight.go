@@ -67,6 +67,7 @@ func k8sRequiredAccess() []k8sAccess {
 		{Verb: "create", Resource: "secrets", Why: "Ensure creates the per-sandbox API key"},
 		{Verb: "get", Resource: "secrets", Why: "the key is read back from the Secret on every create, resume and API call"},
 		{Verb: "delete", Resource: "secrets", Why: "Destroy removes the key with the sandbox"},
+		{Verb: "get", Resource: "namespaces", Cluster: true, Why: "Preflight refuses a start in a namespace that does not exist (namespaces are cluster-scoped)"},
 		{Verb: "get", Group: "node.k8s.io", Resource: "runtimeclasses", Cluster: true, Why: "Preflight checks that the sandbox runtime class exists"},
 	}
 }
