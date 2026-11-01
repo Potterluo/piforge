@@ -2334,3 +2334,96 @@ Pod 没有"暂停"。三种候选，逐个排除：
 - E2B：[SDK 表面（create/run/files/getHost/pause/kill、网络策略、超时与工作目录）](https://e2b.mintlify.app/agents/vercel-ai-sdk)
 - 本仓库内的二次资料：`docs/research/agent-sandbox-isolation-briefing.md`（§3.2 的冷启动/
   warm pool 数字、§1.3 各平台定位，原始来源见该文索引）
+
+## 10. 排错：租户会看到什么，原文是什么，谁该做什么
+
+这一节是给运维和值班用的：**租户侧看到的字**（不是产品想说的话），它对应的内核/平台
+行为，以及产品里有没有对应的信号。写它的直接原因是第二轮对抗验收
+（`e2e/.artifacts/adversarial2/VERDICT.md` §5）：租户写爆单文件上限时看到的是 shell
+自己的一句话，产品里没有任何一处解释它。
+
+### 10.1 单文件写爆：`File size limit exceeded (core dumped)`
+
+容器的 `--ulimit fsize=<配额>:<配额>` 让内核用 `SIGXFSZ` 终止越界的写。租户在终端里
+看到的**就是这一行**（Linux 的 shell 对信号的固定描述），产品无法改写它：
+
+```
+$ fallocate -l 3G /workspace/ballast.bin
+File size limit exceeded (core dumped)
+$ echo $?
+153                       # 128 + 25 (SIGXFSZ)
+$ ls -l /workspace/ballast.bin
+-rw-r--r-- 1 gem gem 0 ...   # 0 字节：写被内核拒绝，不是产品拒绝
+```
+
+`dd` 的表现是**截断在正好配额处**（2 GiB 配额 → 2147483648 字节）后同样收到 `SIGXFSZ`：
+
+```
+$ dd if=/dev/zero of=/workspace/big bs=1M count=3072
+dd: error writing '/workspace/big': File size limit exceeded
+2147483649 bytes (2.1 GB, 2.0 GiB) copied, ...    # 实际落在盘上 2147483648 字节
+```
+
+**这不是配额系统在说话，是内核在说话。** 区别要记住，因为它们指向不同的处置：
+
+| 现象 | 谁说的 | 含义 | 处置 |
+|---|---|---|---|
+| `File size limit exceeded (core dumped)`，exit 153 | 内核（`SIGXFSZ`） | **单个文件**超过每文件上限（`--ulimit fsize`，默认等于 `-sandbox-disk-quota`，2 GiB） | 拆文件、改用流式/临时文件；这不是 bug，也不是"配额用完" |
+| 终端里没有任何提示，下一次 agent 运行被拒：HTTP 507 `sandbox_disk_quota`，会话里一条 `platform.error` | 控制面 | **整个工作区**超过总预算（`du` 走到的字节数 > 配额） | 删东西；沙箱本身仍可进（终端可用），只是 agent 不再启动 |
+| `over=true` 后沙箱被暂停（`state=PAUSED`，`message` 里写 "disk quota exceeded: paused by the platform"） | 控制面 watchdog | 停了 agent 之后**还在长**（终端里接着写） | 下一条消息会自动唤醒；先清理再继续 |
+| admin 行 `bytes=0, over=false, unmeasurable=true`，`error="…context deadline exceeded"` | 控制面 | 量不出来（沙箱无响应，例如 pids 被风暴打满） | 页面显示「未知」而不是 0；见 10.2 |
+
+**没有做的事（明确写下）**：不改写 `SIGXFSZ` 的文本（内核信号无法被产品改写，包一层
+shell 只会让 `exit 153` 变成别的数，更容易误导）；不给终端写者发消息（终端是
+`gem` 的 pty，控制面不在那条管道的写路径上）；所以这条只能靠文档 + 那张表。
+
+### 10.2 沙箱"在跑但什么都不做"：pids 被打满
+
+租户跑进程风暴（`bash -c ':(){ :|:& };:'` 或其变体）时，容器的 `pids` cgroup 会被打
+满。容器仍显示 `running`，但**任何新进程都起不来**：
+
+```
+$ docker exec <sandbox> sh -c 'echo ok'
+OCI runtime exec failed: exec failed: unable to start container process:
+  error executing setns process: exit status 1; runc init error(s):
+  nsexec-0[15297]: unable to spawn stage-1: Resource temporarily unavailable   # exit 128
+$ docker exec <sandbox> cat /sys/fs/cgroup/pids.current
+sh: 1: Cannot fork
+```
+
+产品的处置是自动的（`backend/internal/httpapi/sandbox_watch.go`）：每 10 s 通过沙箱
+自己的 API 跑一次 `true`（3 s 上限），连续 2 次失败判定为无响应 → 停容器再启（工作区
+在卷上，对话和文件都在）→ 再探一次确认 → 会话里写 `platform.error`。租户看到的是：
+
+```
+沙箱无响应，正在恢复：<原因>。工作区、对话和文件都在卷上，恢复不会丢数据。
+…（约 5 秒，实测 stop 4.99 s + start 0.91 s）
+沙箱已恢复（用时 5.9 秒）。对话和工作区都还在，可以继续。
+```
+
+会话视图顶部同时出现「沙箱无响应，正在恢复」和**「恢复」按钮**（同一个动作的手动入口，
+`POST /v1/sessions/{id}/sandbox/recover`）；`GET /v1/sessions/{id}/sandbox` 的
+`responsive` 字段是缓存的探测结果（`null` = 还没探过，不是"坏了"）。
+
+`pids` 默认值本批从 512 降到 **256**（`deploy/tenant-limits.json`、
+`docker-compose.runner.yml` 的 `${PIFORGE_SANDBOX_PIDS:-256}`）。实测依据：镜像自身
+运行时（`gem.sh` → supervisord → Jupyter/Chrome/node）空载 **83–85 个 pid（线程）/ 25
+个进程**，`pids=64` 时有一个 node 服务起不来，`pids>=128` 完整；正常重活（40 个并发
+进程 + 8 个 node worker 线程）在 256 下是 125 个 pid。但**任何上限都挡不住风暴**（64 到
+1024 实测一样被打满），所以真正的保证是上面的探测 + 恢复，不是一个更小的数字。
+
+### 10.3 恢复之后对话是空的（已修）
+
+`pause` → `resume` 之后、下一条 prompt 之前，`GET /v1/sessions/{id}/entries` 曾经返回
+`{"entries":[],"leaf_id":""}`，而 `/stats` 仍是 2 条用户 / 2 条助手、沙箱里的
+`/workspace/.piforge/sessions/<id>.jsonl` 完整。现在这个端点在没有活进程时**读沙箱里
+的那个文件**（`pi.RuntimeConfig.TranscriptFor` → `cmd/piforged` 经沙箱 API 读取），
+`?since=<entry>` 也在文件上生效。排错时看两处即可：`/stats` 的条数、以及
+`docker exec <sandbox> wc -c /workspace/.piforge/sessions/<id>.jsonl`。
+
+### 10.4 admin 的 `files` 计数（已修）
+
+`GET /v1/admin/status` 的 `sandbox_usage[].files` 以前恒为 0（测量只取了 `du -sb` 的
+字节数）。现在同一次遍历里用 `find -printf '%y %s\n' | awk` 同时给出字节数与文件数，
+字节数与 `du -sb` 逐字节一致（400 个文件的树：`412288 400`）；量不出来时仍是
+`unmeasurable: true`，不会伪装成 0。

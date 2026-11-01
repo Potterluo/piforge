@@ -820,3 +820,40 @@ Ordered roughly by how much they will hurt. Nothing here is softened.
       that the image serves everything on one port; someone following only the README will
       not reproduce this deployment.
 
+
+### Sandbox liveness (the fork-storm wedge)
+
+Since 2026-11-01 (second adversarial acceptance, `docs/EXECUTION-BOUNDARY.md` §15.1): a
+process storm inside a sandbox saturates its `pids` cgroup, and from that moment the
+container cannot spawn a single process — `docker exec` fails with `unable to spawn
+stage-1: Resource temporarily unavailable`, the disk measurement above times out, and
+the agent cannot start — while the container still reports `running`. The only recovery
+used to be a manual pause + resume.
+
+Two things now happen, and the second is the guarantee:
+
+- **The default budget dropped from 512 to 256** (`deploy/tenant-limits.json`,
+  `PIFORGE_SANDBOX_PIDS`), because the image's own runtime idles at 83–85 pids
+  (25 processes) and 256 leaves ~170 slots for real work while halving what a storm can
+  park in one cgroup. Measured with `pwsh scripts/measure-pids.ps1`: the runtime is
+  complete at ≥128 and degraded at 64; a storm fills *every* limit from 64 to 1024, so
+  a smaller number alone never prevents the wedge.
+- **A watchdog detects and repairs it.** `httpapi.StartSandboxWatch` (started by
+  `cmd/piforged`, 10 s interval) runs `true` through each READY/BUSY/IDLE sandbox's own
+  API with a 3 s bound. Two consecutive failures = wedged; the repair is `Pause` +
+  `Resume` (measured ~5 s: `docker stop` 4.99 s + `docker start` → command works in
+  0.91 s), verified by probing again (up to 45 s), and the workspace volume is untouched,
+  so the checkout, the transcript and the agent's files survive while every process of
+  the storm dies. The session gets `platform.error` `sandbox_unresponsive`
+  「沙箱无响应，正在恢复」 before the stop and `sandbox_recovered` 「沙箱已恢复（用时 5.9 秒）…」
+  after it — or `sandbox_recovery_failed` with what to do next.
+- **The same repair, by hand:** `POST /v1/sessions/{id}/sandbox/recover` (probes first,
+  so a healthy sandbox is a no-op that says so), and the 「恢复」 button in the session
+  view next to 「沙箱无响应，正在恢复」. `GET /v1/sessions/{id}/sandbox` exposes
+  `responsive` (`null` = never probed, *not* "down"), `recovering` and `can_recover`.
+
+**Still open:** this is a repair, not a resource policy — a tenant that wedges its own
+sandbox in a loop will be repaired in a loop (one WARN per episode). A `ulimit nproc`
+reserve was measured and rejected (`nproc=192` breaks the image's own bootstrap), and a
+value high enough to boot reserves too few pids to matter. A container that is *gone*
+(not wedged) is `reconcile`'s job, not the watchdog's.

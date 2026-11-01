@@ -996,3 +996,128 @@ pause by `sbx_<hash>`, read back by container name, resume both ways) and
 row's id, and the test fails on the old code with `pause reached the provider with
 [sbx_…], want [piforge-…]`).
 
+
+## 15. The second adversarial acceptance (2026-11-01): a fork storm, an empty transcript, two honest numbers
+
+A second adversarial run (`e2e/.artifacts/adversarial2/VERDICT.md`) attacked a fresh
+isolated stack as a tenant. Cross-tenant isolation held again, and the four fixes of §14
+held under re-attack (no root, a per-file kernel cap, a one-hour revoked token, working
+pause/resume). What it found instead was the boundary's *edges*: one way to take a
+project offline with no in-product recovery, one display/API gap after resume, and two
+numbers that were not what the product said they were.
+
+### 15.1 A fork storm wedges the sandbox, and the product had no way back
+
+The measured behaviour, reproduced here: a process storm inside a sandbox saturates its
+`pids` cgroup. At that point the container cannot spawn **anything** — `docker exec`
+fails with `unable to spawn stage-1: Resource temporarily unavailable` (exit 128, ~50 ms,
+intermittently, because a slot frees as the storm thrashes), the platform's own `du`
+times out (`unmeasurable: true`), and the agent cannot start. The container still reports
+`running`. The only recovery was an operator pressing pause and then resume.
+
+`scripts/measure-pids.ps1` was written to answer the question the fix depends on, on this
+host, with the shipped image (`piforge/sandbox-agent:isolated`, `--cpus 1 --memory 2g`):
+
+```
+boot floor (no storm)                     idle footprint
+  pids=64   one node service missing       83-85 pids (threads), 25 processes
+            (pids 45, 22 procs)            supervisord 1, jupyter-lab 1, Xvnc 1,
+  pids=96/128/192/256/512/1024  complete    nginx 2, node 4, python-server 1
+
+bounded storm (timeout 8 bash -c ':(){ :|:& };:')
+  pids=64/96/128/192/256/512/1024   the cgroup is pinned to its maximum in ~1 s;
+                                   `cat /sys/fs/cgroup/pids.current` itself cannot fork
+                                   while it lasts; `docker exec true` fails at *every*
+                                   limit, intermittently, in ~50 ms
+  recovery: docker stop -t5 4.99 s + docker start -> exec ok in 0.91 s = 5.9 s
+
+sane tenant at pids=256
+  40 concurrent processes + 8 node worker threads: 85 -> 125 pids, exec and du fine
+```
+
+Two conclusions, and the second is the one that shaped the fix:
+
+1. The report's "512 is largely consumed by the AIO image" was not true here: the runtime
+   idles at ~83 threads. `deploy/tenant-limits.json` still went from 512 to **256**,
+   which leaves ~170 slots above the idle footprint and halves what a storm can park in
+   one cgroup on a shared daemon.
+2. **No ceiling prevents the wedge.** A storm fills whatever it is given, at 64 and at
+   1024 alike; the failure is saturation, not the number. A `ulimit nproc` reserve was
+   measured too and rejected: at `nproc=192` the image's own bootstrap dies
+   (`su: failed to execute /bin/bash: Resource temporarily unavailable`), and a value
+   high enough to boot (`>~384`) reserves too few pids to be a real reserve.
+
+So the guarantee is detection and repair (`backend/internal/httpapi/sandbox_watch.go`):
+
+* a liveness probe runs `true` **through the sandbox's own API** with a 3 s bound, every
+  10 s, for every READY/BUSY/IDLE sandbox — the same door the agent uses, as the same
+  user, so "the API cannot run a command" is exactly the condition the user experiences;
+* two consecutive failures are a wedge (one is a loaded host), which is ≤ ~25 s;
+* the repair is the pause+resume the operator used to do by hand: `docker stop` +
+  `docker start`, ~5 s of container work measured (`stop -t5` 4.99 s + `start` to a
+  working command 0.91 s), and the workspace is a volume, so the checkout, the
+  transcript and the agent's files survive while every process of the storm dies with
+  the container. End to end on the live stack the repair took **7.4 s** and **12.0 s**
+  in two runs (`elapsed_ms` on the `sandbox_recovered` event; the second includes the
+  image's own services coming back), i.e. 14.1 s from the storm to a sandbox that runs
+  commands again;
+* the repair is verified by probing again (up to 45 s), and the row's state is written
+  only after that — "we restarted it" is not "it works";
+* the session is told in its own transcript, with `platform.error`:
+  `sandbox_unresponsive` 「沙箱无响应，正在恢复」 before anything is touched, then
+  `sandbox_recovered` 「沙箱已恢复（用时 7.4 秒）…」 or `sandbox_recovery_failed` with what
+  to do next. Live, the probe's own failure is the tenant's: `500: Internal server
+  error: [Errno 11] Resource temporarily unavailable` from `/v1/shell/sessions/create`,
+  and the recovery's WARN lines name the same sandbox, strike and elapsed time;
+* the same repair is one HTTP call (`POST /v1/sessions/{id}/sandbox/recover`) and one
+  button (「恢复」 in the session view), and `GET /v1/sessions/{id}/sandbox` reports the
+  cached verdict as `responsive` (`null` = not probed yet, never "down") plus
+  `recovering` and `can_recover`.
+
+**What this does not claim.** It is not a resource policy: a determined tenant can wedge
+its own sandbox again a second later, and the watchdog will repair it again (one WARN per
+episode). A tenant that does it in a loop is a tenancy problem (`max_sandboxes`, project
+deletion), not something a watchdog decides. And a sandbox whose *container* is gone is
+not recovered here — that is `reconcile`'s job.
+
+### 15.2 After pause → resume, the transcript endpoint answered empty
+
+Measured: after `pause` then `resume` and **no new prompt**,
+`GET /v1/sessions/{id}/entries` returned `{"entries":[],"leaf_id":""}` and
+`/status` said `last_seq=0`, while `/stats` still counted 2 user + 2 assistant messages
+and the sandbox's `/workspace/.piforge/sessions/<id>.jsonl` held 8 093 bytes of both
+turns. Nothing was lost; the endpoint was answering from a process that resume does not
+start.
+
+**Mechanism:** `pi.Runtime.Entries` now falls back to the session file when there is no
+live agent (`RuntimeConfig.TranscriptFor`, `internal/pi/transcript.go`). The deployment
+supplies that hook by reading the file through the sandbox's own API
+(`cmd/piforged/agent_sandbox.go: Transcript`), which is where the conversation actually
+lives for a container placement. `?since=<entry>` is honoured against the file; a cursor
+the file no longer contains returns the whole transcript (showing it twice is
+recoverable, showing it empty is not). An unreadable file is still reported as the
+process-less answer, never as a successful empty conversation.
+
+**Tests:** `TestEntriesReadTheTranscriptWhenNoAgentIsRunning`,
+`TestEntriesFromTranscriptHonourSince`,
+`TestEntriesFromTranscriptToleratesAColdOrTornFile`,
+`TestEntriesWithoutATranscriptHookStillReportNoProcess` (pi), and
+`TestEntriesSurvivePauseAndResumeWithoutAPrompt` (httpapi, real `pi.Runtime` + a real
+session file: pause → resume → GET entries returns all four entries and `leaf_id=a2`
+without sending a prompt).
+
+### 15.3 Two numbers that were not what the product said
+
+**(a) The file-size refusal is the shell's, and the tenant was never told.** A write past
+the per-file limit is killed by the kernel with `SIGXFSZ`; the tenant sees the shell's
+own line — `File size limit exceeded (core dumped)`, exit 153, a 0-byte file — and
+nothing in the product explains it. A kernel signal cannot be rewritten, so the fix is
+the documentation: `docs/SANDBOX-DEPLOY.md` §10 quotes that exact text, with the limit,
+the exit code, and the difference between it and the 507 total-quota refusal.
+
+**(b) `files` in the admin `sandbox_usage[]` was always 0.** The in-sandbox measurement
+ran `du -sb` and deliberately skipped the count ("a second `find` would double the walk").
+The second walk was never needed — only the second column: one GNU `find -printf '%y %s\n'`
+pass feeds an `awk` that sums every entry's size **and** counts the non-directories.
+Measured on a 400-file tree: `412288 400` — bytes identical to `du -sb` (412288), files
+400 (was 0).

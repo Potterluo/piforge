@@ -81,10 +81,22 @@ func sandboxAgentStopper(remote sandbox.Remote, keys sandboxKeys) func(context.C
 // 507 check never fired for the placement this repository ships. The measurement
 // has to cross the same door the agent's files do.
 //
-// It runs `du -sb` through the sandbox's own shell API, as the sandbox user —
-// the account that owns the tree, so nothing is hidden from it by permissions.
-// The number is apparent size (GNU `-b`), which over-counts a sparse file rather
-// than under-counting it: a quota that is wrong in the safe direction.
+// It walks the tree once, through the sandbox's own shell API, as the sandbox
+// user — the account that owns the tree, so nothing is hidden from it by
+// permissions. One walk yields both numbers:
+//
+//	bytes — the sum of every entry's st_size, which is exactly `du -sb`
+//	        (GNU `-b`, apparent size). Measured equal on a 400-file tree
+//	        (412288 = 412288), so the admin figure and an operator's `du`
+//	        cannot disagree. Apparent size over-counts a sparse file rather
+//	        than under-counting it: a quota that is wrong in the safe direction.
+//	files — how many non-directory entries the same walk saw. It used to be
+//	        reported as 0 always, because the count was deliberately skipped
+//	        ("a second find would double the walk"); the second walk was never
+//	        needed, only the second column.
+//
+// `find -printf` is GNU find, which this image has. A tree that cannot be walked
+// is an error, and the caller reports `unmeasurable` — never a measured 0.
 func sandboxDiskMeasurer(remote sandbox.Remote, keys sandboxKeys) diskquota.Measurer {
 	if remote == nil {
 		return nil
@@ -114,27 +126,31 @@ func sandboxDiskMeasurer(remote sandbox.Remote, keys sandboxKeys) diskquota.Meas
 		if err != nil {
 			return diskquota.Measurement{}, fmt.Errorf("measure %s: %w", sandboxID, err)
 		}
-		// One number, one command: du's summary for the workspace, first field.
-		// `cut -f1` because GNU du separates the size from the path with a tab.
-		command := "du -sb -- " + aio.Quote(root) + " 2>/dev/null | cut -f1"
+		// One walk, two numbers. `%y` is the entry type ("d" for a directory) and
+		// `%s` its apparent size; the awk pass sums every entry (du does too) and
+		// counts only the non-directories, so "files" is files rather than
+		// "things walked".
+		command := "find " + aio.Quote(root) + ` -printf '%y %s\n' 2>/dev/null` +
+			` | awk '{s+=$2; if ($1 != "d") n++} END{printf "%d %d\n", s, n}'`
 		res, err := client.Exec(ctx, command, sandbox.ContainerWorkspace)
 		if err != nil {
 			return diskquota.Measurement{}, fmt.Errorf("measure %s: %w", sandboxID, err)
 		}
 		if res.ExitCode != 0 {
-			return diskquota.Measurement{}, fmt.Errorf("measure %s: du exited %d: %s", sandboxID, res.ExitCode, strings.TrimSpace(res.Output))
+			return diskquota.Measurement{}, fmt.Errorf("measure %s: the walk exited %d: %s", sandboxID, res.ExitCode, strings.TrimSpace(res.Output))
 		}
 		fields := strings.Fields(strings.TrimSpace(res.Output))
-		if len(fields) == 0 {
-			return diskquota.Measurement{}, fmt.Errorf("measure %s: du printed no size", sandboxID)
+		if len(fields) < 2 {
+			return diskquota.Measurement{}, fmt.Errorf("measure %s: the walk printed %q, want a byte total and a file count", sandboxID, strings.TrimSpace(res.Output))
 		}
 		bytes, err := strconv.ParseInt(fields[0], 10, 64)
 		if err != nil {
-			return diskquota.Measurement{}, fmt.Errorf("measure %s: du printed %q: %w", sandboxID, fields[0], err)
+			return diskquota.Measurement{}, fmt.Errorf("measure %s: the walk printed %q: %w", sandboxID, fields[0], err)
 		}
-		// The file count is deliberately not measured: a second `find | wc -l`
-		// per tick would double the walk for a number the admin page does not
-		// show, and the quota decision is about bytes.
-		return diskquota.Measurement{Bytes: bytes}, nil
+		files, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return diskquota.Measurement{}, fmt.Errorf("measure %s: the walk printed %q files: %w", sandboxID, fields[1], err)
+		}
+		return diskquota.Measurement{Bytes: bytes, Files: files}, nil
 	}
 }

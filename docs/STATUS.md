@@ -1504,3 +1504,149 @@ after : POST pause -> {"state":"PAUSED"} ; docker exited ; GET /sandbox -> PAUSE
 ### 门禁（本批）
 
 见本节末尾的实测行（`go build` / `go vet` / `go test ./... -count=1`、`pnpm --dir web test -- --run`、`pnpm --dir web exec next build`、e2e 182、`deliver-check.ps1` 119）。对抗复检脚本与完整输出在 `e2e/.artifacts/adversarial-fixes/`（`final-transcript.txt`、`agent-stop-transcript.txt`），一次性栈用 `pwsh scripts/up-isolated.ps1` 起在 7723、用 `-Down` 收掉；`pf-local`（7722）前后同一个容器 id 与 healthz。
+
+## 本批：第二轮对抗验收的三个缺陷（进程风暴的不可恢复、恢复后对话为空、两个不诚实的数字）
+
+第二轮对抗验收（`e2e/.artifacts/adversarial2/VERDICT.md`）用一套全新 isolated 栈从租户
+身份又打了一遍。租户边界仍然守住，上一批的四个修复逐条复检也都成立（没有 root、单文件
+被内核卡住、一小时的 token 暂停即失效、pause/resume 可用）。它打出来的是**边界外围**的
+三件事：一个租户可以让自己的项目永久不可用且产品里没有恢复手段；暂停再恢复之后对话端点
+返回空；以及两个"产品说了一个数、实际是另一个数"的地方。机制与实测写进
+`docs/EXECUTION-BOUNDARY.md` §15、`docs/SANDBOX-DEPLOY.md` §10、`docs/HANDOFF.md`
+「Sandbox liveness」；这里记改了什么、怎么证明、代价与仍开放的部分。
+
+### FIX 1（最严重的运维缺陷）进程风暴把沙箱顶死，产品没有恢复路径
+
+**复现与机制**：沙箱里跑进程风暴把 `pids` cgroup 打满。此后容器**仍显示 running**，
+但任何新进程都起不来：`docker exec` 报 `unable to spawn stage-1: Resource temporarily
+unavailable`（exit 128，约 50 ms，概率性失败，因为风暴本身在抖动出空位）、平台的 `du`
+超时（`unmeasurable: true`）、agent 起不来。唯一的恢复是人工 pause + resume。
+
+**先测，再改**（`scripts/measure-pids.ps1`，本机、出厂镜像 `--cpus 1 --memory 2g`）：
+
+```
+空载/启动下限            镜像自带运行时：83–85 个 pid（线程）/ 25 个进程
+                         pids=64 时少一个 node 服务（pids 45、22 进程）
+                         pids=96/128/192/256/512/1024 完整启动
+
+有界风暴（timeout 8 bash -c ':(){ :|:& };:'）
+                         pids=64/96/128/192/256/512/1024 **每个上限**都在约 1 s 内被打满；
+                         打满期间连 `cat /sys/fs/cgroup/pids.current` 都 fork 不出来；
+                         `docker exec true` 在看得到的每个上限上都失败，约 50 ms
+
+恢复（= 产品的 Pause/Resume）  docker stop -t5 4.99 s + docker start → 0.91 s 内可执行 = 5.9 s
+
+正常租户（pids=256）      40 个并发进程 + 8 个 node worker 线程：85 → 125 个 pid，exec/du 正常
+```
+
+两个结论，第二个决定了修法：
+
+1. 报告里"512 已被 AIO 镜像吃掉大半"在本机不成立（空载只有 ~83 个线程）。但默认值仍然
+   从 **512 降到 256**（`deploy/tenant-limits.json`、`docker-compose.runner.yml` 的
+   `${PIFORGE_SANDBOX_PIDS:-256}`）：在空载之上留 ~170 个槽位给租户的构建，同时把单个
+   恶意沙箱能在共享 daemon 上压住的进程数减半。
+2. **任何上限都挡不住这件事**：风暴会填满给它的任何数字，64 和 1024 一样。所以没有走
+   "把 pids 调小到 exec 不失败"这条路（那条路不存在），而是做了检测 + 自动恢复——也正是
+   任务里 (b) 的选项。`ulimit nproc` 的"保留额度"也实测过并放弃：`nproc=192` 时镜像
+   自己的引导就死了（`su: failed to execute /bin/bash: Resource temporarily
+   unavailable`），能启动的值又留不出有意义的余量。
+
+**修法**（`backend/internal/httpapi/sandbox_watch.go`、`backend/cmd/piforged/sandbox_probe.go`）：
+
+- 每 **10 s** 对每个 READY/BUSY/IDLE 沙箱跑一次 `true`，**经沙箱自己的 API**，3 s 上限
+  ——和 agent 走同一扇门、同一个账号，所以"API 跑不动命令"就是用户遇到的那件事；`du`
+  式的 30 s 测量不能当探测信号（它超时，而超时说明不了"不能 fork"）。
+- 连续 **2 次**失败判为顶死（一次可能只是宿主机忙），最迟约 25 s 内发现。
+- 恢复 = 运维手动做的那件事：`docker stop` + `docker start`（实测 ~5 s）。工作区是卷，
+  所以 checkout、对话、agent 的文件都留着；风暴的进程全在容器里，随容器一起消失。
+- 恢复后**再探一次**才算成功（最长 45 s），确认之后才写沙箱行的状态——"重启了"不等于
+  "能用了"。
+- 会话里用 `platform.error` 说两句话：动手前 `sandbox_unresponsive`
+  「沙箱无响应，正在恢复」；成功后 `sandbox_recovered`「沙箱已恢复（用时 5.9 秒）…」；
+  失败则 `sandbox_recovery_failed` 并说明下一步。
+- 同一个动作给出**一键入口**：`POST /v1/sessions/{id}/sandbox/recover`（先探测，健康的
+  沙箱是明说原因的空操作），会话视图顶部「沙箱无响应，正在恢复」旁边的**「恢复」按钮**；
+  `GET /v1/sessions/{id}/sandbox` 暴露 `responsive`（`null` = 还没探过，不是"坏了"）、
+  `recovering`、`can_recover`。
+
+**代价 / 仍开放**：这是修复而不是资源策略——同租户再打爆一次，watchdog 会再修一次（每次
+一个 WARN），循环打爆是租户治理问题（`max_sandboxes`、删项目），watchdog 不替人做决定。
+容器"不见了"（而不是"顶死了"）归 `reconcile`，不在这里。恢复会丢掉容器内 `/tmp` 和正在
+跑的 agent 进程（这正是目的），卷上的东西不丢。
+
+### FIX 2（显示/API 缺口）pause → resume 之后 `entries` 是空的
+
+**实测**：`POST …/sandbox/pause` → `resume`、**不发新 prompt** 时，
+`GET /v1/sessions/{id}/entries` 返回 `{"entries":[],"leaf_id":""}`、`/status` 的
+`last_seq=0`，而 `/stats` 仍是 2 条用户 / 2 条助手 / 3271 tokens，沙箱里的
+`/workspace/.piforge/sessions/<id>.jsonl` 是完整的 8093 字节。数据没丢，端点答的是一个
+resume 不会启动的进程。
+
+**修法**：`pi.Runtime.Entries` 在没有活进程时回退到**会话文件**
+（`RuntimeConfig.TranscriptFor`，`backend/internal/pi/transcript.go`），部署侧由
+`cmd/piforged/agent_sandbox.go` 的 `Transcript` 实现——经沙箱自己的 API 读
+`/workspace/.piforge/sessions/<id>.jsonl`，因为这正是容器placement 里对话真正所在的位置。
+`?since=<entry>` 在文件上生效；游标在文件里找不到时返回整个 transcript（重复显示可以修，
+显示成空不行）；文件读不出来仍然回退成"没有活进程"的诚实答复，绝不伪装成"成功的空对话"。
+
+**测试**：`TestEntriesReadTheTranscriptWhenNoAgentIsRunning`、
+`TestEntriesFromTranscriptHonourSince`、`TestEntriesFromTranscriptToleratesAColdOrTornFile`、
+`TestEntriesWithoutATranscriptHookStillReportNoProcess`（pi），以及
+`TestEntriesSurvivePauseAndResumeWithoutAPrompt`（httpapi，**真** `pi.Runtime` + 真会话
+文件：pause → resume → GET entries 返回 4 条与 `leaf_id=a2`，全程不发 prompt）。
+
+### FIX 3（便宜的两个诚实项）
+
+**(a) 文件超限时租户看到的是 shell 的那句话。** 越界的写被内核用 `SIGXFSZ` 终止，租户
+看到的就是：
+
+```
+$ fallocate -l 3G /workspace/ballast.bin
+File size limit exceeded (core dumped)
+$ echo $?
+153                       # 128 + 25
+```
+
+内核信号无法被产品改写（包一层 shell 只会把 `exit 153` 变成别的数字，更容易误导），
+所以修的是文档：`docs/SANDBOX-DEPLOY.md` §10.1 给出**精确原文**、退出码 0 字节文件、
+`dd` 截断在正好配额处的样子，以及它和总配额 507 `sandbox_disk_quota` 的区别（谁说的、
+什么意思、怎么处置）。同一节还写了终端写者收不到总配额消息这件事本身。
+
+**(b) admin `sandbox_usage[].files` 恒为 0。** 沙箱内的测量只取了 `du -sb` 的字节数，
+注释里写着"文件数故意不测，第二次 `find` 会把遍历翻倍"。其实从不需要第二次遍历，只需要
+第二列：一次 GNU `find -printf '%y %s\n'`，`awk` 同时累加每个 entry 的 `st_size`（与
+`du -sb` 逐字节一致）和非目录 entry 的个数。400 个文件的树实测 `412288 400`：字节
+412288 = `du -sb` 的 412288，文件数 400（原来 0）。量不出来时仍是 `unmeasurable: true`，
+不会伪装成 0。
+
+### 门禁（本批，实测输出）
+
+```
+go build ./...                                   ok
+go vet ./...                                     ok
+go test ./... -count=1                           所有包 ok（httpapi 39.6s，pi 5.9s）
+pnpm --dir web test -- --run                     38 files / 292 tests passed
+pnpm --dir web exec next build                   ok（Next.js 16.4.3 / Turbopack）
+pnpm --dir e2e test                              182 passed (8.8m)
+pwsh scripts/deliver-check.ps1 -Image piforge:local   119/119 checks passed（110.2s，
+                                                 artifacts: e2e/.artifacts/delivery-drill/20261101-093625）
+```
+
+一次说明：第一次全量 e2e 与三个镜像重建/Delivery drill 同时跑，出现 1 failed + 1 flaky
+（`81-provider-lifecycle` 的页面是 Next 的 "This page couldn't load"、`83-browser-takeover`
+等 `panel-tab-browser` 超时）。两个用例单独重跑 4 passed，机器空下来后全量重跑 182 passed
+——这是负载导致的页面资源加载失败，不是本批代码；本批新增的会话页组件有 4 个组件测试
+（`sandbox-health-bar.test.tsx`）与既有 `workbench.test.tsx` 覆盖。
+
+实测栈用 `pwsh scripts/up-isolated.ps1 -Rebuild` 起在 7723、用 `-Down` 收掉；`pf-local`
+（7722）全程未动：同一个容器 id `7dc14e4a7525a8…`、`started=2026-10-31T13:48:51Z`、
+`restarts=0`、`/healthz -> 200`。租户沙箱实测 `PidsLimit=256`（新默认已落到容器）。
+
+本批的实测输出：
+
+```
+e2e/.artifacts/fixes2/20261101-093320/drill.txt   全流程（FIX 2 / FIX 1 / FIX 1 二次 prompt / FIX 3b）
+e2e/.artifacts/fixes2/20261101-093320/sse.txt     会话 SSE：seq 23 sandbox_unresponsive、seq 24 sandbox_recovered（7 391 ms）
+e2e/.artifacts/fixes2/evidence-watchdog.txt       watchdog 日志、容器 PidsLimit、limits 文件、pf-local 身份
+e2e/.artifacts/pids/measure-*.txt                 scripts/measure-pids.ps1 的完整表
+```
