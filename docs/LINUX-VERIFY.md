@@ -152,7 +152,7 @@ the copy fell back, dropping the "bind mount refused (…)" sentence that explai
 *why*. Both are kept now, joined.
 
 **F6 — the Go suite could not pass on a Linux host running as root.**
-`go test ./...` on a stock Linux root host failed in six places, all for the same
+`go test ./...` on a stock Linux root host failed 13 tests in five packages, all for the same
 honest reason, none of which the Windows host could show:
 
 * `materialize`, `provision`: expected `copy-ro` on a host where 0444 does not
@@ -172,7 +172,7 @@ honest reason, none of which the Windows host could show:
   clock always loses. The test now sweeps at an instant after the revoke.
 
 After the fixes: `go test ./... -count=1` on Linux — **42 packages ok, 0
-failures** (was 6 failures).
+failures** (was 13 failures in five packages).
 
 ## What `verify-linux.sh` covers
 
@@ -221,12 +221,13 @@ checked instead), and the agent turn (no key).
 | gate | result |
 |------|--------|
 | `go build ./...` | pass |
-| `go test ./... -count=1` | pass (Windows host) |
-| `go test ./... -count=1` **on Linux** | 42 packages ok, 0 failures (container, golang 1.25) |
+| `go test ./... -count=1` (Windows host) | pass. One note: `agentsupervisor` `TestSupervisorKeepsTheAgentAliveWhenTheClientLeaves` flaked 1 run in 4 (pre-existing, untouched by this pass: "the reattaching client was given no backlog"); the same test passes on Linux, and the gate run itself was green |
+| `go test ./... -count=1` **on Linux** | 42 packages ok, 0 failures (golang:1.25-bookworm container); 13 tests in five packages failed before this pass's fixes |
 | `pnpm --dir web lint` | pass |
 | `pnpm --dir web test -- --run` | pass |
-| full e2e (182) | pass |
-| `pwsh scripts/deliver-check.ps1` (125) | pass |
+| full e2e | 182 passed (8.6 m) |
+| `pwsh scripts/deliver-check.ps1` | 125 checks, 0 failures. The first attempt failed exactly one check — "the source checkout is clean after the drill" — because this pass's changes were still uncommitted; after committing only its own paths it passed. No key was echoed, written to an artifact or left in a file, and `pf-local` stayed up and healthy throughout (that container was only ever read) |
+
 
 ## What only a native Linux host can prove
 
