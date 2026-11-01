@@ -135,8 +135,11 @@ export default function LoginPage() {
               <span className="ml-2 font-sans">{account.role}</span>
             </p>
           ))}
-          <FieldDescription className="mt-1">
-            初始密码在首次启动后端时打印到它的日志里（只打印一次），请向部署同学索取。
+          <FieldDescription className="mt-1" data-testid="login-seed-password-note">
+            初始密码由部署设定（环境变量 PIFORGE_SEED_PASSWORD 和
+            PIFORGE_SEED_USER_PASSWORD）；没有设定时，首次建号会随机生成密码，只保存哈希，
+            <strong className="font-medium text-foreground">不会打印到任何日志</strong>
+            ，也无法找回——请向部署同学索取，或让管理员在「用户」页重置。
           </FieldDescription>
         </div>
       </div>
