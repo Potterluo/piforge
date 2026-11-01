@@ -1,7 +1,7 @@
 "use client";
 
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { Download, Search } from "lucide-react";
+import { Download, Search, ShieldCheck } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -18,28 +18,35 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, auditExportUrl, type AuditQuery } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
-import { ApiError, type AuditRow } from "@/lib/types";
+import { ApiError, type AuditRow, type AuditVerifyResult } from "@/lib/types";
 
 const PAGE_SIZE = 50;
 
 /**
- * The operator's audit trail (docs/EXECUTION-BOUNDARY.md §11).
+ * The operator's forensic audit trail (docs/AUDIT.md).
  *
- * Every tool an agent runs is already written around the call (`tool_calls`:
- * intent before, outcome after). This page is the query an operator could not
- * make before: who ran what, in which project and session, when, and whether it
- * failed — across tenants, paginated, and downloadable as CSV for a ticket.
+ * Every tool an agent runs writes two append-only rows: intent (tool, bounded
+ * redacted preview, ids, sandbox, model, workspace commit) and observation
+ * (status, exit code, duration, bytes). The run facts (tokens, cost) are joined
+ * from audit_runs, and the rows survive the session, project and user they
+ * describe.
  *
- * It is not a forensic log: arguments are a hash plus the same preview the user
- * sees in their own transcript. Saying that here is the difference between an
- * operator trusting the numbers and assuming it captured everything.
+ * It is not the tenant's transcript: arguments are a hash plus a bounded preview
+ * with key-shaped fields redacted and file content reduced to sha256 + size.
+ * The chain button walks prev_hash/hash over the current filter and names the
+ * first edited row, sequence gap or broken link.
  */
 export default function AdminAuditPage() {
   const [tool, setTool] = useState("");
-  const [outcome, setOutcome] = useState<"any" | "ok" | "error" | "running">("any");
+  const [outcome, setOutcome] = useState<"any" | "ok" | "error" | "abandoned" | "running">("any");
   const [user, setUser] = useState("");
   const [since, setSince] = useState("");
+  const [search, setSearch] = useState("");
+  const [minDuration, setMinDuration] = useState("");
   const [offset, setOffset] = useState(0);
+  const [verifying, setVerifying] = useState(false);
+  const [verified, setVerified] = useState<AuditVerifyResult | null>(null);
+  const [verifyError, setVerifyError] = useState("");
 
   const filter = useMemo(() => {
     const next: AuditQuery = { limit: PAGE_SIZE, offset };
@@ -49,8 +56,11 @@ export default function AdminAuditPage() {
     // A date input is a local calendar day; the API wants an instant. "Since
     // midnight" is what an operator means by picking a day.
     if (since) next.since = new Date(`${since}T00:00:00`).toISOString();
+    if (search.trim()) next.q = search.trim();
+    const min = Number.parseInt(minDuration, 10);
+    if (Number.isFinite(min) && min > 0) next.min_duration_ms = min;
     return next;
-  }, [tool, outcome, user, since, offset]);
+  }, [tool, outcome, user, since, search, minDuration, offset]);
 
   const users = useQuery({ queryKey: ["admin", "users"], queryFn: () => api.admin.users() });
   const audit = useQuery({
@@ -67,12 +77,31 @@ export default function AdminAuditPage() {
   const page = Math.floor(offset / PAGE_SIZE) + 1;
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
+  async function runVerify() {
+    setVerifying(true);
+    setVerifyError("");
+    try {
+      setVerified(
+        await api.admin.auditVerify({
+          since: filter.since,
+          until: filter.until,
+        }),
+      );
+    } catch (error) {
+      setVerified(null);
+      setVerifyError(error instanceof Error ? humanizeError(error) : "未知错误");
+    } finally {
+      setVerifying(false);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-5 p-4" data-testid="admin-audit">
       <div className="flex flex-col gap-1">
         <h1 className="text-base font-medium">审计</h1>
         <p className="text-xs text-muted-foreground">
-          每个 agent 的工具调用（谁、什么、何时、成败），跨租户只读。参数只记录哈希与预览，不记录原文。
+          每个 agent 的工具调用（谁、什么、何时、成败、模型、提交、用量），跨租户只读。
+          参数只记录哈希与脱敏预览；文件内容只记 sha256 与字节数。删除会话或项目不会删除审计行。
         </p>
       </div>
 
@@ -116,7 +145,8 @@ export default function AdminAuditPage() {
                 <SelectItem value="any">全部</SelectItem>
                 <SelectItem value="ok">成功</SelectItem>
                 <SelectItem value="error">失败</SelectItem>
-                <SelectItem value="running">未结束</SelectItem>
+                <SelectItem value="abandoned">未回报</SelectItem>
+                <SelectItem value="running">进行中</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -158,6 +188,39 @@ export default function AdminAuditPage() {
               }}
             />
           </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-muted-foreground" htmlFor="audit-search">
+              预览搜索
+            </label>
+            <Input
+              id="audit-search"
+              data-testid="audit-search"
+              className="h-8 w-48"
+              placeholder="路径 / 命令片段"
+              value={search}
+              onChange={(event) => {
+                setSearch(event.target.value);
+                setOffset(0);
+              }}
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-muted-foreground" htmlFor="audit-min-duration">
+              最短耗时 (ms)
+            </label>
+            <Input
+              id="audit-min-duration"
+              data-testid="audit-min-duration"
+              className="h-8 w-28"
+              inputMode="numeric"
+              placeholder="0"
+              value={minDuration}
+              onChange={(event) => {
+                setMinDuration(event.target.value);
+                setOffset(0);
+              }}
+            />
+          </div>
           <div className="flex items-center gap-2">
             <Button
               size="sm"
@@ -170,14 +233,57 @@ export default function AdminAuditPage() {
             <Button
               size="sm"
               variant="outline"
-              data-testid="audit-export"
-              render={<a href={auditExportUrl(filter)} download />}
+              data-testid="audit-verify"
+              disabled={verifying}
+              onClick={() => void runVerify()}
             >
-              <Download /> 导出 CSV
+              <ShieldCheck /> {verifying ? "校验中…" : "校验链"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              data-testid="audit-export-csv"
+              render={<a href={auditExportUrl(filter, "csv")} download />}
+            >
+              <Download /> CSV
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              data-testid="audit-export-jsonl"
+              render={<a href={auditExportUrl(filter, "jsonl")} download />}
+            >
+              <Download /> JSONL
             </Button>
           </div>
         </CardContent>
       </Card>
+
+      {verified || verifyError ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">链校验</CardTitle>
+            <CardDescription>
+              {verifyError
+                ? verifyError
+                : verified && verified.ok
+                  ? `完整：检查 ${verified.checked} 行、${verified.sessions} 个会话，未发现断点。`
+                  : verified?.first_break
+                    ? `首个断点：第 ${verified.first_break.seq} 行，原因 ${verified.first_break.reason} — ${verified.first_break.detail}`
+                    : "没有可检查的行。"}
+            </CardDescription>
+          </CardHeader>
+          {verified?.anchors?.length ? (
+            <CardContent className="text-[11px] text-muted-foreground">
+              {verified.anchors.map((anchor) => (
+                <p key={anchor.session_id}>
+                  会话 {anchor.session_id} 从第 {anchor.seq} 行开始（{anchor.reason}），链在该处锚定。
+                </p>
+              ))}
+            </CardContent>
+          ) : null}
+        </Card>
+      ) : null}
 
       {audit.isPending ? (
         <Skeleton className="h-64 w-full" />
@@ -236,48 +342,81 @@ export default function AdminAuditPage() {
   );
 }
 
-/** One row: when, who, where, what, and how it ended. */
+/** One row: when, who, where, what, with which model and revision, and how it ended. */
 function AuditLine({ row }: { row: AuditRow }) {
-  const outcome = row.failed === undefined ? "running" : row.failed ? "error" : "ok";
+  const outcome = row.status || (row.failed === undefined ? "running" : row.failed ? "error" : "ok");
   const tone =
-    outcome === "error"
+    outcome === "error" || outcome === "abandoned"
       ? "text-destructive"
       : outcome === "running"
         ? "text-amber-600"
         : "text-muted-foreground";
+  const preview = row.args_preview ? JSON.stringify(row.args_preview) : "";
   return (
     <div
       data-testid={`audit-row-${row.id}`}
       data-outcome={outcome}
-      className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-b border-border/60 py-1.5 text-[11px] last:border-0"
+      data-seq={row.seq}
+      className="flex flex-col gap-1 border-b border-border/60 py-1.5 text-[11px] last:border-0"
     >
-      <span className="flex min-w-0 items-baseline gap-2">
-        <span className="font-mono tabular-nums text-muted-foreground">
-          {new Date(row.started_at).toLocaleString("zh-CN")}
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <span className="flex min-w-0 items-baseline gap-2">
+          <span className="font-mono tabular-nums text-muted-foreground">
+            {new Date(row.started_at).toLocaleString("zh-CN")}
+          </span>
+          <span className="font-mono font-medium">{row.tool}</span>
+          {row.namespace ? (
+            <span className="font-mono text-[10px] text-muted-foreground">{row.namespace}</span>
+          ) : null}
+          <Badge variant="outline" className="text-[10px]">
+            {outcome}
+          </Badge>
+          <span className="font-mono text-[10px] text-muted-foreground">seq {row.seq}</span>
         </span>
-        <span className="font-mono font-medium">{row.tool}</span>
-        {row.namespace ? (
-          <span className="font-mono text-[10px] text-muted-foreground">{row.namespace}</span>
-        ) : null}
-        <Badge variant="outline" className="text-[10px]">
-          {outcome}
-        </Badge>
-      </span>
-      <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-muted-foreground">
-        <span className="truncate" title={row.user_id}>
-          {row.user_email || row.user_id}
+        <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-muted-foreground">
+          <span className="truncate" title={row.user_id}>
+            {row.user_email || row.user_id}
+          </span>
+          <span className="truncate" title={row.project_id}>
+            {row.project || row.project_id}
+          </span>
+          <span className="font-mono text-[10px]" title={row.session_id}>
+            {row.session_id}
+          </span>
+          <span className={`tabular-nums ${tone}`}>
+            {row.duration_ms !== undefined ? `${row.duration_ms} ms` : "—"}
+            {row.result_bytes !== undefined ? ` · ${row.result_bytes} B` : ""}
+          </span>
         </span>
-        <span className="truncate" title={row.project_id}>
-          {row.project || row.project_id}
+      </div>
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+        <span className="font-mono" title={row.model_ref}>
+          模型 {row.model_ref || row.run_model_ref || "—"}
         </span>
-        <span className="font-mono text-[10px]" title={row.session_id}>
-          {row.session_id}
+        <span className="font-mono" title={row.commit_sha}>
+          提交 {row.commit_sha ? row.commit_sha.slice(0, 12) : "—"}
         </span>
-        <span className={`tabular-nums ${tone}`}>
-          {row.duration_ms !== undefined ? `${row.duration_ms} ms` : "—"}
-          {row.result_bytes !== undefined ? ` · ${row.result_bytes} B` : ""}
+        <span className="tabular-nums">
+          用量 {row.run_tokens_in} in / {row.run_tokens_out} out
+          {row.run_cost_usd > 0 ? ` · $${row.run_cost_usd.toFixed(4)}` : ""}
         </span>
-      </span>
+        <span className="font-mono" title={row.sandbox_id}>
+          沙箱 {row.sandbox_id || "—"}
+        </span>
+        <span className="font-mono" title={row.hash}>
+          链 {row.hash ? row.hash.slice(0, 10) : "—"}
+          {row.preview_truncated ? " · 预览已截断" : ""}
+        </span>
+      </div>
+      {preview ? (
+        <code
+          data-testid={`audit-preview-${row.id}`}
+          title={preview}
+          className="truncate font-mono text-[10px] text-muted-foreground/80"
+        >
+          {preview}
+        </code>
+      ) : null}
     </div>
   );
 }

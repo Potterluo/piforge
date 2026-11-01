@@ -141,6 +141,10 @@ type options struct {
 	// disables the sweep; the local provider always runs one at startup unless
 	// this is zero.
 	sandboxSweep time.Duration
+	// auditRetentionDays is the forensic trail's retention policy: a tool call
+	// that started more than this many days ago is deleted by the janitor.
+	// Zero keeps the trail forever; negative is refused at startup.
+	auditRetentionDays int
 	// sandboxBrowser is "auto" (the flag's default), "host" or "remote". It holds
 	// the resolved placement by the time anything reads it: auto follows the
 	// provider, which is remote under docker and host under local.
@@ -340,6 +344,8 @@ func run() error {
 		"how often the sandbox idle reaper checks for candidates")
 	flag.DurationVar(&opt.sandboxSweep, "sandbox-sweep", envDuration("PIFORGE_SANDBOX_SWEEP", 10*time.Minute),
 		"how often sandbox directories with no project row are removed, at startup and then on this interval (0 disables, local provider only)")
+	flag.IntVar(&opt.auditRetentionDays, "audit-retention-days", envInt("PIFORGE_AUDIT_RETENTION_DAYS", 90),
+		"delete audit trail rows for tool calls older than this many days on the janitor pass; 0 keeps them forever (env PIFORGE_AUDIT_RETENTION_DAYS)")
 	flag.DurationVar(&opt.sessionReconcileInterval, "session-reconcile-interval",
 		envDuration("PIFORGE_SESSION_RECONCILE_INTERVAL", 30*time.Second),
 		"how often sessions that claim a run is in flight are checked against the live agent registry (0 disables the periodic pass; the startup pass always runs)")
@@ -426,6 +432,9 @@ func run() error {
 	parallelLimit, err := resolveParallelLimit(flag.CommandLine, &opt.parallelLimit)
 	if err != nil {
 		return fmt.Errorf("invalid parallel limit: %w", err)
+	}
+	if opt.auditRetentionDays < 0 {
+		return fmt.Errorf("invalid audit retention: -audit-retention-days (PIFORGE_AUDIT_RETENTION_DAYS) must not be negative; 0 keeps the audit trail forever, a positive number deletes older rows")
 	}
 	// FR-5.8: both budgets are validated before anything is created, for the same
 	// reason the parallel limit is.
@@ -1695,21 +1704,27 @@ func run() error {
 	// handlers remove them eagerly, and this catches what a crash, an ephemeral
 	// session's expiry or an older build left behind. It runs for every provider
 	// because the snapshot root is the control plane's own data directory.
-	if opt.sandboxSweep > 0 {
+	if opt.sandboxSweep > 0 || opt.auditRetentionDays > 0 {
+		interval := opt.sandboxSweep
+		if interval <= 0 {
+			interval = time.Hour
+		}
 		orphans := janitor.New(janitor.Config{
-			Root:          localSandboxRoot,
-			Projects:      st,
-			SnapshotRoot:  skillSnapshotDir,
-			AgentRoot:     filepath.Join(opt.dataDir, "pi-agents"),
-			ArtifactsRoot: filepath.Join(opt.dataDir, "artifacts"),
-			SnapshotsRoot: filepath.Join(opt.dataDir, "snapshots"),
-			SkillsRoot:    filepath.Join(opt.dataDir, "skills"),
-			Sessions:      st,
-			Sandboxes:     st,
-			Skills:        st,
-			SnapshotRows:  st,
-			Logger:        logger,
-			Interval:      opt.sandboxSweep,
+			Root:               localSandboxRoot,
+			Projects:           st,
+			SnapshotRoot:       skillSnapshotDir,
+			AgentRoot:          filepath.Join(opt.dataDir, "pi-agents"),
+			ArtifactsRoot:      filepath.Join(opt.dataDir, "artifacts"),
+			SnapshotsRoot:      filepath.Join(opt.dataDir, "snapshots"),
+			SkillsRoot:         filepath.Join(opt.dataDir, "skills"),
+			Sessions:           st,
+			Sandboxes:          st,
+			Skills:             st,
+			SnapshotRows:       st,
+			AuditRetention:     st,
+			AuditRetentionDays: opt.auditRetentionDays,
+			Logger:             logger,
+			Interval:           interval,
 		})
 		// Empty means this provider keeps no sandbox directories here; saying
 		// "the current directory" for it would read as if it did.
@@ -1724,10 +1739,11 @@ func run() error {
 			"artifacts_root", abs(filepath.Join(opt.dataDir, "artifacts")),
 			"sandbox_snapshot_root", abs(filepath.Join(opt.dataDir, "snapshots")),
 			"skills_root", abs(filepath.Join(opt.dataDir, "skills")),
-			"interval", opt.sandboxSweep.String())
+			"audit_retention_days", opt.auditRetentionDays,
+			"interval", interval.String())
 		go orphans.Start(ctx)
 	} else {
-		logger.Info("janitor sweep disabled", "flag", "-sandbox-sweep=0")
+		logger.Info("janitor sweep disabled", "flag", "-sandbox-sweep=0", "audit_retention_days", 0)
 	}
 
 	// Scratch sessions (PRD FR-1.10) expire on their own: a quick question should

@@ -754,14 +754,17 @@ export interface TenantLimitRow {
 }
 
 /**
- * One tool call in the operator's audit trail (GET /v1/admin/audit).
+ * One tool call in the operator's forensic audit trail (GET /v1/admin/audit).
  *
- * It is the same row the session's own Trace shows, with the owner, project and
- * session joined in. The arguments are a hash plus the preview the user already
- * sees, never the arguments themselves.
+ * It is not the session's Trace: the row survives the session, project and user
+ * it describes, and it carries the model and workspace revision the call ran
+ * against, the run's token/cost facts, and a bounded redacted preview. The full
+ * arguments are never here (docs/AUDIT.md).
  */
 export interface AuditRow {
   id: string;
+  /** Monotonic per session; ordering reconstructs the recorded order. */
+  seq: number;
   started_at: string;
   ended_at?: string;
   duration_ms?: number;
@@ -771,14 +774,32 @@ export interface AuditRow {
   project?: string;
   session_id: string;
   session?: string;
+  sandbox_id?: string;
   run_id?: string;
   tool: string;
   namespace?: string;
   args_hash: string;
+  /** Bounded, redacted JSON object — never the raw arguments. */
+  args_preview?: unknown;
+  preview_bytes: number;
+  preview_truncated?: boolean;
+  /** running | ok | error | abandoned */
+  status: string;
   /** Absent while the call is still running. */
   failed?: boolean;
   exit_code?: number;
   result_bytes?: number;
+  model_ref?: string;
+  commit_sha?: string;
+  /** Run-level facts joined from audit_runs; zero means not reported. */
+  run_model_ref?: string;
+  run_tokens_in: number;
+  run_tokens_out: number;
+  run_tokens_cache_read: number;
+  run_tokens_cache_write: number;
+  run_cost_usd: number;
+  prev_hash?: string;
+  hash: string;
 }
 
 /** One page of the audit trail, plus how many rows the filter matched. */
@@ -789,6 +810,36 @@ export interface AuditResponse {
   offset: number;
   /** The filters the server understood, echoed back. */
   filters: Record<string, string>;
+}
+
+/**
+ * The answer to "is this range of the trail intact" (GET /v1/admin/audit/verify).
+ *
+ * `ok` covers the visited rows only. An `anchor` says the session's visible
+ * range starts mid-chain because retention removed a prefix (or a filter chose
+ * the range), which is not a break. See docs/AUDIT.md for the limits: the chain
+ * detects an edit or a deletion, not a writer who recomputes every hash.
+ */
+export interface AuditVerifyResult {
+  ok: boolean;
+  checked: number;
+  sessions: number;
+  first_break?: {
+    session_id: string;
+    id: string;
+    tool_call_id: string;
+    seq: number;
+    reason: "edited" | "gap" | "link" | "head";
+    detail: string;
+    expected?: string;
+    actual?: string;
+  };
+  anchors?: Array<{
+    session_id: string;
+    seq: number;
+    prev_hash: string;
+    reason: "retention" | "range" | "genesis";
+  }>;
 }
 
 /** One sandbox's footprint against the disk budget (GET /v1/admin/status). */

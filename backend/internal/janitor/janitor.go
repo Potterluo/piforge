@@ -98,6 +98,16 @@ type SnapshotRows interface {
 	DeleteSnapshots(ctx context.Context, ids []string) (int, error)
 }
 
+// AuditRetention is what the janitor asks the store about the forensic trail.
+//
+// Retention is a policy, not a cleanup: only rows older than the configured
+// number of days may go, and the store deletes a whole tool call (both of its
+// rows) so the remainder is still a chain an operator can verify. The count
+// comes back so the pass can log what it removed.
+type AuditRetention interface {
+	PruneAuditBefore(ctx context.Context, cutoff time.Time) (rows int64, runs int64, err error)
+}
+
 // Config wires a Janitor. A pass runs only for the halves that are configured:
 // a deployment with a container provider has no sandbox directories here, a
 // deployment that never took a screenshot has no artifacts, and so on.
@@ -128,6 +138,13 @@ type Config struct {
 	// SnapshotsRoot (to check the directory a row names) and Sandboxes (to check
 	// the owner). Nil disables it.
 	SnapshotRows SnapshotRows
+	// AuditRetention is required for the retention half. Nil disables it.
+	AuditRetention AuditRetention
+	// AuditRetentionDays is the policy: rows of tool calls that started more
+	// than this many days ago are deleted. Zero means "keep forever" and is the
+	// only value that disables this half; a negative value is refused at
+	// startup by cmd/piforged.
+	AuditRetentionDays int
 	// Unmount detaches a directory that is still bind-mounted; nil uses the
 	// platform's lazy detach. Tests use it to observe the order.
 	Unmount func(string) error
@@ -169,7 +186,11 @@ type Result struct {
 	RemovedSnapshotRows int
 	RemovedSkillBundles int
 	SkillBytes          int64
-	Failures            int
+	// RemovedAuditRows and RemovedAuditRuns are what the retention pass deleted.
+	// The rows are the tool-call trail; the runs are the usage facts it joins.
+	RemovedAuditRows int64
+	RemovedAuditRuns int64
+	Failures         int
 }
 
 // Janitor sweeps every orphaned directory in the runtime inventory.
@@ -201,7 +222,8 @@ func (j *Janitor) enabled() bool {
 		(j.cfg.AgentRoot != "" && j.cfg.Sessions != nil) ||
 		(j.cfg.ArtifactsRoot != "" && j.cfg.Sessions != nil) ||
 		(j.cfg.SnapshotsRoot != "" && j.cfg.Sandboxes != nil) ||
-		(j.cfg.SkillsRoot != "" && j.cfg.Skills != nil)
+		(j.cfg.SkillsRoot != "" && j.cfg.Skills != nil) ||
+		(j.cfg.AuditRetention != nil && j.cfg.AuditRetentionDays > 0)
 }
 
 // Start runs one pass immediately and then on every tick until ctx is done.
@@ -272,7 +294,43 @@ func (j *Janitor) RunOnce(ctx context.Context) (Result, error) {
 			return res, err
 		}
 	}
+	// Retention last: it is the only sweep that deletes rows rather than files,
+	// and it is bounded by the policy, never by "what looks old".
+	if j.cfg.AuditRetention != nil && j.cfg.AuditRetentionDays > 0 {
+		if err := j.sweepAuditRows(ctx, &res); err != nil {
+			return res, err
+		}
+	}
 	return res, nil
+}
+
+// sweepAuditRows deletes audit rows older than the retention policy and logs
+// the count. The cutoff is a whole number of days before now; a row that is
+// one second younger is kept, which is what "days" means to an operator.
+func (j *Janitor) sweepAuditRows(ctx context.Context, res *Result) error {
+	cutoff := time.Now().Add(-time.Duration(j.cfg.AuditRetentionDays) * 24 * time.Hour)
+	if j.cfg.DryRun {
+		j.cfg.Logger.Info("janitor: would delete audit rows older than the retention policy",
+			"days", j.cfg.AuditRetentionDays, "cutoff", cutoff.UTC().Format(time.RFC3339))
+		return nil
+	}
+	rows, runs, err := j.cfg.AuditRetention.PruneAuditBefore(ctx, cutoff)
+	if err != nil {
+		res.Failures++
+		j.cfg.Logger.Warn("janitor: audit retention pass failed; will retry",
+			"days", j.cfg.AuditRetentionDays, "error", err.Error())
+		return nil
+	}
+	res.RemovedAuditRows += rows
+	res.RemovedAuditRuns += runs
+	if rows > 0 || runs > 0 {
+		j.cfg.Logger.Info("janitor: deleted audit rows older than the retention policy",
+			"days", j.cfg.AuditRetentionDays,
+			"cutoff", cutoff.UTC().Format(time.RFC3339),
+			"audit_rows", rows,
+			"audit_runs", runs)
+	}
+	return nil
 }
 
 // sweepSandboxes is the project half: every sandbox directory without a row.

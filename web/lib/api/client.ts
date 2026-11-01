@@ -9,6 +9,7 @@ import {
   ApiError,
   type ApiErrorBody,
   type AuditResponse,
+  type AuditVerifyResult,
   type DiffScope,
   type FileContent,
   type FileDiff,
@@ -747,6 +748,22 @@ export const admin = {
    */
   audit: (filter: AuditQuery = {}) =>
     request<AuditResponse>(`/v1/admin/audit?${auditQueryString(filter)}`),
+  /**
+   * Walk the chained hashes over a range and report the first break. It is the
+   * one request that answers "is this trail intact", as opposed to "does it
+   * contain rows" — docs/AUDIT.md says what the chain does and does not prove.
+   */
+  auditVerify: (filter: { session_id?: string; since?: string; until?: string; from_seq?: number; to_seq?: number } = {}) => {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(filter)) {
+      if (value === undefined || value === null || value === "") continue;
+      params.set(key, String(value));
+    }
+    const query = params.toString();
+    return request<AuditVerifyResult>(
+      query ? `/v1/admin/audit/verify?${query}` : "/v1/admin/audit/verify",
+    );
+  },
 };
 
 /** The filters GET /v1/admin/audit understands. */
@@ -755,9 +772,13 @@ export interface AuditQuery {
   project_id?: string;
   session_id?: string;
   tool?: string;
-  outcome?: "ok" | "error" | "running";
+  outcome?: "ok" | "error" | "abandoned" | "running";
   since?: string;
   until?: string;
+  /** Keep calls at least this slow (a running call has no duration). */
+  min_duration_ms?: number;
+  /** Literal substring over the stored, redacted preview. */
+  q?: string;
   limit?: number;
   offset?: number;
 }
@@ -773,17 +794,25 @@ export function auditQueryString(filter: AuditQuery): string {
 }
 
 /**
- * The CSV download URL for a filter.
+ * The export URL for a filter.
  *
  * It is a plain link rather than a fetch: the browser streams it to disk, the
- * session cookie authenticates it, and a 200k-row export cannot be accidentally
- * held in memory by the page. The server caps one download at its page limit and
- * says so in the UI.
+ * session cookie authenticates it, and a 100k-row export is never held in the
+ * page. The server streams the whole filtered set (CSV or JSON-lines) rather
+ * than one page.
  */
-export function auditExportUrl(filter: AuditQuery = {}): string {
+export function auditExportUrl(
+  filter: AuditQuery = {},
+  format: "csv" | "jsonl" = "csv",
+): string {
   const query = auditQueryString(filter);
-  return query ? `/v1/admin/audit?${query}&format=csv` : "/v1/admin/audit?format=csv";
+  return query
+    ? `/v1/admin/audit?${query}&format=${format}`
+    : `/v1/admin/audit?format=${format}`;
 }
+
+/** The chain verification result (GET /v1/admin/audit/verify). */
+
 
 // ---------------------------------------------------------------------------
 // API keys (FR-13.9)

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/piforge/piforge/backend/internal/skillsnap"
 )
@@ -660,5 +661,77 @@ func TestSweepLogsCountAndBytesForEveryNewRoot(t *testing.T) {
 		if !strings.Contains(line, want) {
 			t.Fatalf("log is missing %q:\n%s", want, line)
 		}
+	}
+}
+
+// fakeRetention records the cutoff it was asked for and answers with counts.
+type fakeRetention struct {
+	cutoff time.Time
+	rows   int64
+	runs   int64
+	err    error
+	calls  int
+}
+
+func (f *fakeRetention) PruneAuditBefore(_ context.Context, cutoff time.Time) (int64, int64, error) {
+	f.calls++
+	f.cutoff = cutoff
+	return f.rows, f.runs, f.err
+}
+
+// Retention is a policy pass: it runs when a positive day count is configured,
+// asks for exactly that cutoff, and reports the count. Days=0 keeps the trail
+// forever and must not call the store at all.
+func TestAuditRetentionRunsOnlyWithAPositivePolicy(t *testing.T) {
+	retention := &fakeRetention{rows: 7, runs: 3}
+	j := New(Config{
+		AuditRetention:     retention,
+		AuditRetentionDays: 30,
+		Logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	before := time.Now()
+	result, err := j.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if retention.calls != 1 {
+		t.Fatalf("retention was called %d times, want 1", retention.calls)
+	}
+	wantCutoff := before.Add(-30 * 24 * time.Hour)
+	if delta := retention.cutoff.Sub(wantCutoff); delta < -time.Minute || delta > time.Minute {
+		t.Fatalf("cutoff = %s, want about %s", retention.cutoff, wantCutoff)
+	}
+	if result.RemovedAuditRows != 7 || result.RemovedAuditRuns != 3 {
+		t.Fatalf("result = %+v", result)
+	}
+
+	// Zero days means "keep forever": no call, and the pass is not enabled.
+	off := &fakeRetention{}
+	j = New(Config{
+		AuditRetention:     off,
+		AuditRetentionDays: 0,
+		Logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if _, err := j.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce(off): %v", err)
+	}
+	if off.calls != 0 {
+		t.Fatalf("retention ran with days=0 (%d calls)", off.calls)
+	}
+
+	// A store failure is logged and counted, not turned into a panic or a
+	// half-applied sweep.
+	broken := &fakeRetention{err: errors.New("database is away")}
+	j = New(Config{
+		AuditRetention:     broken,
+		AuditRetentionDays: 1,
+		Logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	result, err = j.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce(broken) returned an error: %v", err)
+	}
+	if result.Failures != 1 {
+		t.Fatalf("failures = %d, want 1", result.Failures)
 	}
 }

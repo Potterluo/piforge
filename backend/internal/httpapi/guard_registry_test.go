@@ -123,6 +123,7 @@ var guardedEdges = []guardEdge{
 	{"admin update user", "PATCH /v1/admin/users/{id}", "handleAdminUpdateUser", "admin_handlers.go", "contracts.RoleAdmin"},
 	{"admin status", "GET /v1/admin/status", "handleAdminStatus", "admin_handlers.go", "contracts.RoleAdmin"},
 	{"admin audit", "GET /v1/admin/audit", "handleAdminAudit", "audit_handlers.go", "contracts.RoleAdmin"},
+	{"admin audit verify", "GET /v1/admin/audit/verify", "handleAdminAuditVerify", "audit_handlers.go", "contracts.RoleAdmin"},
 	{"admin feature", "POST /v1/admin/users/{id}/features", "handleAdminSetUserFeature", "feature_handlers.go", "KnownFeature"},
 	{"support access", "POST /v1/admin/support-access", "handleCreateSupportAccess", "support_handlers.go", "CreateSupportAccess"},
 	{"support transcript", "GET /v1/admin/support-access/{id}/transcript", "handleSupportTranscript", "support_handlers.go", "SupportAccessGrant"},
