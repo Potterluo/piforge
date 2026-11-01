@@ -960,9 +960,19 @@ hours. It could not reach `/v1` or MCP, but it spent the operator's provider cre
    0644). Measured: `ls -ld` shows `drwx------`, `ls -l` shows `-rw-------`, and another
    account in the container cannot read the token.
 
-**Still open:** the revocation set is in memory. A control-plane crash between the agent
+**Still open:** the revocation state is in memory. A control-plane crash between the agent
 stop and the revoke, or a restart, forgets it; the one-hour TTL is the backstop for that
 window.
+
+**A defect in the first version of this fix, found by its own re-check:** Revoke was keyed
+by session id alone, so after a pause every token for that session was rejected —
+including the one minted for the next spawn. Measured as "a new spawn minted a different
+token: True; host GET with it -> 401": a sandbox that had ever been paused could not use
+the gateway again until the TTL ran out, which also meant pause → resume → prompt was
+broken. Revocation is now a per-session generation counter: Revoke increments it, Issue
+stamps it into the claims (`g`), and Verify requires equality. Tokens from before the stop
+die exactly, the resume's token works immediately, and no clock granularity is involved
+(a pause and its resume can happen inside one second).
 
 ### 14.4 Pause and resume could not find the sandbox
 

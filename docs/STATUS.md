@@ -1482,7 +1482,9 @@ after : drwx------ 0700 / -rw------- 0600；claims ttl_s=3600 session_matches=Tr
         恢复后新 spawn 发的新 token 可用，旧 token 仍然 401
 ```
 
-**代价 / 仍开放**：撤销集合在内存里，控制面崩溃/重启会忘掉撤销，1 小时 TTL 是这个窗口的兜底（所以 TTL 不能再长）；单个 agent 进程跑超过 1 小时会到 TTL 后失去模型访问，下一次 prompt 重新签发。
+**代价 / 仍开放**：撤销状态在内存里，控制面崩溃/重启会忘掉撤销，1 小时 TTL 是这个窗口的兜底（所以 TTL 不能再长）；单个 agent 进程跑超过 1 小时会到 TTL 后失去模型访问，下一次 prompt 重新签发。
+
+**这个修复自己的复检发现的缺陷**（本批第二个 gateway 提交）：第一版只按 session id 撤销，暂停之后该会话的**所有** token 都被拒——包括下一次 spawn 新签的那个（实测 "a new spawn minted a different token: True; host GET with it -> 401"），于是"暂停过"的沙箱在 TTL 到期前都用不了网关。改成每会话一个 generation 计数：Revoke 自增、Issue 写进 claims（`g`）、Verify 要求相等。暂停前的 token 精确失效，恢复后的新 token 立即可用；不涉及时钟精度（暂停与恢复可能落在同一秒）。复检的最终输出：live token 200 / 补全 200，`/v1` 与 `/gw/mcp` 401，暂停后 401，恢复后旧 token 401、新 token 200。
 
 ### FIX 4（bug）pause/resume 422
 
