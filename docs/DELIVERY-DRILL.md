@@ -91,6 +91,8 @@ $env:PIFORGE_DRILL_KEY = (
 docker volume create pf-drill-data
 
 docker run -d --name pf-drill -p 7731:7700 -v pf-drill-data:/data `
+  -v <artifact>/url-policy.json:/etc/piforge/url-policy.json:ro `
+  -e PIFORGE_URL_ALLOW_FILE=/etc/piforge/url-policy.json `
   -e PIFORGE_SEED_EMAIL=admin@piforge.local `
   -e PIFORGE_SEED_PASSWORD=<seed-admin-password> `
   -e PIFORGE_SEED_USER_EMAIL=dev@piforge.local `
@@ -107,6 +109,33 @@ docker run -d --name pf-drill -p 7731:7700 -v pf-drill-data:/data `
 curl.exe -fsS http://127.0.0.1:7731/healthz
 # 0.55 s 后返回 200（脚本计时，见 summary.json）
 ```
+
+### 2.2.1 出站 URL 策略：演练用一条 allow 条目，默认仍然拒绝
+
+演练的假 forge 是容器里的 loopback 地址（`http://127.0.0.1:7799`），而出站 URL 策略
+（`docs/SANDBOX-DEPLOY.md` §1.9）默认拒绝 loopback。所以演练在启动容器前写一个**只有一条**的
+allow 文件：
+
+```json
+{"allow":[{"host":"127.0.0.1","ports":[7799]}]}
+```
+
+这不是绕过，而是任何一个用内网 forge 的 operator 都必须做的事；容器启动日志里因此出现
+`policy="public http(s) only + 1 allow entries"`。**除这一条之外，演练全程跑在默认策略下**，
+并且同一个容器上还会跑 5 条检查，专门盯住"默认拒绝"这件事：
+
+| 检查 | 期望 |
+|---|---|
+| `POST /v1/mcp/servers {"url":"http://127.0.0.1:7700/healthz"}`（同一地址、**不同端口**） | 400，`details.reason=loopback` |
+| `POST /v1/mcp/servers {"url":"http://host.docker.internal:7700/healthz"}` | 400，`details.reason=host-name` |
+| `POST /v1/mcp/servers {"url":"http://169.254.169.254/latest/meta-data/"}` | 400，`details.reason=link-local` |
+| `POST /v1/mcp/servers {"url":"http://127.0.0.1:7799/mcp"}`（allow 文件点名的那个） | 201 |
+| `POST /v1/skills/import {"url":"file:///tmp/drill-clone-cap.git"}`（20 MiB 仓库） | 400，消息含 `16.0 MiB` 与实测字节数 |
+
+第四条是前面三条的对照：同一个端点、同样的形状，唯一的差别是 allow 文件里有没有它。谁把默认策略
+改松了，前三条（以及 clone 上限那条）会立刻失败。
+
+**不要照抄这个 allow 文件当默认配置**：`deploy/url-policy.json` 出厂是空的。
 
 ### 2.3 证明 bootstrap 生效（不手工配置）
 

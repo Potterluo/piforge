@@ -2298,10 +2298,21 @@ allow-list 文件（compose 把它只读挂到 `/etc/piforge/url-policy.json`，
 以及它覆盖哪些路径；`allow_file` 永远是文件路径或空。
 
 交付演练（`scripts/deliver-check.ps1`）就是这条规则的一个使用者：它的假 forge 是容器里的
-loopback 地址，所以演练启动容器时**写下一个只含 `127.0.0.1:<端口>` 的 allow 文件**并挂进去
-（`-v $ArtifactDir/url-policy.json:/etc/piforge/url-policy.json:ro`）。演练没有绕过策略，它
-做的是任何一个用内网 forge 的 operator 都要做的事；除那一条之外，演练全程跑在默认策略下。
-启动日志里因此是 `policy="public http(s) only + 1 allow entries"`。
+loopback 地址，所以演练启动容器时**写下一个只含 `127.0.0.1:<forge 端口>` 的 allow 文件**并挂进去
+（`-v <artifact>/url-policy.json:/etc/piforge/url-policy.json:ro` +
+`-e PIFORGE_URL_ALLOW_FILE=/etc/piforge/url-policy.json`）。启动日志里因此是
+`policy="public http(s) only + 1 allow entries"`。
+
+**这不是绕过，而且默认拒绝是被自动化守着的**：同一个演练里还有 5 条检查跑在同一个容器上——
+`http://127.0.0.1:7700/healthz`（**换了端口**，所以不在那一条 allow 里）→ 400 `loopback`、
+`http://host.docker.internal:7700` → 400 `host-name`、`http://169.254.169.254/` → 400
+`link-local`、被 allow 文件点名的那个 URL → 201（同一个端点，唯一的差别是文件里有没有它）、
+以及一个 20 MiB 仓库的 `POST /v1/skills/import` → 400 且消息里同时有 16.0 MiB 和实测字节数。
+谁把默认策略改松了，这四条拒绝会立刻变红。
+
+**不要照抄演练的 allow 文件当作默认配置**：它存在的唯一理由是"演练自己的假 forge 在 loopback 上"。
+真正的部署里 `deploy/url-policy.json` 是空的；要放开某个内网目标，是 operator 为那一个目标写一条
+带端口的条目，而不是复制一份演练文件。
 
 #### 1.9.4 这一轮审计过的每一个"控制面 fetch 租户 URL"的点
 
@@ -2329,7 +2340,10 @@ loopback 地址，所以演练启动容器时**写下一个只含 `127.0.0.1:<�
 - 一个看门狗每 25 ms 量一次目标目录（含 `.git` 的 pack），超过 `-skill-clone-max-bytes`（默认 16 MiB）
   就 `Kill` git；git 退出后再量一次（覆盖"25 ms 内就跑完"的情况）；
 - 任何一种超限：`os.RemoveAll` + 类型化 400，消息里写上限和**实际量到的字节**；
-- 最坏情况 = 上限 + 一个采样间隔内 git 写下的字节（25 ms 内），实测见 §1.9.7。
+- 最坏情况 = 上限 + 一个采样间隔内 git 写下的字节：实测——64 MiB 仓库停在 16 690 724 B（低于
+  16 MiB 上限）；同一个 20 MiB 仓库（本地 `file://` 克隆，读盘快）两次分别停在 18.4 MiB 和
+  16.8 MiB，即超出上限 2.4 MiB / 0.8 MiB（写盘越快，一个 25 ms 窗口里塞进去的越多）。网络克隆
+  受链路速率限制，超出的量只会更小。
 
 #### 1.9.6 残余（写清楚，不藏）
 

@@ -1919,6 +1919,9 @@ fetcher，都在隔离栈上量到（`e2e/.artifacts/adversarial4/REPORT.md` 攻
   旧 argv 手动跑：du -sb /tmp/naive = 134 342 612 B
   新导入：400 in 1075 ms，"已写入 16.3 MiB 时停止并删除"
   采样 76 次（30 ms）：/tmp/piforge-skills-* 峰值 16 690 724 B；残留目录 0
+  交付演练里的 20 MiB 仓库（本地 file:// 克隆，21 063 593 B），两次运行：400，"已写入 18.4 MiB"
+    与 "已写入 16.8 MiB" → 超上限 2.4 MiB / 0.8 MiB，即一个 25 ms 采样窗口在本地拷贝速度下能写下
+    的量；网络克隆受链路速率限制，超出只会更小
 
 运营卫生：7723 拆除后 connect refused；piforge.user 容器 0；piforge* 卷 0；piforge* 网络 0
   pf-local 前后一致：id=7dc14e4a7525a8ef… started=2026-10-31T13:48:51Z restarts=0

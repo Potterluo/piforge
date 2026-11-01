@@ -514,6 +514,72 @@ try {
     Assert-Check "new user sees shared_provider_available=true" ([bool]$setupUser.shared_provider_available) "shared=$($setupUser.shared_provider_available)"
     Assert-Check "new user is not an admin" (-not $setupUser.is_admin) "is_admin=$($setupUser.is_admin)"
 
+    # -----------------------------------------------------------------------
+    # 3b. The outbound URL policy refuses by default (docs/SANDBOX-DEPLOY.md 1.9)
+    # -----------------------------------------------------------------------
+    #
+    # This container runs with a one-entry allow file, written above solely so the
+    # drill's own loopback fake forge is reachable. These checks are what keeps
+    # "the default is closed" from silently becoming "the default is open": the
+    # entry names 127.0.0.1 on the forge port and nothing else, so the same
+    # address on another port, the docker host name and the metadata address are
+    # all still refused — and the fourth check shows the same endpoint accepting
+    # the one URL the file does name.
+    Write-Step "The outbound URL policy refuses everything the allow file does not name"
+
+    $refusalCases = @(
+        @{ Label = "loopback";    Url = "http://127.0.0.1:7700/healthz";            Reason = "loopback";   Host = "127.0.0.1" },
+        @{ Label = "docker-host"; Url = "http://host.docker.internal:7700/healthz"; Reason = "host-name";  Host = "host.docker.internal" },
+        @{ Label = "link-local";  Url = "http://169.254.169.254/latest/meta-data/"; Reason = "link-local"; Host = "169.254.169.254" }
+    )
+    foreach ($case in $refusalCases) {
+        $resp = Invoke-Api -Method POST -Path "/v1/mcp/servers" -Session $user.Session -CSRF $user.CSRF `
+            -Body @{ name = "policy-$($case.Label)"; transport = "http"; url = $case.Url } -Raw
+        $reason = $resp.Body.error.details.reason
+        $refusedHost = $resp.Body.error.details.host
+        Assert-Check ("MCP server URL {0} is refused with 400/{1}" -f $case.Url, $case.Reason) `
+            ($resp.Status -eq 400 -and $reason -eq $case.Reason -and $refusedHost -eq $case.Host) `
+            ("status={0} reason={1} host={2}" -f $resp.Status, $reason, $refusedHost)
+    }
+
+    $allowedMcpUrl = "http://127.0.0.1:$FakeForgePort/mcp"
+    $allowedMcp = Invoke-Api -Method POST -Path "/v1/mcp/servers" -Session $user.Session -CSRF $user.CSRF `
+        -Body @{ name = "policy-allowed"; transport = "http"; url = $allowedMcpUrl } -Raw
+    Assert-Check ("MCP server URL {0} (named by the allow file) is accepted with 201" -f $allowedMcpUrl) `
+        ($allowedMcp.Status -eq 201) ("status={0} url={1}" -f $allowedMcp.Status, $allowedMcpUrl)
+    if ($allowedMcp.Status -eq 201) {
+        # Removed again: this check is about the save path, and the session that
+        # runs the real prompt below must not be handed a server that is not one.
+        Invoke-Api -Method DELETE -Path "/v1/mcp/servers/$($allowedMcp.Body.server.id)" -Session $user.Session -CSRF $user.CSRF | Out-Null
+    }
+
+    # -----------------------------------------------------------------------
+    # 3c. The skill clone cap (docs/SANDBOX-DEPLOY.md 1.9.5)
+    # -----------------------------------------------------------------------
+    #
+    # The 4 MB read cap used to run after the clone, so a repository was written
+    # in full first (adversarial #4: 268 MiB -> 268 800 878 B). This asserts the
+    # bound is still ahead of the read: a 20 MiB repository is refused, and the
+    # message names both the cap and the bytes measured.
+    Write-Step "A repository over the clone cap is refused before it fills the disk"
+
+    $capRepo = "/tmp/drill-clone-cap.git"
+    $capWork = "/tmp/drill-clone-cap-work"
+    $capSetup = & docker exec $ContainerName sh -c "set -e; rm -rf '$capRepo' '$capWork'; git init -q --bare '$capRepo'; mkdir -p '$capWork'/s; cd '$capWork'; git init -q; git config user.email drill@piforge.local; git config user.name drill; echo cap-skill > s/SKILL.md; dd if=/dev/urandom of=s/blob.bin bs=1M count=20 status=none; git add -A; git commit -qm over-the-cap; git push -q '$capRepo' HEAD:refs/heads/main; git --git-dir='$capRepo' symbolic-ref HEAD refs/heads/main; du -sb '$capRepo'" 2>&1 | Out-String
+    $capSetupCode = $LASTEXITCODE
+    $capBytes = ($capSetup -split "`n" | Where-Object { $_ -match "^\d+\s" } | Select-Object -Last 1)
+    Assert-Check "a 20 MiB repository exists inside the container" ($capSetupCode -eq 0 -and [bool]$capBytes) ("exit={0} repo={1}" -f $capSetupCode, $capBytes)
+
+    $capResp = Invoke-Api -Method POST -Path "/v1/skills/import" -Session $user.Session -CSRF $user.CSRF `
+        -Body @{ url = "file://$capRepo" } -Raw
+    $capMessage = [string]$capResp.Body.error.message
+    $capNamesTheLimit = $capMessage -match "16\.0 MiB"
+    $capNamesTheMeasurement = $capMessage -match "已写入\s*\d+(?:\.\d+)?\s*(?:MiB|KiB|B)"
+    Assert-Check "a repository over the 16 MiB clone cap is refused with 400, naming the cap and the bytes measured" `
+        ($capResp.Status -eq 400 -and $capNamesTheLimit -and $capNamesTheMeasurement) `
+        ("status={0} repo={1} message={2}" -f $capResp.Status, $capBytes, $capMessage)
+    & docker exec $ContainerName sh -c "rm -rf '$capRepo' '$capWork'" 2>$null | Out-Null
+
     $project = Invoke-Api -Method POST -Path "/v1/projects" -Session $user.Session -CSRF $user.CSRF `
         -Body @{ name = $ProjectName; repo_url = ""; default_branch = "main" }
     $projectID = $project.project.id
