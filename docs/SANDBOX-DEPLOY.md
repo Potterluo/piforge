@@ -1512,6 +1512,94 @@ compose 栈（`piforge` / `piforge-sandbox-runner` / `piforge-sandbox-image`）�
 `piforge_sandbox-control` / `piforge-sandboxes`。宿主机上的备份 tar（含三把密钥）用后即删。
 
 
+### 1.4.7 对抗验收之后的四个修复（2026-11-01）
+
+一次对抗验收（`e2e/.artifacts/adversarial/VERDICT.md`）以租户身份打了一套全新的
+isolated 栈。租户边界本身守住了（读不到 `/data`、没有出网、够不到别的租户），
+但边界**周围**有四个真缺陷。机制与取舍的完整叙述在 `docs/EXECUTION-BOUNDARY.md` §14，
+这里记的是部署侧的事实与实测数字。
+
+#### (1) 租户在沙箱里是 root —— 已经拿掉
+
+沙箱容器现在带：
+
+```
+--cap-drop ALL
+--cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add SETUID --cap-add SETGID
+--security-opt no-new-privileges
+```
+
+五个 capability 不是猜的：镜像以 `--cap-drop ALL` 启动，逐个加回，因为镜像自己的
+启动日志点名了缺少它时失败的那一步（`backend/internal/sandbox/docker.go` 的
+`sandboxCapAdd` 里每个都写了一行原因）。agent 账号（`gem`）一个都没有
+（`CapEff 0000000000000000`）；容器整体是 `00000000000000cb`，Docker 默认的
+`NET_RAW` / `SYS_CHROOT` / `MKNOD` / `SETFCAP` / `KILL` / `AUDIT_WRITE` /
+`NET_BIND_SERVICE` 全部不在。
+
+`no-new-privileges` 是真正结束 sudo 的那一层：镜像是 setuid-root 的
+`/usr/bin/sudo`，而在 `no_new_privs` 下 execve 不再改变 euid，所以 `sudo -n id`
+以 `gem` 的身份失败。`deploy/Dockerfile.sandbox-agent` 另外删掉了 sudo 二进制与
+`/etc/sudoers.d/gem`，并把 `/opt/piforge` 与 `/opt/piforge/piforged` 设成
+root 所有 `0555`——因为没有 `CAP_DAC_OVERRIDE`，连 root 也写不了它；构建时若缺任何
+一项会直接失败。
+
+**明确留下的**：工作区里的 skill 树（`.pi/skills/**`）属于租户账号（沙箱文件 API 以
+`gem` 写入），0444/0555 挡住的是误写和旧的 sudo 路径，挡不住先 `chmod u+w` 的租户。
+要真正冻结需要一个 root 侧的写入口（bind mount 或 root 文件 API），这个镜像没有。
+
+#### (2) 磁盘不限量而 UI 显示配额 —— 两层强制 + 真实数字
+
+- 每个沙箱容器带 `--ulimit fsize=<budget>:<budget>`（`sandbox.Limits.DiskBytes`，
+  从 `-sandbox-disk-quota` 经 runner 的 create 请求传下去）。软硬上限相同，租户的
+  shell 无法用 `ulimit -f unlimited` 抬高。实测：2 GiB 预算下
+  `fallocate -l 3G` → `File size limit exceeded`（SIGXFSZ），文件 0 字节。
+- 每 5 秒的沙箱内检查（`httpapi.StartDiskWatch`）：通过沙箱自己的 shell API 跑
+  `du -sb /workspace`；超预算 → 停掉该沙箱的 agent、往会话写一条与 507 相同的
+  `platform.error`、如果停掉 agent 之后还在长就暂停沙箱。
+- 同一个测量喂三个读侧：admin 的 `sandbox_usage[]`、运行边界的 507 拒绝、看门狗。
+  测不出来时是 `unmeasurable: true`（页面显示「未知」），不是 `0 B / over=false`
+  ——后者正是缺陷：detached 工作区的 `root_dir` 是 `/workspace`，宿主上根本没有这个
+  目录，原来的 `du` 什么都测不到。
+
+**这台 daemon 上试过但不能用的**：`--storage-opt size=` 被接受且被静默忽略
+（Docker Desktop overlayfs：1 GiB 的 rootfs 写进 1.5 GiB，`df` 仍显示 1007 GB），
+而且它也管不到工作区卷；ext4 project quota 需要 `prjquota` 挂载；size 受限的 tmpfs
+不持久；loopback 文件系统需要 `CAP_SYS_ADMIN`，而 (1) 已经把它拿掉了。
+
+#### (3) 网关 token 是可携带的 12 小时凭证 —— 1 小时 + 随会话结束
+
+- TTL 从 12 小时降到 **1 小时**（`llmgw.DefaultTTL`；`-gateway-token-ttl` /
+  `PIFORGE_GATEWAY_TOKEN_TTL` 可显式调大）。token 每次 agent 启动时新签，所以一小时
+  是**泄漏上界**，不是会话长度。
+- `Signer.Revoke(sessionID)` 挂在 `pi.Runtime.Stop` 这个唯一收口上：手动暂停、空闲
+  暂停、归档、删除、删项目、切模型、空闲回收、进程关闭都会立即作废该会话的 token。
+- `.piforge/agents/<session>` 是 `0700`，`models.json`/`mcp.json` 是 `0600`，由沙箱内
+  拥有该目录的账号在文件 API 写完（它写 0644）之后 chmod。实测 `ls -ld` 是
+  `drwx------`，另一个账号 `cat` 是 Permission denied。
+
+**明确留下的**：撤销集合在内存里。控制面在「agent 停止」与「撤销」之间崩溃、或重启，
+撤销集合就没了；那一小时 TTL 是这个窗口的兜底（所以不能再长）。
+
+#### (4) pause/resume 422 —— 边界上做一次 id 归一
+
+`POST /v1/sessions/{id}/sandbox/pause` 在沙箱 READY 时回 422
+`sandbox: not found: piforge-sbx_<hash>`：handler 传的是
+`sandbox.ID(user, project)` = `sbx_<hash>`，容器叫 `piforge-<hash>`，而 provider 的
+`resolve()` 只认 `piforge-` 前缀，于是去找 `piforge-sbx_<hash>`。resume 同样坏，
+所以空闲暂停根本停不下任何沙箱——也就是 (3) 里限制 token 花费的那个机制。
+
+现在只有一个归一化：`sandbox.NormalizeSandboxID` 接受 `piforge-<hash>`、
+`sbx_<hash>`、裸 `<hash>`，一律给出容器名；所有生命周期方法都走它，所以进程内的
+Docker provider 和 runner 的 HTTP API 都接受两种形式。handler 改为传行里记的
+provider id，而不是重新推导 pair id。
+
+回归测试：`TestNormalizeSandboxID`（两种形式 + 空格 + 「不认识就诚实地 not found」）、
+`TestDockerPauseAndResumeAcceptBothIDForms`（真容器，按 `sbx_<hash>` 暂停、按容器名
+读回、两种形式都能唤醒）、`TestSandboxPauseAndResumeUseTheRowID`（HTTP 边界：provider
+必须收到行里的 id；在旧代码上失败信息是
+`pause reached the provider with [sbx_…], want [piforge-…]`）。
+
+
 ### 1.5 推荐方案下仍然会坏的地方（这一节是重点）
 
 | 事件 | 会发生什么 | 缓解 |

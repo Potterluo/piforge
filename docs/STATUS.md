@@ -1419,3 +1419,86 @@ pf-local (7722): 同一个容器 7dc14e4a7525…、StartedAt 不变、healthz 20
 **门禁**：`go build ./...`、`go vet ./...`、`go test ./... -count=1` 全绿（新增 `internal/tenantegress`、`sandbox` 出口单测、两个 wiring 单测、httpapi 出口报告测试）；`pnpm --dir web test -- --run` 288/288；`pnpm --dir web exec next build` 通过；e2e 182/182；`deliver-check.ps1` 在 local 形态下用同一把 key 跑（见下）。
 
 **没有宣称的**：出口是开关不是过滤器（`allowlist` 启动即拒绝）；共享单机形状与 `-sandbox local` 下没有出口边界；它不阻止沙箱让网关把 prompt 里的内容发出去（那是产品本身）；同租户两个沙箱仍互通 8080（§12.1 的既有边界）。
+
+
+## 本批：对抗验收的四个真缺陷（root / 磁盘 / 网关 token / pause 422）
+
+一次对抗验收（`e2e/.artifacts/adversarial/VERDICT.md`）以租户身份打了一套全新 isolated 栈：租户边界守住（读不到 `/data`、无出网、够不到别的租户），但边界**周围**有四个真缺陷。机制与取舍写进 `docs/EXECUTION-BOUNDARY.md` §14 与 `docs/SANDBOX-DEPLOY.md` §1.4.7；这里记的是改了什么、怎么证明、代价与仍开放的部分。
+
+### FIX 1（LEAK，最高）租户在沙箱里是 root
+
+**机制**：容器创建时 `--cap-drop ALL` + 只加回镜像实测需要的五个（`CHOWN`、`DAC_OVERRIDE`、`FOWNER`、`SETUID`、`SETGID`，逐个按镜像自己的启动日志加回，理由写在 `sandboxCapAdd`），外加 `--security-opt no-new-privileges`；沙箱镜像（`deploy/Dockerfile.sandbox-agent`）删掉 `/usr/bin/sudo` 与 `/etc/sudoers.d/gem`，`/opt/piforge` 与 `/opt/piforge/piforged` 设成 root 所有 `0555`，缺任何一项构建即失败。`no-new-privileges` 是结束 leak 的那一层：setuid 的 sudo 在 `no_new_privs` 下不再改变 euid，所以即使某个部署仍用原生 AIO 镜像，`sudo -n id` 也拿不到 root。
+
+**前后对比**（同一套栈、同一个租户账号）：
+
+```
+before: sudo -n id -> uid=0(root) ; sudo -n -l -> (ALL) NOPASSWD: ALL ; CapEff 00000000a80425fb
+after : id -> uid=1000(gem) ; sudo -> "not found" ; su root -> Authentication failure
+        CapEff 0000000000000000 (agent) / 00000000000000cb (container)
+        CapDrop=["ALL"] CapAdd=["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_SETGID","CAP_SETUID"]
+        SecurityOpt=["no-new-privileges"]
+        /opt/piforge dr-xr-xr-x ; piforged -r-xr-xr-x -> write: Permission denied ; rm: Permission denied
+        SKILL.md -r--r--r-- -> echo >> : Permission denied
+```
+
+**代价**：五个 capability 留在容器（不是给 agent 账号，agent 是 0）；镜像的 root 引导（gem.sh、nginx master）仍需要它们，逐个写了原因。产品路径（pi、git、node、终端、code-server、Jupyter）全部以 `gem` 运行。
+
+**仍然开放**：工作区里的 skill 树属于租户账号（沙箱文件 API 以 `gem` 写），0444/0555 挡住误写和旧的 sudo 路径，先 `chmod u+w` 仍可改——已在实测里明确复现并记录，不假装冻结。`/opt/piforge/piforged` 不可写但不做哈希校验。
+
+### FIX 2（能搞掉部署）磁盘不限量而 UI 显示配额
+
+**机制**：两层。① 容器 `--ulimit fsize=<配额>:<配额>`（`sandbox.Limits.DiskBytes`，从 `-sandbox-disk-quota` 经 runner 的 create 传到容器），软硬相同，shell 无法抬高；② 每 5 秒的沙箱内检查（`httpapi.StartDiskWatch`）：通过沙箱 API 跑 `du -sb /workspace`，超预算就停 agent（`Runtime.Stop` + 向沙箱内 supervisor 发 SIGTERM，因为容器里的 agent 故意能活过控制面断流）、写一条与 507 相同的 `platform.error`，持续增长则暂停沙箱；同一个测量同时供 admin 的 `sandbox_usage[]` 与运行边界 507 使用，三者不会再各说各话。测不出来时是 `unmeasurable: true`（页面「未知」），不再是 `0 B / over=false`。
+
+**前后对比**：
+
+```
+before: fallocate -l 3G -> 成功，used_delta_bytes=3221229568，admin: quota=2 GiB over=false
+after : ulimit -f -> 4194304 (2 GiB) ; /proc/1/limits Max file size 2147483648
+        fallocate -l 3G -> File size limit exceeded（SIGXFSZ），0 字节文件
+        dd 3 GiB 单文件 -> 截断在 2147483648 字节
+        dd 2 GiB + 200 MiB -> admin: bytes=2357393472 over=true（3.0 GiB / 2.0 GiB 同理）
+        跑着长任务的 agent：写完 2 GiB+200 MiB 后 supervisor 2 秒内消失，pi 进程 0 个，
+        会话里出现 platform.error(code=sandbox_disk_quota, 与 507 同一句话)
+        再发消息 -> HTTP 507 sandbox_disk_quota；删掉大文件后同一个会话可以继续（实测 accepted=True）
+```
+
+**这台 daemon 上不能用、已实测并写进文档的**：`--storage-opt size=` 被接受且被忽略（1 GiB rootfs 写进 1.5 GiB，`df` 仍 1007 GB；而且它管不到工作区卷）；ext4 project quota 需要 `prjquota` 挂载；size 受限 tmpfs 不持久；loopback 文件系统需要 `CAP_SYS_ADMIN`（已被 FIX 1 移除）。
+
+**代价 / 仍开放**：单文件上限是每文件而不是每文件系统，5 秒检查意味着"很多个各自 2 GiB 的文件"可以超出几个 GiB 才被刹住（这里写入速度 ~1.3 GB/s，最坏约几 GiB）；暂停只发生在"停了 agent 之后还在长"的第 3 个 tick（约 10 秒），普通超配额只停 agent + 507，沙箱保持可清理。被暂停的沙箱由下一条消息唤醒（`wakeSandbox` + 沙箱 API 的就绪等待，之前会 500）。
+
+### FIX 3（凭证爆炸半径）12 小时网关 token 在世界可写目录里
+
+**机制**：① TTL 12h → 1h（`llmgw.DefaultTTL`，`-gateway-token-ttl` / `PIFORGE_GATEWAY_TOKEN_TTL` 可显式调大，boot 日志把数字和撤销时机一起打出来）；② 会话生命周期绑定：`pi.Runtime.Stop` 这个唯一收口调用 `Signer.Revoke(sessionID)`——手动暂停、空闲暂停、归档、删除、删项目、切模型、空闲回收、关闭进程全都会立刻作废；③ `.piforge/agents/<session>` 0700、`models.json`/`mcp.json` 0600，由拥有者账号在文件 API 写完（它写 0644）之后 chmod。
+
+**前后对比**：
+
+```
+before: models.json 在 drwxrwxrwx 里 0644；token 12 小时；从宿主 GET /gw/llm/<t>/models -> 200
+after : drwx------ 0700 / -rw------- 0600；claims ttl_s=3600 session_matches=True
+        另一个账号（uid 65534）cat -> Permission denied
+        宿主 GET /gw/llm/<t>/models -> 200；4-token 补全 -> 200（这一半是设计：沙箱要用）
+        同一个 token 打 /v1/projects -> 401；/gw/mcp/<t> -> 401
+        暂停沙箱（agent 停止）后，同一 token 从宿主 -> 401 invalid_token（立即，不等 TTL）
+        恢复后新 spawn 发的新 token 可用，旧 token 仍然 401
+```
+
+**代价 / 仍开放**：撤销集合在内存里，控制面崩溃/重启会忘掉撤销，1 小时 TTL 是这个窗口的兜底（所以 TTL 不能再长）；单个 agent 进程跑超过 1 小时会到 TTL 后失去模型访问，下一次 prompt 重新签发。
+
+### FIX 4（bug）pause/resume 422
+
+**机制**：边界上做一次 id 归一（`sandbox.NormalizeSandboxID`：`piforge-<hash>` / `sbx_<hash>` / 裸 `<hash>` → 容器名），所有生命周期方法都走它，所以进程内 Docker provider 与 runner 的 HTTP API 都接受两种形式；handler 改为传行里记的 provider id，不再重新推导 pair id。
+
+**前后对比**：
+
+```
+before: POST /v1/sessions/<A>/sandbox/pause -> 422 sandbox: not found: piforge-sbx_dff082834bc9e8d7
+after : POST pause -> {"state":"PAUSED"} ; docker exited ; GET /sandbox -> PAUSED
+        POST resume -> {"state":"READY"} ; docker running ; GET /sandbox -> READY
+        暂停后立刻发消息：accepted=True（唤醒路径不再 500，见 FIX 2 的 wake 等待）
+```
+
+**回归测试**：`TestNormalizeSandboxID`、`TestDockerPauseAndResumeAcceptBothIDForms`（真容器，两种 id 形式都能暂停/唤醒）、`TestSandboxPauseAndResumeUseTheRowID`（HTTP 边界；在旧代码上失败信息是 `pause reached the provider with [sbx_…], want [piforge-…]`）。
+
+### 门禁（本批）
+
+见本节末尾的实测行（`go build` / `go vet` / `go test ./... -count=1`、`pnpm --dir web test -- --run`、`pnpm --dir web exec next build`、e2e 182、`deliver-check.ps1` 119）。对抗复检脚本与完整输出在 `e2e/.artifacts/adversarial-fixes/`（`final-transcript.txt`、`agent-stop-transcript.txt`），一次性栈用 `pwsh scripts/up-isolated.ps1` 起在 7723、用 `-Down` 收掉；`pf-local`（7722）前后同一个容器 id 与 healthz。

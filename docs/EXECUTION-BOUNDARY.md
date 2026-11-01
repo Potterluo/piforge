@@ -841,3 +841,148 @@ the policy, and pinning `https://example.com` would have made the probe measure 
 firewall instead of the bridge. The closed tenant's `https://1.1.1.1` failure is a
 *transport* failure (`curl: (7)`), and its DNS failure is the one an agent sees first.
 
+
+
+## 14. What the adversarial acceptance changed (2026-11-01)
+
+An adversarial run (`e2e/.artifacts/adversarial/VERDICT.md`) attacked a fresh isolated
+stack as a tenant and found four real defects. The tenancy boundary itself held — no
+cross-tenant read, no egress, no route into the control plane's data — and every one of
+the four was *around* that boundary. This section records the mechanisms, what was
+measured, and what is still not claimed.
+
+### 14.1 The tenant owned root inside its sandbox
+
+`sudo -n id` answered `uid=0(root)`, `sudo -n -l` answered `(ALL) NOPASSWD: ALL`, and
+`CapEff` was `00000000a80425fb` — Docker's default set. The image ships a setuid-root
+`/usr/bin/sudo`, and its runtime bootstrap (`gem.sh`, running as root) appends
+`gem ALL=(ALL) NOPASSWD:ALL` to `/etc/sudoers.d/gem` on every start. From that root a
+tenant could rewrite `/opt/piforge/piforged` (the launcher the control plane starts) and
+the "frozen" skill tree, and it was one container escape away from the host.
+
+**Mechanism, in three independent layers:**
+
+1. `--security-opt no-new-privileges` on the sandbox container. This is the layer that
+   ends the leak even against the *stock* image: with `no_new_privs` set, execve() of a
+   setuid binary does not change the effective uid, so sudo runs as `gem` and cannot
+   `setuid(0)`. Measured: `sudo -n id` → `sudo: no new privileges flag is set` /
+   permission failure, `id` → `uid=1000(gem)`.
+2. `--cap-drop ALL` plus only the capabilities the image measurably needs. Each of the
+   five was added back because the image's own boot log named the operation that failed
+   without it (see `sandboxCapAdd` in `backend/internal/sandbox/docker.go`):
+   `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`. Everything Docker grants by
+   default and this list omits is gone — `NET_RAW`, `SYS_CHROOT`, `MKNOD`, `SETFCAP`,
+   `KILL`, `AUDIT_WRITE`, `NET_BIND_SERVICE` — and the agent account holds none of the
+   five (`CapEff 0000000000000000`). Measured `CapEff` for the container: `00000000000000cb`.
+3. `deploy/Dockerfile.sandbox-agent` deletes `/usr/bin/sudo`, `/usr/sbin/sudo` and
+   `/etc/sudoers.d/gem`, makes `/opt/piforge` and `/opt/piforge/piforged` root-owned
+   `0555`, and fails the build if any of that is missing. The mode is real because the
+   container has no capability that bypasses it: a root process in this container is
+   subject to file modes like any other account. Writing `/opt/piforge/piforged` fails
+   as `gem` (EACCES) and would fail for a root that appeared some other way.
+
+**What it cost:** five capabilities remain (listed above, each with the operation that
+needs it). Nothing in the product path needed root for itself: `pi`, git, node, the
+terminal, code-server and Jupyter all run as `gem`, and the only root processes are the
+image's own bootstrap and nginx master.
+
+**Still open:** the skill tree inside the workspace is owned by the tenant account (the
+sandbox file API writes as `gem`), so its 0444/0555 bits are a guard against accident
+and against the old sudo path, not against a tenant that runs `chmod u+w` first. Closing
+that needs a root-owned writer inside the sandbox, which this image does not offer.
+
+### 14.2 Disk was uncapped while the UI showed a quota
+
+`fallocate -l 3G /workspace/ballast.bin` succeeded (`used_delta_bytes=3221229568`) on a
+1007 GB volume with 784 GB free, while the admin row said `quota_bytes=2 GiB, over=false`.
+The run-boundary 507 check only ran between turns, and — worse — it could not see the
+sandbox at all: with a detached workspace the row's `root_dir` is `/workspace`, a path
+that exists only inside the container, so the host walk measured 0 bytes.
+
+**Mechanism:**
+
+1. `--ulimit fsize=<budget>:<budget>` (`sandbox.Limits.DiskBytes`, carried from
+   `-sandbox-disk-quota` through the runner's create request). Every process in the
+   container inherits `RLIMIT_FSIZE`; soft = hard so a shell cannot raise it. Measured:
+   `fallocate -l 3G` → `File size limit exceeded` (SIGXFSZ), 0-byte file.
+2. A periodic in-sandbox check (`httpapi.StartDiskWatch`, 5 s) that measures
+   `du -sb /workspace` through the sandbox's own shell API. Over budget it stops the
+   agents, appends a `platform.error` with the run boundary's 507 message, and pauses
+   the sandbox if usage keeps growing after the agents are gone.
+
+   Stopping an agent there is not just `Runtime.Stop`: a container placement's agent is
+   owned by a detached supervisor inside the sandbox that deliberately survives a closed
+   control-plane stream, so the watchdog also sends SIGTERM to that supervisor through
+   the shell API (matched on `agent-supervisor … -session <id>`). Without it the agent
+   kept running — the runtime stop only detached the reader. Measured: a live run with
+   `pi` inside the sandbox, then 2 GiB + 200 MiB written from the terminal; the
+   supervisor was gone 2 s after the writes, `pi` processes 0, the run's status flipped
+   to not-running, and the session carried `platform.error(code=sandbox_disk_quota)`.
+
+3. One measurement feeds three readers — the admin report, the run-boundary refusal and
+   the watchdog — so `over` cannot disagree with itself. A measurement that fails is
+   reported as `unmeasurable: true` (page: `未知`), never as `0 B`.
+
+4. A paused sandbox is woken by the next message (`wakeSandbox`), and the agent's
+   dial waits up to 25 s for the sandbox API, because a resume is a container start whose
+   services are not listening yet. That race was invisible while pause returned 422
+   (§14.4); making pause work made it reachable, and the first prompt after a resume
+   died with `connection refused` until the wait was added.
+
+**What did not work on this daemon, measured:** `--storage-opt size=1G` is accepted and
+ignored (overlayfs on Docker Desktop): 1.5 GiB written into the 1 GiB rootfs, `df` still
+1007 GB. It would not cover the workspace volume in any case. ext4 project quotas need a
+`prjquota` mount; a size-limited tmpfs is not persistent; a loopback filesystem needs
+`CAP_SYS_ADMIN`, which §14.1 removed.
+
+**Still open:** many files just under the per-file cap can overshoot by a few GiB before
+the 5 s check acts (worst case ≈ one writer's throughput × 5 s ≈ a few GiB here). A
+per-write quota needs a filesystem that supports it on this volume.
+
+### 14.3 The gateway token was a portable 12-hour credential
+
+`/workspace/.piforge/agents/<session>/models.json` sat in a `drwxrwxrwx` directory and
+held a gateway token that answered `200` from the host, outside the sandbox, for twelve
+hours. It could not reach `/v1` or MCP, but it spent the operator's provider credit.
+
+**Mechanism:**
+
+1. TTL is one hour (`llmgw.DefaultTTL`; `-gateway-token-ttl` /
+   `PIFORGE_GATEWAY_TOKEN_TTL` to raise it deliberately). It is minted at every agent
+   spawn, so an hour is a ceiling on a leak, not a session length.
+2. Revocation on session end: `Signer.Revoke(sessionID)` is called from
+   `pi.Runtime.Stop`, the single choke point every stop path goes through — manual pause,
+   idle pause, archive, delete, project delete, model switch, idle reaper and shutdown.
+   `Verify` refuses a revoked session's token immediately, so "pause the sandbox" also
+   stops the spend.
+3. `0700` on `.piforge/agents/<session>` and `0600` on `models.json`/`mcp.json`, set in
+   the sandbox as the owning account right after the file API writes them (it writes
+   0644). Measured: `ls -ld` shows `drwx------`, `ls -l` shows `-rw-------`, and another
+   account in the container cannot read the token.
+
+**Still open:** the revocation set is in memory. A control-plane crash between the agent
+stop and the revoke, or a restart, forgets it; the one-hour TTL is the backstop for that
+window.
+
+### 14.4 Pause and resume could not find the sandbox
+
+`POST /v1/sessions/{id}/sandbox/pause` answered `422 sandbox: not found:
+piforge-sbx_<hash>` while the sandbox was READY. The handler passed
+`sandbox.ID(user, project)` = `sbx_<hash>`, the container is `piforge-<hash>`, and the
+provider's `resolve()` only understood the `piforge-` prefix, so it looked for
+`piforge-sbx_<hash>`. Resume failed identically, which also meant an idle pause could
+never park a sandbox — the mechanism that bounds the token spend in §14.3.
+
+**Mechanism:** one normalization on the boundary, `sandbox.NormalizeSandboxID`: it
+accepts `piforge-<hash>` (unchanged), `sbx_<hash>` and a bare `<hash>`, and answers the
+container name. Every lifecycle method resolves through it, so the in-process Docker
+provider *and* the runner's HTTP API accept either form. The handlers now pass the id the
+sandbox row carries (the provider's own id) instead of re-deriving the pair id.
+
+**Regression tests:** `TestNormalizeSandboxID` (both forms, the whitespace case, the
+"not found is honest" case), `TestDockerPauseAndResumeAcceptBothIDForms` (real container,
+pause by `sbx_<hash>`, read back by container name, resume both ways) and
+`TestSandboxPauseAndResumeUseTheRowID` (the HTTP boundary: the provider must receive the
+row's id, and the test fails on the old code with `pause reached the provider with
+[sbx_…], want [piforge-…]`).
+

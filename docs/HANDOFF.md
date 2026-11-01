@@ -285,20 +285,69 @@ msg="orphaned runtime directories are swept" sandbox_root=/data/sandboxes skill_
 
 ### Disk quota
 
-`sandbox_disk_quota: 2147483648` (2.0 GiB) is reported per sandbox in `sandbox_usage[]`
-as `{bytes, files, quota_bytes, over, measured_at}`, sampled on the admin-status call.
-Skill *imports* have their own cap: 32 MiB (`skill_import_max`). I did not test a write
-that crosses the quota — `over: true` is observable, but I never saw a write refused.
+Enforced in two places since the adversarial acceptance run (2026-11-01,
+`docs/EXECUTION-BOUNDARY.md` §14.2, `docs/SANDBOX-DEPLOY.md` §1.4.7):
+
+- **Kernel, per file.** Every sandbox container is created with
+  `--ulimit fsize=<quota>:<quota>` (`sandbox.Limits.DiskBytes`), so every process in
+  it — the agent, its children, the terminal shell — inherits `RLIMIT_FSIZE` at the
+  budget and cannot raise the soft limit from a shell (`ulimit -f unlimited` needs
+  no privilege; setting a soft limit *above* the hard one is refused). Measured:
+  `fallocate -l 3G` against a 2 GiB budget dies with `File size limit exceeded`
+  (SIGXFSZ) and the file is 0 bytes.
+- **Periodic, per total.** `RLIMIT_FSIZE` bounds one file, not a tree. A watchdog
+  (`httpapi.StartDiskWatch`, every 5 s, started by `cmd/piforged`) measures each
+  READY sandbox's workspace *inside the sandbox* (`du -sb /workspace` through its own
+  shell API) and, over budget, stops the agents, appends a `platform.error` with the
+  same 507 message the run boundary uses, and — if usage keeps growing after the
+  agents stopped — pauses the sandbox. The same measurement feeds
+  `GET /v1/admin/status`'s `sandbox_usage[]` and the run-boundary refusal, so the
+  admin figure and the refusal cannot disagree.
+
+`sandbox_usage[]` reports `{bytes, files, quota_bytes, over, unmeasurable, measured_at}`.
+A sandbox the deployment cannot measure is `unmeasurable: true` and the page shows
+`未知`, not `0 B / over=false` — that zero was the defect: with a detached workspace
+the row's `root_dir` is `/workspace`, a path that exists only *inside* the container,
+so the host walk measured nothing while the sandbox held 3 GiB.
+
+**Measured alternatives that do not work here:** `--storage-opt size=` is *accepted*
+by this daemon and silently ignored (Docker Desktop, overlayfs; 1.5 GiB written into
+a 1 GiB rootfs, `df` still 1007 GB) and would not cover the workspace volume anyway;
+ext4 project quotas need a `prjquota` mount this volume does not have; a
+size-limited tmpfs would make the workspace non-persistent; a loopback ext4 needs
+`CAP_SYS_ADMIN`, which the sandbox no longer holds. So the honest bound is "one file
+cannot exceed the budget, and the total is caught within seconds", not "the
+filesystem cannot be over quota at all".
 
 ### Capability requirements
 
-- The container runs as root. `copy-ro` skill materialisation relies on file modes
-  (0444/0555), which root ignores through `CAP_DAC_OVERRIDE`; the deployment therefore
-  starts with `--cap-drop DAC_OVERRIDE` (`CapDrop: ["CAP_DAC_OVERRIDE"]`, `CapAdd:
-  null`, `Privileged: false`). Without the drop the product still starts but reports
-  `copy` (frozen, writable) instead of pretending.
-- `CAP_SYS_ADMIN` is optional: it upgrades the mechanism to `bind-ro` (kernel-enforced,
-  and many sessions can share one snapshot). It is not required for correctness.
+Measured, not guessed (`docs/EXECUTION-BOUNDARY.md` §14.1): a sandbox container runs
+with `--cap-drop ALL --security-opt no-new-privileges` plus exactly five
+capabilities, each added back because the AIO image's own bootstrap failed without
+it:
+
+| capability | what needs it |
+|---|---|
+| `CHOWN` | `gem.sh` chowns `/home/gem`, `/workspace`, the log/run dirs and the X11 socket to `gem` |
+| `DAC_OVERRIDE` | the same bootstrap writes into directories the image already owns as `gem` (`/var/lib/aio-sandbox`, `/var/run/gem`) |
+| `FOWNER` | it `chmod`s directories `gem` owns (`/run/user/1000`, `/tmp/.X11-unix`) |
+| `SETUID`, `SETGID` | root → `gem` for the services it starts (nginx master stays root; file/shell/terminal/code-server/Jupyter run as `gem`) |
+
+Everything Docker grants by default and this list omits is gone: `NET_RAW`
+(raw sockets on the tenant bridge), `SYS_CHROOT`, `MKNOD`, `SETFCAP`, `KILL`,
+`AUDIT_WRITE`, `NET_BIND_SERVICE`. The agent account holds **none** of the five
+(`CapEff 0000000000000000`); they belong to the container's own bootstrap.
+
+`no-new-privileges` is what ends the passwordless-root leak: the image's
+`/usr/bin/sudo` is setuid-root, and with no_new_privs the setuid bit no longer
+changes the effective uid, so `sudo -n id` fails as `gem`. The hardened sandbox
+image (`deploy/Dockerfile.sandbox-agent`) additionally deletes the sudo binary and
+its sudoers entry, and makes `/opt/piforge` + `/opt/piforge/piforged` root-owned
+`0555` — a mode root cannot write either, because the container has no
+`CAP_DAC_OVERRIDE`-equivalent left to bypass it with.
+
+- `CAP_SYS_ADMIN` is optional and **no longer granted**: it used to upgrade
+  `copy-ro` skill materialisation to `bind-ro`. It is not required for correctness.
 - No docker CLI in the image, so `-sandbox docker` cannot start here; `-sandbox runner`
   moves that dependency into the runner container (which needs Engine ≥ 25 for
   `volume-subpath`).
@@ -478,6 +527,36 @@ Ordered roughly by how much they will hurt. Nothing here is softened.
    `-sandbox local`, and it does not stop a sandbox from asking the model gateway to send
    whatever the prompt contains; disk is per sandbox, not per tenant; and the number is
    four tenants on one Docker Desktop host, not fifty.
+
+   **What the 2026-11-01 adversarial fixes still do not claim** (`docs/EXECUTION-BOUNDARY.md`
+   §14 has the mechanisms and the measurements):
+
+   - **The skill tree is read-only by mode, not by ownership.** `.pi/skills/**` is
+     0444/0555 and the tenant account *owns* it (the sandbox file API writes as `gem`,
+     which is also the account the agent runs as). A shell redirect into a frozen skill
+     fails, and the pre-fix `sudo` route to it is gone, but an agent that runs
+     `chmod u+w` first can still edit one. Making that impossible needs a root-owned
+     writer inside the sandbox (a bind mount or a root-side file API), which this image
+     does not offer; the honest statement is "frozen against accident and against the
+     old sudo path, not against a determined tenant".
+   - **`/opt/piforge/piforged` is unwritable by the tenant, not integrity-checked.** It
+     is root-owned 0555 and the container has no capability that bypasses mode bits, so
+     the tenant cannot rewrite it; nothing verifies its hash at spawn. A launcher that
+     was tampered with would run *inside* that tenant's own sandbox (the control plane
+     starts it there, as `gem`), so the blast radius is the sandbox, not the host.
+   - **Token revocation is in memory.** The one-hour gateway token
+     (`llmgw.DefaultTTL`, `-gateway-token-ttl`) is revoked when the session's agent
+     stops, through the single `Runtime.Stop` choke point. A control-plane *crash*
+     between the stop and the revoke, or a restart, forgets the revocation set; the
+     one-hour TTL is the backstop, which is why the TTL is not longer.
+   - **Disk is bounded per file and checked every 5 s, not per write.** See "Disk
+     quota" above: `--storage-opt size=` is ignored by this daemon, so a tenant that
+     writes many files can overshoot by a few GiB before the watchdog stops the agents
+     and pauses the sandbox. The host volume is 1007 GB; the point is that one command
+     can no longer fill it and that the admin figure now matches reality.
+   - **`sudo` removal is image-level; `no-new-privileges` is the runtime guarantee.**
+     A deployment that keeps the stock AIO sandbox image still has `/usr/bin/sudo` on
+     disk — it just cannot gain privileges. The hardened image deletes it.
 
 
 
