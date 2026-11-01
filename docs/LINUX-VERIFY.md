@@ -39,7 +39,7 @@ classified:
 | L4 | `du -sbx /` is a usable measurement for the enforcer's uid | `quotaenforcer/platform_linux.go:78` | (a) | as root `9163716049`; as gem `8576239753` **exit 1**, 17 unreadable directories (`/tmp/*_kernels`, `/var/lib/aio-sandbox/nginx/*`) → 587,476,296 bytes invisible to the uid that runs the enforcer | **was wrong, fixed (F3)** |
 | L5 | The boot baseline is comparable with the enforcer's walk | `deploy/quota-enforcer.sh:96` | (a) | baseline written as root `9044482902`; the enforcer's walk as gem `8576239753` → delta **−468,243,149**, clamped to 0, so the whole-container term read 0 on every tick | **was wrong, fixed (F1)** |
 | L6 | The baseline describes *this layer before any tenant write* | `deploy/quota-enforcer.sh:88-108` | (a) | `/run` is on the overlay (`findmnt /run` → `overlay`), so the file survives a restart; `docker stop` + `docker start` with 200 MB in `/tmp` moved the baseline `9044482902` → **`10014794913`** (+970 MB), and all of it stopped counting | **was wrong, fixed (F2)** |
-| L7 | A root-owned 0555 launcher is unwritable, root included | `deploy/Dockerfile.sandbox-agent:61`, `docs/EXECUTION-BOUNDARY.md:882` | (a) | `gem` → `Permission denied`; root with the provider's caps (`0xcb`) **wrote** a root-owned 0555 file and created a new one inside `/opt/piforge`; the same container without DAC_OVERRIDE (`0xc9`) → `install: cannot create regular file: Permission denied` | claim was **too strong**, corrected (F4); the tenant half holds |
+| L7 | A root-owned 0555 launcher is unwritable, root included | `deploy/Dockerfile.sandbox-agent:78-91` (the corrected comment), `:96-107` (the RUN), `docs/EXECUTION-BOUNDARY.md:882-896` | (a) | `gem` → `Permission denied`; root with the provider's caps (`0xcb`) **wrote** a root-owned 0555 file and created a new one inside `/opt/piforge`; the same container without DAC_OVERRIDE (`0xc9`) → `install: cannot create regular file: Permission denied` | claim was **too strong**, corrected (F4); the tenant half holds |
 | L8 | Model and MCP config are 0700/0600 | `pimodel/pimodel.go:134,141`, `pimodel/mcp.go:72,75` | (a) host; (b) sandbox | host path is `MkdirAll(0o700)` + `WriteFile(0o600)`; the sandbox path goes through `SandboxFS.WriteFile`, whose mode argument is ignored by design (`materialize/sandboxfs.go:93`), so the file lands 0644 as `gem`. The directory and the per-session gateway token are the control there, not the mode | holds on the host, **not claimed** in the sandbox |
 | L9 | 0444/0555 refuse writes and new files | `materialize/materialize.go:645`, `skillsnap/skillsnap.go:225` | (a) | `gem` writing a 0444 file it owns → `Permission denied` (rc 2); `touch` in a 0555 dir → `Permission denied`; `chmod u+w` first → the write succeeds (the residual `EXECUTION-BOUNDARY.md:894` already states) | holds; residual documented |
 | L10 | cgroup v2 is where the sandbox limits are | `sandbox/limits.go:186-207` | (a) | `stat -fc %T /sys/fs/cgroup` → `cgroup2fs`; in the container `pids.max=512`, `memory.max=2147483648` — exactly the `--pids-limit 512 --memory 2g` the provider passed | holds |
@@ -49,7 +49,7 @@ classified:
 | L14 | `mount --bind` + `MS_RDONLY` freezes the skill snapshot | `materialize/bind_linux.go`, `skillsnap/unmount_linux.go` | (a) with SYS_ADMIN | `mount --bind`, then `mount -o remount,bind,ro`: write → `Read-only file system`, `touch` → `Read-only file system`, `umount -l` → OK. The shipped sandbox has no SYS_ADMIN and uses `copy-ro` by design | holds |
 | L15 | `Pdeathsig` and `Setsid` keep the agent tied to its supervisor | `liveness/proc_linux.go`, `agentsupervisor/proc_linux.go` | (a) | `go test ./internal/liveness ./internal/agentsupervisor` on Linux: **ok** (1.44 s / 0.47 s). The Windows branch is not a silent skip: `proc_other.go` returns nil and both platforms close the agent's stdin on exit | holds; caveat R3 |
 | L16 | A real agent turn works on Linux | the whole stack | gated | `verify-linux.sh` logs in, creates a project and session, prompts, and reads `verify-linux.txt` back — only when `PIFORGE_VERIFY_KEY` (or `_KEY_FILE`) is set; otherwise `SKIP` | not run in this pass (no key in this shell) |
-| L17 | The image under test **is** the image this tree builds | `deploy/Dockerfile.sandbox-agent` (`LABEL piforge.source-digest`), `backend/cmd/sourcedigest`, `scripts/up-isolated.ps1`, `scripts/verify-linux.sh` | (a) precondition, not a product assertion | `docker image inspect -f '{{index .Config.Labels "piforge.source-digest"}}'` equals the digest `backend/cmd/sourcedigest` computes from this tree and the parent image's id. A mismatch, or no label at all, fails L17 and **refuses** the container section, naming the rebuild command | holds: the stale `:isolated` label `5ce0d3fd2bee` is refused; an image built from this tree is labelled `954f1b873432` and passes |
+| L17 | The image under test **is** the image this tree builds | `deploy/Dockerfile.sandbox-agent` (`LABEL piforge.source-digest`), `backend/cmd/sourcedigest`, `scripts/up-isolated.ps1`, `scripts/verify-linux.sh` | (a) precondition, not a product assertion | `docker image inspect -f '{{index .Config.Labels "piforge.source-digest"}}'` equals the digest `backend/cmd/sourcedigest` computes from this tree and the parent image's id. A mismatch, or no label at all, fails L17 and **refuses** the container section, naming the rebuild command | holds: an `:isolated` image built from an older tree is refused (its label is not this tree's digest) and one built from this tree passes. The values are **not** quoted here — see "Digests are printed, not quoted" below for the two commands that print them |
 
 ### (c) Windows-only workarounds that Linux does not need
 
@@ -124,7 +124,9 @@ FAIL L6 the baseline moved from 9044482902 to 9078516168 across a restart; the 2
 
 — which is exactly the bug, reported by the check rather than hidden. After
 `docker build -f deploy/Dockerfile.sandbox-agent --build-arg AGENT_IMAGE=piforge:local -t piforge/sandbox-agent:linux-verify .`
-the same run is **28 passed, 0 failed, 9 skipped** (29 passed once L17 exists).
+the same run is **29 passed, 0 failed, 9 skipped** — 28 before L17 existed, one
+more now that it does. The summary line is the count; rerun the script rather
+than trusting this copy of it.
 
 That run cost a round: two red lines three hundred lines into the drill looked
 like a regression, and the only thing wrong was an image from an older tree. So
@@ -135,15 +137,92 @@ digest `backend/cmd/sourcedigest` computes from this tree before it asserts
 anything. A mismatch refuses the container section and prints what to run:
 
 ```
-FAIL  L17  piforge/sandbox-agent:isolated was built from another tree: label 5ce0d3fd2bee, this tree 954f1b873432 (parent piforge:isolated); refusing to run the container assertions against it
+FAIL  L17  piforge/sandbox-agent:isolated was built from another tree: label <label>, this tree <tree> (parent piforge:isolated); refusing to run the container assertions against it
 INFO  rebuild it with:
 INFO  docker build -f deploy/Dockerfile.sandbox-agent \
                   --build-arg AGENT_IMAGE=piforge:isolated \
-                  --build-arg PIFORGE_SOURCE_DIGEST=954f1b873432c59bf957b6d9c2488d82fadce84e7689a91a40586150ce61e490 \
+                  --build-arg PIFORGE_SOURCE_DIGEST=<tree> \
                   -t piforge/sandbox-agent:isolated .
 INFO  or, where pwsh is available: pwsh scripts/up-isolated.ps1 -Rebuild (it rebuilds all three images)
 SKIP  L3  the container assertions did not run: piforge/sandbox-agent:isolated is not the image this tree builds
 ```
+
+`<label>` and `<tree>` are 12-character short forms of values this document
+deliberately does not carry; the next section is what fills them in, and the one
+after it is why a digest is refused outright when git could not list the tree.
+
+### Digests are printed, not quoted
+
+**Why not a literal:** a digest hashes this tree *and* the id of the parent image
+it was built `FROM`, so a commit or a rebuilt `piforge:isolated` changes it, and a
+literal is wrong the next time either moves.
+
+A digest is not a fact about the product; it is a fact about one tree plus one
+parent image. `backend/cmd/sourcedigest` hashes the content of every tracked (or
+untracked, not ignored) file under `backend/`, `web/`, `deploy/`, `Dockerfile`
+and `docker-compose.runner.yml`, **plus the Dockerfile's path** and, for the
+sandbox image, **the full id of the control-plane image it was built `FROM`**. A
+commit changes it and a rebuilt `piforge:isolated` changes it again, which is what
+happened to every digest this document used to quote (they were the label of an
+older tree, and the L17 refusal above is precisely the check noticing that).
+
+Two commands, no literal:
+
+```
+# this tree's digest for the sandbox recipe, run from the repository root
+# (needs a git checkout and a local piforge:isolated: see "Rebuilding" below)
+cd backend && go run ./cmd/sourcedigest -root .. \
+   -dockerfile deploy/Dockerfile.sandbox-agent -agent-image piforge:isolated
+
+# the digest the image says it was built from
+docker image inspect -f '{{index .Config.Labels "piforge.source-digest"}}' \
+  piforge/sandbox-agent:isolated
+```
+
+Both print 64 lowercase hex characters, and L17 passes when they are equal
+(an image with no label prints `<no value>`, which is the refusal, not a
+digest); `… | cut -c1-12` is the short form the transcript above prints, and
+`-json` adds `files` and `source` to the first.
+
+### A digest git did not produce is refused
+
+The digest only means "this tree" if the tree was listed **through git**. When
+git cannot list it — no git on the host, not a checkout, a directory git refuses
+— the fallback covers the four recipe files alone (`Dockerfile`,
+`deploy/Dockerfile.runner`, `deploy/Dockerfile.sandbox-agent`,
+`docker-compose.runner.yml`), so an edit under `backend/`, `web/` or `deploy/`
+would leave the digest unchanged and the freshness rule would answer `current`
+for a tree it never read. `sourcedigest` therefore **refuses**: exit 1, the
+reason on stderr, no digest on stdout.
+
+```
+sourcedigest: the tree could not be listed through git (sourcedigest: git ls-files -z --: exec: "git": executable file not found in %PATH%), so the digest would cover only these 4 file(s) — Dockerfile, deploy/Dockerfile.runner, deploy/Dockerfile.sandbox-agent, docker-compose.runner.yml — and would not change when a source file under backend/, web/ or deploy/ changed; refusing to guess. Run from a checkout with git installed, or pass -allow-fallback if the image really is built from these files alone
+```
+
+`-allow-fallback` prints the narrow digest anyway, for a build that really is
+made of those four files alone. It is not silent about it: it prints a WARNING
+on stderr and marks the answer `"source":"fallback"` in `-json` (a git listing
+prints `"source":"git"`). The doubled `sourcedigest:` below is real — the
+WARNING wraps the inner reason, which carries its own prefix.
+
+```
+sourcedigest: WARNING: sourcedigest: git ls-files -z --: exec: "git": executable file not found in %PATH%; the digest covers 4 recipe file(s) only and cannot notice a source edit (source "fallback")
+```
+
+`scripts/up-isolated.ps1` refuses such a digest **independently of the tool** —
+it reads `source` out of `-json` and fails on anything but `git` — so a caller
+that relaxes the tool cannot bring the guess back through the script:
+
+```
+ERROR: the source digest for Dockerfile came from 'fallback', not from git: it covers only the recipe files, so a change under backend/, web/ or deploy/ would not be noticed. Refusing to decide freshness from it (install git, or run from a checkout)
+```
+
+**Why a git-less host is not supported:** without git the digest cannot see
+`backend/`, `web/` or `deploy/`, so `current` would mean "the four recipe files
+did not change", not "this image is this tree" — a guess, not a decision, and
+the host fails loudly instead of reporting it. `verify-linux.sh` is the third
+caller: L17 turns the refusal into a `SKIP` that carries the tool's own reason
+(it used to assume "it needs go" even when git was the missing piece).
 
 ### Rebuilding the sandbox image
 
@@ -222,7 +301,9 @@ honest reason, none of which the Windows host could show:
   clock always loses. The test now sweeps at an instant after the revoke.
 
 After the fixes: `go test ./... -count=1` on Linux — **42 packages ok, 0
-failures** (was 13 failures in five packages).
+failures at that commit** (was 13 failures in five packages). The number is the
+command's, not a constant: the same suite is 45 packages `ok` on this tree, five
+of its 50 packages having no test files.
 
 ## What `verify-linux.sh` covers
 
@@ -240,8 +321,9 @@ non-zero on any failure, no provider key required.
   `piforge.source-digest` label must equal the digest of this tree (and of the
   control-plane image it was built `FROM`). A stale or unlabelled image is
   **refused** before any assertion runs, with the rebuild command printed — see
-  "Rebuilding the sandbox image" below. Without Go the check `SKIP`s and says so;
-  it never guesses.
+  "Rebuilding the sandbox image" below. It never guesses: without Go, or with a
+  tree git cannot list, the check `SKIP`s and carries the reason the tool gave
+  (see "A digest git did not produce is refused").
 * **sandbox container** — boots the real image with the provider's flags
   (`--cap-drop ALL` + the five, `no-new-privileges`, `--pids-limit`, `--memory`,
   `--ulimit fsize`) and asserts: uid 1000 / `gem` CapEff 0; the enforcer running
@@ -255,22 +337,25 @@ non-zero on any failure, no provider key required.
   the command).
 * **code and daemon** — `go test` on the Linux-only packages; the docker storage
   driver.
-* **native host** — the four (b) rows as `SKIP` with their commands when run
-  inside a container, executed when run on the host.
+* **native host** — the five (b) rows (N1–N5) as `SKIP` with their commands when
+  run inside a container, executed when run on the host.
 * **agent turn** — gated on a key; `SKIP` states how to supply one; the key is
   never echoed.
 
 Measured run against the rebuilt image (2026-11-01, Docker Desktop's Linux VM,
-`docker:cli` shell so the container section could reach the daemon):
+`docker:cli` shell so the container section could reach the daemon). The last
+line the script prints is the count — rerun it rather than trusting this copy:
 
 ```
-28 passed, 0 failed, 9 skipped
+29 passed, 0 failed, 9 skipped
 ```
 
-The nine skips are the honest ones: no `CAP_SYS_ADMIN` in the shipped sandbox
-(bind-ro, with the command to prove it elsewhere), the five native-host rows
-(this run was itself in a container), the host `pids.max` (a container limit was
-checked instead), and the agent turn (no key).
+The skips are the honest ones: no `CAP_SYS_ADMIN` in the shipped sandbox
+(bind-ro, with the command to prove it elsewhere), the native-host rows (this run
+was itself in a container), the host's own cgroup limits (a container limit was
+checked instead), and the agent turn (no key). Each `SKIP` line names its cause
+and the command that would prove it, so the list belongs to the run, not to this
+document.
 
 ## Gates (this machine, 2026-11-01)
 
@@ -278,7 +363,7 @@ checked instead), and the agent turn (no key).
 |------|--------|
 | `go build ./...` | pass |
 | `go test ./... -count=1` (Windows host) | pass. The one known flake, `agentsupervisor` `TestSupervisorKeepsTheAgentAliveWhenTheClientLeaves` ("the reattaching client was given no backlog"), was a real attach-order race — the client was published as current before its handshake was queued, so a record the agent wrote in that window reached the wire first and was read as the frame. Fixed in `supervisor.attach`; 50/50 green afterwards, whole package 20/20, and `TestEveryReattachSeesTheHandshakeFirst` guards the ordering |
-| `go test ./... -count=1` **on Linux** | 42 packages ok, 0 failures (golang:1.25-bookworm container); 13 tests in five packages failed before this pass's fixes |
+| `go test ./... -count=1` **on Linux** | 45 packages `ok`, 0 failures, 5 with no test files (golang:1.25-bookworm container, this tree; measured again 2026-11-01 — `go test` prints one line per package, so the count is the command's); 13 tests in five packages failed before this pass's fixes |
 | `pnpm --dir web lint` | pass |
 | `pnpm --dir web test -- --run` | pass |
 | full e2e | 182 passed (8.6 m) |

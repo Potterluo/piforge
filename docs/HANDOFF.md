@@ -95,12 +95,56 @@ the past made the script print `piforge:isolated is current` while the tree diff
 runs the four cases and prints each decision.
 
 The rule lives in **one** place now, `backend/cmd/sourcedigest`, and both scripts call it.
-The clock is no longer an input at all: with no git the digest narrows to the four recipe
-files (`-root` prints `files=N`, so an empty list cannot pass as a full one), and if even
-those cannot be read the scripts stop instead of guessing. The sandbox image stamps the
-label from **its own Dockerfile** (`ARG PIFORGE_SOURCE_DIGEST` → `LABEL piforge.source-digest`),
-so a build that does not go through `up-isolated.ps1` carries it too — and one that omits
-the build arg is unlabelled, which is a refusal, not a shrug.
+The clock is no longer an input at all. The digest covers the tracked — or untracked but
+not ignored — files under `backend/`, `web/`, `deploy/`, `Dockerfile` and
+`docker-compose.runner.yml`, so it only means "this tree" if the tree was listed **through
+git**. The sandbox image stamps the label from **its own Dockerfile**
+(`ARG PIFORGE_SOURCE_DIGEST` → `LABEL piforge.source-digest`), so a build that does not go
+through `up-isolated.ps1` carries it too — and one that omits the build arg is unlabelled,
+which is a refusal, not a shrug.
+
+**A digest git did not produce is refused, not narrowed.** When git cannot list the tree
+(no git on the host, not a checkout, a directory git refuses), the fallback covers the four
+recipe files alone — `Dockerfile`, `deploy/Dockerfile.runner`,
+`deploy/Dockerfile.sandbox-agent`, `docker-compose.runner.yml` — so an edit under
+`backend/`, `web/` or `deploy/` would leave it unchanged. `sourcedigest` therefore refuses:
+exit 1, the reason on stderr, and no digest on stdout.
+
+```
+sourcedigest: the tree could not be listed through git (sourcedigest: git ls-files -z --: exec: "git": executable file not found in %PATH%), so the digest would cover only these 4 file(s) — Dockerfile, deploy/Dockerfile.runner, deploy/Dockerfile.sandbox-agent, docker-compose.runner.yml — and would not change when a source file under backend/, web/ or deploy/ changed; refusing to guess. Run from a checkout with git installed, or pass -allow-fallback if the image really is built from these files alone
+```
+
+`-allow-fallback` is the one way to get that narrow digest: it prints it with a WARNING on
+stderr, and `-json` marks the answer `"source":"fallback"` (a git listing marks it `git`). It
+exists for a build that really is made of those four files alone, not as a way to build on a
+host without git. (Go's own message names `%PATH%` on Windows and `$PATH` elsewhere; the
+reason is git's, the prefix is the tool's.)
+
+```
+sourcedigest: WARNING: sourcedigest: git ls-files -z --: exec: "git": executable file not found in %PATH%; the digest covers 4 recipe file(s) only and cannot notice a source edit (source "fallback")
+```
+
+`scripts/up-isolated.ps1` refuses any non-`git` source **on its own**, independently of the
+tool — it reads `source` from `-json` and fails on anything else — so a caller that relaxes
+`sourcedigest` cannot bring the guess back through the script:
+
+```
+ERROR: the source digest for Dockerfile came from 'fallback', not from git: it covers only the recipe files, so a change under backend/, web/ or deploy/ would not be noticed. Refusing to decide freshness from it (install git, or run from a checkout)
+```
+
+**Why a git-less host is not supported:** without git the digest cannot see `backend/`,
+`web/` or `deploy/`, so `current` would mean "the four recipe files did not change", not
+"this image is this tree" — a guess, and the host fails loudly instead of reporting it.
+`verify-linux.sh` is the third caller: L17 carries the tool's own reason into its `SKIP`.
+
+The value itself is **never quoted in this document**: it changes with a commit or with a
+rebuilt parent image, so a literal would be a fact about last week's tree. Two commands print
+it, and the docs use their output instead of a number:
+
+```
+cd backend && go run ./cmd/sourcedigest -root .. -dockerfile Dockerfile           # this tree
+docker image inspect -f '{{index .Config.Labels "piforge.source-digest"}}' <image>  # the image
+```
 
 **Refreshing the images is one command, and both scripts name it when they refuse:**
 
@@ -1198,11 +1242,17 @@ Ordered roughly by how much they will hurt. Nothing here is softened.
       §5.1, `SANDBOX-DEPLOY.md` §1.4.1, `HANDOFF.md` "Run it" and `deploy/README.md`; the
       full `docker build --build-arg INSTALL_CHROMIUM=true -t <tag> .` is named only as the
       underlying from-scratch build.
-    - Still true: the image running here (`sha256:15eb2f9c14ad…`, tag `piforge:local`,
-      rebuilt 2026-10-31 after the interrupt fix) is **not** the image the delivery drill
-      documents (`sha256:2cdba2cd…`, 2026-10-30 16:58); the drill's 119 assertions *were*
-      re-run on the current build (`pwsh scripts/deliver-check.ps1`, run `20261031-215046`: 119 PASS / 0 FAIL, exit 0, on image `sha256:15eb2f9c14ad…`) but the drill
-      document itself still describes the older one.
+    - Still true, and now three-way: the image `pf-local` runs, the image the
+      `piforge:local` tag points at, and the image the delivery drill documents are all
+      different. `docker inspect -f '{{.Image}}' pf-local` and
+      `docker images --format '{{.ID}} {{.CreatedAt}}' piforge:local` print the first two; on
+      2026-11-01 they read `sha256:15eb2f9c14ad…` and `061477150594` (built 2026-11-01
+      21:58) — the container has been up since before that rebuild, so it keeps the image it
+      started with. The drill documents `sha256:2cdba2cd…` (2026-10-30 16:58), which is no
+      longer present locally (`docker image inspect sha256:2cdba2cd` → `No such image`). The
+      drill's 119 assertions *were* re-run on the image `pf-local` still runs
+      (`pwsh scripts/deliver-check.ps1`, run `20261031-215046`: 119 PASS / 0 FAIL, exit 0),
+      but the drill document itself still describes the older one.
     - Still true: `README.md`'s local-run section (8080 + `pnpm dev` on 3000) never mentions
       that the image serves everything on one port; someone following only the README will
       not reproduce this deployment.
