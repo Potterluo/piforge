@@ -2326,10 +2326,10 @@ loopback 地址，所以演练启动容器时**写下一个只含 `127.0.0.1:<fo
 | `/gw/llm/<token>/…`（真模型流量） | provider 行 | 把 agent 的请求转发到 `base_url` | 调用前 400 `url_refused` + 策略 transport |
 | `PUT /v1/projects/{id}/forge` + PR 调用 | 租户 | `POST <api_base>/repos/…/pulls` | 存时 + `forge.Config.HTTP` 走策略 client |
 | `POST /v1/skills/import`（http/https、`git@`） | 租户 | `git clone` 从控制面出网 | 调用前（`git@` 按 `https://<host>/` 校验同一套主机规则）+ `http.curloptResolve` 钉 IP |
-| 项目 `repo_url` | 租户 | **在沙箱里** clone | 不在控制面；`validateRepoURL` 只放 https/`git@`（不变） |
-| 截图 / 浏览器导航 | 租户 | **在沙箱里的** Chrome | 不在控制面（`-sandbox-browser remote`），不变 |
+| 项目 `repo_url` | 租户 | 容器部署**在沙箱里** clone；`-sandbox local` 时由控制面 clone | 容器：不在控制面位置；local：克隆前 `Local.refuseCloneTarget`（`urlguard` 判 http(s)/`git@`，本地路径拒绝另一个账号的沙箱目录） |
+| 截图 / 浏览器导航 | 租户 | 容器部署：**沙箱里的** Chrome；`host` 放置：控制面自己的 Chrome | 容器：不在控制面位置；`host`：只校验 scheme，**仍是残余**（docs/DATA-FLOW-AUDIT.md G5） |
 | `/preview` 反代（web upstream） | 部署 | Next.js | 部署配置，不是租户 URL，不在本策略范围 |
-| `file://` skill 导入 | 租户 | git 读控制面自己的本地仓库 | **仍是残余**（§1.9.6） |
+| `file://` skill 导入 | 租户 | git 读控制面自己的本地仓库 | 读前 `confineLocalImport`：路径必须落在 `-skill-import-roots` 里（默认空 = 全部拒绝，`tenantfs.Contains` 解析链接） |
 
 #### 1.9.5 skill 克隆的落盘上界（同一份报告的攻击 10）
 
@@ -2347,9 +2347,10 @@ loopback 地址，所以演练启动容器时**写下一个只含 `127.0.0.1:<fo
 
 #### 1.9.6 残余（写清楚，不藏）
 
-- **`file://` skill 导入源**仍然接受（自托管部署把 skill 放在同一块盘上），没有白名单：它能指向控制面
-  能读的本地 git 仓库，只是带链接的仓库会被拒、路径形状会漏给租户。要收紧是另一个决定（部署级白名单），
-  这一轮没做。
+- **`file://` skill 导入源**不再是"接受任意路径"：它按 `-skill-import-roots` 白名单读
+  （默认空 = 拒绝每一个 `file://`；`tenantfs.Contains` 解析符号链接，链接不能绕回根外）。
+  自托管安装把仓库放在同一块盘上时，由运维写出允许的目录。这一条与整个数据流的边表
+  一起记在 `docs/DATA-FLOW-AUDIT.md`（G1）。
 - **`git@host:path`（ssh）** 只按同一套主机规则校验 host；SSH 本身不是 HTTP，`http.curloptResolve` 管不到它
   （`ssh` 的 `HostKeyAlias`/`ProxyCommand` 是另一件事）。公网主机放行，内网主机被拒。
 - **allow-list 是 host/CIDR + 端口**，不是路径；一个被允许的 host 上的任何路径都可拨。
