@@ -21,10 +21,22 @@ package httpapi
 //     contain it;
 //   - the file cannot be read             -> the note says the quote came from
 //     the diff, so the agent does not treat the numbers as verified.
+//
+// The size caps are budgets, not validation (nothing here answers 400 because a
+// comment is large). What they cut is reported twice, from one computation:
+//
+//   - the composed text ends with a 「注：…」 line naming the lines and runes that
+//     did not fit. That string is the transcript entry *and* the prompt, by
+//     design — one string instead of three that can disagree — so the record
+//     shows exactly what reached the agent, and the agent learns that the quote
+//     it was handed is partial;
+//   - the same counts travel in PromptResult.review_truncation, so the browser
+//     can warn without parsing the text, and a retry can be asserted on.
 
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
@@ -144,13 +156,21 @@ func findQuote(fileLines []string, line int, quote []string) (quoteLocation, int
 // which readable reports). The result is plain text on purpose: it is shown in
 // the transcript as the user's own message, and a transcript that renders
 // literal markdown fences around a quote reads worse than an indented one.
-func composeReviewPrompt(in ReviewComment, fileLines []string, readable bool) (string, error) {
+//
+// The second result is nil when nothing was cut, and otherwise carries the same
+// counts the trailing 「注：…」 line states, so the API and the text cannot drift
+// apart.
+func composeReviewPrompt(in ReviewComment, fileLines []string, readable bool) (string, *contracts.ReviewTruncation, error) {
 	if err := validateReviewComment(in); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	path := strings.TrimSpace(in.Path)
 	quote := in.Quote
+	var cut contracts.ReviewTruncation
+	cut.QuoteLinesKept = len(quote)
 	if len(quote) > maxReviewQuoteLines {
+		cut.QuoteLinesKept = maxReviewQuoteLines
+		cut.QuoteLinesOmitted = len(quote) - maxReviewQuoteLines
 		quote = append(append([]string{}, quote[:maxReviewQuoteLines]...), "…（其余行已省略）")
 	}
 	// The header always carries path:line: it is the anchor the agent needs even
@@ -168,19 +188,26 @@ func composeReviewPrompt(in ReviewComment, fileLines []string, readable bool) (s
 	if strings.TrimSpace(in.Hunk) != "" {
 		fmt.Fprintf(&b, "diff 片段：%s\n", strings.TrimSpace(in.Hunk))
 	}
+	// shortened holds the indexes of quoted lines that hit the per-line cap, so
+	// the note can name their file line numbers instead of a bare count.
+	var shortened []int
 	if len(quote) > 0 {
 		b.WriteString("引用的代码：\n")
 		for i, line := range quote {
 			line = strings.TrimRight(line, "\r\n")
-			if len([]rune(line)) > maxReviewQuoteRune {
-				line = string([]rune(line)[:maxReviewQuoteRune]) + "…"
+			if runes := []rune(line); len(runes) > maxReviewQuoteRune {
+				shortened = append(shortened, i)
+				cut.QuoteLinesShortened++
+				cut.QuoteLineRunesCut += len(runes) - maxReviewQuoteRune
+				line = string(runes[:maxReviewQuoteRune]) + "…"
 			}
 			fmt.Fprintf(&b, " %4d | %s\n", in.Line+i, line)
 		}
 	}
 	body := strings.TrimSpace(in.Body)
-	if len([]rune(body)) > maxReviewBodyRune {
-		body = string([]rune(body)[:maxReviewBodyRune]) + "…"
+	if runes := []rune(body); len(runes) > maxReviewBodyRune {
+		cut.BodyRunesCut = len(runes) - maxReviewBodyRune
+		body = string(runes[:maxReviewBodyRune]) + "…"
 	}
 	fmt.Fprintf(&b, "评论：%s\n", body)
 
@@ -188,7 +215,50 @@ func composeReviewPrompt(in ReviewComment, fileLines []string, readable bool) (s
 	case ok:
 		fmt.Fprintf(&b, "位置：%s\n", note)
 	}
-	return b.String(), nil
+	if note := truncationNote(in, cut, shortened); note != "" {
+		fmt.Fprintf(&b, "%s\n", note)
+	}
+	if !cut.Truncated() {
+		return b.String(), nil, nil
+	}
+	return b.String(), &cut, nil
+}
+
+// truncationNote is the sentence the composed block ends with.
+//
+// It is written for the person who wrote the comment — "the original comment
+// quoted 30 lines, only the first 24 arrived" — because that is the claim the
+// transcript has to keep honest. It is also the only place the agent can learn
+// that the quote it was handed is partial, which is useful rather than noise:
+// without it the agent would reason as if it had seen the whole selection.
+func truncationNote(in ReviewComment, cut contracts.ReviewTruncation, shortened []int) string {
+	var parts []string
+	if cut.QuoteLinesOmitted > 0 {
+		parts = append(parts, fmt.Sprintf("原始评论引用了 %d 行，仅前 %d 行送达",
+			cut.QuoteLinesKept+cut.QuoteLinesOmitted, cut.QuoteLinesKept))
+	}
+	if len(shortened) > 0 {
+		at := make([]string, 0, len(shortened))
+		for _, i := range shortened {
+			at = append(at, strconv.Itoa(in.Line+i))
+		}
+		lines := "第 " + strings.Join(at, "、") + " 行"
+		if len(shortened) == 1 {
+			parts = append(parts, fmt.Sprintf("%s引用超过 %d 字，已截断 %d 字",
+				lines, maxReviewQuoteRune, cut.QuoteLineRunesCut))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s引用超过 %d 字，共截断 %d 字",
+				lines, maxReviewQuoteRune, cut.QuoteLineRunesCut))
+		}
+	}
+	if cut.BodyRunesCut > 0 {
+		parts = append(parts, fmt.Sprintf("正文超出 %d 字，已截断 %d 字",
+			maxReviewBodyRune, cut.BodyRunesCut))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "注：" + strings.Join(parts, "；") + "。"
 }
 
 // locationNote explains where the quoted code is now. It returns false when
@@ -218,9 +288,9 @@ func locationNote(in ReviewComment, fileLines []string, readable bool) (string, 
 // A file that cannot be read is not an error: the comment is still meaningful,
 // and refusing to send it because the workspace is momentarily unavailable would
 // lose what the user wrote. The message says the quote was not verified.
-func (s *server) reviewPrompt(ctx context.Context, userID string, sess *contracts.Session, in ReviewComment) (string, error) {
+func (s *server) reviewPrompt(ctx context.Context, userID string, sess *contracts.Session, in ReviewComment) (string, *contracts.ReviewTruncation, error) {
 	if err := validateReviewComment(in); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var (
 		lines    []string

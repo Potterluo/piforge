@@ -326,6 +326,22 @@ export interface PromptResult {
   model_ref?: string;
   /** The reference (or provider) that no longer resolved, when that happened. */
   model_fallback_from?: string;
+  /**
+   * Present only when an inline comment was cut to fit the server's caps
+   * (`backend/internal/httpapi/review_comment.go`). The composed message also
+   * says it — that string is the transcript entry — so this is the same fact in
+   * a form the UI can render without parsing Chinese text.
+   */
+  review_truncation?: ReviewTruncation;
+}
+
+/** What the inline-comment composer left out, with exact counts. */
+export interface ReviewTruncation {
+  quote_lines_kept: number;
+  quote_lines_omitted: number;
+  quote_lines_shortened: number;
+  quote_line_runes_cut: number;
+  body_runes_cut: number;
 }
 
 export interface InterruptResult {

@@ -530,7 +530,9 @@ Flow notes:
 - **Inline review** is server-assembled: the browser posts
   `{path, line, side, hunk, quote: ["<line text>"], body}` (`quote` is an array) and the
   server builds the `行内评论 · notes.txt:2` turn with the code quoted and a "位置：…"
-  note. Measured 191 ms to accept, 30.5 s round.
+  note. Measured 191 ms to accept, 30.5 s round. Its size caps cut rather than refuse and
+  report the cut in `review_truncation` plus a trailing `注：…` line in the message (see
+  "API shapes"), so a 30-line selection cannot silently arrive as 24.
 - **PR with a forge configured** (from DELIVERY-DRILL, not reproducible here — no forge on
   this deployment): `PUT /v1/projects/{id}/forge {kind:"github", api_base, repo,
   base_branch, token}`, `GET …/git/pr` previews, `POST …/git/pr` pushes
@@ -566,15 +568,38 @@ needs an idempotency key the browser generates, a fork body is one field (its ti
 `label`, not `title`), and a review comment quotes an array of lines.
 
 **`review_comment` caps** (`backend/internal/httpapi/review_comment.go`). They are
-**truncations, not refusals** — nothing here answers 400, and the caller is not told the
-quote or the body was cut; the truncation only shows up in the composed message:
+**truncations, not refusals** — nothing here answers 400 — and the cut is **reported**, not
+silent: the response carries `review_truncation` with exact counts, and the composed
+message ends with a `注：…` line naming what did not fit. That message is the transcript
+entry *and* the prompt (one string by design, so the record cannot disagree with what the
+agent received), which is why the human sees the note in the transcript and the agent sees
+that its quote is partial:
+
+```json
+{"accepted":true,"disposition":"started","run_id":"run_…",
+ "review_truncation":{"quote_lines_kept":24,"quote_lines_omitted":6,
+                      "quote_lines_shortened":1,"quote_line_runes_cut":100,
+                      "body_runes_cut":1000}}
+```
+
+The field is **absent** when nothing was cut (no zeroed object to render). The composed
+text then ends with, for the same comment:
+
+```
+注：原始评论引用了 30 行，仅前 24 行送达；第 3 行引用超过 400 字，已截断 100 字；正文超出 4000 字，已截断 1000 字。
+```
 
 | field | cap | what happens over the cap |
 |---|---|---|
-| `quote` | 24 lines (`maxReviewQuoteLines`) | the extra lines are dropped and the composed quote ends with a line `…（其余行已省略）` |
-| each `quote[i]` | 400 runes (`maxReviewQuoteRune`) | the line is cut at 400 runes and a `…` is appended |
-| `body` | 4000 runes (`maxReviewBodyRune`) | the body is cut at 4000 runes and a `…` is appended |
+| `quote` | 24 lines (`maxReviewQuoteLines`) | the extra lines are dropped, `quote_lines_omitted` counts them, and the composed quote ends with a line `…（其余行已省略）` |
+| each `quote[i]` | 400 runes (`maxReviewQuoteRune`) | the line is cut at 400 runes with a `…`; `quote_lines_shortened` / `quote_line_runes_cut` count the lines and runes |
+| `body` | 4000 runes (`maxReviewBodyRune`) | the body is cut at 4000 runes with a `…`; `body_runes_cut` counts the runes |
 | `end_line` | none | optional; `0`/omitted means "same as `line`", a value below `line` is clamped to it, and a value past the end of the file is accepted verbatim (it only appears in the `行内评论 · path:line-end` header) |
+
+A caller that only wants to know *whether* something was cut can test for the presence of
+`review_truncation`; the browser uses the counts to render the warning after a send, and
+the composer warns before sending from the selection it already has (24 lines / 400 runes
+per line / 4000 body runes, mirrored in `web/lib/review/limits.ts`).
 
 The 400s that do exist are about the anchor, not the size, and each is exact:
 `review_comment.path is required`, `review_comment.path must be a relative path inside the

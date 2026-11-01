@@ -54,6 +54,11 @@ import {
 } from "@/components/ui/select";
 import { api } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
+import {
+  MAX_COMPOSER_IMAGES,
+  imageLimitNotice,
+  planImageAttachments,
+} from "@/lib/session/attachments";
 import { shortModel, truncate } from "@/lib/session/format";
 import { qk } from "@/lib/session/queries";
 import type { QueuedPrompt } from "@/lib/session/reduce";
@@ -430,7 +435,16 @@ export function Composer({
   };
 
   const addImages = async (files: File[]) => {
-    const picked = files.filter((file) => file.type.startsWith("image/")).slice(0, 4);
+    const candidates = files.filter((file) => file.type.startsWith("image/"));
+    if (candidates.length === 0) return;
+    // The cap is four images per message. Dropping the rest silently would let
+    // someone paste six and believe the agent saw six, so the count that did
+    // not fit is said out loud — before the send, next to the composer.
+    const { accepted, dropped } = planImageAttachments(candidates.length, images.length);
+    if (dropped > 0) {
+      toast.warning("图片没有全部加入", { description: imageLimitNotice(dropped) });
+    }
+    const picked = candidates.slice(0, accepted);
     if (picked.length === 0) return;
     try {
       const drafts = await Promise.all(
@@ -444,7 +458,7 @@ export function Composer({
           } satisfies ImageDraft;
         }),
       );
-      setImages((current) => [...current, ...drafts].slice(0, 4));
+      setImages((current) => [...current, ...drafts].slice(0, MAX_COMPOSER_IMAGES));
     } catch (error) {
       toast.error("添加图片失败", {
         description: humanizeError(error),

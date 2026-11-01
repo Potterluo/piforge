@@ -56,6 +56,8 @@
 - 本批（第五轮对抗验收的 git 与路径五项）**不改变任何 FR 状态**：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。它关闭的是 `docs/DATA-FLOW-AUDIT.md` 新增的 G9–G13：git 作为**命令解释器**（`core.fsmonitor` 经 `GET /git/status` 执行、`core.sshCommand` 经 `POST /git/push` 执行）与作为**第二个 HTTP 客户端**（`git clone` 跟随 302 取控制面自己的回环），以及 Windows 的 junction 与 `.git.`、`user@host:path`、`pushInsteadOf`/`remote.*.proxy` 未被读到。同一批还修了验收工具本身：`up-isolated.ps1` 只在镜像缺失时构建，于是审计量到的是改动前的镜像；探针在干净栈上只跑 15 条，文档却写 17 条。fail-first 与实测见文末「本批：第五轮对抗验收的 git 与路径五项（2026-11-01）」。
 > 后续交付（同样不改 FR 状态）：每沙箱一个 `SANDBOX_API_KEY`（`crypto/rand` 生成、创建时经内部 API 上报一次、AES-GCM 加密存 `sandboxes.api_key_cipher`；`-sandbox-api-key` 降为调试用固定覆盖）。它修的是「runner 让端点跨租户可达之后，一个部署级 key 等于所有沙箱的 key」这个问题，证据见 `docs/SANDBOX-DEPLOY.md` §1.4、`docs/SANDBOX.md`「每个沙箱一个 key」，以及 `TestDockerProviderPerSandboxAPIKey`（真实容器：A 的 key 打 B 是 401）与 `scripts/verify-runner-sandbox.ps1` 的 cross-tenant 检查。
 
+- 本批（行内评论的静默截断）**不改变任何 FR 状态**：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。它修的是 HANDOFF「API shapes」自己写下的那条：24 行 / 每行 400 字 / 正文 4000 字的上限**切了却不告诉调用方**，选 30 行的人以为 30 行都到了 agent 那里。现在合成函数把切掉的量算出来，响应里带 `review_truncation`（精确计数），转录（= 发给 agent 的同一个字符串）末尾写「注：…」。同一批按同一条规则查了其它上限：唯一同样静默丢用户内容的是编辑器一次最多 4 张图片（多出的直接丢），已改成加入前就说出「另外 N 张没有加入」；其余上限是展示预览或已带 `truncated` 标记，逐条写在文末。fail-first、grep 清单与门禁见文末「本批：行内评论的静默截断（2026-11-01）」。
+
 | FR | 状态 | 证据 |
 |---|---|---|
 | FR-1.1 新建会话（仓库/基准分支/模型/推理强度） | PARTIAL | 会话只选模型/推理/临时（标题框已删，首条消息自动命名）：`web/components/shell/new-session-dialog.tsx`（`session-model`、`session-thinking`）；仓库与基准分支只在建项目时选（`new-project-dialog.tsx` 的 `repo_url`/`default_branch`，`handleCreateProject`）。测试：`e2e/tests/00-shell.spec.ts` "creates a project and a session through the dialogs"（未覆盖分支选择）、`59-auto-naming.spec.ts` |
@@ -2170,3 +2172,112 @@ pwsh scripts/deliver-check.ps1 -Image piforge:local   125/125 checks passed
 - 宿主放置不返回 `outside_workspace`：越界链接在那里是 400 拒绝，比标记更强。
 - 摘要覆盖 `backend/`、`web/`、`deploy/`、`Dockerfile`、`docker-compose.runner.yml` 的全部内容；改其中任何
   一个都会让三个镜像的摘要都变，但 Docker 的层缓存让"内容没变的镜像"重建只花几秒。
+
+---
+
+## 本批：行内评论的静默截断（2026-11-01）
+
+**缺陷.** `backend/internal/httpapi/review_comment.go` 在合成行内评论时按三个预算切内容：引用 24 行
+（`maxReviewQuoteLines`）、每行 400 字（`maxReviewQuoteRune`）、正文 4000 字（`maxReviewBodyRune`）。切完只
+往文本里塞 `…（其余行已省略）` / `…`，响应里没有任何字段，转录里也没有一句话：选 30 行的人合理地相信 30 行
+都到了 agent 那里。`29db67e` 加的 `TestComposeReviewPromptCapsTruncateInsteadOfRefusing` 只钉住了「切」，
+没有钉住「说」。
+
+**修法（一处计算，两处报告）.**
+
+1. `composeReviewPrompt` 现在返回 `(string, *contracts.ReviewTruncation, error)`；同一次计算填
+   `contracts.ReviewTruncation{quote_lines_kept, quote_lines_omitted, quote_lines_shortened,
+   quote_line_runes_cut, body_runes_cut}`，没切就是 `nil`。
+2. `PromptResult.review_truncation` 把它带进 API 响应（`omitempty`：没切时字段不存在，不渲染一个全 0 对象）。
+   幂等重放路径会用同一个请求重新合成，再把同一份报告挂回去，所以重试不会丢掉计数。
+3. 合成文本的**末尾**加一行 `注：原始评论引用了 30 行，仅前 24 行送达；第 3 行引用超过 400 字，已截断 100 字；
+   正文超出 4000 字，已截断 1000 字。`。
+
+**为什么注写在字符串里（而不是只放在 UI/响应里）.** 这个产品的设计是「转录、agent 收到的 prompt、存下来的
+消息是同一个字符串」，`message_handlers.go` 的注释与 HANDOFF 都这么写。两者在这里**不可分**，所以只能二选一：
+
+- 只把注放进响应/界面：API 调用方（脚本、幂等重放）看得到，**转录**看不到——记录会继续声称 30 行都送达了，
+  而 agent 实际只看到 24 行。这正是要修的谎。
+- 把注放进字符串（采用）：转录与 prompt 都看到。代价是 agent 的 prompt 多一行；但这一行对 agent 不是噪声：
+  它让 agent 知道手里的引用是**部分**的，不会按「我看过整段」去推理。
+
+**UI.** `web/lib/review/limits.ts` 镜像三个上限（注释指明服务端是权威），`reviewSelectionWarning()` 在
+**发送前**按当前选择说会切什么（30 行只送 24 行、N 行超长、正文超出多少字）；发送后如果响应仍带
+`review_truncation`，编辑器不关闭，改渲染 `ReviewTruncationNotice`（`data-testid="review-comment-truncation-result"`，
+文案直接来自响应的计数），草稿行那条路径没有编辑器可留，改用 12 秒的 warning toast。两个文案都点明「转录里这条
+消息的末尾也写明了实际送达的内容」。
+
+**同一条规则的其余上限（grep `maxReview|truncat|已省略|slice\(0,|\[:[0-9]` 后逐条判定）.**
+
+| 位置 | 切什么 | 判定 |
+|---|---|---|
+| `backend/internal/httpapi/review_comment.go` | 用户写的评论引用与正文 | **本批修复**：计数 + 转录注 + 界面提示 |
+| `web/components/session/composer.tsx` `addImages` | 用户粘贴/拖入的图片，一次最多 4 张，多出的静默丢弃 | **本批修复**：`web/lib/session/attachments.ts` 先算 `dropped`，加入前 toast「一条消息最多 4 张图片，另外 N 张没有加入」；上限本身是产品决定，改的是「不说」 |
+| `backend/internal/httpapi/message_handlers.go` `firstLine` | 自动生成的会话标题取首行前 40 字 + `…` | 可以：标题是派生标签，消息本体（转录）原样保留，省略号也标了 |
+| `web/lib/session/format.ts` `truncate` | 工具轨迹、技能选择器、分支树、fork 预览的**显示** | 可以：纯展示预览，完整文本另有载体（展开的轨迹 / 文件 / 会话） |
+| `backend/internal/fsx/fsx.go`（2 MiB 预览、`truncationMarker`）、`snapshot`、`runtimedirs`、`diskquota` | 文件预览 / 目录树 / 快照清单 / 配额测量的上限 | 可以：不是用户输入，且都带 `truncated` 字段或可见标记；`19-preview.spec.ts` 钉住了「预览切了、下载仍是完整字节」 |
+| `backend/internal/workspaceremote/exec.go` `truncateOutput`、`forge.go` / `aio` / `provider_probe.go` 的 `truncate` | 命令输出、上游错误正文的**显示**截断 | 可以：展示用；错误信息本身指向真实原因，`truncated` 语义不涉及用户提交内容的丢失 |
+| `backend/internal/pi/stream.go` 的 `Truncated` 工具调用 | 模型输出在输出上限处被切断 | 可以：`truncated` 标记使调用不可执行，UI 也显示；不是用户输入 |
+| `backend/internal/auth/password.go`（bcrypt 72 字节） | 密码 | 可以：**拒绝**而不是截断，注释写明理由 |
+| `backend/internal/provision/provision.go`（slug 48 字符） | 由项目名派生的沙箱/分支名 | 可以：派生标识，项目名原样保存，重名有 `-2` 后缀 |
+| `web/components/session/composer.tsx` 发送时 `text.trim()` | 首尾空白 | 可以：不是内容（服务端也 trim），用户可见的文本不变 |
+
+**测试.** `backend/internal/httpapi/review_comment_test.go`：
+
+- `TestComposeReviewPromptCapsTruncateInsteadOfRefusing` **改为断言报告**：`quote_lines_kept=24`、
+  `quote_lines_omitted=6`、`quote_lines_shortened=1`、`quote_line_runes_cut=100`、`body_runes_cut=1000`，
+  且文本包含三段注、以注结尾；
+- `TestComposeReviewPromptSaysWhatItCut`：合成块以「仅前 24 行送达 / 已截断 1000 字」结尾；
+- `TestComposeReviewPromptWithinLimitsSaysNothing`：在限内 `trunc == nil` 且文本没有「注：」；
+- `TestPostMessageWithAReviewCommentReportsTruncation`：走真实 POST，断言响应 JSON 的五个计数**精确相等**，
+  且 runtime 收到的 prompt（= 转录）含注；
+- `TestPostMessageWithAReviewCommentWithinLimitsReportsNothing`：响应里没有 `review_truncation`。
+
+前端：`web/components/workspace/review-comment.test.tsx` 5 例（30 行选择出现发送前警告、正文超 4000 出现警告、
+限内不出现警告、响应带截断时渲染服务端计数、无截断时正常关闭）；
+`web/lib/session/attachments.test.ts` 5 例（一次粘贴超限、已有图片时超限、已满、文案含数量）。
+
+**fail-first（先跑测试，后改实现）.**
+
+```
+go test ./internal/httpapi -run '…ReportsTruncation|…SaysWhatItCut' -count=1
+--- FAIL: TestComposeReviewPromptSaysWhatItCut
+    the composed block does not end with "注：原始评论引用了 30 行，仅前 24 行送达；正文超出 4000 字，已截断 1000 字。"
+--- FAIL: TestPostMessageWithAReviewCommentReportsTruncation
+    the response did not report the truncation: {"accepted":true,"disposition":"started","queue_position":0,"run_id":"run_scripted"}
+（同一次运行里两条「限内不报告」用例通过——它们改前改后都必须通过）
+pnpm --dir web test -- --run review-comment
+  3 failed | 2 passed：找不到 review-comment-truncation-warning / review-comment-truncation-result
+```
+
+证据文件：`e2e/.artifacts/fail-first-review-truncation-go.log`、`fail-first-review-truncation-web.log`
+（未入库，`.artifacts` 被忽略）。
+
+**门禁（实测输出）.**
+
+```
+go build ./...                                   exit 0
+go vet ./...                                     exit 0
+go test ./... -count=1                           48 个包：44 ok + 4 no test files，0 FAIL
+pnpm --dir web test -- --run                     41 files / 305 tests passed
+pnpm --dir web exec next build                   ok
+pnpm --dir e2e test                              182 passed (8.7m)
+docker build --build-arg INSTALL_CHROMIUM=true -t piforge:local .   ok（sha256:d190dcc7af49…）
+pwsh scripts/deliver-check.ps1 -Image piforge:local   125/125 PASS，DRILL，exit 0（total 101.7s）
+```
+
+第一次跑 drill 是 **124/125**：唯一的 FAIL 是它自己的「source checkout is clean after the drill」守卫，
+因为当时改动还没提交（这正是那个检查存在的理由）。提交后原样重跑得到 125/125；两次证据分别在
+`e2e/.artifacts/delivery-drill/20261101-185545/`（124）与 `20261101-185735/`（125）。`pf-local`（7722）
+两次都 PASS「same container id / still running / /healthz 200」。
+
+`pnpm --dir web lint` 不在本批门禁内，且改动前就有 12 errors / 11 warnings（`use-pty.ts`、`workspace-panels.tsx`
+与 `review-comment.tsx` 里 `useReviewDrafts` 的 effect）；本批没有新增 lint 问题（新文件不在报错列表里）。
+
+**仍未做 / 边界.**
+
+- 计数只覆盖「合成时的切」；模型上下文窗口对这条消息的进一步裁剪在产品之外，无法从这里观察。
+- 前端镜像的三个上限是常量（`web/lib/review/limits.ts`）。服务端改上限时前端不会自动跟随；没有做成
+  `GET /v1/…/caps`，因为为一个纯提示多一个端点不值得，注释已写明「服务端是权威」。
+- 图片上限仍是 4；本批只保证它不再静默，没有改产品规则。
+- `pf-local`（:7722）未重启、未改动。

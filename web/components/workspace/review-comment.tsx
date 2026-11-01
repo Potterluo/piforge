@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { MessageSquareIcon, SendIcon, Trash2Icon, XIcon } from "lucide-react";
+import { MessageSquareIcon, SendIcon, Trash2Icon, TriangleAlertIcon, XIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -17,7 +17,9 @@ import {
   subscribeDrafts,
   type ReviewDraft,
 } from "@/lib/review/comments";
+import { describeReviewTruncation, reviewSelectionWarning } from "@/lib/review/limits";
 import type { CommentAnchor } from "@/lib/git/patch-lines";
+import type { PromptResult, ReviewTruncation } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -74,8 +76,8 @@ export async function sendReviewDraft(
   sessionId: string,
   draft: ReviewDraft,
   running: boolean,
-): Promise<void> {
-  await api.sessions.send(sessionId, {
+): Promise<PromptResult> {
+  return api.sessions.send(sessionId, {
     client_msg_id: newId(),
     // `text` is what the transcript would show if the server ever stops
     // composing; the server replaces it with the full path:line + quote.
@@ -91,6 +93,39 @@ export async function sendReviewDraft(
       body: draft.body,
     },
   });
+}
+
+/**
+ * ReviewTruncationNotice renders the server's report — not a client-side guess
+ * — after a send that was still cut. It stays on screen until dismissed, where
+ * a toast would disappear before someone reading a long diff looked back.
+ */
+export function ReviewTruncationNotice({
+  truncation,
+  onClose,
+}: {
+  truncation: ReviewTruncation;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      data-testid="review-comment-truncation-result"
+      role="status"
+      className="flex flex-col gap-1 rounded border border-amber-500/50 bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-900 dark:text-amber-200"
+    >
+      <span className="flex items-center gap-1 font-medium">
+        <TriangleAlertIcon className="size-3 shrink-0" />
+        已发送，但有内容被截断
+      </span>
+      <span>{describeReviewTruncation(truncation)}。</span>
+      <span className="opacity-80">
+        转录里这条消息的末尾也写明了实际送达的内容，agent 看到的正是那一段。
+      </span>
+      <Button size="xs" variant="outline" className="self-start" onClick={onClose}>
+        知道了
+      </Button>
+    </div>
+  );
 }
 
 /**
@@ -117,6 +152,12 @@ export function ReviewCommentEditor({
   const events = useOptionalSessionEventState();
   const [text, setText] = React.useState(existing?.body ?? "");
   const [busy, setBusy] = React.useState(false);
+  // Set when the server says it had to cut this comment. The editor stays open
+  // with the report instead of closing, so the cut is seen where it happened.
+  const [truncation, setTruncation] = React.useState<ReviewTruncation | null>(null);
+  // The composer knows the selection size, so it can say what the caps will cut
+  // before the send — the response is the fallback, not the first notice.
+  const warning = reviewSelectionWarning(anchor.quote, text);
   // Stable across re-renders: a fresh uuid per keystroke would make the stored
   // draft's identity depend on how many times the user typed before saving.
   const id = React.useMemo(
@@ -156,8 +197,16 @@ export function ReviewCommentEditor({
     }
     setBusy(true);
     try {
-      await sendReviewDraft(sessionId, draft, Boolean(events?.state.running));
+      const result = await sendReviewDraft(sessionId, draft, Boolean(events?.state.running));
       remove(draft.id);
+      if (result.review_truncation) {
+        // The comment is sent; what changes is that the record says what the
+        // caps took. Clearing the body and keeping the report up means the
+        // editor cannot be used to send the same comment twice.
+        setText("");
+        setTruncation(result.review_truncation);
+        return;
+      }
       toast.success(events?.state.running ? "已改口：这条评论已发给 agent" : "已发送给 agent");
       onClose();
     } catch (error) {
@@ -166,6 +215,19 @@ export function ReviewCommentEditor({
       setBusy(false);
     }
   };
+
+  if (truncation) {
+    return (
+      <div
+        data-testid="review-comment-editor"
+        data-path={anchor.path}
+        data-line={anchor.line}
+        className="flex flex-col gap-1.5 border-y border-sky-500/40 bg-sky-500/5 px-2 py-1.5"
+      >
+        <ReviewTruncationNotice truncation={truncation} onClose={onClose} />
+      </div>
+    );
+  }
 
   return (
     <div
@@ -188,6 +250,16 @@ export function ReviewCommentEditor({
         >
           {anchor.quote.join("\n")}
         </pre>
+      ) : null}
+      {warning ? (
+        <p
+          data-testid="review-comment-truncation-warning"
+          role="status"
+          className="flex items-start gap-1 text-[10px] leading-snug text-amber-700 dark:text-amber-300"
+        >
+          <TriangleAlertIcon className="mt-0.5 size-3 shrink-0" />
+          <span>{warning}</span>
+        </p>
       ) : null}
       <Textarea
         data-testid="review-comment-input"
@@ -251,8 +323,17 @@ export function ReviewCommentRow({
   const send = async () => {
     setBusy(true);
     try {
-      await sendReviewDraft(sessionId, draft, Boolean(events?.state.running));
+      const result = await sendReviewDraft(sessionId, draft, Boolean(events?.state.running));
       remove(draft.id);
+      // No editor stays open on this path, so the report goes where the send
+      // did: a toast that names the counts, and the transcript note beside it.
+      if (result.review_truncation) {
+        toast.warning("已发送，但有内容被截断", {
+          description: describeReviewTruncation(result.review_truncation),
+          duration: 12_000,
+        });
+        return;
+      }
       toast.success(events?.state.running ? "已改口：这条评论已发给 agent" : "已发送给 agent");
     } catch (error) {
       toast.error("发送失败", { description: humanizeError(error) });

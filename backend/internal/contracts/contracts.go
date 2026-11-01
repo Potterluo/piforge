@@ -314,6 +314,37 @@ type PromptResult struct {
 	// resolved. The UI turns the pair into one sentence so a run never silently
 	// answers from a different model than the one on screen.
 	ModelFallbackFrom string `json:"model_fallback_from,omitempty"`
+	// ReviewTruncation is present only when the inline-comment composer had to
+	// cut the quote or the body to fit its caps (FR-12.3). The composed message
+	// also says what was cut — it is the transcript entry, so the record cannot
+	// disagree with what the agent received — and this field is the same counts
+	// in a form a caller can assert on without parsing Chinese text.
+	ReviewTruncation *ReviewTruncation `json:"review_truncation,omitempty"`
+}
+
+// ReviewTruncation is what the inline-comment composer left out: how many
+// quoted lines were dropped, how many were shortened, and how many runes were
+// cut from the quoted lines and from the comment body.
+//
+// It is reported rather than silent because a reviewer who selected 30 lines
+// believes all 30 reached the agent; the caps are budgets, not validation, so
+// the honest answer is "sent, and here is what it cost".
+type ReviewTruncation struct {
+	// QuoteLinesKept is how many of the submitted quote lines are in the message.
+	QuoteLinesKept int `json:"quote_lines_kept"`
+	// QuoteLinesOmitted is how many were dropped past the line cap.
+	QuoteLinesOmitted int `json:"quote_lines_omitted"`
+	// QuoteLinesShortened counts the kept lines cut at the per-line rune cap.
+	QuoteLinesShortened int `json:"quote_lines_shortened"`
+	// QuoteLineRunesCut is the total runes removed across those lines.
+	QuoteLineRunesCut int `json:"quote_line_runes_cut"`
+	// BodyRunesCut is how many runes of the comment body were cut.
+	BodyRunesCut int `json:"body_runes_cut"`
+}
+
+// Truncated reports whether anything was actually cut.
+func (t ReviewTruncation) Truncated() bool {
+	return t.QuoteLinesOmitted > 0 || t.QuoteLinesShortened > 0 || t.BodyRunesCut > 0
 }
 
 // InterruptResult carries back the text the user had queued, so the composer

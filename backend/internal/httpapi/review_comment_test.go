@@ -1,10 +1,13 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/piforge/piforge/backend/internal/contracts"
 )
 
 // TestComposeReviewPromptNamesFileLineAndQuote pins the shape of the message the
@@ -13,7 +16,7 @@ import (
 // code is now.
 func TestComposeReviewPromptNamesFileLineAndQuote(t *testing.T) {
 	file := strings.Split("package cache\n\nfunc Get(k string) any {\n\treturn cache[k]\n}\n", "\n")
-	got, err := composeReviewPrompt(ReviewComment{
+	got, _, err := composeReviewPrompt(ReviewComment{
 		Path:  "internal/cache/cache.go",
 		Line:  4,
 		Side:  "new",
@@ -54,7 +57,7 @@ func f() {
 	return 1
 }
 `, "\n")
-	got, err := composeReviewPrompt(ReviewComment{
+	got, _, err := composeReviewPrompt(ReviewComment{
 		Path:  "x.go",
 		Line:  2,
 		Quote: []string{"func f() {"},
@@ -79,7 +82,7 @@ func f() {
 // message says so instead of inventing a line.
 func TestComposeReviewPromptWhenTheCodeIsGone(t *testing.T) {
 	file := strings.Split("package x\n\nfunc g() {}\n", "\n")
-	got, err := composeReviewPrompt(ReviewComment{
+	got, _, err := composeReviewPrompt(ReviewComment{
 		Path:  "x.go",
 		Line:  3,
 		Quote: []string{"func f() {}"},
@@ -97,7 +100,7 @@ func TestComposeReviewPromptWhenTheCodeIsGone(t *testing.T) {
 // the new file does not contain, so the moved-line search must not run.
 func TestComposeReviewPromptOnARemovedLine(t *testing.T) {
 	file := strings.Split("package x\n\nfunc g() {}\n", "\n")
-	got, err := composeReviewPrompt(ReviewComment{
+	got, _, err := composeReviewPrompt(ReviewComment{
 		Path:  "x.go",
 		Line:  2,
 		Side:  "old",
@@ -115,7 +118,7 @@ func TestComposeReviewPromptOnARemovedLine(t *testing.T) {
 // TestComposeReviewPromptWithoutTheFile: the workspace may be unavailable. The
 // comment still goes out, and the message says the quote was not verified.
 func TestComposeReviewPromptWithoutTheFile(t *testing.T) {
-	got, err := composeReviewPrompt(ReviewComment{
+	got, _, err := composeReviewPrompt(ReviewComment{
 		Path:  "x.go",
 		Line:  1,
 		Quote: []string{"package x"},
@@ -145,7 +148,7 @@ func TestReviewCommentValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := composeReviewPrompt(tc.in, nil, false); err == nil {
+			if _, _, err := composeReviewPrompt(tc.in, nil, false); err == nil {
 				t.Fatalf("%+v was accepted", tc.in)
 			}
 		})
@@ -209,7 +212,7 @@ func TestComposeReviewPromptCapsTruncateInsteadOfRefusing(t *testing.T) {
 	}
 	body := strings.Repeat("z", 5000)
 
-	got, err := composeReviewPrompt(ReviewComment{
+	got, cut, err := composeReviewPrompt(ReviewComment{
 		Path:    "notes.txt",
 		Line:    3,
 		EndLine: 99, // past the end of the file: accepted, it is only a header
@@ -218,6 +221,33 @@ func TestComposeReviewPromptCapsTruncateInsteadOfRefusing(t *testing.T) {
 	}, nil, false)
 	if err != nil {
 		t.Fatalf("the caps must not refuse the comment: %v", err)
+	}
+	// The report is the point of this test: the caller is told, with exact
+	// counts, what the caps took. A cut that only shows up as a marker inside
+	// the text is the defect this replaced.
+	if cut == nil {
+		t.Fatalf("the caps cut the comment without reporting it:\n%s", got)
+	}
+	want := contracts.ReviewTruncation{
+		QuoteLinesKept:      24,
+		QuoteLinesOmitted:   6,
+		QuoteLinesShortened: 1,
+		QuoteLineRunesCut:   100,
+		BodyRunesCut:        1000,
+	}
+	if *cut != want {
+		t.Fatalf("truncation = %+v, want %+v", *cut, want)
+	}
+	// The same counts are in the message, because that string is the transcript
+	// entry: the record has to show what actually reached the agent.
+	for _, want := range []string{
+		"注：原始评论引用了 30 行，仅前 24 行送达；",
+		"第 3 行引用超过 400 字，已截断 100 字；",
+		"正文超出 4000 字，已截断 1000 字。",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("the composed block is missing %q:\n%s", want, got)
+		}
 	}
 
 	// The header keeps the anchor the caller sent, even past EOF.
@@ -246,6 +276,138 @@ func TestComposeReviewPromptCapsTruncateInsteadOfRefusing(t *testing.T) {
 	}
 	if strings.Contains(got, strings.Repeat("z", 4001)) {
 		t.Fatalf("the body kept more than 4000 runes")
+	}
+}
+
+// TestComposeReviewPromptSaysWhatItCut: the caps are budgets, so the composed
+// message — which is also the transcript entry and the text the agent receives —
+// must end by saying what did not fit. A reviewer who selected 30 lines has to
+// be able to read, in the record, that only 24 arrived.
+func TestComposeReviewPromptSaysWhatItCut(t *testing.T) {
+	quote := make([]string, 0, 30)
+	for i := 1; i <= 30; i++ {
+		quote = append(quote, fmt.Sprintf("line %d", i))
+	}
+	got, cut, err := composeReviewPrompt(ReviewComment{
+		Path:  "notes.txt",
+		Line:  3,
+		Quote: quote,
+		Body:  strings.Repeat("z", 5000),
+	}, nil, false)
+	if err != nil {
+		t.Fatalf("compose: %v", err)
+	}
+	if cut == nil {
+		t.Fatalf("compose did not report the truncation:\n%s", got)
+	}
+	want := "注：原始评论引用了 30 行，仅前 24 行送达；正文超出 4000 字，已截断 1000 字。"
+	if !strings.HasSuffix(strings.TrimRight(got, "\n"), want) {
+		t.Fatalf("the composed block does not end with %q:\n%s", want, got)
+	}
+}
+
+// TestComposeReviewPromptWithinLimitsSaysNothing: a comment that fits must not
+// grow a note. An always-on warning is noise, and noise is how a real one gets
+// ignored.
+func TestComposeReviewPromptWithinLimitsSaysNothing(t *testing.T) {
+	got, cut, err := composeReviewPrompt(ReviewComment{
+		Path:  "notes.txt",
+		Line:  2,
+		Quote: []string{"line 2", "line 3"},
+		Body:  "这一行不要动。",
+	}, nil, false)
+	if err != nil {
+		t.Fatalf("compose: %v", err)
+	}
+	if cut != nil {
+		t.Fatalf("a comment within the caps reported %+v", *cut)
+	}
+	if strings.Contains(got, "注：") {
+		t.Fatalf("a comment within the caps must not carry a truncation note:\n%s", got)
+	}
+}
+
+// TestPostMessageWithAReviewCommentReportsTruncation is the API half: the
+// caller is told what was cut, with exact counts, in the response — not left to
+// discover it by reading the composed text. The prompt the runtime received is
+// asserted too, because that string is the transcript entry.
+func TestPostMessageWithAReviewCommentReportsTruncation(t *testing.T) {
+	env := newTestEnv(t)
+	user := env.mkUser("reviewer3@piforge.local", "reviewer-pass-123", "user")
+	_, sess := env.mkSessionFor(user.ID, "review3")
+	c := env.login("reviewer3@piforge.local", "reviewer-pass-123")
+
+	quote := make([]string, 0, 30)
+	for i := 1; i <= 30; i++ {
+		quote = append(quote, fmt.Sprintf("line %d", i))
+	}
+	rec := env.doAuthed(http.MethodPost, "/v1/sessions/"+sess.ID+"/messages", map[string]any{
+		"client_msg_id": "review-truncated",
+		"review_comment": map[string]any{
+			"path":  "notes.txt",
+			"line":  3,
+			"quote": quote,
+			"body":  strings.Repeat("z", 5000),
+		},
+	}, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST messages: %d %s", rec.Code, rec.Body.String())
+	}
+
+	type report struct {
+		QuoteLinesKept      int `json:"quote_lines_kept"`
+		QuoteLinesOmitted   int `json:"quote_lines_omitted"`
+		QuoteLinesShortened int `json:"quote_lines_shortened"`
+		QuoteLineRunesCut   int `json:"quote_line_runes_cut"`
+		BodyRunesCut        int `json:"body_runes_cut"`
+	}
+	var got struct {
+		ReviewTruncation *report `json:"review_truncation"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.ReviewTruncation == nil {
+		t.Fatalf("the response did not report the truncation: %s", rec.Body.String())
+	}
+	if want := (report{24, 6, 0, 0, 1000}); *got.ReviewTruncation != want {
+		t.Fatalf("review_truncation = %+v, want %+v", *got.ReviewTruncation, want)
+	}
+
+	env.runtime.mu.Lock()
+	defer env.runtime.mu.Unlock()
+	if len(env.runtime.prompts) != 1 {
+		t.Fatalf("runtime received %d prompts, want 1", len(env.runtime.prompts))
+	}
+	prompt := env.runtime.prompts[0].Text
+	if !strings.Contains(prompt, "仅前 24 行送达") || !strings.Contains(prompt, "已截断 1000 字") {
+		t.Fatalf("the transcript text does not say what was cut:\n%s", prompt)
+	}
+}
+
+// TestPostMessageWithAReviewCommentWithinLimitsReportsNothing: the shape is
+// absent, not zeroed, when nothing was cut — a client that renders on presence
+// must not show "0 lines omitted".
+func TestPostMessageWithAReviewCommentWithinLimitsReportsNothing(t *testing.T) {
+	env := newTestEnv(t)
+	user := env.mkUser("reviewer4@piforge.local", "reviewer-pass-123", "user")
+	_, sess := env.mkSessionFor(user.ID, "review4")
+	c := env.login("reviewer4@piforge.local", "reviewer-pass-123")
+
+	rec := env.doAuthed(http.MethodPost, "/v1/sessions/"+sess.ID+"/messages", map[string]any{
+		"client_msg_id": "review-small",
+		"review_comment": map[string]any{
+			"path":  "notes.txt",
+			"line":  2,
+			"quote": []string{"line 2"},
+			"body":  "这一行不要动。",
+		},
+	}, c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST messages: %d %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "review_truncation") {
+		t.Fatalf("a comment within the caps reported a truncation: %s", rec.Body.String())
 	}
 }
 

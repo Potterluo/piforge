@@ -74,19 +74,23 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	// FR-12.3: a comment on a line is sent through this same endpoint. Its text is
 	// composed here, before the empty-text check, because the client sends the
-	// anchor (path, line, quote) rather than a prompt.
+	// anchor (path, line, quote) rather than a prompt. The composer also reports
+	// what its size caps cut, so the response can say it instead of leaving the
+	// caller to discover it by reading the composed text.
+	var reviewTruncation *contracts.ReviewTruncation
 	if in.ReviewComment != nil {
 		if in.ContinueInterrupted {
 			s.fail(w, r, apiErr(contracts.ErrInvalidArgument,
 				"continue_interrupted and review_comment cannot be combined"))
 			return
 		}
-		composed, cerr := s.reviewPrompt(r.Context(), user.ID, sess, *in.ReviewComment)
+		composed, truncated, cerr := s.reviewPrompt(r.Context(), user.ID, sess, *in.ReviewComment)
 		if cerr != nil {
 			s.fail(w, r, cerr)
 			return
 		}
 		in.Text = composed
+		reviewTruncation = truncated
 	}
 	// A run that ended without a result has one deliberate recovery action: the
 	// server composes a follow-up from the event log (what was asked, why the run
@@ -151,9 +155,13 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		s.recordPausedSiblings(r, user.ID, sess, paused)
 	}
 
-	// Replay: return exactly what the first submission produced.
+	// Replay: return exactly what the first submission produced. The truncation
+	// report is recomputed above from the same request, so a retry does not lose
+	// the counts the first answer carried.
 	if rec, err := s.deps.Store.Message(r.Context(), user.ID, sess.ID, clientID); err == nil {
-		writeJSON(w, http.StatusOK, promptResultFromRecord(rec))
+		replayed := promptResultFromRecord(rec)
+		replayed.ReviewTruncation = reviewTruncation
+		writeJSON(w, http.StatusOK, replayed)
 		return
 	} else if !errors.Is(err, store.ErrNotFound) {
 		s.fail(w, r, err)
@@ -297,6 +305,8 @@ func (s *server) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		res.ModelRef = sess.ModelRef
 		res.ModelFallbackFrom = resolved.FallbackFrom
 	}
+	// Same rule for the comment caps: the caller is told what the composer cut.
+	res.ReviewTruncation = reviewTruncation
 
 	// The new-session dialog promises 留空则用第一条消息自动命名. A session that keeps
 	// a placeholder title is listed, forked and shared under a name that says
