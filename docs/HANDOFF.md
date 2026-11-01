@@ -56,8 +56,8 @@ then the sandbox image **from** the control plane so `pi` and `/opt/piforge/pifo
 inside it at the same version — runs `backend/cmd/preflight` (Docker Engine ≥ 25, all
 three images, and that the sandbox image really contains `/opt/piforge/piforged` and
 `pi`), then starts the stack on 7723 with a fresh volume and waits for `/healthz`. It
-prints the URL and the seeded accounts at the end, with each image's id, build time,
-digest and the reason it was or was not rebuilt. `-Check` runs only the preflight; `-BuildOnly` builds what is stale and stops; `-Down` removes the stack, its
+prints the URL, the effective port and the seeded accounts at the end, with each image's
+id, build time, digest and the reason it was or was not rebuilt. `-Check` runs only the preflight; `-BuildOnly` builds what is stale and stops; `-Down` removes the stack, its
 sandboxes and their volumes; `-Rebuild` forces all three images. `-EgressFile` points at
 another egress policy than `deploy/tenant-egress.json` (the probe below uses that).
 
@@ -76,6 +76,12 @@ the past made the script print `piforge:isolated is current` while the tree diff
 fallback for a tree where no digest can be computed at all (no git), and the log line says
 when that happens. `scripts/verify-image-freshness.ps1` runs the four cases and prints
 each decision.
+
+**The port is part of the stack's identity.** If `pf-isolated` is already up on another
+port, `up-isolated.ps1` refuses and names the port it is on instead of re-publishing the
+live stack; `-Force` moves it (and says the old port will stop answering). `-Down` ignores
+the port: teardown must work whatever was typed. The effective port is printed before
+anything is built and again in the final summary.
 
 The stack's sandboxes have **no route to the public internet** by default: each tenant's
 bridge is created `--internal` from the policy in `deploy/tenant-egress.json`, while the

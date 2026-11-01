@@ -2507,6 +2507,12 @@ ssh> -c core.pager= -c core.askPass= -c core.gitProxy= -c credential.helper= -c 
 `-Rebuild` 照旧强制全部重建，新增的 `-BuildOnly` 只构建、不启动（`scripts/verify-image-freshness.ps1` 用它跑
 四个用例：改内容且回填旧 mtime → 重建；恢复时间戳 → 不重建；只 touch → 不重建；`-Rebuild` → 重建）。
 
+**(2) 端口是这台栈的身份的一部分。** 旧脚本对 `-Port 7724` 什么都不说：同一个 compose 项目原地重建，
+7723 悄悄不再应答。现在启动前先读这个项目**实际发布**的端口（`docker ps` 按
+`com.docker.compose.project=<p>` 过滤，再 `docker inspect` 取 `7700/tcp` 的 `HostPort`）：项目已经在别的端口上
+就**拒绝**，并点名它现在在哪个端口；确实要搬，`-Force`（并明确说旧端口会停止应答）。`-Down` 在检查之前执行，
+所以**任何端口都能拆**——拆栈不该取决于上一次敲的是哪个端口。生效端口在构建前打印一次，最终摘要里再打印一次。
+
 ## 2. Kubernetes：四种做法，各自什么时候是对的
 
 ### 2.1 方案（i）：一个 Pod 一个沙箱，控制面用 client-go 管

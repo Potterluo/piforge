@@ -32,6 +32,9 @@ param(
     # without bringing a stack up.
     [switch]$BuildOnly,
     [switch]$Rebuild,
+    # Move a stack that is already up on another port. Without it, a different
+    # -Port is refused instead of silently re-publishing the live stack.
+    [switch]$Force,
     [switch]$Down,
     [string]$Provider = "volc|https://api.example.com/v1|deepseek-v4-flash",
     [string]$ProviderKey = $env:PIFORGE_DRILL_KEY,
@@ -245,6 +248,10 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     Fail "docker is not on PATH; the isolated deployment runs three containers and needs Docker Engine 25+"
 }
 
+# The effective port is printed before anything is removed, built or started:
+# it is the one value an operator has to know to find the stack again.
+Step "isolated stack: project $Project, effective port $Port (http://127.0.0.1:$Port)"
+
 # Down first: it is the only operation that must work even when the images are
 # stale or the compose file has grown a required variable.
 if ($Down) {
@@ -288,6 +295,46 @@ if ($Down) {
     Write-Host "removed: containers labelled piforge.user, volumes named piforge-ws-*, networks labelled piforge.tenant, network piforge-sandboxes"
     Write-Host "kept: the image tags (pass -Rebuild after a source change)"
     exit 0
+}
+
+# A compose project publishes exactly one port. Re-running the same project with
+# another -Port re-creates its containers on the new port and the old one simply
+# stops answering — a live stack re-pointed without a word (adversarial round 6).
+# So: the port a project is already on is read from Docker, and a different
+# -Port is refused unless it is said out loud with -Force. `-Down` runs before
+# this and therefore works whatever port was passed.
+
+# Get-PublishedPort is the host port the project's control plane is published
+# on, or $null when the project is not up (or publishes none).
+function Get-PublishedPort([string]$project) {
+    $ids = @(& docker ps -q --filter "label=com.docker.compose.project=$project" 2>$null)
+    foreach ($id in $ids) {
+        if (-not $id) { continue }
+        $service = (& docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' $id 2>$null | Out-String).Trim()
+        if ($service -ne 'piforge') { continue }
+        $raw = (& docker inspect -f '{{json .NetworkSettings.Ports}}' $id 2>$null | Out-String).Trim()
+        if ([string]::IsNullOrWhiteSpace($raw) -or $raw -eq 'null') { continue }
+        try { $published = $raw | ConvertFrom-Json } catch { continue }
+        foreach ($entry in @($published.'7700/tcp')) {
+            if ($entry -and $entry.HostPort) { return [int]$entry.HostPort }
+        }
+    }
+    return $null
+}
+
+$livePort = Get-PublishedPort $Project
+if ($null -ne $livePort -and $livePort -ne $Port) {
+    if (-not $Force) {
+        $refusal = (
+            "project {0} is already up on port {1}; refusing to re-point it to {2} " +
+            "(the old port would stop answering). Pass -Force to move it, or -Down first."
+        ) -f $Project, $livePort, $Port
+        Fail $refusal
+    }
+    Write-Host ("    -Force: moving project {0} from port {1} to {2}; {1} will stop answering" -f $Project, $livePort, $Port) -ForegroundColor Yellow
+}
+elseif ($null -ne $livePort) {
+    Write-Host ("    project {0} is already up on this port; the stack will be re-created in place" -f $Project)
 }
 
 # ---------------------------------------------------------------------------
@@ -461,6 +508,7 @@ if (-not $ok) {
 
 Write-Host ""
 Write-Host "PiForge (isolated) is up: http://127.0.0.1:$Port/login" -ForegroundColor Green
+Write-Host "  port     : $Port (project $Project; http://127.0.0.1:$Port)"
 Write-Host "  accounts : admin@piforge.local / piforge-admin-123 (change before exposing)"
 Write-Host "              dev@piforge.local   / piforge-dev-123"
 # Each image's id, build time, digest and the reason it was or was not rebuilt:
