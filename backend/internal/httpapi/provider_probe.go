@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/urlguard"
 )
 
 // providerProbeTimeout bounds the test call. A provider that cannot answer a
@@ -59,33 +61,58 @@ func (s *server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := probeProvider(r.Context(), provider, key)
+	// The probe is a fetch of the tenant's own URL from the control plane's
+	// network position, so it asks the policy first and answers with the same
+	// typed 400 the save path uses. adversarial acceptance #4 attack 21 measured
+	// the old behaviour: POST /v1/providers with base_url=http://a4marker:9021,
+	// then /test, and the marker container answered {"ok":true}.
+	if err := s.refuseOutboundURL(r.Context(), provider.BaseURL, "provider base_url"); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	result, perr := probeProvider(r.Context(), provider, key, s.outboundPolicy())
+	if perr != nil {
+		// A redirect to a refused target, or a name that stopped resolving, is
+		// the same typed 400 as a save-time refusal rather than a 200 that
+		// quietly says "not ok".
+		s.fail(w, r, s.urlRefusal(r.Context(), "provider base_url", perr))
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
 // probeProvider performs the provider-specific minimal call.
-func probeProvider(ctx context.Context, provider *contracts.Provider, key string) providerTestResult {
+func probeProvider(ctx context.Context, provider *contracts.Provider, key string, policy *urlguard.Policy) (providerTestResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, providerProbeTimeout)
 	defer cancel()
 
 	target, body, headers, err := probeRequest(provider, key)
 	if err != nil {
-		return providerTestResult{OK: false, Message: err.Error()}
+		return providerTestResult{OK: false, Message: err.Error()}, nil
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
-		return providerTestResult{OK: false, Message: "cannot build the test request"}
+		return providerTestResult{OK: false, Message: "cannot build the test request"}, nil
 	}
 	for name, value := range headers {
 		req.Header.Set(name, value)
 	}
 
+	// The client dials only verified addresses and re-validates every redirect,
+	// so a base_url that answers 302 to the metadata service is refused rather
+	// than followed.
+	client := policy.Client(providerProbeTimeout)
 	started := time.Now()
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	latency := time.Since(started).Milliseconds()
 	if err != nil {
-		return providerTestResult{OK: false, LatencyMS: latency, Message: truncate(err.Error(), 300)}
+		var refusal *urlguard.Refusal
+		if errors.As(err, &refusal) {
+			return providerTestResult{}, refusal
+		}
+		return providerTestResult{OK: false, LatencyMS: latency, Message: truncate(err.Error(), 300)}, nil
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -98,7 +125,7 @@ func probeProvider(ctx context.Context, provider *contracts.Provider, key string
 	if !result.OK {
 		result.Message = truncate(upstreamMessage(payload), 300)
 	}
-	return result
+	return result, nil
 }
 
 // apiBase normalises a provider's base URL so that appending a path never

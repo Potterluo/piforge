@@ -8,18 +8,21 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/diskquota"
 	"github.com/piforge/piforge/backend/internal/tenantfs"
+	"github.com/piforge/piforge/backend/internal/urlguard"
 )
 
 // Importing skills from a repository (PRD FR-14.x).
@@ -35,6 +38,28 @@ import (
 // skillImportMaxBytes caps how much a single import may pull in, so a mistake (a repo of
 // binaries) cannot fill the disk.
 const skillImportMaxBytes = 4 << 20
+
+// DefaultSkillCloneMaxBytes bounds the *checkout* a clone may write, measured
+// while git runs and again when it exits.
+//
+// Why a second cap: the 4 MB cap above is enforced by the walk, after the clone
+// has already written the whole tree (adversarial acceptance #4, attack 10: a
+// 32 MiB repository left 38 829 857 B in /tmp and a 268 MiB one left
+// 268 800 878 B, all root-owned on the same overlay as /data). "The read is
+// capped" was true and useless: the disk had already been spent. This cap is
+// checked by a watchdog that measures the destination every 25 ms and kills git
+// when it crosses the line, and once more after git exits; either way the
+// directory is deleted and the import is refused with a 400 that names the cap
+// and the bytes measured. It is a configuration (-skill-clone-max-bytes /
+// PIFORGE_SKILL_CLONE_MAX_BYTES) because "how big a repository may this
+// deployment fetch" is an operator's judgement.
+const DefaultSkillCloneMaxBytes = 16 << 20
+
+// clonePollInterval is how often the watchdog measures the checkout. It is the
+// overshoot window: git may write for at most this long after the cap is
+// crossed, which is why the measured worst case (see docs) is "cap + one
+// interval of writes", not "cap".
+const clonePollInterval = 25 * time.Millisecond
 
 // handleImportSkills clones a git URL and imports the skills it contains.
 func (s *server) handleImportSkills(w http.ResponseWriter, r *http.Request) {
@@ -62,6 +87,17 @@ func (s *server) handleImportSkills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A clone over http(s) is this process fetching a tenant URL from its own
+	// network position, which is exactly what the report measured through the
+	// importer's git (`http://127.0.0.1:7700/healthz`,
+	// `http://169.254.169.254/...`). The policy refuses those before git runs.
+	if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "git@") {
+		if err := s.refuseOutboundURL(r.Context(), gitURLForPolicy(url), "skill repository URL"); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 120*time.Second)
 	defer cancel()
 
@@ -75,7 +111,7 @@ func (s *server) handleImportSkills(w http.ResponseWriter, r *http.Request) {
 	// The clone is confined twice: git is told not to create links (below), and
 	// the repository's own index is refused if it declares one. See
 	// cloneSkillRepo and refuseDeclaredSymlinks.
-	if cerr := cloneSkillRepo(ctx, url, in.Ref, dir); cerr != nil {
+	if cerr := cloneSkillRepo(ctx, url, in.Ref, dir, s.skillCloneMaxBytes(), s.outboundPolicy()); cerr != nil {
 		s.fail(w, r, cerr)
 		return
 	}
@@ -415,8 +451,8 @@ type skillCandidate struct {
 //
 // Depth stays at 1: the import only reads what a skill directory contains, and a
 // tenant's repository should not be able to make this process fetch its history.
-func cloneSkillRepo(ctx context.Context, url, ref, dir string) error {
-	if cerr := cloneCheckout(ctx, url, ref, dir); cerr != nil {
+func cloneSkillRepo(ctx context.Context, url, ref, dir string, maxBytes int64, policy *urlguard.Policy) error {
+	if cerr := cloneCheckout(ctx, url, ref, dir, maxBytes, policy); cerr != nil {
 		return cerr
 	}
 	if rerr := refuseDeclaredSymlinks(ctx, dir); rerr != nil {
@@ -429,21 +465,159 @@ func cloneSkillRepo(ctx context.Context, url, ref, dir string) error {
 // text files instead of created. It is separate from cloneSkillRepo so the flag
 // that makes a link harmless can be tested without the index check that refuses
 // the repository anyway.
-func cloneCheckout(ctx context.Context, url, ref, dir string) error {
-	args := []string{"-c", "core.symlinks=false", "clone", "--depth", "1"}
+func cloneCheckout(ctx context.Context, url, ref, dir string, maxBytes int64, policy *urlguard.Policy) error {
+	if maxBytes <= 0 {
+		maxBytes = DefaultSkillCloneMaxBytes
+	}
+	// --depth 1 --single-branch --no-tags: the importer reads one commit's tree,
+	// so a tenant's repository must not be able to make this process fetch its
+	// history or its other branches. (Before this, --depth 1 already limited the
+	// commit graph but every branch tip and tag was still advertised and, for a
+	// ref named explicitly, fetched.)
+	args := []string{"-c", "core.symlinks=false", "clone", "--depth", "1", "--single-branch", "--no-tags"}
 	if strings.TrimSpace(ref) != "" {
 		args = append(args, "--branch", strings.TrimSpace(ref))
 	}
+	// A name the policy verified is pinned to the address it verified, which
+	// closes the window between the check above and git's own DNS lookup.
+	args = append(args, gitResolveArgs(ctx, policy, url)...)
 	args = append(args, url, dir)
+
 	cmd := exec.CommandContext(ctx, "git", args...)
-	if out, cerr := cmd.CombinedOutput(); cerr != nil {
-		detail := strings.TrimSpace(string(out))
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if cerr := cmd.Start(); cerr != nil {
+		return apiErr(contracts.ErrInternal, "无法启动 git：%v", cerr)
+	}
+
+	// The watchdog: measure the checkout while it is being written, and stop git
+	// the moment it is over the cap. Without this the cap is a post-mortem: the
+	// report's 268 MiB clone is 268 MiB on disk before anything reads it.
+	var (
+		peak   atomic.Int64
+		killed atomic.Bool
+		stop   = make(chan struct{})
+		done   = make(chan struct{})
+	)
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(clonePollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				size, merr := treeBytes(dir)
+				if merr != nil {
+					continue
+				}
+				if size > peak.Load() {
+					peak.Store(size)
+				}
+				if size > maxBytes {
+					peak.Store(size)
+					killed.Store(true)
+					_ = cmd.Process.Kill()
+					return
+				}
+			}
+		}
+	}()
+
+	waitErr := cmd.Wait()
+	close(stop)
+	<-done
+
+	measured, merr := treeBytes(dir)
+	if merr == nil && measured > peak.Load() {
+		peak.Store(measured)
+	}
+	if killed.Load() || (merr == nil && measured > maxBytes) {
+		_ = os.RemoveAll(dir)
+		return apiErr(contracts.ErrInvalidArgument,
+			"仓库克隆超过了单次导入的克隆上限（%s）：已写入 %s 时停止并删除，没有导入任何 Skill。"+
+				"请换一个更小的仓库，或请管理员调整 -skill-clone-max-bytes / PIFORGE_SKILL_CLONE_MAX_BYTES",
+			diskquota.HumanBytes(maxBytes), diskquota.HumanBytes(peak.Load()))
+	}
+	if waitErr != nil {
+		detail := strings.TrimSpace(out.String())
 		if len(detail) > 400 {
 			detail = detail[len(detail)-400:]
 		}
 		return apiErr(contracts.ErrInvalidArgument, "克隆失败：%s", detail)
 	}
 	return nil
+}
+
+// treeBytes measures everything under dir, including .git: the pack and the
+// checkout are both disk this process spent, and the report counted both.
+func treeBytes(dir string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(dir, func(_ string, entry os.DirEntry, err error) error {
+		if err != nil {
+			// A file git renamed under us is not a measurement failure.
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, ierr := entry.Info()
+		if ierr != nil {
+			if os.IsNotExist(ierr) {
+				return nil
+			}
+			return ierr
+		}
+		total += info.Size()
+		return nil
+	})
+	return total, err
+}
+
+// gitURLForPolicy turns a scp-style `git@host:path` address into the https URL
+// the policy understands, so the same host rules apply to both shapes.
+func gitURLForPolicy(raw string) string {
+	if !strings.HasPrefix(raw, "git@") {
+		return raw
+	}
+	rest := strings.TrimPrefix(raw, "git@")
+	host, path, ok := strings.Cut(rest, ":")
+	if !ok {
+		return raw
+	}
+	// The transport differs (ssh, not https) but the question is the same one —
+	// where does this host live — so it is checked as an https URL of it.
+	return "https://" + host + "/" + strings.TrimPrefix(path, "/")
+}
+
+// gitResolveArgs pins the name git is about to fetch to the address the policy
+// verified, via Git's own CURLOPT_RESOLVE hook. An empty result means the
+// policy had nothing to pin (or git is too old to know the key, which the
+// pre-check above still covers).
+func gitResolveArgs(ctx context.Context, policy *urlguard.Policy, raw string) []string {
+	if !strings.HasPrefix(raw, "http://") && !strings.HasPrefix(raw, "https://") {
+		return nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Hostname() == "" {
+		return nil
+	}
+	if policy == nil {
+		policy = urlguard.Default()
+	}
+	target, err := policy.Check(ctx, raw)
+	if err != nil || len(target.Addrs) == 0 {
+		return nil
+	}
+	parts := make([]string, 0, len(target.Addrs))
+	for _, addr := range target.Addrs {
+		parts = append(parts, fmt.Sprintf("%s:%s:%s", target.Host, target.Port, addr.String()))
+	}
+	return []string{"-c", "http.curloptResolve=" + strings.Join(parts, ",")}
 }
 
 // refuseDeclaredSymlinks reads the index a clone just wrote and refuses the

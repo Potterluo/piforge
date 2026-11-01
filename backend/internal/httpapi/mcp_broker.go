@@ -13,6 +13,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/pimodel"
 	"github.com/piforge/piforge/backend/internal/store"
+	"github.com/piforge/piforge/backend/internal/urlguard"
 )
 
 // The MCP broker: how a sandbox gets an MCP server without getting its key.
@@ -122,6 +123,18 @@ func (s *server) handleMCPGateway(w http.ResponseWriter, r *http.Request) {
 	}
 	target.RawQuery = r.URL.RawQuery
 
+	// The address and proof checks above say *who* may use the broker; this says
+	// *what it may reach*. Without it the broker was an authenticated open
+	// reverse proxy: adversarial acceptance #4 sent a sandbox request to
+	// http://piforge:7700/healthz and read the control plane's own loopback, and
+	// to a marker container only the control plane's network could reach
+	// (REPORT.md attack 18). The check runs on every call, not only at save time,
+	// so a name whose DNS answer changed is refused rather than dialled.
+	if err := s.refuseOutboundURL(ctx, target.String(), "MCP server URL"); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
 	headers, err := s.mcpBrokerHeaders(ctx, record)
 	if err != nil {
 		s.fail(w, r, err)
@@ -129,6 +142,10 @@ func (s *server) handleMCPGateway(w http.ResponseWriter, r *http.Request) {
 	}
 
 	proxy := &httputil.ReverseProxy{
+		// The dial goes through the same policy: resolve, verify, dial the
+		// verified address. The check above is the sentence; this is the fence
+		// that survives a DNS answer changing between the two.
+		Transport: s.outboundPolicy().Transport(),
 		Director: func(req *http.Request) {
 			req.URL = target
 			req.Host = target.Host
@@ -148,6 +165,15 @@ func (s *server) handleMCPGateway(w http.ResponseWriter, r *http.Request) {
 		// connection closes.
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			// A refusal that only shows up at dial time (the name resolved
+			// somewhere private after the check above, or it stopped resolving)
+			// is the same 400 as a save-time refusal, not a 502: the tenant
+			// configured a target this deployment will not fetch.
+			var refusal *urlguard.Refusal
+			if errors.As(err, &refusal) {
+				s.fail(w, r, s.urlRefusal(r.Context(), "MCP server URL", err))
+				return
+			}
 			s.log.WarnContext(r.Context(), "the MCP broker could not reach the server",
 				"server", server.Name, "error", err.Error())
 			http.Error(w, "the MCP server is unreachable", http.StatusBadGateway)

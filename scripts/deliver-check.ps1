@@ -401,6 +401,16 @@ try {
     Assert-Check "docker volume create $VolumeName" ($volumeCreate.Code -eq 0) $volumeCreate.Output
     $script:CreatedVolume = $true
 
+    # The outbound URL policy (docs/SANDBOX-DEPLOY.md 1.9): the drill's own fake
+    # forge is a loopback URL inside this container, and the deployment default
+    # refuses loopback. An internal destination has to be written down, so the
+    # drill writes it down exactly as an operator would — one host, one port, and
+    # nothing else. Without this the forge steps would (correctly) be refused with
+    # a 400, and the drill would be measuring the policy rather than the delivery.
+    $urlPolicyPath = Join-Path $ArtifactDir "url-policy.json"
+    $urlPolicyJson = '{"comment":"drill: the fake forge is loopback inside this container","allow":[{"host":"127.0.0.1","ports":[' + $FakeForgePort + ']}]}'
+    Set-Content -LiteralPath $urlPolicyPath -Value $urlPolicyJson -Encoding utf8 -NoNewline
+
     $ContainerArgs = @(
         "run", "-d",
         "--name", $ContainerName,
@@ -414,6 +424,8 @@ try {
         # be testing a deployment nobody runs.
         "--cap-drop", "DAC_OVERRIDE",
         "-v", "${VolumeName}:/data",
+        "-v", "${urlPolicyPath}:/etc/piforge/url-policy.json:ro",
+        "-e", "PIFORGE_URL_ALLOW_FILE=/etc/piforge/url-policy.json",
         "-e", "PIFORGE_SEED_EMAIL=$SeedAdminEmail",
         "-e", "PIFORGE_SEED_PASSWORD=$SeedAdminPassword",
         "-e", "PIFORGE_SEED_USER_EMAIL=$SeedUserEmail",

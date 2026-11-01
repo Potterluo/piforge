@@ -39,6 +39,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/store"
 	"github.com/piforge/piforge/backend/internal/tenantegress"
 	"github.com/piforge/piforge/backend/internal/tenantlimits"
+	"github.com/piforge/piforge/backend/internal/urlguard"
 )
 
 // Provisioner attaches a working directory to a session. *provision.Service
@@ -197,6 +198,14 @@ type Deps struct {
 	// DefaultSkillMaxBytes; an archive that would exceed it is refused whole,
 	// before a skill row exists.
 	SkillMaxBytes int64
+	// SkillCloneMaxBytes caps the checkout a git import may write, measured
+	// while the clone runs and again when it exits, from
+	// -skill-clone-max-bytes / PIFORGE_SKILL_CLONE_MAX_BYTES. Zero uses
+	// DefaultSkillCloneMaxBytes (16 MiB). It exists because the 4 MB read cap
+	// above ran *after* the clone: adversarial acceptance #4 measured a 268 MiB
+	// repository occupying 268 800 878 B of the control plane's /tmp before the
+	// import was refused (docs/SANDBOX-DEPLOY.md §1.9).
+	SkillCloneMaxBytes int64
 	// SnapshotDir is where a session's frozen skill snapshots live
 	// (<dataDir>/skill-snapshots). Deleting a session or a project removes the
 	// matching directories; empty means this deployment never creates one (a
@@ -242,6 +251,14 @@ type Deps struct {
 	// broker unbound, which only a hand-built test server should do — the
 	// deployment always wires it (cmd/piforged) and says so in its boot log.
 	SandboxBinding SessionBinder
+	// URLPolicy is the shared outbound-URL policy (internal/urlguard) for every
+	// fetcher that dials a tenant-supplied URL: the MCP broker, the provider
+	// probe, the forge client and the skill importer. Nil means the deployment
+	// rule itself — public http(s) only — which is what a deployment that
+	// configured no allow-list gets; it is never "no policy". Tests and operators
+	// widen it the same way, with explicit allow entries
+	// (docs/SANDBOX-DEPLOY.md §1.9).
+	URLPolicy *urlguard.Policy
 	// Browser owns one Chrome per sandbox. Nil disables the browser panel with
 	// a typed 422 rather than a hanging socket.
 	Browser *browser.Manager

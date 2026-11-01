@@ -2211,8 +2211,161 @@ httpapi    TestImportRefusesASymlinkToTheEnvironment          （报告的攻击
            TestSkillBundleReadRefusesALink
 ```
 
-**残余**（同 §1.4.10 末段）：`file://` 没有白名单；clone 的工作树落盘没有上限；硬链接不在检测范围；
-"根文件系统减基线"包含沙箱服务自己写的东西。
+**残余**（同 §1.4.10 末段）：`file://` 没有白名单；硬链接不在检测范围；"根文件系统减基线"包含沙箱服务自己写的东西。
+clone 的工作树落盘在第四轮之后有上限（`-skill-clone-max-bytes`，默认 16 MiB，见 §1.9.5）。
+### 1.9 出站 URL 策略：控制面替租户取一个 URL 的唯一规则
+
+这一节和 §1.8 一样是**规范**，不是历史。任何一个**新**的"控制面去 fetch 一个租户给的 URL"的入口，
+都要先回答这一节的问题；答不上来就不该合入。
+
+#### 1.9.1 这一轮测到的事
+
+第四轮对抗验收（`e2e/.artifacts/adversarial4/REPORT.md` 的攻击 18 与 21）证明了控制面有两个**开放的
+反向代理**，而沙箱"没有出网"这句话对 HTTP 不成立：
+
+```
+# 攻击 18：MCP broker。POST /v1/mcp/servers 存 URL 时没有任何 scheme/host 检查，
+# 会话开始后沙箱拿到 http://piforge:7700/gw/mcp/<token>，broker 把沙箱的
+# 方法、body、响应原样转发到那一行里的 URL —— 从控制面自己的网络位置。
+# 在沙箱里（没有 DNS、没有路由）：
+GET http://piforge:7700/gw/mcp/<tok>/healthz   -> 200 {"status":"ok"}      # 控制面自己的 loopback
+GET http://piforge:7700/gw/mcp/<tok>/anything  -> 200 {"you_are":"172.26.0.2",
+                                                      "marker":"A4-ONLY-THE-CONTROL-PLANE-CAN-READ-THIS"}
+# 172.26.0.2 = 控制面容器；marker 容器只挂在 pf-isolated_default 上，沙箱解析不了它。
+# 控制面能上外网（wget https://example.com -> rc=0）→ 双向通道：数据可以出去。
+
+# 攻击 21：provider base_url。任何用户都能建一个 base_url，再让控制面 POST 过去，
+# 非 2xx 的响应还会回显 ≤300 字符的上游 body。
+POST /v1/providers {"base_url":"http://a4marker:9021"} -> 201
+POST /v1/providers/<id>/test                          -> 200 {"ok":true}
+# marker 看到的：client=172.26.0.2  Authorization: Bearer <租户自己的 key>
+```
+
+结论不是"broker 的鉴权有问题"（token 有、地址绑定有、凭据不转发），而是**缺少一条关于"去哪儿"的规则**。
+所以修复不在两个 handler 里各加一个判断，而是一条共享策略，在每个 fetch 点各生效一次、而且生效两次
+（存的时候、拨号的时候）。
+
+#### 1.9.2 规则（`internal/urlguard`）
+
+1. **scheme 只能是 `http` / `https`。** `file:`、`gopher:`、`unix:`、`ftp:`、空 scheme 一律类型化拒绝，
+   理由码 `scheme`。`http://user:pw@host/` 这种把凭据塞进 URL 的也拒绝（`credentials`）。
+2. **名字先判。** `localhost` / `*.localhost`、`host.docker.internal`、`gateway.docker.internal`、
+   `*.local`、`*.internal`、`host.containers.internal`、compose 服务名（`piforge`、`sandbox-runner`）、
+   本容器自己的 hostname（`os.Hostname()`，每个部署都不同，所以运行时取）、`metadata.google.internal`
+   等，**不问 DNS 直接拒**（`host-name` / `loopback`）。一个只能指向"这台机器"的名字，不是租户的 MCP 服务器。
+3. **每一个解析结果都要是公网地址。** 逐地址分类，任何一个命中就拒绝：loopback（127/8、::1）、
+   link-local（169.254/16、fe80::/10 —— 云元数据就在 169.254.169.254）、private（10/8、172.16/12、
+   192.168/16）、unique-local（fc00::/7）、unspecified（0.0.0.0、::）、multicast、CGNAT（100.64/10）、
+   documentation（192.0.2/24 等）、benchmark（198.18/15）、reserved（240/4、0/8）。IPv4-mapped IPv6
+   先 unmap 再判，否则 `::ffff:127.0.0.1` 会绕过。
+4. **请求时再查一次，并且把连接钉在验证过的 IP 上。** `urlguard.Transport` 的 `DialContext` 自己解析、
+   自己验证、然后 `dial(验证过的 IP)`；TLS 的 SNI 仍然取自 URL 的 host。所以"存的时候解析到公网、
+   一分钟后再解析到私网"（DNS rebinding）依然失败，而且连接去的是被检查过的那个地址，不是第二次解析的答案。
+   transport 显式 `Proxy: nil`：环境变量里的 `HTTP_PROXY` 是第二个未经检查的拨号器。
+5. **重定向逐跳重查。** `http.Client.CheckRedirect` 对每一跳重新走规则 1–3，最多 5 跳；一个允许的
+   base_url 回 302 到 `169.254.169.254` 会变成拒绝，而不是被跟随。
+6. **拒绝是类型化的 400，点名理由和 host，一次拒绝一行日志。** body 是平台统一的
+   `{"error":{"code":"invalid_argument","message":"…","details":{"reason":"loopback","host":"127.0.0.1"}}}`；
+   日志只有一行 `refused to fetch a tenant-supplied URL what=… host=… reason=…`，**不记完整 URL**
+   （query 里可能是租户粘进去的 token）。
+7. **存的时候宽松一点，只宽松"解析不了"。** `CheckSave` 允许一个**此刻解析不了**的名字被保存（DNS 临时
+   坏掉时不能连 provider 都改不了），但 scheme / 凭据 / 本机名字 / 能解析到的私网地址仍然当场拒绝；
+   真正到达网络的永远是请求时那次检查，所以这一点不放宽边界。
+8. **只有显式 allow-list 能放宽。** 默认空；一个 operator 写的文件在启动时解析（未知字段、坏 CIDR、
+   缺 ports 都会让启动失败），条目按 **host 或 CIDR + 端口** 精确匹配，只能把"可拨"扩到那一条，
+   改不了别的。这是部署规则，不是租户设置。
+
+#### 1.9.3 配置
+
+```
+-url-allow-file / PIFORGE_URL_ALLOW_FILE      # 默认空：只有公网 http(s)
+-skill-clone-max-bytes / PIFORGE_SKILL_CLONE_MAX_BYTES   # 默认 16 MiB，见 1.9.5
+```
+
+allow-list 文件（compose 把它只读挂到 `/etc/piforge/url-policy.json`，默认是 `deploy/url-policy.json`，空的）：
+
+```json
+{
+  "comment": "the one internal MCP server this operator runs",
+  "allow": [
+    { "host": "mcp.internal.example.com", "ports": [443] },
+    { "cidr": "10.20.0.0/16", "ports": [8443] }
+  ]
+}
+```
+
+启动日志会打一行 `outbound URL policy policy="public http(s) only" | "… + N allow entries"`，
+以及它覆盖哪些路径；`allow_file` 永远是文件路径或空。
+
+交付演练（`scripts/deliver-check.ps1`）就是这条规则的一个使用者：它的假 forge 是容器里的
+loopback 地址，所以演练启动容器时**写下一个只含 `127.0.0.1:<端口>` 的 allow 文件**并挂进去
+（`-v $ArtifactDir/url-policy.json:/etc/piforge/url-policy.json:ro`）。演练没有绕过策略，它
+做的是任何一个用内网 forge 的 operator 都要做的事；除那一条之外，演练全程跑在默认策略下。
+启动日志里因此是 `policy="public http(s) only + 1 allow entries"`。
+
+#### 1.9.4 这一轮审计过的每一个"控制面 fetch 租户 URL"的点
+
+| 入口 | 谁给的 URL | 控制面拿它做什么 | 现在 |
+|---|---|---|---|
+| `POST /v1/mcp/servers` | 租户 | 存进 `mcp_servers.url` | 存时 `saveOutboundURL` |
+| `GET/POST /gw/mcp/<token>/…` | 上面那一行 | `httputil.ReverseProxy` 全方法全 body 转发 | 每次调用 `refuseOutboundURL` + 策略 transport（拨号钉 IP）+ `ErrorHandler` 把拨号期拒绝也变成 400 |
+| `POST /v1/providers`、`PATCH /v1/providers/{id}` | 租户 | 存 `base_url` | 存时 |
+| `POST/PATCH /v1/admin/providers` | 管理员 | 同上 | 存时 |
+| `POST /v1/providers/{id}/test` | 上面那一行 | `POST <base>/v1/…`，并把上游错误回显 300 字符 | 调用前 + 策略 client（重定向逐跳） |
+| `/gw/llm/<token>/…`（真模型流量） | provider 行 | 把 agent 的请求转发到 `base_url` | 调用前 400 `url_refused` + 策略 transport |
+| `PUT /v1/projects/{id}/forge` + PR 调用 | 租户 | `POST <api_base>/repos/…/pulls` | 存时 + `forge.Config.HTTP` 走策略 client |
+| `POST /v1/skills/import`（http/https、`git@`） | 租户 | `git clone` 从控制面出网 | 调用前（`git@` 按 `https://<host>/` 校验同一套主机规则）+ `http.curloptResolve` 钉 IP |
+| 项目 `repo_url` | 租户 | **在沙箱里** clone | 不在控制面；`validateRepoURL` 只放 https/`git@`（不变） |
+| 截图 / 浏览器导航 | 租户 | **在沙箱里的** Chrome | 不在控制面（`-sandbox-browser remote`），不变 |
+| `/preview` 反代（web upstream） | 部署 | Next.js | 部署配置，不是租户 URL，不在本策略范围 |
+| `file://` skill 导入 | 租户 | git 读控制面自己的本地仓库 | **仍是残余**（§1.9.6） |
+
+#### 1.9.5 skill 克隆的落盘上界（同一份报告的攻击 10）
+
+4 MB 的读上限是在 clone **之后**才生效的：报告里 32 MiB 的仓库在 `/tmp` 留下 38 829 857 B、
+268 MiB 的留下 268 800 878 B，然后才 400。现在：
+
+- `git clone --depth 1 --single-branch --no-tags`（一个提交、一条分支、不要 tag）；
+- 一个看门狗每 25 ms 量一次目标目录（含 `.git` 的 pack），超过 `-skill-clone-max-bytes`（默认 16 MiB）
+  就 `Kill` git；git 退出后再量一次（覆盖"25 ms 内就跑完"的情况）；
+- 任何一种超限：`os.RemoveAll` + 类型化 400，消息里写上限和**实际量到的字节**；
+- 最坏情况 = 上限 + 一个采样间隔内 git 写下的字节（25 ms 内），实测见 §1.9.7。
+
+#### 1.9.6 残余（写清楚，不藏）
+
+- **`file://` skill 导入源**仍然接受（自托管部署把 skill 放在同一块盘上），没有白名单：它能指向控制面
+  能读的本地 git 仓库，只是带链接的仓库会被拒、路径形状会漏给租户。要收紧是另一个决定（部署级白名单），
+  这一轮没做。
+- **`git@host:path`（ssh）** 只按同一套主机规则校验 host；SSH 本身不是 HTTP，`http.curloptResolve` 管不到它
+  （`ssh` 的 `HostKeyAlias`/`ProxyCommand` 是另一件事）。公网主机放行，内网主机被拒。
+- **allow-list 是 host/CIDR + 端口**，不是路径；一个被允许的 host 上的任何路径都可拨。
+- 策略不改变"控制面能上外网"这个事实：它只是不让**租户**借控制面的位置去取。
+
+#### 1.9.7 怎么证明它还在
+
+Go 测试（都在 `go test ./...` 里）：
+
+```
+urlguard    TestRefusesEveryAddressTheReportNames        （report 的两个探针 + 每一个地址族，逐个断言 reason）
+            TestOwnContainerNameIsRefused / TestRefusesSchemesAndShapes
+            TestPublicAddressesAreAllowed                 （anthropic / openai / volc 的主机仍然可拨）
+            TestDNSFailureIsARefusalAtCallTimeAndNotAtSaveTime
+            TestAllowListIsTheOnlyWayToWiden / TestAllowEntriesAreValidated
+            TestDialRefusesAndPins                        （拨号器自己拒绝 + 钉住验证过的 IP）
+            TestRedirectToARefusedTargetIsRefused / TestClientDoesNotUseAnEnvironmentProxy
+httpapi     TestTheMCPBrokerRefusesTheReportsTargets      （存时 400 × 7，调用时 400，上游 0 次命中）
+            TestAnAllowedInternalMCPServerStillWorks      （allow-list 的那一个仍然 200 且真的到上游）
+            TestTheProviderBaseURLIsRefusedTheSameWay     （存 / patch / /test 三条）
+            TestTheProviderProbeRefusesARedirectToTheMetadataService
+            TestTheForgeAPIBaseIsRefused
+            TestTheDeploymentDefaultIsWhatRefuses         （默认策略不是 test harness 的宽松策略）
+            TestSkillImportRefusesACloneOverTheCap / TestSkillImportStillWorksUnderTheDefaultCap
+llmgw       TestGatewayRefusesAPrivateProviderBaseURL     （/gw/llm 对私网 base_url 回 400 url_refused）
+```
+
+隔离栈（7723，镜像从本轮 HEAD 重建）的实测输出见 `docs/STATUS.md` 本批那一节和
+`e2e/.artifacts/adversarial5/REPORT.md`。
+
 ## 2. Kubernetes：四种做法，各自什么时候是对的
 
 ### 2.1 方案（i）：一个 Pod 一个沙箱，控制面用 client-go 管

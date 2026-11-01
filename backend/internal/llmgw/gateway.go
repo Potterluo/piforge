@@ -28,6 +28,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/crypto"
+	"github.com/piforge/piforge/backend/internal/urlguard"
 )
 
 // ProviderLookup resolves a provider name for a user, with its sealed key.
@@ -45,6 +46,13 @@ type Config struct {
 	Signer *Signer
 	// Transport overrides the HTTP transport (tests use this).
 	Transport http.RoundTripper
+	// Policy is the outbound URL policy for the provider's base_url. This handler
+	// is the third fetcher of a tenant-supplied URL (after the MCP broker and the
+	// provider probe): the agent's model traffic is POSTed to whatever base_url
+	// the provider row names, from this process's network position. Nil means the
+	// deployment rule (public http(s) only) — never "no policy"
+	// (docs/SANDBOX-DEPLOY.md §1.9).
+	Policy *urlguard.Policy
 	// Binder enforces "this token works only from its own sandbox": the request
 	// must arrive from an address the sandbox has, and (when the deployment has a
 	// per-sandbox secret) carry a proof. Nil disables both halves, which is what a
@@ -80,9 +88,15 @@ func New(cfg Config) (*Handler, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = func(string, ...any) {}
 	}
+	if cfg.Policy == nil {
+		cfg.Policy = urlguard.Default()
+	}
 	transport := cfg.Transport
 	if transport == nil {
-		transport = http.DefaultTransport
+		// No environment proxy, and every dial resolved, verified and pinned by
+		// the policy: a provider base_url cannot be pointed at the control
+		// plane's own loopback or at a sibling container.
+		transport = cfg.Policy.Transport()
 	}
 	return &Handler{
 		cfg: cfg,
@@ -174,6 +188,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	target, err := h.upstreamURL(provider, rest, r.URL.RawQuery)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "provider_unavailable", err.Error())
+		return
+	}
+	// The tenant's base_url, checked at call time as well as when it was saved:
+	// an agent whose provider row names 169.254.169.254 gets a 400, not an
+	// outbound request from the control plane (adversarial acceptance #4, the
+	// same class as the MCP broker).
+	if _, cerr := h.cfg.Policy.Check(r.Context(), target.String()); cerr != nil {
+		var refusal *urlguard.Refusal
+		if errors.As(cerr, &refusal) {
+			h.cfg.Logger("llmgw: refused provider base_url: host=%s reason=%s", refusal.Host, refusal.Reason)
+			writeErr(w, http.StatusBadRequest, "url_refused", refusal.Detail)
+			return
+		}
+		writeErr(w, http.StatusBadRequest, "url_refused", "the provider base URL is refused")
 		return
 	}
 

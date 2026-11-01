@@ -325,6 +325,9 @@ func (s *server) forgeClient(ctx context.Context, userID string, project *contra
 		APIBase: project.Forge.APIBase,
 		Repo:    project.Forge.Repo,
 		Token:   token,
+		// The forge call is a tenant-supplied URL fetched from the control
+		// plane's network position; its redirects are re-validated too.
+		HTTP: s.outboundHTTPClient(prForgeTimeout),
 	})
 }
 
@@ -400,6 +403,14 @@ func (s *server) handleSetProjectForge(w http.ResponseWriter, r *http.Request) {
 	// create flow would otherwise discover after a push.
 	if _, err := forge.New(forge.Config{Kind: kind, APIBase: in.APIBase, Repo: in.Repo, Token: "validate"}); err != nil {
 		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "代码托管平台配置无效：%v", err))
+		return
+	}
+	// `api_base` is fetched by this process when it opens a pull request, so it
+	// is a tenant-supplied URL like the MCP server URL and the provider base_url
+	// (docs/SANDBOX-DEPLOY.md §1.9). The policy refuses it here and the PR client
+	// dials through the policy as well.
+	if err := s.saveOutboundURL(r.Context(), in.APIBase, "forge api_base"); err != nil {
+		s.fail(w, r, err)
 		return
 	}
 

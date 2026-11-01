@@ -1,0 +1,4 @@
+{
+  "comment": "Outbound URL policy exceptions (docs/SANDBOX-DEPLOY.md 1.9). Empty means the deployment default: the control plane fetches public http(s) only. Add one entry per internal destination, with its ports, e.g. {\"host\": \"mcp.internal.example.com\", \"ports\": [443]} or {\"cidr\": \"10.20.0.0/16\", \"ports\": [8443]}. This file is parsed at startup; a typo fails the boot.",
+  "allow": []
+}

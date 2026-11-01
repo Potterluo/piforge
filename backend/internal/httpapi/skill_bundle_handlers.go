@@ -43,6 +43,17 @@ func (s *server) skillMaxBytes() int64 {
 	return DefaultSkillMaxBytes
 }
 
+// skillCloneMaxBytes is the effective cap on the checkout a git import may
+// write, enforced while the clone runs and again when it exits. cmd/piforged
+// fills Deps.SkillCloneMaxBytes from -skill-clone-max-bytes /
+// PIFORGE_SKILL_CLONE_MAX_BYTES; 16 MiB is the deployment default.
+func (s *server) skillCloneMaxBytes() int64 {
+	if s != nil && s.deps.SkillCloneMaxBytes > 0 {
+		return s.deps.SkillCloneMaxBytes
+	}
+	return DefaultSkillCloneMaxBytes
+}
+
 type skillFile struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`

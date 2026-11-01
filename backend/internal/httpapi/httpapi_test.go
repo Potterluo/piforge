@@ -21,6 +21,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/crypto"
 	"github.com/piforge/piforge/backend/internal/reconcile"
 	"github.com/piforge/piforge/backend/internal/store"
+	"github.com/piforge/piforge/backend/internal/urlguard"
 )
 
 // ---------------------------------------------------------------------------
@@ -92,6 +93,13 @@ func newTestEnv(t *testing.T) *testEnv {
 		Runtime:   env.runtime,
 		Workspace: env.workspace,
 		Secrets:   box,
+		// The outbound URL policy, with the one exception a test server needs:
+		// its fixture upstreams listen on 127.0.0.1 on an ephemeral port, which
+		// the deployment default refuses. This is the same mechanism an operator
+		// uses for an internal MCP server (docs/SANDBOX-DEPLOY.md §1.9) — the
+		// default is untouched, and TestTheDefaultPolicyRefusesTheReportsTargets
+		// in outbound_policy_test.go proves it.
+		URLPolicy: testURLPolicy(),
 		// Creating a skill with a body writes its bundle, so every test server
 		// needs somewhere to put it.
 		SkillsDir: skillsDir,
@@ -118,6 +126,17 @@ func newTestEnvWithSkills(t *testing.T) *testEnv {
 	env.deps.SkillsDir = env.skillsDir
 	env.rebuild()
 	return env
+}
+
+// testURLPolicy allows this host's loopback, which is where every fixture
+// upstream listens. Nothing else is widened: private, link-local and the docker
+// names stay refused, and the deployment (no allow file) never gets this policy.
+func testURLPolicy() *urlguard.Policy {
+	policy, err := urlguard.New([]urlguard.Allow{{CIDR: "127.0.0.1/32"}, {CIDR: "::1/128"}})
+	if err != nil {
+		panic("httpapi: test URL policy: " + err.Error())
+	}
+	return policy
 }
 
 // rebuild re-creates the router from the current deps, which is how tests swap

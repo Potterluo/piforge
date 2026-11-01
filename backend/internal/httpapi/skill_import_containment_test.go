@@ -261,7 +261,7 @@ func TestCloneMaterialisesADeclaredSymlinkAsAFile(t *testing.T) {
 	declareSymlink(t, repo, "leakskill/key.txt", secret)
 
 	dest := filepath.Join(t.TempDir(), "checkout")
-	if err := cloneCheckout(t.Context(), repoURL(repo), "", dest); err != nil {
+	if err := cloneCheckout(t.Context(), repoURL(repo), "", dest, DefaultSkillCloneMaxBytes, testURLPolicy()); err != nil {
 		t.Fatalf("cloneCheckout: %v", err)
 	}
 

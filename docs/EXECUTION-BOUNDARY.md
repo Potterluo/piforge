@@ -1575,9 +1575,9 @@ detected t+76 s and recovered t+87 s.
 - `file://` import URLs are still accepted (a self-hosted install keeps skills on the same disk).
   A repository with a link is refused, but "the control plane can be pointed at its own local
   repositories" is a deployment-level allow-list question, not a path check.
-- `git clone --depth 1` still writes the whole working tree to the control plane's temp directory:
-  the 4 MB cap is on what is *read*, not on what lands. A 10 GB repository fills the control plane's
-  disk, which is not the sandbox budget's business.
+- ~~`git clone --depth 1` still writes the whole working tree to the control plane's temp directory~~:
+  closed in §18.4. The 4 MB cap was on what is *read*; a clone is now stopped at
+  `-skill-clone-max-bytes` (16 MiB default) while it runs, and the refused directory is deleted.
 - Hard links are outside `tenantfs`'s check: git and the zip reader cannot create them, so neither
   transport produces one — but a future tar importer must reconsider this.
 - "Root filesystem minus baseline" includes what the sandbox's own services write (browser profile,
@@ -1585,3 +1585,101 @@ detected t+76 s and recovered t+87 s.
   grows slowly.
 - The skill-mount project needed no change: `materialize`'s copy, copy-to-sandbox and digest paths
   already refused symlinks, which is also why the leak was in the importer and not in the mount.
+
+## 18. The fourth adversarial acceptance (2026-11-01): the control plane was an open fetcher
+
+The fourth pass did not find a read path; it found that the control plane will **fetch a URL a tenant
+names, from its own network position**. Two independent fetchers, both measured on the isolated stack
+(`e2e/.artifacts/adversarial4/REPORT.md`, attacks 18 and 21):
+
+```
+MCP broker   POST /v1/mcp/servers stored any URL; at session start the sandbox got
+             http://piforge:7700/gw/mcp/<token>, and handleMCPGateway proxied the sandbox's
+             method/body/response to that row's URL.
+             from inside the sandbox (no DNS, no route):
+               GET …/<tok>/healthz  -> 200 {"status":"ok"}              (the control plane's own loopback)
+               GET …/<tok>/anything -> 200 {"you_are":"172.26.0.2",
+                                             "marker":"A4-ONLY-THE-CONTROL-PLANE-CAN-READ-THIS"}
+             The control plane has internet (wget https://example.com, rc=0), so this was a
+             bidirectional exfil channel: no-egress was true for the sandbox's sockets and false for
+             its HTTP.
+
+provider     POST /v1/providers {base_url:"http://a4marker:9021"} -> 201, /test -> 200 {"ok":true};
+             the marker saw client=172.26.0.2 and the tenant's own Authorization header. A non-2xx
+             answer echoed up to 300 characters of the upstream body.
+```
+
+The broker's *authentication* held (token, address binding, no credential forwarded) — what was missing
+was a rule about **where it may go**. That is why the fix is not two `if`s in two handlers.
+
+### 18.1 The rule: one policy, every fetcher, twice
+
+`internal/urlguard` is the policy; `docs/SANDBOX-DEPLOY.md` §1.9 is its specification. In one paragraph:
+
+- scheme must be `http`/`https` (`file:`, `gopher:`, `unix:`, empty, and URLs with userinfo are refused);
+- the name must not be one that only means this machine (`localhost`, `host.docker.internal`, `*.local`,
+  `*.internal`, the compose service names, this container's own hostname);
+- **every** address the name resolves to must be public — loopback, link-local (169.254/16, where cloud
+  metadata lives), private, unique-local (fc00::/7), unspecified, multicast, CGNAT, documentation and
+  reserved ranges are refused, with the reason named;
+- the check runs again at dial time, and the dial is **pinned to the verified address** (custom
+  `DialContext`), so a name that resolved public when it was saved and private a minute later still
+  fails — and the connection goes to the address that was checked, not to a second lookup's answer;
+- redirects are re-validated hop by hop;
+- a refusal is a typed 400 naming the reason and the host, logged once, at save time *and* at call time;
+- the only widening is an operator's allow-list file (`-url-allow-file`), default empty, validated at
+  boot, scoped to host-or-CIDR **and** port.
+
+### 18.2 Every fetch site it now covers
+
+| Site | What the control plane does with the tenant's URL | Enforcement |
+|---|---|---|
+| `POST /v1/mcp/servers` | stores `mcp_servers.url` | save |
+| `/gw/mcp/<token>/…` | reverse-proxies the sandbox's request to that URL | call (`Check`) + dial pinning + `ErrorHandler` turns a dial-time refusal into the same 400 |
+| `POST/PATCH /v1/providers`, `POST/PATCH /v1/admin/providers` | stores `base_url` | save |
+| `POST /v1/providers/{id}/test` | POSTs to `<base>/v1/…`, echoes upstream errors | call + policy client (redirects) |
+| `/gw/llm/<token>/…` | forwards the agent's model traffic to `base_url` | call (400 `url_refused`) + policy transport |
+| `PUT /v1/projects/{id}/forge`, PR create | POSTs to `<api_base>/repos/…/pulls` | save + `forge.Config.HTTP` is a policy client |
+| `POST /v1/skills/import` (http/https, `git@`) | `git clone` from this process | call + `http.curloptResolve` pinning |
+| project `repo_url` | cloned **in the sandbox** | not a control-plane fetch (unchanged; `validateRepoURL` still allows only https/`git@`) |
+| screenshot / browser navigation | **the sandbox's** Chrome | not a control-plane fetch (unchanged) |
+
+A new endpoint that fetches a tenant URL and is not on this list is a bug, and §1.9.4 is the table to
+extend.
+
+### 18.3 What it does not claim
+
+- The control plane still has internet. The policy stops a **tenant** from borrowing that network
+  position; it does not close the control plane's own egress (it needs it for model calls).
+- The allow-list widens by host/CIDR and port, not by path: an allowed host is dialable on any path.
+- `file://` skill imports are still accepted with no allow-list (§17.6, unchanged this round).
+- `git@host:path` (ssh) is checked for its **host** only; the HTTP pinning mechanism does not apply to
+  ssh.
+
+### 18.4 The clone bound (same report, attack 10)
+
+The 4 MB cap was enforced by the walk, *after* the clone had written the whole tree: 38 829 857 B for a
+32 MiB repository, 268 800 878 B for a 268 MiB one, both root-owned on the same overlay as `/data`. Now:
+
+- `git clone --depth 1 --single-branch --no-tags`;
+- a watchdog measures the destination every 25 ms (pack + checkout) and kills git at
+  `-skill-clone-max-bytes` (default 16 MiB); the size is measured once more after git exits, so a clone
+  that finishes inside one interval is still refused;
+- on either: the directory is removed and the import is refused with a 400 that names the cap and the
+  bytes measured.
+
+Worst case is "the cap plus whatever git writes inside one 25 ms interval"; the measured figure is in
+`docs/STATUS.md` (this batch).
+
+### 18.5 Evidence
+
+Go: `internal/urlguard` (11 tests), `internal/httpapi` (`TestTheMCPBrokerRefusesTheReportsTargets`,
+`TestAnAllowedInternalMCPServerStillWorks`, `TestTheProviderBaseURLIsRefusedTheSameWay`,
+`TestTheProviderProbeRefusesARedirectToTheMetadataService`, `TestTheForgeAPIBaseIsRefused`,
+`TestTheDeploymentDefaultIsWhatRefuses`, `TestSkillImportRefusesACloneOverTheCap`,
+`TestSkillImportStillWorksUnderTheDefaultCap`), `internal/llmgw`
+(`TestGatewayRefusesAPrivateProviderBaseURL`).
+
+Isolated stack (7723, images rebuilt from this HEAD): the report's two probes, the allow-listed
+legitimate MCP server, a real prompt that settles, and the provider path — measured output in
+`docs/STATUS.md` and `e2e/.artifacts/adversarial5/REPORT.md`.

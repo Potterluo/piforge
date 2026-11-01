@@ -36,7 +36,11 @@ param(
     # deploy/tenant-egress.json is closed by default (every tenant bridge is
     # created --internal). scripts/probe-egress.ps1 points this at a file that
     # opens one tenant, so both modes are measured on one stack.
-    [string]$EgressFile = ""
+    [string]$EgressFile = "",
+    # The outbound URL policy's allow-list (docs/SANDBOX-DEPLOY.md 1.9).
+    # deploy/url-policy.json is empty by default: public http(s) only. A drill
+    # that needs an internal MCP server points this at a file that names it.
+    [string]$UrlAllowFile = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -54,6 +58,9 @@ $LimitsFile = (Resolve-Path $LimitsFile).Path
 if ([string]::IsNullOrWhiteSpace($EgressFile)) { $EgressFile = Join-Path $root "deploy/tenant-egress.json" }
 if (-not (Test-Path $EgressFile)) { Write-Host "ERROR: tenant egress file not found: $EgressFile" -ForegroundColor Red; exit 1 }
 $EgressFile = (Resolve-Path $EgressFile).Path
+if ([string]::IsNullOrWhiteSpace($UrlAllowFile)) { $UrlAllowFile = Join-Path $root "deploy/url-policy.json" }
+if (-not (Test-Path $UrlAllowFile)) { Write-Host "ERROR: URL allow-list file not found: $UrlAllowFile" -ForegroundColor Red; exit 1 }
+$UrlAllowFile = (Resolve-Path $UrlAllowFile).Path
 
 function Step($message) { Write-Host "==> $message" -ForegroundColor Cyan }
 function Fail($message) { Write-Host "ERROR: $message" -ForegroundColor Red; exit 1 }
@@ -94,6 +101,7 @@ if ($Down) {
     $env:PIFORGE_DATA_VOLUME = $DataVolume
     $env:PIFORGE_TENANT_LIMITS_MOUNT = $LimitsFile
     $env:PIFORGE_TENANT_EGRESS_MOUNT = $EgressFile
+    $env:PIFORGE_URL_ALLOW_MOUNT = $UrlAllowFile
     if ([string]::IsNullOrWhiteSpace($env:SANDBOX_RUNNER_TOKEN)) { $env:SANDBOX_RUNNER_TOKEN = "teardown-only" }
     Invoke-Docker -Arguments @("compose", "-p", $Project, "-f", $compose, "down", "-v", "--remove-orphans") -AllowFailure | Out-Null
 
@@ -188,6 +196,7 @@ $env:PIFORGE_PUBLISH = "$Port"
 $env:PIFORGE_DATA_VOLUME = $DataVolume
 $env:PIFORGE_TENANT_LIMITS_MOUNT = $LimitsFile
     $env:PIFORGE_TENANT_EGRESS_MOUNT = $EgressFile
+$env:PIFORGE_URL_ALLOW_MOUNT = $UrlAllowFile
 $env:SANDBOX_RUNNER_TOKEN = $RunnerToken
 $env:PIFORGE_DEFAULT_PROVIDER = $DefaultProvider
 if (-not [string]::IsNullOrWhiteSpace($Provider)) { $env:PIFORGE_BOOTSTRAP_PROVIDER = $Provider }
@@ -219,6 +228,7 @@ Write-Host "  images   : $controlPlaneImage, $runnerImage, $sandboxImage"
 Write-Host "  data     : volume $DataVolume"
 Write-Host "  provider : $DefaultProvider ($Provider)"
 Write-Host "  egress   : $EgressFile (default none: no route to the internet; the gateway on the tenant bridge still answers)"
+Write-Host "  url policy: $UrlAllowFile (default empty: the control plane fetches public http(s) only; an internal destination must be written down)"
 Write-Host "  stop     : pwsh scripts/up-isolated.ps1 -Project $Project -Down"
 if ([string]::IsNullOrWhiteSpace($ProviderKey)) {
     Write-Host "  note     : no provider key was supplied; set -ProviderKey (or PIFORGE_DRILL_KEY) for a real prompt," -ForegroundColor Yellow

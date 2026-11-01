@@ -116,6 +116,13 @@ services:
       # mounted file is closed, and a mode this deployment cannot enforce
       # ("allowlist") fails the start rather than being ignored.
       PIFORGE_TENANT_EGRESS_FILE: /etc/piforge/tenant-egress.json
+      # The outbound URL policy's allow-list (docs/SANDBOX-DEPLOY.md 1.9). The
+      # mounted file is empty by default, which means "public http(s) only": a
+      # tenant-supplied MCP server URL, provider base_url, forge api_base or
+      # skill repository is resolved, every address is checked, and the dial is
+      # pinned to the verified address. An internal server has to be written
+      # down here, with its ports; this file can only widen, never narrow.
+      PIFORGE_URL_ALLOW_FILE: /etc/piforge/url-policy.json
     volumes:
       - piforge-data:/data
       # The quota policy is configuration, reviewed with the deployment and
@@ -125,6 +132,10 @@ services:
       # create carries. The runner reads the same file and is the side that
       # enforces it (it creates the tenant bridges).
       - ${PIFORGE_TENANT_EGRESS_MOUNT:-./deploy/tenant-egress.json}:/etc/piforge/tenant-egress.json:ro
+      # The URL allow-list, read-only, reviewed with the compose file. Empty is
+      # the default and is a valid policy; a file that does not parse fails the
+      # start (cmd/piforged loads it before anything is created).
+      - ${PIFORGE_URL_ALLOW_MOUNT:-./deploy/url-policy.json}:/etc/piforge/url-policy.json:ro
     networks:
       - default
       - sandbox-control

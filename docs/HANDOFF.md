@@ -937,3 +937,44 @@ still writes the whole working tree before the 4 MB read cap applies; hard links
 containment check (neither transport can create one today); and "root filesystem minus baseline"
 counts what the sandbox's own services write, which is honest but means an idle sandbox grows slowly.
 The full list is at the end of `docs/EXECUTION-BOUNDARY.md` §17.
+
+## The fourth adversarial acceptance (2026-11-01)
+
+The finding was not a file read: the **control plane would fetch any URL a tenant named, from its own
+network position**. `POST /v1/mcp/servers` accepted `http://piforge:7700` (the control plane's own
+loopback) and `http://169.254.169.254` with no check, and the broker then reverse-proxied the sandbox's
+requests there; `POST /v1/providers` + `/test` was the same fetcher without the broker. Measured from
+inside a sandbox with no DNS and no route: `GET /gw/mcp/<tok>/healthz -> 200 {"status":"ok"}` and
+`GET /gw/mcp/<tok>/anything -> 200 {"you_are":"172.26.0.2","marker":"A4-ONLY-…"}`. The control plane has
+internet, so the sandbox had an HTTP channel out. No key, file or database row was read.
+
+**What to know if you are operating this build**
+
+- **Every tenant-supplied fetch target now goes through one policy** (`internal/urlguard`,
+  `docs/SANDBOX-DEPLOY.md` §1.9): http(s) only, no localhost / docker host / compose name / this
+  container, and every resolved address must be public (loopback, 169.254/16, 10/8, 172.16/12,
+  192.168/16, fc00::/7, unspecified, multicast are refused). It is applied when the URL is saved **and**
+  again when it is dialled — the dial is pinned to the verified address, so a DNS answer that changes
+  between the two still fails — and redirects are re-validated hop by hop. A refusal is a 400 that names
+  the reason and the host, at both points.
+- **It covers**: MCP server URL (save + `/gw/mcp/<token>`), provider `base_url` (save, `/test`, and the
+  real `/gw/llm/<token>` traffic), project forge `api_base` (save + the PR call), and skill import over
+  http(s)/`git@`. The table is §18.2 of `docs/EXECUTION-BOUNDARY.md`; a new endpoint that fetches a
+  tenant URL and is not on it is a bug.
+- **An internal MCP server or provider still works, but only if you write it down.** Create
+  `deploy/url-policy.json` (mounted read-only at `/etc/piforge/url-policy.json`) with
+  `{"allow":[{"host":"mcp.internal.example.com","ports":[443]}]}`, or pass `-url-allow-file`. Default is
+  empty, which is "public http(s) only". The file is parsed at boot and a typo fails the start; the boot
+  log prints `outbound URL policy policy=… covers=…`. The allow-list can only *widen* — it cannot make a
+  public target refuse — and it is scoped to the host (or CIDR) **and** the ports.
+- **The skill clone is bounded now.** It used to write the whole checkout before the 4 MB read cap: a
+  268 MiB repository left 268 800 878 B in the control plane's `/tmp`. It clones with
+  `--depth 1 --single-branch --no-tags`, a watchdog measures the directory every 25 ms and kills git at
+  `-skill-clone-max-bytes` (16 MiB default), the directory is deleted, and the import is refused with a
+  400 naming the cap and the bytes measured.
+
+**What is still open**: `file://` skill import URLs have no allow-list (a symlink-bearing repository is
+refused, but a tenant can still point the importer at a repository this host can read); `git@host:path`
+is host-checked only (the HTTP address pinning does not apply to ssh); the allow-list is host/CIDR +
+port, not path. The full list is §1.9.6 of `docs/SANDBOX-DEPLOY.md` and §18.3 of
+`docs/EXECUTION-BOUNDARY.md`.

@@ -287,6 +287,15 @@ func (s *server) handleCreateMCPServer(w http.ResponseWriter, r *http.Request) {
 			"only admin routes may create scope=%q entries", in.Scope))
 		return
 	}
+	// The broker reverse-proxies the sandbox's request to this URL from the
+	// control plane's own network position, so the URL is a fetch target and not
+	// a preference. It goes through the shared policy here and again on every
+	// call (handleMCPGateway), because a name that resolved public when it was
+	// saved can resolve private later (docs/SANDBOX-DEPLOY.md §1.9).
+	if err := s.saveOutboundURL(r.Context(), in.URL, "MCP server URL"); err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	enabled := true
 	if in.Enabled != nil {
 		enabled = *in.Enabled

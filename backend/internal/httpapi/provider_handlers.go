@@ -95,6 +95,15 @@ func (s *server) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// `base_url` is a tenant-supplied fetch target: POST /v1/providers/{id}/test
+	// makes this process POST to it, and /gw/llm forwards the agent's model
+	// traffic to it. It is refused at save time here and again at every call
+	// (probeProvider, llmgw) — adversarial acceptance #4 attack 21.
+	if err := s.saveOutboundURL(r.Context(), in.BaseURL, "provider base_url"); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
 	// The key is sealed before it ever reaches the database (PRD §5.7 FR-13.3).
 	// A deployment without a secret box refuses the write rather than storing a
 	// credential in the clear — silently downgrading that guarantee is exactly
@@ -179,6 +188,13 @@ func (s *server) handleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if in.BaseURL != nil {
+		if err := s.saveOutboundURL(r.Context(), *in.BaseURL, "provider base_url"); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
+
 	patch := store.ProviderPatch{
 		API:      in.API,
 		BaseURL:  in.BaseURL,
@@ -240,6 +256,11 @@ func (s *server) handleAdminUpsertProvider(w http.ResponseWriter, r *http.Reques
 		Enabled *bool                 `json:"enabled"`
 	}
 	if err := decodeJSON(r, &in); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	if err := s.saveOutboundURL(r.Context(), in.BaseURL, "provider base_url"); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -306,6 +327,13 @@ func (s *server) handleAdminUpdateProvider(w http.ResponseWriter, r *http.Reques
 	if err := decodeJSON(r, &in); err != nil {
 		s.fail(w, r, err)
 		return
+	}
+
+	if in.BaseURL != nil {
+		if err := s.saveOutboundURL(r.Context(), *in.BaseURL, "provider base_url"); err != nil {
+			s.fail(w, r, err)
+			return
+		}
 	}
 
 	patch := store.ProviderPatch{

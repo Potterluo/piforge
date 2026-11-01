@@ -60,6 +60,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/store"
 	"github.com/piforge/piforge/backend/internal/tenantlimits"
 	"github.com/piforge/piforge/backend/internal/term"
+	"github.com/piforge/piforge/backend/internal/urlguard"
 	"github.com/piforge/piforge/backend/internal/workspaceremote"
 )
 
@@ -213,6 +214,13 @@ type options struct {
 	gatewayTokenTTL time.Duration
 	// skillMaxBytes caps the total a single skill import may expand (FR-5.8).
 	skillMaxBytes int64
+	// skillCloneMaxBytes caps the checkout a git import may write (adversarial
+	// acceptance #4, attack 10: the clone ran before the 4 MB read cap, so a
+	// 268 MiB repository cost 268 MiB of /tmp before being refused).
+	skillCloneMaxBytes int64
+	// urlAllowFile is the outbound URL policy's allow-list: the only way this
+	// deployment may fetch a non-public host (docs/SANDBOX-DEPLOY.md §1.9).
+	urlAllowFile string
 	// sessionReconcileInterval is how often the watchdog compares persisted
 	// "running" rows with the in-process agent registry. Zero keeps the boot
 	// pass but disables the periodic one.
@@ -305,6 +313,11 @@ func run() error {
 	flag.Int64Var(&opt.skillMaxBytes, "skill-max-bytes",
 		httpapi.DefaultSkillMaxBytes,
 		"total bytes one skill import may expand on disk; 0 is refused (env PIFORGE_SKILL_MAX_BYTES, default 32 MiB)")
+	flag.Int64Var(&opt.skillCloneMaxBytes, "skill-clone-max-bytes",
+		httpapi.DefaultSkillCloneMaxBytes,
+		"checkout bytes one git skill import may write before git is stopped; 0 is refused (env PIFORGE_SKILL_CLONE_MAX_BYTES, default 16 MiB)")
+	flag.StringVar(&opt.urlAllowFile, "url-allow-file", envOr("PIFORGE_URL_ALLOW_FILE", ""),
+		"JSON allow-list of outbound hosts/CIDRs the control plane may fetch; default empty, i.e. public http(s) only (env PIFORGE_URL_ALLOW_FILE)")
 	flag.DurationVar(&opt.agentIdleTTL, "agent-idle-ttl", envDuration("PIFORGE_AGENT_IDLE_TTL", 30*time.Minute),
 		"stop an agent process after it has been idle this long")
 	flag.DurationVar(&opt.sandboxIdlePause, "sandbox-idle-pause", envDuration("PIFORGE_SANDBOX_IDLE_PAUSE", 30*time.Minute),
@@ -399,6 +412,18 @@ func run() error {
 	if opt.skillMaxBytes, err = resolveByteBudget(flag.CommandLine, "skill-max-bytes",
 		"PIFORGE_SKILL_MAX_BYTES", opt.skillMaxBytes, false); err != nil {
 		return fmt.Errorf("invalid skill size cap: %w", err)
+	}
+	if opt.skillCloneMaxBytes, err = resolveByteBudget(flag.CommandLine, "skill-clone-max-bytes",
+		"PIFORGE_SKILL_CLONE_MAX_BYTES", opt.skillCloneMaxBytes, false); err != nil {
+		return fmt.Errorf("invalid skill clone cap: %w", err)
+	}
+	// The outbound URL policy is configuration that cannot mean anything unless
+	// it loads: a file that is present but unreadable, or one with a typo, must
+	// fail the boot rather than leave the deployment at the default while the
+	// operator believes their internal MCP server is allowed.
+	urlPolicy, err := urlguard.LoadFile(opt.urlAllowFile)
+	if err != nil {
+		return fmt.Errorf("invalid outbound URL policy: %w", err)
 	}
 
 	// Normalise the provider name before anything compares it: placement resolution
@@ -689,6 +714,11 @@ func run() error {
 	// Say the number out loud: "how long is a leaked sandbox token worth" is a
 	// security property of the deployment, and it is now one hour rather than
 	// half a day.
+	logger.Info("outbound URL policy",
+		"policy", urlPolicy.Describes(),
+		"rule", "public http(s) only: a tenant-supplied URL is resolved, every address is checked, and the dial is pinned to the verified address",
+		"covers", "MCP server URL (save + /gw/mcp), provider base_url (save, /test, /gw/llm), project forge api_base, skill import over http(s)",
+		"allow_file", opt.urlAllowFile)
 	logger.Info("model gateway token lifetime",
 		"ttl", signer.TTL().String(),
 		"revoked_on", "the session's agent stopping (pause, archive, delete, model switch); not on shutdown, because a container agent outlives this process",
@@ -724,6 +754,10 @@ func run() error {
 		Box:    box,
 		Signer: signer,
 		Binder: binder,
+		// The model gateway is the third fetcher of a tenant-supplied URL: it
+		// forwards the agent's traffic to the provider's base_url from this
+		// process's network position.
+		Policy: urlPolicy,
 		Logger: func(format string, args ...any) { logger.Debug(fmt.Sprintf(format, args...)) },
 	})
 	if err != nil {
@@ -763,15 +797,15 @@ func run() error {
 		// host: without it Ensure could not create /workspace/repo. The browser and
 		// terminal reach the same endpoint when they are remote.
 		dockerProvider, derr := sandbox.NewDocker(sandbox.DockerConfig{
-			Image:    opt.sandboxImage,
-			Network:  opt.sandboxNetwork,
-			CPUs:     opt.sandboxCPUs,
-			Memory:   opt.sandboxMemory,
-			Pids:     opt.sandboxPids,
+			Image:     opt.sandboxImage,
+			Network:   opt.sandboxNetwork,
+			CPUs:      opt.sandboxCPUs,
+			Memory:    opt.sandboxMemory,
+			Pids:      opt.sandboxPids,
 			DiskBytes: opt.sandboxDiskQuota,
-			DataRoot: filepath.Join(opt.dataDir, "sandboxes"),
-			APIPort:  8080,
-			APIKey:   opt.sandboxAPIKey,
+			DataRoot:  filepath.Join(opt.dataDir, "sandboxes"),
+			APIPort:   8080,
+			APIKey:    opt.sandboxAPIKey,
 			// A per-tenant quota and a per-tenant bridge, both resolved here rather
 			// than inside the provider: the policy is the deployment's, and the
 			// provider only applies what it is given.
@@ -1339,9 +1373,14 @@ func run() error {
 		// and the answer follows the placement: a container deployment runs every
 		// agent in its sandbox, so a stdio server cannot be staged there
 		// (internal/mcpstage).
-		AgentIsolated:    opt.agentInSandbox,
-		SandboxDiskQuota: opt.sandboxDiskQuota,
-		SkillMaxBytes:    opt.skillMaxBytes,
+		AgentIsolated:      opt.agentInSandbox,
+		SandboxDiskQuota:   opt.sandboxDiskQuota,
+		SkillMaxBytes:      opt.skillMaxBytes,
+		SkillCloneMaxBytes: opt.skillCloneMaxBytes,
+		// The one outbound URL policy every fetcher shares: the MCP broker, the
+		// provider probe, the forge client and the skill importer
+		// (docs/SANDBOX-DEPLOY.md §1.9).
+		URLPolicy: urlPolicy,
 		// The quota is measured where the workspace is. With a container provider
 		// that is inside the sandbox: the reported root is /workspace, a path this
 		// process cannot open, and walking it here is how the admin page came to
@@ -1380,16 +1419,16 @@ func run() error {
 		LLMGateway:           gateway,
 		// The same binder, for the MCP broker's half of the rule: a broker token
 		// copied out of the sandbox is refused from anywhere else too (§16.3).
-		SandboxBinding: binder,
-		Browser:              browsers,
-		Term:                 termAdapter{m: terminals},
-		Provisioner:          prov,
-		SetupDefaults:        setupDefaults,
-		BrowserTakeoverTTL:   opt.browserTakeoverTTL,
-		Reconciler:           rec,
-		Probe:                livenessProbe,
-		Now:                  time.Now,
-		Logger:               logger,
+		SandboxBinding:     binder,
+		Browser:            browsers,
+		Term:               termAdapter{m: terminals},
+		Provisioner:        prov,
+		SetupDefaults:      setupDefaults,
+		BrowserTakeoverTTL: opt.browserTakeoverTTL,
+		Reconciler:         rec,
+		Probe:              livenessProbe,
+		Now:                time.Now,
+		Logger:             logger,
 	})
 
 	srv := &http.Server{

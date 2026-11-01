@@ -13,6 +13,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/crypto"
+	"github.com/piforge/piforge/backend/internal/urlguard"
 )
 
 // fakeProvider mimics the store's resolver.
@@ -115,7 +116,14 @@ func newHarness(t *testing.T) *harness {
 	}
 	h.signer = signer
 
-	gw, err := New(Config{Store: h.store, Box: box, Signer: signer})
+	// The fixture provider listens on 127.0.0.1, which the deployment policy
+	// refuses; the allow entry is the operator's exception, spelled the same way
+	// an operator would write it for an internal provider.
+	policy, err := urlguard.New([]urlguard.Allow{{CIDR: "127.0.0.1/32"}})
+	if err != nil {
+		t.Fatalf("urlguard.New: %v", err)
+	}
+	gw, err := New(Config{Store: h.store, Box: box, Signer: signer, Policy: policy})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -139,6 +147,37 @@ func (h *harness) do(t *testing.T, token, method, path, body string, headers map
 	rec := httptest.NewRecorder()
 	h.gateway.ServeHTTP(rec, req)
 	return rec
+}
+
+// TestGatewayRefusesAPrivateProviderBaseURL is the third fetcher of a
+// tenant-supplied URL: the agent's own model traffic is POSTed to the provider's
+// base_url from this process. A row that names the control plane's loopback (or
+// the metadata service) must be a 400, not a request.
+func TestGatewayRefusesAPrivateProviderBaseURL(t *testing.T) {
+	h := newHarness(t)
+	// The deployment default: public http(s) only, no allow entries.
+	deployment, err := New(Config{Store: h.store, Box: h.box, Signer: h.signer, Policy: urlguard.Default()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	h.gateway = deployment
+
+	token, err := h.signer.Issue("ses_1", "usr_1", "anthropic-shared", "claude-sonnet-4-5", time.Now())
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	rec := h.do(t, "", http.MethodPost, "/gw/llm/"+token+"/v1/messages",
+		`{"model":"claude-sonnet-4-5"}`, map[string]string{"Content-Type": "application/json"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "url_refused") ||
+		!strings.Contains(rec.Body.String(), "127.0.0.1") {
+		t.Fatalf("body = %s, want a url_refused naming the host", rec.Body.String())
+	}
+	if h.captured != nil {
+		t.Fatalf("the gateway dialled the refused base_url: %s", h.captured.URL)
+	}
 }
 
 func TestGatewayInjectsAnthropicKeyAndStripsTheEphemeralOne(t *testing.T) {

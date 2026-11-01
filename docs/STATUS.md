@@ -1851,3 +1851,95 @@ storm    441 个 sleep 顶死 512 的 cgroup：first miss 05:01:00.810 -> repair
 `file://` 导入源没有白名单（只保证带链接的仓库被拒）；clone 的落盘没有上限（4 MB 是**读**的上限）；
 硬链接不在 `tenantfs` 检测范围（git/zip 造不出，未来的 tar 导入要重新想）；"根文件系统减基线"包含沙箱
 自身服务写的东西，空闲沙箱会缓慢增长。
+
+## 本批：控制面替租户取 URL（第五轮，2026-11-01）
+
+第四轮对抗验收的结论是"控制面可以按租户给的 URL 出网，而且是从它自己的网络位置"。两条独立的
+fetcher，都在隔离栈上量到（`e2e/.artifacts/adversarial4/REPORT.md` 攻击 18 与 21）：MCP broker 把
+沙箱的请求原样转发到 `mcp_servers.url`（沙箱里 `GET /gw/mcp/<tok>/healthz` -> `200 {"status":"ok"}`，
+即控制面自己的 loopback；`…/anything` -> `200 {"you_are":"172.26.0.2",…}`，是只有控制面能到的 marker
+容器），provider `base_url` + `/test` 是同一个 fetch 去掉 broker。控制面能上外网，所以这是双向通道；
+没有读到任何密钥、文件或数据库行。同一份报告的攻击 10 是便宜的那条：skill 克隆在 4 MB 读上限**之前**
+就把整棵树写到 `/tmp`（32 MiB 仓库 -> 38 829 857 B，268 MiB -> 268 800 878 B）。
+
+### 本轮修复
+
+1. **FIX 1（SSRF / 出网代理）**：新增 `internal/urlguard`，一条策略、每个 fetch 点各生效两次
+   （存的时候、拨号的时候）。scheme 只放 http(s)；`localhost` / `host.docker.internal` / `*.local` /
+   `*.internal` / compose 服务名 / 本容器 hostname 不问 DNS 直接拒；解析出的**每一个**地址都必须是公网
+   （loopback、169.254/16、10/8、172.16/12、192.168/16、fc00::/7、unspecified、multicast、CGNAT、
+   documentation、reserved 全拒，IPv4-mapped IPv6 先 unmap）；请求时再查一次并且**把拨号钉在验证过的
+   IP 上**（自定义 `DialContext`，`Proxy: nil`），所以 DNS rebinding 无效；重定向逐跳重查；拒绝是
+   类型化 400（`details.reason` + `details.host`），每次拒绝一行日志、不记完整 URL。
+   `CheckSave` 只放宽"此刻解析不了"这一种情况（DNS 坏了也要能改 provider），边界不变。
+2. **FIX 1b（覆盖到每一个 fetch 点）**：MCP server URL（存 + `/gw/mcp`）、provider `base_url`
+   （存、`/test`、`/gw/llm`）、项目 forge `api_base`（存 + PR 调用）、skill 导入的 http(s)/`git@`
+   （`http.curloptResolve` 钉 IP）。项目 `repo_url` 是在**沙箱里** clone、截图是沙箱里的 Chrome，
+   都不在控制面，未改。完整表在 `docs/SANDBOX-DEPLOY.md` §1.9.4。
+3. **FIX 1c（唯一放宽途径）**：`-url-allow-file` / `PIFORGE_URL_ALLOW_FILE`，compose 只读挂
+   `deploy/url-policy.json`（**默认空**），启动时严格解析（未知字段 / 坏 CIDR / 缺 ports 都 fail boot），
+   条目按 host 或 CIDR + 端口匹配，只能放宽、不能收紧。启动日志打一行 policy + 覆盖范围 + allow_file。
+4. **FIX 1d（演练也走这条规则）**：`scripts/deliver-check.ps1` 的假 forge 是容器里的 loopback 地址，
+   演练现在写一个只含 `127.0.0.1:<forge 端口>` 的 allow 文件挂进容器（启动日志因此是
+   `+ 1 allow entries`）。演练没有绕过策略——那正是"内网 forge 的 operator 要写下来"这件事本身；
+   其余 118 项都在默认策略下跑。
+5. **FIX 2（克隆落盘上界）**：`git clone --depth 1 --single-branch --no-tags` + 每 25 ms 量一次目标
+   目录、超过 `-skill-clone-max-bytes`（默认 16 MiB）就 kill、退出后再量一次、`RemoveAll`、
+   类型化 400 报上限与实测字节。
+
+### 实测（隔离栈 7723，镜像从本轮工作树重建）
+
+```
+默认策略（deploy/url-policy.json 为空），全部落库前拒绝：
+  MCP  http://piforge:7700/healthz        -> 400 details={"host":"piforge","reason":"host-name"}
+       http://127.0.0.1:7700              -> 400 reason=loopback
+       http://169.254.169.254/latest/…    -> 400 reason=link-local
+       http://a4marker:9021/mcp           -> 400 reason=private（"a4marker (172.26.0.3)"）
+       http://host.docker.internal:9021   -> 400 reason=host-name
+       file:///data/master.key            -> 400 reason=scheme
+  provider  http://a4marker:9021 / 127.0.0.1:7700 / 169.254.169.254 -> 400（同上理由）
+  skill     http://169.254.169.254/repo.git -> 400 reason=link-local
+  volc      POST /v1/providers/<volc>/test -> 200 {"ok":true,"status":200,"latency_ms":1910}
+
+允许一条 host.docker.internal:9021 之后（一次启动，验证"合法 MCP 仍然可用"）：
+  POST /v1/mcp/servers {url: http://host.docker.internal:9021/mcp} -> 201
+  真 prompt -> 200 started，8 s settle；MCP server 日志：initialize(pi 1.4.0) ->
+    notifications/initialized -> tools/list -> tools/call echo PONG
+  模型拿到 {"content":[{"type":"text","text":"A4-LEGIT-TOOL-RESULT:PONG"}]} 并复述
+
+再回到默认策略（库里的行和 token 都还在 = 升级后的既有部署）：
+  沙箱里 curl /gw/mcp/<cp-service tok>/healthz  -> 400 reason=host-name（A4 的那条探针）
+  沙箱里 curl /gw/mcp/<cp-service tok>/anything -> 400 同上
+  沙箱里 curl /gw/mcp/<a4legit tok>/mcp         -> 400 reason=host-name（允许项撤销后）
+  控制面自己 wget http://127.0.0.1:7700/healthz -> {"status":"ok"}（目标本身在，broker 不再代取）
+  provider /test（phase B 存下的 http://host.docker.internal:9021）-> 400 reason=host-name
+  volc /test -> 200
+
+克隆上界（容器内，64 MiB 随机内容 + SKILL.md）：
+  旧 argv 手动跑：du -sb /tmp/naive = 134 342 612 B
+  新导入：400 in 1075 ms，"已写入 16.3 MiB 时停止并删除"
+  采样 76 次（30 ms）：/tmp/piforge-skills-* 峰值 16 690 724 B；残留目录 0
+
+运营卫生：7723 拆除后 connect refused；piforge.user 容器 0；piforge* 卷 0；piforge* 网络 0
+  pf-local 前后一致：id=7dc14e4a7525a8ef… started=2026-10-31T13:48:51Z restarts=0
+  healthz -> 200 {"status":"ok"}
+```
+
+### 门禁（本批，实测输出）
+
+- `go build ./...`、`go vet ./...`、`go test ./... -count=1`（`agentsupervisor` 的
+  `TestSupervisorKeepsTheAgentAliveWhenTheClientLeaves` 在全量跑里出现过一次时序失败，单独跑 3/3 通过，
+  与本批无关，未改那个包）
+- `pnpm --dir web test -- --run`（38 files / 292 tests）、`pnpm --dir web exec next build`
+- e2e 全量：**182 passed (8.7m)**
+- `pwsh scripts/deliver-check.ps1`：exit 0（`PIFORGE_DRILL_KEY` 只经 `scripts/drill-key.ps1` 读取）
+- 新增 Go 测试：`internal/urlguard` 11 个；`internal/httpapi` 8 个（含两个克隆上界）；
+  `internal/llmgw` 1 个。逐条列在 `docs/SANDBOX-DEPLOY.md` §1.9.7。
+- 证据：`e2e/.artifacts/adversarial5/REPORT.md`、`EVIDENCE.md` 与四个复现脚本。
+
+### 仍未做
+
+`file://` 导入源仍没有白名单（带链接的仓库仍被整次拒绝，但可以指向本机能读的仓库）；
+`git@` 只校验 host、不做地址钉住（ssh 不受 `http.curloptResolve` 管）；allow-list 是 host/CIDR +
+端口，不是路径；broker 仍然把完整的方法/body/响应转发给**被允许**的主机——那是功能，
+变的是"被允许"现在是一条写下来的部署决定。
