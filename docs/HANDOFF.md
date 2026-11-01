@@ -421,7 +421,14 @@ msg="orphaned runtime directories are swept" sandbox_root=/data/sandboxes skill_
 - **Janitor** (every 10 min): removes runtime directories no database row points at —
   sandbox roots, skill snapshots, agent configs, artifacts, sandbox snapshots, skill
   bundles. It is what cleans up after a crash; a directory it deletes is gone, so a
-  database that loses rows also loses the files.
+  database that loses rows also loses the files. Since the forensic audit trail
+  (`docs/AUDIT.md`), the same pass applies the audit retention policy
+  (`-audit-retention-days`, default 90; `0` keeps forever): it deletes whole tool
+  calls that **started** before the cutoff, plus run facts that started before it,
+  and logs `janitor: deleted audit rows older than the retention policy` with
+  `audit_rows` / `audit_runs`. It never deletes one phase of a call without the
+  other, and it writes `audit_pruned` so verification can tell a policy prefix from
+  a deleted head.
 - **Idle policy** (every 1 min): pause a sandbox after 30 min idle, reclaim (delete
   snapshots / workspace) after 336 h = 14 days. Observed pausing two sandboxes at boot
   that had been idle ~30m30s.
@@ -1499,3 +1506,55 @@ default, a no-op in a normal run) was 30/30 red before the change and 0/30 after
 guarantees e2e leans on (`backend/internal/gitx/status_order_test.go`): a status read cannot make a
 stage fail — removing `GIT_OPTIONAL_LOCKS=0` fails the test 3/3 and killed 18 of 200 real `git add`s
 on this box — and a stage is committed before the call returns.
+
+## The forensic audit trail (2026-11-01)
+
+`GET /v1/admin/audit` used to read `tool_calls`: a name, a hash, timing, joined to
+the session. That is a trace, not evidence — deleting the session deleted the row.
+The trail now lives in two independent tables and is documented end to end in
+**`docs/AUDIT.md`**. The short version:
+
+- **`audit_log`** — two append-only rows per call: `start` (tool, bounded redacted
+  preview, `user_id`/`project_id`/`session_id`/`sandbox_id`/`run_id`, denormalised
+  labels, `model_ref`, `commit_sha`, per-session `seq`) and `end` (`status`,
+  `exit_code`, `duration_ms`, `result_bytes`). **No foreign keys**: a session,
+  project or user delete does not erase the trail. `TestAuditRowsSurviveSessionAndProjectDeletion`
+  deletes all three and reads the row back with its labels, model and usage.
+- **`audit_runs`** — the run's token/cache/cost facts, written when the provider
+  settles, joined at read time. A provider that reports nothing leaves zeroes,
+  which the UI shows as "not reported".
+- **`audit_pruned`** — per-session retention watermark, so a mid-chain head is
+  explained rather than reported as tampering.
+- **Preview** — max 2048 bytes, 256 runes per field, 16 fields, 8 array items,
+  depth 3; key-shaped field names and value-shaped credentials become
+  `<redacted>`; content-shaped fields become `{sha256, bytes}`. Full file bytes
+  are never stored. The rules and the word lists are in `internal/audit`.
+- **Filters** — `tool`, `outcome`, `user`, `project`, `session`, `since`/`until`,
+  `min_duration_ms`, `q` (literal, case-insensitive over the preview); the short
+  aliases `user`/`project`/`session` are accepted. Pagination is unchanged
+  (offset, capped at 500).
+- **Exports** — `format=csv` and `format=jsonl` stream the **whole filtered set**
+  through a 32 KiB buffer, flushed every 256 rows. The CSV's first 17 columns keep
+  their old order; the new columns are appended. `TestAdminAuditCSVStreamsFiftyThousandRows`
+  exports 50k rows through a writer that caps each `Write` and asserts the heap
+  does not grow with the row count.
+- **Chain** — every `audit_log` row stores `prev_hash` (previous row in the
+  session) and `hash = SHA-256(prev_hash + canonical row + version)`.
+  `GET /v1/admin/audit/verify?session_id=…&from_seq=…&to_seq=…&since=…&until=…`
+  walks it and reports the first `edited` row, `gap`, `link` or unexplained
+  `head`. `TestAuditChainDetectsEditsAndDeletions` pins the edit and the deleted
+  middle row; `TestAuditChainCoversEveryStoredColumn` fails if a column is added
+  to the table but not to the hash.
+- **What the chain does not prove** (said in `docs/AUDIT.md` §6, not implied
+  away): there is no secret key, so a writer with database access can rewrite a
+  row and every later hash. It detects inconsistency and naive tampering, not a
+  privileged adversary. `audit_runs` is not chained.
+- **Retention** — `-audit-retention-days` / `PIFORGE_AUDIT_RETENTION_DAYS`,
+  default 90, `0` forever, negative refused at startup. The janitor deletes
+  whole calls (both phases) by start time and logs the counts. `audit_log` has no
+  update path after insert other than that policy delete.
+
+The probe is `scripts/probe-audit.ps1`: one real agent run on the throwaway
+isolated stack, then the admin page/API read back with the preview, model, commit
+sha, token usage and a verified chain.
+
