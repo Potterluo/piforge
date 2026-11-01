@@ -450,6 +450,16 @@ type FileContent struct {
 	Language  string    `json:"language,omitempty"`
 	MimeType  string    `json:"mime_type,omitempty"`
 	Modified  time.Time `json:"modified"`
+	// OutsideWorkspace says the bytes were reached through a symlink that leaves
+	// the workspace root. It is not an error and not a refusal: in a container
+	// placement the link is inside the tenant's own sandbox, so the content is
+	// returned — but the panel must not present it as a workspace file (a
+	// reviewer, and an auditor after them, would read the path as where the
+	// bytes live). Absent means "resolves inside the workspace".
+	OutsideWorkspace bool `json:"outside_workspace,omitempty"`
+	// ResolvedPath is where the link actually pointed, when OutsideWorkspace is
+	// set: the canonical path in the container's namespace.
+	ResolvedPath string `json:"resolved_path,omitempty"`
 }
 
 // Risk markers attached to a git change (PRD FR-12.4). A lockfile or a CI

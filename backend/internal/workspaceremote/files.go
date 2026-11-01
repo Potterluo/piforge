@@ -272,6 +272,14 @@ func (w *Workspace) ReadFile(ctx context.Context, root, relPath string) (*contra
 		Modified: meta.Modified,
 		Language: fsx.GuessLanguage(container),
 	}
+	// Where the bytes really are. The sandbox's file API follows a symlink out
+	// of the workspace without a word, so the preview has to say so itself: the
+	// content is still returned (it is the tenant's own container), but it is
+	// marked as reached through a link (adversarial round 6).
+	if resolved, outside := w.resolveOutside(ctx, tgt, container); outside {
+		content.OutsideWorkspace = true
+		content.ResolvedPath = resolved
+	}
 	switch {
 	case meta.Size > w.cfg.MaxPreviewBytes:
 		sample, serr := w.readSample(ctx, tgt, container)
@@ -339,6 +347,49 @@ func (w *Workspace) ReadFile(ctx context.Context, root, relPath string) (*contra
 		content.MimeType = fsx.GuessMime(container, content.Binary)
 		return content, nil
 	}
+}
+
+// resolveOutside canonicalises container inside the sandbox and reports whether
+// it left tgt.Root, plus the path it reached.
+//
+// Nothing in the sandbox's file API refuses a symlink that points out of the
+// workspace: `GET /files?path=leak` where leak -> /etc/passwd answers the bytes
+// with a 200 and the panel would show them under a workspace path. That is the
+// tenant's own container, so it is not an escape — but it is a claim about
+// provenance that is false, and the fix is to say so, not to hide the file.
+//
+// The image has a shell, so the answer comes from the namespace the file API
+// reads, not from a guess: `readlink -f` on the root and on the target, in one
+// exec. A resolution failure is neither a read failure nor an "outside" claim;
+// the payload then carries no provenance, exactly as it did before this check.
+func (w *Workspace) resolveOutside(ctx context.Context, tgt Target, container string) (string, bool) {
+	if strings.TrimSpace(tgt.Root) == "" {
+		return "", false
+	}
+	script := fmt.Sprintf(
+		"printf 'PFROOT:%%s\\n' \"$(readlink -f -- %s)\"; printf 'PFTARGET:%%s\\n' \"$(readlink -f -- %s)\"",
+		aio.Quote(tgt.Root), aio.Quote(container))
+	res, err := tgt.Client.Exec(ctx, script, "")
+	if err != nil || res.ExitCode != 0 {
+		return "", false
+	}
+	var root, target string
+	for _, line := range strings.Split(res.Output, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		switch {
+		case strings.HasPrefix(line, "PFROOT:"):
+			root = strings.TrimPrefix(line, "PFROOT:")
+		case strings.HasPrefix(line, "PFTARGET:"):
+			target = strings.TrimPrefix(line, "PFTARGET:")
+		}
+	}
+	if root == "" || target == "" {
+		return "", false
+	}
+	if target == root || strings.HasPrefix(target, strings.TrimSuffix(root, "/")+"/") {
+		return "", false
+	}
+	return target, true
 }
 
 // OpenFile opens a file for a raw byte stream through the sandbox's download

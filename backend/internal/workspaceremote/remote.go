@@ -19,11 +19,15 @@
 //
 // Deliberate differences from internal/fsx:
 //
-//   - symlinks are not resolved and re-checked remotely. The containment that
+//   - a symlink is resolved and *reported*, not refused. The containment that
 //     matters here is the container boundary: the agent whose files these are
 //     could read /etc/passwd inside its own sandbox anyway, so a link cannot
-//     widen anything. Lexical traversal of the workspace root is still rejected
-//     by fsx.CleanRel before a path is joined.
+//     widen anything. But a preview that presents "leak" as a workspace file
+//     when the bytes came from /etc/passwd is a lie a reviewer — and an auditor
+//     after them — would repeat, so ReadFile canonicalises the path inside the
+//     container and answers OutsideWorkspace + ResolvedPath when it left the
+//     workspace root. Lexical traversal of the root is still rejected by
+//     fsx.CleanRel before a path is joined.
 //   - a file larger than the preview threshold is read as head+tail through
 //     `head`/`tail` instead of ReadAt. The cut can land inside a multi-byte
 //     character; the local reader trims to a line boundary, this one reports

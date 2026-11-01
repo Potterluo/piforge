@@ -38,6 +38,7 @@ type fakeSandbox struct {
 	t       *testing.T
 	root    string // host directory that stands for /workspace
 	tmpRoot string // host directory that stands for /tmp
+	etcRoot string // host directory that stands for /etc
 
 	mu     sync.Mutex
 	execs  []string
@@ -46,7 +47,7 @@ type fakeSandbox struct {
 
 func newFakeSandbox(t *testing.T) *fakeSandbox {
 	t.Helper()
-	return &fakeSandbox{t: t, root: t.TempDir(), tmpRoot: t.TempDir()}
+	return &fakeSandbox{t: t, root: t.TempDir(), tmpRoot: t.TempDir(), etcRoot: t.TempDir()}
 }
 
 func (f *fakeSandbox) server() *httptest.Server { return httptest.NewServer(f.handler()) }
@@ -91,6 +92,10 @@ func (f *fakeSandbox) host(container string) (string, bool) {
 		return f.tmpRoot, true
 	case strings.HasPrefix(clean, "/tmp/"):
 		return filepath.Join(f.tmpRoot, filepath.FromSlash(strings.TrimPrefix(clean, "/tmp/"))), true
+	case clean == "/etc":
+		return f.etcRoot, true
+	case strings.HasPrefix(clean, "/etc/"):
+		return filepath.Join(f.etcRoot, filepath.FromSlash(strings.TrimPrefix(clean, "/etc/"))), true
 	}
 	return "", false
 }
@@ -472,6 +477,9 @@ func (f *fakeSandbox) runShell(command, gitOut string) (string, int) {
 		}
 		return base64.StdEncoding.EncodeToString(raw), 0
 
+	case strings.HasPrefix(command, "printf 'PFROOT:"):
+		return f.resolveReadlink(command), 0
+
 	case strings.Contains(command, "PFHEAD:"):
 		head := regexp.MustCompile(`head -c \d+ -- '([^']*)'`).FindStringSubmatch(command)
 		tail := regexp.MustCompile(`tail -c \d+ -- '([^']*)'`).FindStringSubmatch(command)
@@ -493,6 +501,47 @@ func (f *fakeSandbox) runShell(command, gitOut string) (string, int) {
 	}
 	f.t.Fatalf("unexpected shell command: %s", command)
 	return "", 1
+}
+
+// readlinkArg finds both `readlink -f -- '<path>'` arguments in the provenance
+// probe the workspace sends.
+var readlinkArg = regexp.MustCompile(`readlink -f -- '([^']*)'`)
+
+// resolveReadlink answers the provenance probe: canonicalise both paths the way
+// `readlink -f` would inside the container, and print the markers the client
+// parses. The fake runs on the host, so it resolves the host file and maps the
+// result back into the container namespace (/workspace, /tmp, /etc) — a link
+// from /workspace to /etc/passwd must answer /etc/passwd, not a host path.
+func (f *fakeSandbox) resolveReadlink(command string) string {
+	m := readlinkArg.FindAllStringSubmatch(command, -1)
+	if len(m) != 2 {
+		f.t.Fatalf("unparseable resolve: %s", command)
+	}
+	return "PFROOT:" + f.containerReal(m[0][1]) + "\n" + "PFTARGET:" + f.containerReal(m[1][1])
+}
+
+func (f *fakeSandbox) containerReal(container string) string {
+	hostPath, ok := f.host(container)
+	if !ok {
+		return ""
+	}
+	real, err := filepath.EvalSymlinks(hostPath)
+	if err != nil {
+		return ""
+	}
+	for _, m := range []struct{ root, prefix string }{
+		{f.root, "/workspace"}, {f.tmpRoot, "/tmp"}, {f.etcRoot, "/etc"},
+	} {
+		rel, rerr := filepath.Rel(m.root, real)
+		if rerr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if rel == "." {
+			return m.prefix
+		}
+		return m.prefix + "/" + filepath.ToSlash(rel)
+	}
+	return filepath.ToSlash(real)
 }
 
 func (f *fakeSandbox) runGit(command, gitOut string) (string, int) {
@@ -657,6 +706,72 @@ func TestReadFileClassifiesMissingDirectoryAndBinary(t *testing.T) {
 	}
 	if content.Body != "" || !content.Truncated || content.Language != "" {
 		t.Fatalf("metadata preview = %+v", content)
+	}
+}
+
+func TestReadFileMarksALinkThatLeavesTheWorkspace(t *testing.T) {
+	fake := newFakeSandbox(t)
+	ws, _ := newTestWorkspace(t, fake, Config{})
+	ctx := context.Background()
+	root := `C:\host\sandboxes\repo`
+
+	// The report's case: a link inside the checkout that points at the
+	// container's /etc/passwd. The sandbox's file API follows it and answers the
+	// bytes with a 200 — which is inside the tenant's own container, so it is
+	// not an escape. What must change is the claim: the payload has to say the
+	// bytes were reached through a link, and where it landed.
+	passwd := []byte("root:x:0:0:root:/root:/bin/sh\n")
+	if err := os.WriteFile(filepath.Join(fake.etcRoot, "passwd"), passwd, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	leak := filepath.Join(fake.root, "leak")
+	if err := os.Symlink(filepath.Join(fake.etcRoot, "passwd"), leak); err != nil {
+		t.Skipf("symlinks not permitted here: %v", err)
+	}
+	content, err := ws.ReadFile(ctx, root, "leak")
+	if err != nil {
+		t.Fatalf("ReadFile leak: %v", err)
+	}
+	if !content.OutsideWorkspace {
+		t.Errorf("OutsideWorkspace = false for a link to /etc/passwd")
+	}
+	if content.ResolvedPath != "/etc/passwd" {
+		t.Errorf("ResolvedPath = %q, want /etc/passwd", content.ResolvedPath)
+	}
+	if content.Body != string(passwd) {
+		t.Errorf("body = %q, want the linked bytes (the read itself must still work)", content.Body)
+	}
+
+	// A normal workspace file is not marked, and carries no resolved path: the
+	// wall between "inside" and "reached through a link" is the whole point.
+	if err := os.WriteFile(filepath.Join(fake.root, "notes.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := ws.ReadFile(ctx, root, "notes.txt")
+	if err != nil {
+		t.Fatalf("ReadFile notes.txt: %v", err)
+	}
+	if plain.OutsideWorkspace || plain.ResolvedPath != "" {
+		t.Errorf("a workspace file was marked: outside=%v resolved=%q", plain.OutsideWorkspace, plain.ResolvedPath)
+	}
+
+	// A link that stays inside the workspace is still a workspace file: it
+	// resolves under the root, so marking it would be a false alarm.
+	if err := os.MkdirAll(filepath.Join(fake.root, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fake.root, "real", "inner.txt"), []byte("inner\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(fake.root, "real", "inner.txt"), filepath.Join(fake.root, "alias")); err != nil {
+		t.Skipf("symlinks not permitted here: %v", err)
+	}
+	alias, err := ws.ReadFile(ctx, root, "alias")
+	if err != nil {
+		t.Fatalf("ReadFile alias: %v", err)
+	}
+	if alias.OutsideWorkspace {
+		t.Errorf("an in-workspace link was marked outside: %+v", alias)
 	}
 }
 

@@ -357,6 +357,15 @@ export interface FileContent {
   language?: string;
   mime_type?: string;
   modified: string;
+  /**
+   * The bytes were reached through a symlink that leaves the workspace root.
+   * The server still returns them (in a container placement the link is inside
+   * the tenant's own sandbox), but the panel must not present them as a
+   * workspace file. Absent means "resolves inside the workspace".
+   */
+  outside_workspace?: boolean;
+  /** Where the link pointed, when `outside_workspace` is set. */
+  resolved_path?: string;
 }
 
 export interface GitStatus {

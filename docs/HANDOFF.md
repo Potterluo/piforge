@@ -1078,6 +1078,18 @@ digest and decision. `-Rebuild` still forces all three; `-BuildOnly` builds and 
 stack (it used to run 15 of the 17 this document claimed), prints the count, and exits 2 when an edge
 could not be measured.
 
+**The file panel now says when it reads through a link.** In a container placement the panel reads
+through the sandbox's own file API, which follows a symlink out of the workspace:
+`GET /v1/sessions/{id}/files?path=<link to /etc/passwd>` answered 200 with the container's
+`/etc/passwd`, and the panel showed it as an ordinary workspace file. `../` and absolute paths are
+still refused (400), so this stayed inside the tenant's own container — what was wrong was the
+claim, which a reviewer (and an auditor after them) would repeat. `FileContent` now carries
+`outside_workspace` and `resolved_path`: the workspace asks the sandbox shell for `readlink -f` of
+the root and of the target and marks the payload when the target leaves the root, and the panel
+badges it 「经符号链接指向工作区外」 with the real path in the body. Host placement is unchanged and
+stricter: `fsx.Resolve` refuses an escaping link with a 400, because there the workspace is the
+host.
+
 **Gates for this round** (`go build`, `go vet`, `go test ./... -count=1`, `pnpm --dir web test -- --run`,
 `pnpm --dir web exec next build`, full e2e 182, `deliver-check.ps1 -Image` with 125 checks) — the numbers
 are in `docs/STATUS.md`.

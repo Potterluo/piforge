@@ -172,6 +172,25 @@ export function FilePreview({ sessionId, path, line, onSaved, onClose }: FilePre
             {language === "plaintext" ? (content.mime_type ?? "text") : language}
           </Badge>
         ) : null}
+        {content?.outside_workspace ? (
+          // The path in the header is the one the user clicked, and in a
+          // container placement the file API follows a symlink out of the
+          // workspace without the path saying so. Saying it is the difference
+          // between a preview a reviewer can trust and one they'd repeat in an
+          // audit as "a file in the repository".
+          <Badge
+            variant="outline"
+            data-testid="preview-outside-workspace"
+            title={
+              content.resolved_path
+                ? `实际路径：${content.resolved_path}`
+                : "这个文件经符号链接读取，不在工作区里"
+            }
+            className="shrink-0 border-amber-500/60 bg-amber-500/10 text-[10px] text-amber-700 dark:text-amber-400"
+          >
+            经符号链接指向工作区外
+          </Badge>
+        ) : null}
         {content && EDITABLE.has(kind) && !content.truncated ? (
           <Button
             variant="ghost"
@@ -267,6 +286,15 @@ export function FilePreview({ sessionId, path, line, onSaved, onClose }: FilePre
           {content.truncated ? (
             <div className="shrink-0 border-b bg-muted/40 px-2 py-1 text-[10px] text-muted-foreground">
               文件过大，仅显示首尾片段 · 共 {formatBytes(content.size)}
+            </div>
+          ) : null}
+          {content.outside_workspace ? (
+            <div
+              data-testid="preview-outside-workspace-note"
+              className="shrink-0 border-b bg-amber-500/10 px-2 py-1 text-[10px] text-amber-700 dark:text-amber-400"
+            >
+              这个文件经符号链接读取，实际路径是{" "}
+              <span className="font-mono">{content.resolved_path ?? "工作区外"}</span>，不在工作区里。
             </div>
           ) : null}
 
