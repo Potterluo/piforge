@@ -15,44 +15,57 @@ import (
 
 // The periodic half of disk-quota enforcement (FR-5.8).
 //
-// The run boundary is the honest place to *refuse* a turn, but it is not a
-// bound on what a sandbox can write: an adversarial acceptance run wrote 3 GiB
-// into a sandbox whose admin row said `quota_bytes=2 GiB, over=false` with one
-// `fallocate`, and nothing stopped it because nothing was watching between
-// turns.
+// The run boundary is the honest place to *refuse* a turn, but it is not a bound
+// on what a sandbox can write: an adversarial acceptance run wrote 3 GiB into a
+// sandbox whose admin row said `quota_bytes=2 GiB, over=false` with one
+// `fallocate`, and the second one wrote 7.03 GB into a 2 GiB budget in ten seconds
+// with a loop of 8 MiB files — 3.27x — while this watchdog was still on its first
+// warning.
 //
-// Two mechanisms close that gap, and they are complementary:
+// Three mechanisms bound it now, and they are complementary:
 //
 //   - the container is created with RLIMIT_FSIZE set to the budget
 //     (sandbox.Limits.DiskBytes → `docker run --ulimit fsize`), so a single file
-//     cannot exceed the quota in the first place. That is the kernel's answer,
-//     and it is what makes `fallocate -l 3G` fail instead of succeeding;
-//   - this watchdog measures the workspace from *inside* the sandbox every few
-//     seconds. Many files can each stay under RLIMIT_FSIZE while the total goes
-//     over, and only a measuring loop sees that.
+//     cannot exceed the quota. That is the kernel's answer, and it is what makes
+//     `fallocate -l 3G` fail instead of succeeding;
+//   - this watchdog measures the workspace from *inside* the sandbox, at an
+//     interval that depends on whether a run is in flight (2 s) or not (10 s).
+//     Many files can each stay under RLIMIT_FSIZE while the total goes over, and
+//     only a measuring loop sees that;
+//   - the sandbox image runs an in-sandbox enforcer (internal/quotaenforcer) that
+//     walks the workspace every 100 ms and SIGSTOPs the processes holding it open
+//     for writing. That is the bound on the *burst*; this loop is the slower,
+//     more authoritative one that also stops the agents and pauses a sandbox that
+//     keeps growing.
 //
-// When it sees a sandbox over budget it stops the agents, records a
+// When this watchdog sees a sandbox over budget it stops the agents, records a
 // `platform.error` with the same 507 message the run boundary uses, and — if the
-// workspace keeps growing after the agents are gone — pauses the sandbox. The
-// two stages exist so the ordinary case (an `npm install` that overshoots) leaves
-// the terminal usable to clean up, while a tenant that keeps writing cannot fill
-// the host volume at a few hundred MB/s.
+// workspace keeps growing after the agents are gone — pauses the sandbox. The two
+// stages exist so the ordinary case (an `npm install` that overshoots) leaves the
+// terminal usable to clean up, while a tenant that keeps writing cannot fill the
+// host volume at a few hundred MB/s.
 
-// defaultDiskWatchInterval is how often the watchdog measures one sandbox.
+// diskWatchTick is how often the loop wakes up to decide which sandboxes are due.
 //
-// Five seconds is a real bound, not a sample: on this host a single writer
-// manages ~1.3 GB/s, so the worst case is a few GiB of overshoot before the
-// agents are killed. The alternative — a per-write filesystem quota — needs
-// either an XFS/ext4 project-quota mount or CAP_SYS_ADMIN to build a loopback
-// filesystem, and this deployment has neither (docs/SANDBOX-DEPLOY.md §6).
-const defaultDiskWatchInterval = 5 * time.Second
+// It is not the measurement interval: each sandbox carries its own `nextAt`
+// (diskquota.WatchInterval). A short tick keeps the adaptive intervals exact
+// without meaning "measure everything every 500 ms".
+const diskWatchTick = 500 * time.Millisecond
+
+// defaultDiskWatchInterval was the fixed five-second interval every sandbox used
+// to be measured at. It survives only as the fallback for a test that wants a
+// deterministic cadence: the loop's real intervals are diskquota.ActiveWatchInterval
+// and diskquota.IdleWatchInterval, which is what the 3.27x measurement argued for.
+const defaultDiskWatchInterval = 2 * time.Second
 
 // diskWatch tracks one sandbox between ticks: how many consecutive ticks found
-// it over budget, and what it held on the previous tick. Growth between ticks is
-// what distinguishes "the agent overshot once" from "something is still writing".
+// it over budget, what it held on the previous tick, and when it is next due.
+// Growth between ticks is what distinguishes "the agent overshot once" from
+// "something is still writing".
 type diskWatch struct {
 	strikes   int
 	lastBytes int64
+	nextAt    time.Time
 }
 
 // StartDiskWatch runs the periodic check until ctx is done. It is a no-op (with
@@ -69,16 +82,14 @@ func (sv *Server) StartDiskWatch(ctx context.Context) {
 		s.log.Info("sandbox disk watchdog: disabled (this deployment has no in-sandbox measurement; the run boundary still measures host workspaces)")
 		return
 	}
-	interval := s.deps.DiskWatchInterval
-	if interval <= 0 {
-		interval = defaultDiskWatchInterval
-	}
 	s.log.Info("sandbox disk watchdog: watching",
-		"interval", interval.String(),
+		"active_interval", s.diskWatchInterval(true).String(),
+		"idle_interval", s.diskWatchInterval(false).String(),
+		"tick", diskWatchTick.String(),
 		"quota", diskquota.HumanBytes(s.diskQuota.Limit()),
-		"enforcement", "RLIMIT_FSIZE per container file + this periodic check (stop the agents, then pause if it keeps growing)")
+		"enforcement", "RLIMIT_FSIZE per container file, the in-sandbox enforcer at 100 ms, and this check (stop the agents, then pause if it keeps growing)")
 	go func() {
-		ticker := time.NewTicker(interval)
+		ticker := time.NewTicker(diskWatchTick)
 		defer ticker.Stop()
 		for {
 			select {
@@ -91,12 +102,31 @@ func (sv *Server) StartDiskWatch(ctx context.Context) {
 	}()
 }
 
-// diskWatchPass measures every READY sandbox and acts on the ones over budget.
+// diskWatchInterval is how long a sandbox waits between measurements: the fast
+// interval while a run is in flight, the slow one otherwise. Deps.DiskWatchInterval
+// overrides both, which is how a test gets a deterministic cadence.
+func (s *server) diskWatchInterval(active bool) time.Duration {
+	if s.deps.DiskWatchInterval > 0 {
+		return s.deps.DiskWatchInterval
+	}
+	return diskquota.WatchInterval(active)
+}
+
+// diskWatchPass measures the sandboxes that are due and acts on the ones over
+// budget.
 func (s *server) diskWatchPass(ctx context.Context) {
 	dirs, err := s.deps.Store.SandboxDirectories(ctx)
 	if err != nil {
 		s.log.WarnContext(ctx, "sandbox disk watchdog: cannot list sandboxes", "error", err.Error())
 		return
+	}
+	// One indexed query for the whole pass: which sandboxes have a run in flight.
+	// A failure here only costs the fast interval, never a measurement.
+	running, rerr := s.deps.Store.RunningSandboxIDs(ctx)
+	if rerr != nil {
+		s.log.DebugContext(ctx, "sandbox disk watchdog: cannot tell which sandboxes are running; using the idle interval",
+			"error", rerr.Error())
+		running = map[string]bool{}
 	}
 	for _, dir := range dirs {
 		if err := ctx.Err(); err != nil {
@@ -108,43 +138,53 @@ func (s *server) diskWatchPass(ctx context.Context) {
 			// files are on this host, not in a sandbox this process cannot see.
 			continue
 		}
+		key := diskWatchKey(dir.ID)
+		now := time.Now()
+		if !s.diskWatchDue(key, now) {
+			continue
+		}
+		interval := s.diskWatchInterval(running[dir.ID])
 		sb, err := s.deps.Store.Sandbox(ctx, dir.UserID, dir.ID)
 		if err != nil {
+			s.diskWatchSchedule(key, now.Add(interval))
 			continue
 		}
 		if sb.State != contracts.SandboxReady {
 			// A paused sandbox is not writing. Measuring it would only produce a
-			// report nobody can act on, and waking it is the wrong repair.
-			s.clearDiskWatch(dir.ID)
+			// report nobody can act on, and waking it is the wrong repair. Its
+			// strikes are forgotten, but its place in the queue is kept: clearing
+			// the entry outright would make it due on every tick.
+			s.diskWatchReset(key, now.Add(interval))
 			continue
 		}
-		key := diskWatchKey(dir.ID)
 		rep := s.diskQuota.MeasureWith(ctx, dir.ID, dir.RootDir, s.deps.MeasureSandbox)
 		if rep.Unmeasurable {
 			s.log.DebugContext(ctx, "sandbox disk watchdog: could not measure", "sandbox", dir.ID, "error", rep.Error)
+			s.diskWatchSchedule(key, now.Add(interval))
 			continue
 		}
 		if !rep.Over {
-			s.clearDiskWatch(key)
+			s.diskWatchReset(key, now.Add(interval))
 			continue
 		}
-		s.enforceDiskWatch(ctx, sb, rep, key)
+		s.enforceDiskWatch(ctx, sb, rep, key, now.Add(interval))
 	}
 }
 
 // enforceDiskWatch is the two-stage response to an over-budget sandbox.
-func (s *server) enforceDiskWatch(ctx context.Context, sb *contracts.Sandbox, rep diskquota.Report, key string) {
+func (s *server) enforceDiskWatch(ctx context.Context, sb *contracts.Sandbox, rep diskquota.Report, key string, next time.Time) {
 	s.diskMu.Lock()
 	state := s.diskWatchState[key]
 	grew := state.lastBytes > 0 && rep.Bytes > state.lastBytes
 	state.lastBytes = rep.Bytes
 	state.strikes++
+	state.nextAt = next
 	first := state.strikes == 1
 	s.diskWatchState[key] = state
 	s.diskMu.Unlock()
 
 	message := s.diskQuota.Message(rep)
-	// One warning per episode, not one every five seconds: the operator needs it
+	// One warning per episode, not one per measurement: the operator needs it
 	// once, with the numbers. The pause (below) is the second signal.
 	if first {
 		s.log.WarnContext(ctx, "sandbox is over its disk quota",
@@ -179,10 +219,10 @@ func (s *server) enforceDiskWatch(ctx context.Context, sb *contracts.Sandbox, re
 	// Continued growth while the agents are gone means something other than the
 	// agent is writing (a terminal, a leftover process). Stop the sandbox: the
 	// volume is 1007 GB and the control plane's own data lives on the same host.
-	// Three strikes is ~10 s of writing — long enough to tell a runaway agent
-	// (already stopped above, which ends the growth) from a tenant that will not
-	// stop. A paused sandbox is woken by the next message (wakeSandbox), so this
-	// is a brake, not a lockout: resume, delete files, continue.
+	// Three strikes is one active interval (6 s) of writing — long enough to tell
+	// a runaway agent (already stopped above) from a tenant that will not stop.
+	// A paused sandbox is woken by the next message (wakeSandbox), so this is a
+	// brake, not a lockout: resume, delete files, continue.
 	if state.strikes >= 3 && grew {
 		if err := s.deps.Sandbox.Pause(ctx, sb.ID); err != nil {
 			s.log.WarnContext(ctx, "sandbox disk watchdog: could not pause the over-quota sandbox",
@@ -199,12 +239,33 @@ func (s *server) enforceDiskWatch(ctx context.Context, sb *contracts.Sandbox, re
 	}
 }
 
-// clearDiskWatch forgets one sandbox's strikes, so a sandbox that was cleaned up
-// starts from a clean slate.
-func (s *server) clearDiskWatch(key string) {
+// diskWatchDue reports whether one sandbox is due for a measurement.
+func (s *server) diskWatchDue(key string, now time.Time) bool {
 	s.diskMu.Lock()
-	delete(s.diskWatchState, key)
-	s.diskMu.Unlock()
+	defer s.diskMu.Unlock()
+	state, ok := s.diskWatchState[key]
+	return !ok || state.nextAt.IsZero() || !now.Before(state.nextAt)
+}
+
+// diskWatchSchedule sets when one sandbox is measured next, keeping its strikes.
+func (s *server) diskWatchSchedule(key string, next time.Time) {
+	s.diskMu.Lock()
+	defer s.diskMu.Unlock()
+	state := s.diskWatchState[key]
+	state.nextAt = next
+	s.diskWatchState[key] = state
+}
+
+// diskWatchReset forgets one sandbox's strikes (it was measured under budget, or
+// it is not running) and sets when it is due next.
+func (s *server) diskWatchReset(key string, next time.Time) {
+	s.diskMu.Lock()
+	defer s.diskMu.Unlock()
+	state := s.diskWatchState[key]
+	state.strikes = 0
+	state.lastBytes = 0
+	state.nextAt = next
+	s.diskWatchState[key] = state
 }
 
 func diskWatchKey(sandboxID string) string { return sandboxID }

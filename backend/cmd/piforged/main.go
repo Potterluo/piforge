@@ -52,6 +52,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/pi"
 	"github.com/piforge/piforge/backend/internal/pimodel"
 	"github.com/piforge/piforge/backend/internal/provision"
+	"github.com/piforge/piforge/backend/internal/quotaenforcer"
 	"github.com/piforge/piforge/backend/internal/reaper"
 	"github.com/piforge/piforge/backend/internal/reconcile"
 	"github.com/piforge/piforge/backend/internal/sandbox"
@@ -77,7 +78,14 @@ func main() {
 	if code, handled := agentsupervisor.MaybeRun(context.Background(), os.Args); handled {
 		os.Exit(code)
 	}
-
+	// The in-sandbox disk enforcer: `quota-enforcer -limit <bytes> -root
+	// /workspace`. It is started by the sandbox image at boot (deploy/
+	// quota-enforcer.sh, RUN_HOOK_PRE_SERVICES), not by the control plane, which
+	// is why it lives in this binary and not behind a provider call: a runner
+	// deployment has no exec path (docs/SANDBOX-DEPLOY.md §6).
+	if code, handled := quotaenforcer.MaybeRun(context.Background(), os.Args); handled {
+		os.Exit(code)
+	}
 	if err := run(); err != nil {
 		slog.Error("piforged exited with an error", "err", err)
 		os.Exit(1)

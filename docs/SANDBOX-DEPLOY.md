@@ -1600,6 +1600,140 @@ provider id，而不是重新推导 pair id。
 `pause reached the provider with [sbx_…], want [piforge-…]`）。
 
 
+
+### 1.4.8 第三轮：磁盘突发的上界与可落库的撤销（2026-11-01）
+
+第二轮对抗验收（`e2e/.artifacts/adversarial2/VERDICT.md`）留下三条「运维会担心」的事，
+这一轮关掉其中两条，第三条（token 本身是可携带的一小时凭证）如实写明、不假装关掉。
+环境：`pwsh scripts/up-isolated.ps1`（7723，`piforge:isolated` /
+`piforge/sandbox-agent:isolated`），`pf-local`（7722）全程未动。
+
+#### (1) 撤销落库：重启不再复活 token
+
+缺陷：`Signer.Revoke` 只改内存里的 `map[string]int64`。暂停当时是对的，控制面在这一小时
+TTL 内重启一次，计数器从 0 重新开始，**重启前签发的 token 全部重新可用**。旧代码的注释
+还把这写成了设计（「状态在内存里是故意的：它描述的是活进程」）——但 token 描述的不是
+活进程，它是一张一小时内有效的现金券。
+
+机制：
+
+- 新表 `gateway_revocations(session_id PRIMARY KEY, generation, revoked_at, expires_at)`
+  （`store/gateway_revocations.go`）。`RevokeGatewayToken` 在一个事务里读+加+写（写池是
+  单连接，所以两个并发 stop 不会都写成 1），`expires_at = now + TTL`，也就是这次撤销
+  能影响的最后一个 token 的到期时刻。
+- 写就发生在让 token 失效的那次调用里（`Signer.Revoke`，来自 `pi.Runtime.Stop`），
+  不是队列：`200 PAUSED` 意味着行已经在盘上。写失败时内存里仍然生效，并且把「这次只有
+  内存在挡、重启会复活」写进日志。
+- `Signer.Verify` 每次 `/gw/llm` 都读这个 generation（主键读一行，且在 HMAC 校验之后，
+  所以未认证的请求打不到数据库），与内存快路取 `max`；读失败才退回内存 —— 永远不比旧
+  行为更松。
+- `Signer.Issue` 读同一个数，所以**恢复后新签的 token 带着落库的 generation**，立刻可用；
+  同时 `ExtendGatewayRevocation` 把行的 `expires_at` 推到新 token 的到期时刻，清扫不会
+  在 token 还有效时把它的依据删掉。
+- 清扫：`SweepGatewayRevocations` 删 `expires_at` 已过的行，`cmd/piforged` 每 10 分钟跑
+  一次。**这张表故意没有指向 `sessions` 的外键**：删会话时如果级联删掉墓碑行，那个会话
+  在撤销前签发（generation 0）的 token 会重新变得有效。
+- **关机是唯一不落库的 stop。** 容器里的 agent 按设计要活过控制面（§1.4.5 阶段三），而它
+  没有新 prompt 就签不出新 token；关机时撤销等于把阶段三推翻。钩子在
+  `cmd/piforged/gateway_revocations.go` 的 `revocationHook`，`drain()` 注册在
+  `rt.Close()` 之前（defer 后进先出），所以先 drain 再 Close。用户/平台造成的每一种 stop
+  （暂停、归档、删除、切模型、空闲回收）都照常落库。
+
+证据（`scripts/probe-gateway-revocation.ps1`，产物在
+`e2e/.artifacts/gateway-revocation/`；token 只打印长度、sha256 前缀和 claims，不打印值）：
+
+```
+token A: len=204 sha256=0e8984… session=ses_… provider=volc g=0 ttl_s=3600 baseUrl=…/gw/llm/<token>/v1
+PASS  token A works from the host before the pause        (GET /gw/llm/<A>/v1/models -> 200)
+PASS  pause                                               (state=PAUSED)
+PASS  token A is refused after the pause                  (GET -> 401)
+boot log before the restart: … "model gateway revocations are durable" … on_record=0
+restarting piforge ...
+boot log after the restart:  … "model gateway revocations are durable" … on_record=1
+PASS  the restarted process loaded a revocation from disk (on_record=1)
+PASS  token A is STILL refused after the restart          (GET -> 401)
+PASS  resume                                              (state=READY)
+PASS  token B is a different token, one generation later  (g: 0 -> 1)
+PASS  token B works from the host (the resumed generation is valid) (GET -> 200)
+PASS  token A is still refused while token B works        (GET -> 401)
+RESULT durable_revocation=401 old_token_after_restart=401 resumed_token=200 generations=0->1 on_record=1
+```
+
+测试：`TestRevocationSurvivesAControlPlaneRestart`（真 store：撤销 → 关库 → 开库 → 新
+signer 拒绝旧 token，且它内存里的集合是空的，避免「用内存碰巧过了」）、
+`TestResumedGenerationIsValidAfterARestart`、`TestSweepKeepsAResumedTokenAlive`、
+`TestSignerWithoutAStoreStillRevokes`；store 侧
+`TestGatewayRevocationSurvivesReopen` / `…SweepRemovesOnlyExpiredRows` /
+`…ExtendKeepsResumedTokenAlive` / `…HaveNoCascadingForeignKey` / `…OutlivesTheSession`；
+关机例外由 `TestRevocationHookSkipsOnlyTheShutdownStop` 钉住。
+
+#### (2) 磁盘突发：实测 3.27 倍，之后 1.05 倍
+
+先把「今天到底多重」量出来。`scripts/probe-quota-overshoot.ps1` 建租户/项目/会话，然后在
+沙箱里以 `gem`（PTY 和 agent 用的是同一个身份）突发写，同时从宿主每 200 ms 采一次
+`du -sbx /workspace`。改动之前（`piforge:before`，HEAD `0592c27`）：
+
+```
+sample    194 ms      58845315 bytes  (0.05 GiB)
+sample   4118 ms    2122442883 bytes  (1.98 GiB)   <- 到预算
+sample   8104 ms    4605479043 bytes  (4.29 GiB)
+sample  10085 ms    6874605699 bytes  (6.40 GiB)   <- 探针自己的 6 GiB 上限
+RESULT mode=files quota_bytes=2147483648 max_bytes=7029794947 ratio=3.27 paused=false enforcer=absent state=READY
+```
+
+十秒写进 2 GiB 预算 7.03 GB，写进程还在跑、沙箱还是 READY，控制面只在 4.90 GB 时打过一条
+WARN。第二轮验收在同一机制上量到 3.95 GB 和 5.41 GB —— 所以诚实的说法是「取决于写速，
+约 2–3.3 倍预算」，不是一个固定数。
+
+四个选项都在**这台 daemon 上量过**，不是纸面比较：
+
+| 选项 | 在这台 daemon 上的实测 | 结论 |
+|---|---|---|
+| (a) 更短且自适应的看门狗间隔 | 固定 5 s → 有 run 在跑时 2 s、空闲 10 s；每沙箱各自计时，驱动 tick 500 ms | **采用**：它只是把窗口变窄，仍然是 `间隔 × 写速` |
+| (b) size 受限的 tmpfs 工作区 | `--tmpfs /workspace:size=2g`：第二次写正好在 2147483648 B 处 `No space left on device` —— 真的是硬上限；但 `docker restart` 之后 `total 0`，整棵树没了 | **否决**：pause/resume、文件面板、agent 的产出都要工作区持久；tmpfs 还和 `--memory 2g` 抢内存 |
+| (c) `--storage-opt size` | 被接受（`HostConfig.StorageOpt={"size":"1g"}`）且被静默忽略：`df /` 仍报 1006.9G，而且它管不到工作区卷 | **否决**：实测是空操作 |
+| (d) 沙箱内的配额执行器 | `piforged quota-enforcer`：每 100 ms `du -sbx`，对"持有可写文件描述符的进程 + 它所在的进程树"发 SIGSTOP；只有出现新的写进程才升级 SIGKILL；marker 在 `/workspace/.piforge/quota-brake.json`，日志在 `/tmp/quota-enforcer.log` | **采用**：四个里唯一能在突发进行中当场刹住的 |
+
+**(a)+(d) 一起，代价写清楚：**
+
+- **峰值从"一个窗口"变成"一次在途写"。** 同一探针、同一栈，改动之后：
+  **2 265 053 457 B = 1.05x**（8 MiB 文件流；提交后的镜像上复跑为 2 172 778 769 B = 1.01x）、**2 156 001 554 B = 1.00x**（一个 6 GiB
+  文件被 RLIMIT 截断后再续小文件）、**2 171 730 202 B = 1.01x**（两者并发）。
+  写进程被找到时是 `T` 状态，brake marker 里点名了它们，沙箱保持 READY —— 平台看门狗
+  这次没被迫暂停。
+- **它仍然不是文件系统配额。** 上界是 `du` 间隔 + 反应时间（在实测约 1 GB/s 的突发下约
+  0.2 s 的写入）加上一次 `write()` 的在途量。能跑赢 `/proc` 扫描的写者，或者干脆
+  `kill` 掉执行器（同 uid，做得到）的租户，剩下的就是平台看门狗；下一次容器启动会重新
+  跑 hook，因为脚本和二进制在镜像里是 root 所有 `0555`。
+- **CPU**：2 GiB / 256 文件上 `du -sbx` < 1 ms，每秒 10 次是微秒级；树很大时
+  `NextInterval` 退避到 3 倍 walk 时间（上限 5 s），所以 20 万文件的 checkout 不会被
+  每秒走十遍。
+- **冻结不是杀死**：被刹住的是 `SIGSTOP`，可恢复；升级到 `SIGKILL` 需要冻结之后又长了
+  **1 MiB**（`growthFloor`），也就是真的出现了新写者，而不是 `du` 的字节噪声。
+- **租户看到什么**：它的 shell 停住（进程 `T`），平台看门狗把与 507 相同的那条消息写进
+  会话，§10.5 引了原文；产品里没有「解冻」按钮 —— 恢复方式就是暂停/恢复，和超配额树一样。
+- **为什么不由控制面启动**：本仓交付的隔离部署用 runner 提供方，它刻意没有 exec 端点
+  （§1.4）。所以执行器做成镜像的一部分：基础镜像的 `RUN_HOOK_PRE_SERVICES` 在沙箱用户
+  建好之后、服务启动之前跑 `deploy/quota-enforcer.sh`，用 `su` 降到 `gem`（剥掉
+  `CAP_KILL` 之后只有同 uid 能发信号），预算读 `/proc/self/limits` 的 `Max file size`
+  —— 和每文件 RLIMIT 是同一个数，不引入第二份配置。
+
+测试：`TestDecide`（杀死决策的表驱动：未超、刚超、超且已冻结、超且仍在长、显式阈值、
+无上限、计数为 0）、`TestNextInterval`（基线/慢 walk 退避/下限/上限）、
+`TestDefaultsAreTheDocumentedOnes`、`TestWatchIntervalIsFastWhileActiveAndSlowWhenIdle`
+（2 s / 10 s）、`TestDiskWatchScheduling`（due/schedule/reset，间隔不是注释）、
+`TestPlatformWatchIsSlowerThanTheEnforcer`、
+`TestRunningSandboxIDsFollowsTheStatusAndTheWorktree`（哪块沙箱有 run 在跑，决定用哪个
+间隔）。
+
+#### 本轮仍然留着的一条
+
+token 仍是一小时内**可携带的 bearer 凭证**：在宿主上用 `/gw/llm` 能答，不绑定沙箱/容器/
+地址，且 `models.json` 由 `gem` 拥有（`0600`，agent 和它跑的东西都能读）。落库的撤销界定的
+是它的**寿命**，不是**持有者**。把它绑到沙箱（网关校验的 per-container secret header，或
+mTLS 身份）是下一步，比这一轮大：沙箱里的 SDK 得会带上证明，网关还得有一份能活过容器
+替换的 per-sandbox 秘密存储。详见 `docs/EXECUTION-BOUNDARY.md` §16.3。
+
 ### 1.5 推荐方案下仍然会坏的地方（这一节是重点）
 
 | 事件 | 会发生什么 | 缓解 |
@@ -2427,3 +2561,37 @@ sh: 1: Cannot fork
 字节数）。现在同一次遍历里用 `find -printf '%y %s\n' | awk` 同时给出字节数与文件数，
 字节数与 `du -sb` 逐字节一致（400 个文件的树：`412288 400`）；量不出来时仍是
 `unmeasurable: true`，不会伪装成 0。
+
+### 10.5 写进程被"冻住"（`T` 状态）：总预算突发的当场刹车
+
+沙箱内的执行器（`piforged quota-enforcer`，§1.4.8 (2)）每 100 ms 走一次工作区；一旦总和
+超过预算，它给**持有可写文件描述符的进程以及它们所在的进程树**发 `SIGSTOP`。租户那边
+看到的就是冻结，没有任何提示：
+
+```
+$ dd if=/dev/zero of=/workspace/big bs=1M count=4000 &
+[1] 1234
+$ ps -o pid,stat,args -p 1234
+    PID STAT COMMAND
+   1234 T    dd if=/dev/zero of=/workspace/big bs=1M count=4000
+$ echo $?          # 什么都没发生；进程被停住，不是被杀
+$ kill -CONT 1234  # 同 uid 可以自己解冻——但总量还在预算之上，它会立刻被再冻一次
+```
+
+配套的两个文件（都在工作区里，租户可读）：
+
+```
+/workspace/.piforge/quota-brake.json   上一次动作：action、used_bytes、limit_bytes、writers、readings
+/tmp/quota-enforcer.log                执行器自己的日志（容器内 /tmp，随容器删除）
+```
+
+| 现象 | 谁做的 | 含义 | 处置 |
+|---|---|---|---|
+| 写进程 `STAT=T`，工作区大小停住 | 沙箱内执行器 | 总和超过预算，写者被暂停 | 删文件让总量回到预算下；执行器会 `clear` 掉记忆，下一条消息唤醒沙箱即可 |
+| 进程直接消失（无 exit code） | 沙箱内执行器 | 冻结之后又长了 ≥ 1 MiB（出现了新的写者），升级为 `SIGKILL` | 同上；如果是 agent 的工具被杀，会话里会看到那次工具失败 |
+| `quota-brake.json` 里 `readings` 一直涨但 `used_bytes` 不动 | 执行器 | 写者已经停住，平台看门狗在等"还长不长" | 正常；看门狗不会再暂停，因为不再增长 |
+| 租户 `pkill -f quota-enforcer` 之后继续写 | 租户 | 执行器是同 uid，杀得掉 | 平台看门狗是剩下的那层（2 s/10 s），并且下次容器启动 hook 会把它拉起来 |
+
+**没有做的事（明确写下）**：不在产品里提供"解冻"按钮（恢复路径就是暂停/恢复，和超配额
+的树一样）；不把 `SIGSTOP` 换成可读的拒绝（信号没有消息通道，写进程不是通过产品 API
+写的）；也不声称这是文件系统配额——上界是 `du` 间隔 + 反应时间，实测数字见 §1.4.8。

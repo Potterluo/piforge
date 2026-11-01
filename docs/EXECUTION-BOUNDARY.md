@@ -960,9 +960,10 @@ hours. It could not reach `/v1` or MCP, but it spent the operator's provider cre
    0644). Measured: `ls -ld` shows `drwx------`, `ls -l` shows `-rw-------`, and another
    account in the container cannot read the token.
 
-**Still open:** the revocation state is in memory. A control-plane crash between the agent
-stop and the revoke, or a restart, forgets it; the one-hour TTL is the backstop for that
-window.
+**Still open, and now closed by §16.1:** the revocation state was in memory. A control-plane
+crash between the agent stop and the revoke, or a restart, forgot it; the one-hour TTL was
+the backstop for that window. §16.1 persists the counter and proves it survives
+`docker restart piforge`.
 
 **A defect in the first version of this fix, found by its own re-check:** Revoke was keyed
 by session id alone, so after a pause every token for that session was rejected —
@@ -1121,3 +1122,155 @@ The second walk was never needed — only the second column: one GNU `find -prin
 pass feeds an `awk` that sums every entry's size **and** counts the non-directories.
 Measured on a 400-file tree: `412288 400` — bytes identical to `du -sb` (412288), files
 400 (was 0).
+
+## 16. The third pass (2026-11-01): the two risks the second acceptance left open
+
+`e2e/.artifacts/adversarial2/VERDICT.md` closed its three "operator would worry" items
+with three that were still true: the durable-revocation gap in §14.3, the ~2x disk
+overshoot in §14.2/§15, and the one-hour portable token itself. This section fixes the
+first two and measures the third, on the same isolated stack
+(`pwsh scripts/up-isolated.ps1`, 7723, `piforge:isolated` / `piforge/sandbox-agent:isolated`).
+
+### 16.1 A revoked token now stays revoked across a restart
+
+**Defect.** `Signer.Revoke` bumped a `map[string]int64` in the control plane's memory.
+Pause revoked correctly *in that process*; a restart inside the one-hour TTL started the
+counter at zero again, so every token minted before it verified again. The old comment
+even said so ("the state is in memory on purpose: it describes live processes").
+
+**Mechanism.**
+
+* `gateway_revocations(session_id PRIMARY KEY, generation, revoked_at, expires_at)`
+  (`store/gateway_revocations.go`). `RevokeGatewayToken` reads and bumps the generation in
+  one transaction — the write pool is a single connection, so two concurrent stops cannot
+  both write generation 1 — and sets `expires_at = now + TTL`, the moment the last token
+  that revocation could affect expires.
+* The write happens in the *same call* that ends the token (`Signer.Revoke`, from
+  `pi.Runtime.Stop`), not on a queue: a pause that answered `200 PAUSED` means the row is
+  on disk. If the write fails, the revocation is still enforced in memory and the failure
+  is logged with what it means.
+* `Signer.Verify` reads the durable generation on every `/gw/llm` call (one indexed
+  primary-key read, after the HMAC check, so an unauthenticated caller cannot make the
+  gateway touch the database) and takes the maximum of it and the in-memory fast path. A
+  failed read falls back to memory: never weaker than the old behaviour.
+* `Signer.Issue` reads the same number, so the token minted for the resumed session
+  carries the persisted generation and verifies immediately. Issue also extends the row's
+  `expires_at` (`ExtendGatewayRevocation`) so the sweep can never delete the generation a
+  live resumed token still relies on.
+* `SweepGatewayRevocations` deletes rows past `expires_at`; `cmd/piforged` runs it every
+  ten minutes. The row has **no** foreign key to `sessions` on purpose: a revoked session
+  that is later deleted must not take its tombstone with it, or its pre-revoke tokens would
+  become valid again.
+* **Shutdown is the one stop that does not persist.** A container placement's agent
+  outlives the control plane by design (§6), and it cannot mint a new token without a new
+  prompt, so revoking at shutdown would break exactly the property stage 3 built. The hook
+  is `revocationHook` in `cmd/piforged/gateway_revocations.go`; `drain()` is registered
+  before `rt.Close()` so it runs first. Every stop a user or the platform causes — pause,
+  archive, delete, model switch, idle reap — still writes the row.
+
+**Proof (isolated stack, `scripts/probe-gateway-revocation.ps1`, artifacts under
+`e2e/.artifacts/gateway-revocation/`):**
+
+```
+token A: len=204 sha256=0e8984… session=ses_… provider=volc g=0 ttl_s=3600 baseUrl=http://piforge:7700/gw/llm/<token>/v1
+PASS  token A works from the host before the pause        (GET /gw/llm/<A>/v1/models -> 200)
+PASS  pause                                               (state=PAUSED)
+PASS  token A is refused after the pause                  (GET -> 401)
+boot log before the restart: … "model gateway revocations are durable" … on_record=0
+restarting piforge ...
+boot log after the restart:  … "model gateway revocations are durable" … on_record=1
+PASS  the restarted process loaded a revocation from disk (on_record=1)
+PASS  token A is STILL refused after the restart          (GET -> 401)
+PASS  resume                                              (state=READY)
+PASS  token B is a different token, one generation later  (g: 0 -> 1)
+PASS  token B works from the host (the resumed generation is valid) (GET -> 200)
+PASS  token A is still refused while token B works        (GET -> 401)
+RESULT durable_revocation=401 old_token_after_restart=401 resumed_token=200 generations=0->1 on_record=1
+```
+
+**Tests:** `TestRevocationSurvivesAControlPlaneRestart` (llmgw + a real store: revoke,
+close the store, reopen it, a *new* signer refuses the old token and its in-memory set is
+empty), `TestResumedGenerationIsValidAfterARestart`, `TestSweepKeepsAResumedTokenAlive`,
+`TestSignerWithoutAStoreStillRevokes`, the store-level
+`TestGatewayRevocationSurvivesReopen` / `…SweepRemovesOnlyExpiredRows` /
+`…ExtendKeepsResumedTokenAlive` / `…HaveNoCascadingForeignKey` / `…OutlivesTheSession`,
+and `TestRevocationHookSkipsOnlyTheShutdownStop` for the shutdown exception.
+
+### 16.2 The disk overshoot: measured at 3.27x, then bounded to 1.05x
+
+**Defect, measured on this host instead of assumed.** `scripts/probe-quota-overshoot.ps1`
+creates a tenant, a project and a session, then bursts inside the sandbox as `gem` (the
+identity the PTY and the agent get) while sampling `du -sbx /workspace` from the host every
+200 ms. On the build this section starts from (`piforge:before`, HEAD `0592c27`):
+
+```
+sample    194 ms      58845315 bytes  (0.05 GiB)
+sample   4118 ms    2122442883 bytes  (1.98 GiB)   <- the budget, reached here
+sample   8104 ms    4605479043 bytes  (4.29 GiB)
+sample  10085 ms    6874605699 bytes  (6.40 GiB)   <- the probe's own 6 GiB safety cap
+RESULT mode=files quota_bytes=2147483648 max_bytes=7029794947 ratio=3.27 paused=false enforcer=absent elapsed_ms=10086 state=READY
+```
+
+7.03 GB into a 2 GiB budget in ten seconds, the writer still running and the sandbox still
+`READY`; the control plane had logged one warning at 4.90 GB. The second acceptance run
+measured 3.95 GB and 5.41 GB on the same mechanism; this run is the same defect with a
+faster writer, so the honest statement is "~2x–3.3x of the budget, depending on the write
+rate".
+
+**Options, evaluated on this daemon** (all four measured, not argued):
+
+| Option | Measured on this daemon | Verdict |
+|---|---|---|
+| (a) shorter, adaptive watchdog interval | 5 s fixed → 2 s while a run is in flight, 10 s idle; the interval is per sandbox, ticked at 500 ms | **taken**: it narrows the window, but by itself it is still `interval x write rate` |
+| (b) size-capped tmpfs workspace | `--tmpfs /workspace:size=2g`: the second write dies at exactly 2147483648 B (`No space left on device`) — a real hard cap. But `docker restart` leaves `total 0`: the whole workspace is gone | **rejected**: pause/resume, the file panel and the agent's work all require a persistent workspace; the tmpfs also competes with `--memory 2g` |
+| (c) `--storage-opt size` | accepted (`HostConfig.StorageOpt = {"size":"1g"}`) and silently ignored: `df /` still reports 1006.9G, and it would not cover the workspace volume anyway | **rejected**: measured no-op |
+| (d) in-sandbox enforcer | `piforged quota-enforcer`: `du -sbx` every 100 ms, SIGSTOP the writers and the tree they run in, SIGKILL only when new writers keep appearing; marker at `/workspace/.piforge/quota-brake.json`, log at `/tmp/quota-enforcer.log` | **taken**: it is the only one of the four that bounds the burst in-band |
+
+**(a)+(d) together, and what they cost.** The enforcer is a mode of the binary that is
+already in the sandbox image, started by the base image's own bootstrap
+(`RUN_HOOK_PRE_SERVICES=/opt/piforge/quota-enforcer.sh`, baked into
+`deploy/Dockerfile.sandbox-agent`). It reads the budget from `/proc/self/limits`
+(`Max file size`), not from a second configuration source: that is the same
+`--ulimit fsize` the per-file cap uses. Two measured costs, stated as costs:
+
+* **The peak is now one in-flight write, not a window.** After the change, the same probe
+  on the same stack: **2 265 053 457 B = 1.05x** (files), **2 156 001 554 B = 1.00x**
+  (one 6 GiB file capped by RLIMIT, then the flood), **2 171 730 202 B = 1.01x** (mixed). A\n  repeat of the first shape against the committed image measured 2 172 778 769 B = 1.01x, so the\n  range for the file-flood case is 1.01x-1.05x across runs.
+  The writers were found in `T` state with the brake marker naming them, and the sandbox
+  stayed `READY` — the platform watchdog did not have to pause it.
+* **It is still not a filesystem quota.** The bound is `du` interval + reaction (~0.2 s of
+  writes at the measured ~1 GB/s burst rate) plus whatever a single `write()` is holding.
+  A writer that outruns `/proc` scanning, or a tenant that disables the loop (same uid, so
+  it can `kill` it) gets the platform watchdog instead. The next container start runs the
+  hook again because the script and the binary are root-owned `0555` in the image.
+* **CPU**: `du -sbx` on a 2 GiB / 256-file tree measured < 1 ms, so 10 walks/s is
+  micro-seconds of a core; `NextInterval` backs off to 3x the walk time when the tree is
+  large (cap 5 s), so a 200k-file checkout is not walked ten times a second.
+* **Frozen, not killed.** A bolted writer is stopped with `SIGSTOP`, which is reversible;
+  the escalation to `SIGKILL` needed a *mebibyte* of growth after the freeze (the
+  `growthFloor`), i.e. new writers, not `du` noise.
+* **What the tenant sees**: its shell freezes (a stopped process), the platform's watchdog
+  records the same 507 message a refused run carries, and `docs/SANDBOX-DEPLOY.md` §10.5
+  quotes it. There is no in-product "unfreeze": the pause/resume cycle is the recovery,
+  exactly as for an over-quota tree.
+
+**Tests:** `TestDecide` (the kill decision as a table: under, first over, over-and-frozen,
+still-growing past the threshold, explicit threshold, no limit, zero count),
+`TestNextInterval` (base, slow-walk back-off, floor, cap), `TestDefaultsAreTheDocumentedOnes`,
+`TestWatchIntervalIsFastWhileActiveAndSlowWhenIdle` (2 s / 10 s),
+`TestDiskWatchScheduling` (due/schedule/reset, so the interval is not just a comment),
+`TestPlatformWatchIsSlowerThanTheEnforcer`, and
+`TestRunningSandboxIDsFollowsTheStatusAndTheWorktree` for the "is a run in flight" query
+that picks the interval.
+
+### 16.3 What is still open
+
+The token is still a **portable bearer credential for up to an hour**: it answers
+`/gw/llm` from the host, with no binding to the sandbox, container or address, and it is
+readable by any process in the sandbox that can read `models.json` (owned by `gem`, `0600`
+— i.e. the agent and anything it runs). Revocation now survives a restart, which bounds
+the *life* of a leaked token; it does not bound the *holder*. Binding the token to the
+sandbox (a per-container secret in a header the gateway checks, or a mTLS identity) is the
+next step, and it is a bigger change than this pass: the SDK in the sandbox would have to
+send the proof, and the gateway would need a per-sandbox secret store that survives
+container replacement.

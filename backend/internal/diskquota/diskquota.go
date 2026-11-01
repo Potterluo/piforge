@@ -57,6 +57,33 @@ type Config struct {
 	Now func() time.Time
 }
 
+// The two intervals the platform-side watchdog runs at.
+//
+// The watchdog used to tick every five seconds for every sandbox, which is both
+// too slow to bound a burst (a tenant wrote 7.03 GB into a 2 GiB budget in ten
+// seconds on this host) and wasteful when nothing is happening. "Active" means a
+// session on the sandbox is running: that is the interval that has to be short,
+// because that is when an agent's `npm install` or a build is writing. An idle
+// sandbox is checked slowly on purpose; a terminal can still write to it, and the
+// in-sandbox enforcer (internal/quotaenforcer) covers that case at 250 ms.
+//
+// The pair is a measured compromise, not a guess: the run boundary is the accurate
+// check, this is the one that has to be cheap enough to run forever.
+const (
+	// ActiveWatchInterval is the interval while a run is in flight.
+	ActiveWatchInterval = 2 * time.Second
+	// IdleWatchInterval is the interval with nothing running on the sandbox.
+	IdleWatchInterval = 10 * time.Second
+)
+
+// WatchInterval is how often the platform watchdog should measure one sandbox.
+func WatchInterval(active bool) time.Duration {
+	if active {
+		return ActiveWatchInterval
+	}
+	return IdleWatchInterval
+}
+
 // Measurement is what one measurement of a sandbox's workspace saw.
 type Measurement struct {
 	Bytes     int64

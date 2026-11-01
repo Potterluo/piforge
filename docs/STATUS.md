@@ -1650,3 +1650,75 @@ e2e/.artifacts/fixes2/20261101-093320/sse.txt     会话 SSE：seq 23 sandbox_un
 e2e/.artifacts/fixes2/evidence-watchdog.txt       watchdog 日志、容器 PidsLimit、limits 文件、pf-local 身份
 e2e/.artifacts/pids/measure-*.txt                 scripts/measure-pids.ps1 的完整表
 ```
+
+## 本批：第三轮对抗验收留下的两条风险（磁盘突发上界 + 撤销落库，2026-11-01）
+
+`e2e/.artifacts/adversarial2/VERDICT.md` 的三条「运维会担心」里，这一批关掉两条，第三条
+（token 本身是 1 小时可携带 bearer 凭证）如实保留、不写成已解决。
+
+### FIX 1（安全）撤销集合从内存搬进数据库
+
+- 新表 `gateway_revocations(session_id PK, generation, revoked_at, expires_at)`；
+  `RevokeGatewayToken` 在一个事务里读+加+写，`expires_at = now + TTL`。
+- 写发生在让 token 失效的同一次调用里（`Signer.Revoke` ← `pi.Runtime.Stop`），不是队列：
+  `200 PAUSED` 意味着行已落盘。
+- `Signer.Verify` 每次 `/gw/llm` 读这个 generation（主键一行，HMAC 之后），与内存快路取
+  max；读失败才退回内存（永不比旧行为更松）。`Signer.Issue` 读同一个数，所以恢复后的新
+  token 带落库的 generation 立即可用；`ExtendGatewayRevocation` 保证清扫不会删掉仍在用的
+  generation。
+- 清扫每 10 分钟一次（`cmd/piforged`）。表故意没有指向 `sessions` 的外键：删会话不能把
+  墓碑一起删掉，否则撤销前的 token 会复活。
+- **关机是唯一不落库的 stop**：容器里的 agent 按设计活过控制面，没有新 prompt 签不出新
+  token，关机撤销等于推翻阶段三。`revocationHook.drain()` 注册在 `rt.Close()` 之前。
+- 实测（7723 隔离栈，`scripts/probe-gateway-revocation.ps1`）：token A 暂停前 200 → 暂停后
+  401 → `docker restart piforge` 之后仍 401，重启进程日志 `on_record=1`；恢复后新 token
+  （g=1）200，而 token A 仍 401。token 只打印长度/sha256 前缀/claims。
+
+### FIX 2（资源）磁盘突发：实测 3.27 倍 → 1.05 倍
+
+先量后改：`scripts/probe-quota-overshoot.ps1` 在沙箱里以 `gem` 突发写、宿主每 200 ms 采
+`du -sbx /workspace`。改动前（HEAD `0592c27`，2 GiB 预算）**7 029 794 947 B = 3.27x**，
+十秒、写者仍在跑、沙箱仍 READY。
+
+四个选项都在这台 daemon 上量过：(a) 自适应间隔（2 s 有 run / 10 s 空闲）采用；(b) size
+受限 tmpfs 确实硬顶（2147483648 B 处 `No space left on device`）但 `docker restart` 后
+`total 0`，工作区全丢 —— 否决；(c) `--storage-opt size` 被接受且静默忽略（`df /` 仍
+1006.9G）—— 否决；(d) 沙箱内执行器采用。
+
+采用 (a)+(d)：`piforged quota-enforcer` 每 100 ms `du -sbx`，超预算对"持有可写 fd 的进程
++ 能再起写者的祖先链（遇到监听套接字就停）"发 SIGSTOP；只有冻结后又长 ≥ 1 MiB（新写者）
+才升 SIGKILL。由镜像的 `RUN_HOOK_PRE_SERVICES` 启动（runner 提供方刻意没有 exec 端点），
+预算读 `/proc/self/limits`，与每文件 RLIMIT 同一个数。
+
+实测（同一探针、同一栈）：文件流 **2 265 053 457 B = 1.05x**（同一形态复跑 2 172 778 769 B = 1.01x），单大文件 **2 156 001 554 B
+= 1.00x**，混合 **2 171 730 202 B = 1.01x**；写者被找到时是 `T`，沙箱保持 READY。
+
+比旧行为好 3 倍以上，但它**不是文件系统配额**：上界 = `du` 间隔 + 反应时间（约 0.2 s 的
+写入）+ 一次在途 `write()`。租户能 `kill` 掉同 uid 的执行器，剩下的那层是平台看门狗。
+
+### 边界（本批没有做的）
+
+- token 仍是 1 小时可携带的 bearer 凭证（不绑定沙箱/容器/地址）；绑定的设计写在
+  `docs/EXECUTION-BOUNDARY.md` §16.3，没有实现。
+- 执行器被租户杀掉之后不自动重启（下次容器启动会重跑 hook）；没有"解冻"按钮，恢复路径
+  就是暂停/恢复。
+- 没有在 K8s/gVisor 下验证这套机制（本批只有 compose + runner 形态）。
+### 门禁（本批，实测输出）
+
+```
+go build ./...                                   ok
+go vet ./...                                     ok
+go test ./... -count=1                           42 个包全 ok（httpapi 38.6s，gitx 21.6s）
+pnpm --dir web test -- --run                     38 files / 292 tests passed (29.9s)
+pnpm --dir web exec next build                   ok（Next.js 16.4.3 / Turbopack）
+pnpm --dir e2e test                              182 passed (8.9m)
+pwsh scripts/deliver-check.ps1                   119/119 checks passed（98.0s，镜像 piforge:local
+                                                 sha256:f98f52f9…，artifacts: e2e/.artifacts/delivery-drill/）
+```
+
+栈：`pwsh scripts/up-isolated.ps1` 起在 7723（`-Rebuild` 重打过三个镜像），`-Down` 收掉；
+`pf-local`（7722）全程未动：同一个容器 id `7dc14e4a7525a8…`、`/healthz -> 200`。
+
+一次说明：deliver-check 的第一次跑在提交之前，唯一的失败是它自己的守卫
+「the source checkout is clean after the drill」（118/119）——工作树里是本批未提交的改动，
+不是产品缺陷；提交后重跑是 119/119。

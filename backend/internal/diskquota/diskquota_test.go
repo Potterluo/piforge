@@ -198,3 +198,22 @@ func TestNilGuardianIsDisabled(t *testing.T) {
 	}
 	g.Forget("sbx_nil")
 }
+
+// The watchdog's interval is a policy, and the policy is the measured
+// compromise the docs state: fast while something runs, slow when nothing does.
+// Pinning it here is what keeps "2 s / 10 s" from drifting in a later refactor.
+func TestWatchIntervalIsFastWhileActiveAndSlowWhenIdle(t *testing.T) {
+	if got := WatchInterval(true); got != 2*time.Second {
+		t.Fatalf("WatchInterval(active) = %s, want 2s", got)
+	}
+	if got := WatchInterval(false); got != 10*time.Second {
+		t.Fatalf("WatchInterval(idle) = %s, want 10s", got)
+	}
+	if ActiveWatchInterval >= IdleWatchInterval {
+		t.Fatalf("the active interval (%s) is not shorter than the idle one (%s); a watchdog that polls faster when idle is a bug",
+			ActiveWatchInterval, IdleWatchInterval)
+	}
+	if ActiveWatchInterval <= 0 || IdleWatchInterval <= 0 {
+		t.Fatal("an interval of zero would make the watchdog a busy loop")
+	}
+}

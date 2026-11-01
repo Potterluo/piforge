@@ -87,3 +87,42 @@ RUN set -eux; \
 RUN node --version \
  && pi --version \
  && test -x /opt/piforge/piforged
+
+# ---------------------------------------------------------------------------
+# The disk-quota enforcer, and why it is a hook of the base image.
+#
+# The per-file RLIMIT_FSIZE plus the control plane's periodic `du` do not bound
+# the total: measured on the isolated stack, a tenant writing 8 MiB files put
+# 7.03 GB into a 2 GiB budget (3.27x) in ten seconds before anything stopped it.
+# The fix is a loop inside the container that walks the workspace every 250 ms and
+# SIGSTOPs the processes holding it open for writing (internal/quotaenforcer,
+# `piforged quota-enforcer`).
+#
+# It cannot be started by the control plane: the shipped isolated deployment uses
+# the runner provider, which has no exec endpoint on purpose. It can be started by
+# the image: the base image runs RUN_HOOK_PRE_SERVICES after the sandbox user is
+# created and before its services start, and `su -s /bin/sh gem -c ...` drops to
+# the account that is allowed to signal the tenant's processes (the container has
+# no CAP_KILL).
+#
+# The budget is not configured twice: the hook reads `ulimit -f`, which is the
+# same RLIMIT_FSIZE the providers set from `-sandbox-disk-quota`.
+#
+# Both files are root-owned and 0555, so the tenant cannot rewrite the hook or the
+# binary that enforces it. The tenant *can* kill the running loop (same uid, same
+# container); the platform watchdog is what remains then, and the next container
+# start runs the hook again. That trade is documented, not hidden:
+# docs/SANDBOX-DEPLOY.md §6.
+# ---------------------------------------------------------------------------
+COPY deploy/quota-enforcer.sh /opt/piforge/quota-enforcer.sh
+RUN set -eux; \
+    chown root:root /opt/piforge/quota-enforcer.sh; \
+    chmod 0555 /opt/piforge/quota-enforcer.sh; \
+    bash -n /opt/piforge/quota-enforcer.sh; \
+    grep -q 'quota-enforcer' /opt/piforge/quota-enforcer.sh
+
+# Set on the image, not on the create call: the runner provider does not forward
+# arbitrary environment, and every provider that starts this image should get the
+# enforcer.
+ENV RUN_HOOK_PRE_SERVICES="/opt/piforge/quota-enforcer.sh"
+

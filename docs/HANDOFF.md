@@ -285,8 +285,8 @@ msg="orphaned runtime directories are swept" sandbox_root=/data/sandboxes skill_
 
 ### Disk quota
 
-Enforced in two places since the adversarial acceptance run (2026-11-01,
-`docs/EXECUTION-BOUNDARY.md` §14.2, `docs/SANDBOX-DEPLOY.md` §1.4.7):
+Enforced in three places since the third pass (2026-11-01,
+`docs/EXECUTION-BOUNDARY.md` §16.2, `docs/SANDBOX-DEPLOY.md` §1.4.8):
 
 - **Kernel, per file.** Every sandbox container is created with
   `--ulimit fsize=<quota>:<quota>` (`sandbox.Limits.DiskBytes`), so every process in
@@ -295,8 +295,21 @@ Enforced in two places since the adversarial acceptance run (2026-11-01,
   no privilege; setting a soft limit *above* the hard one is refused). Measured:
   `fallocate -l 3G` against a 2 GiB budget dies with `File size limit exceeded`
   (SIGXFSZ) and the file is 0 bytes.
+- **In the sandbox, per burst.** `piforged quota-enforcer` (package
+  `internal/quotaenforcer`) runs as `gem` inside the sandbox — started by the image's own
+  `RUN_HOOK_PRE_SERVICES` (`deploy/quota-enforcer.sh`), because the shipped runner
+  provider deliberately has no exec endpoint. It walks the workspace with `du -sbx` every
+  100 ms, reads the budget from `RLIMIT_FSIZE` (`/proc/self/limits`), and when the total
+  is over it `SIGSTOP`s the processes holding a writable file below the workspace plus the
+  chain that could start another one (stopping at a listening socket, so a sandbox service
+  is never frozen). The writer is frozen, not killed; `SIGKILL` needs a mebibyte of growth
+  after the freeze, i.e. new writers. Measured on the isolated stack: **2 265 053 457 B
+  into a 2 GiB budget (1.05x; 2 172 778 769 B = 1.01x on a repeat run)** for a flood of 8 MiB
+  files, 1.01x for a mixed
+  one-big-file-plus-many-small burst — against **7 029 794 947 B (3.27x)** on the same
+  probe before the change.
 - **Periodic, per total.** `RLIMIT_FSIZE` bounds one file, not a tree. A watchdog
-  (`httpapi.StartDiskWatch`, every 5 s, started by `cmd/piforged`) measures each
+  (`httpapi.StartDiskWatch`, started by `cmd/piforged`) measures each
   READY sandbox's workspace *inside the sandbox* (`du -sb /workspace` through its own
   shell API) and, over budget, stops the agents, appends a `platform.error` with the
   same 507 message the run boundary uses, and — if usage keeps growing after the
@@ -310,13 +323,16 @@ A sandbox the deployment cannot measure is `unmeasurable: true` and the page sho
 the row's `root_dir` is `/workspace`, a path that exists only *inside* the container,
 so the host walk measured nothing while the sandbox held 3 GiB.
 
-**Measured alternatives that do not work here:** `--storage-opt size=` is *accepted*
-by this daemon and silently ignored (Docker Desktop, overlayfs; 1.5 GiB written into
-a 1 GiB rootfs, `df` still 1007 GB) and would not cover the workspace volume anyway;
-ext4 project quotas need a `prjquota` mount this volume does not have; a
-size-limited tmpfs would make the workspace non-persistent; a loopback ext4 needs
-`CAP_SYS_ADMIN`, which the sandbox no longer holds. So the honest bound is "one file
-cannot exceed the budget, and the total is caught within seconds", not "the
+**Measured alternatives that do not work here** (re-measured on this daemon in the third
+pass): `--storage-opt size=` is *accepted* and silently ignored — `HostConfig.StorageOpt =
+{"size":"1g"}` while `df /` still reports 1006.9G — and it would not cover the workspace
+volume anyway; a size-capped tmpfs really does enforce a hard cap (the write dies with `No
+space left on device` at exactly 2147483648 B) but `docker restart` leaves the workspace
+empty (`total 0`), so pause/resume, the file panel and the agent's work all break, and it
+competes with `--memory`; ext4 project quotas need a `prjquota` mount this volume does not
+have; a loopback ext4 needs `CAP_SYS_ADMIN`, which the sandbox no longer holds. So the
+honest bound is "one file cannot exceed the budget, and a burst is stopped within ~0.2 s of
+writes (~1.05x measured), with the platform watchdog as the second line", not "the
 filesystem cannot be over quota at all".
 
 ### Capability requirements
@@ -544,16 +560,23 @@ Ordered roughly by how much they will hurt. Nothing here is softened.
      the tenant cannot rewrite it; nothing verifies its hash at spawn. A launcher that
      was tampered with would run *inside* that tenant's own sandbox (the control plane
      starts it there, as `gem`), so the blast radius is the sandbox, not the host.
-   - **Token revocation is in memory.** The one-hour gateway token
-     (`llmgw.DefaultTTL`, `-gateway-token-ttl`) is revoked when the session's agent
-     stops, through the single `Runtime.Stop` choke point. A control-plane *crash*
-     between the stop and the revoke, or a restart, forgets the revocation set; the
-     one-hour TTL is the backstop, which is why the TTL is not longer.
-   - **Disk is bounded per file and checked every 5 s, not per write.** See "Disk
-     quota" above: `--storage-opt size=` is ignored by this daemon, so a tenant that
-     writes many files can overshoot by a few GiB before the watchdog stops the agents
-     and pauses the sandbox. The host volume is 1007 GB; the point is that one command
-     can no longer fill it and that the admin figure now matches reality.
+   - **Token revocation is durable; the token itself is still portable for an hour.**
+     The one-hour gateway token (`llmgw.DefaultTTL`, `-gateway-token-ttl`) is revoked
+     when the session's agent stops, through the single `Runtime.Stop` choke point, and
+     the revocation is a row in `gateway_revocations` now — measured: pause → `401`,
+     `docker restart piforge` → still `401` (`on_record=1` at boot), while the resumed
+     session's new token (generation 1) answers `200`. What is still true: the token is a
+     bearer credential with no binding to the sandbox, so anyone who can read
+     `models.json` (the agent, anything it runs) can spend it from anywhere until it
+     expires. See `docs/EXECUTION-BOUNDARY.md` §16.3.
+   - **Disk is bounded per file, per burst and per total.** See "Disk quota" above:
+     `--storage-opt size=` is ignored by this daemon, and a size-capped tmpfs enforces a
+     hard cap but loses the workspace on restart. So the bound is: one file cannot exceed
+     the budget (kernel), a burst is stopped within ~0.2 s of writes by the in-sandbox
+     enforcer (**measured 3.27x → 1.05x** of a 2 GiB budget), and the platform watchdog
+     (2 s active / 10 s idle) stops the agents and pauses a sandbox that keeps growing.
+     The host volume is 1007 GB; the point is that one command can no longer fill it, that
+     a burst cannot run for seconds, and that the admin figure matches reality.
    - **`sudo` removal is image-level; `no-new-privileges` is the runtime guarantee.**
      A deployment that keeps the stock AIO sandbox image still has `/usr/bin/sudo` on
      disk — it just cannot gain privileges. The hardened image deletes it.
