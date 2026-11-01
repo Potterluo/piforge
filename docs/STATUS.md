@@ -2098,3 +2098,75 @@ pwsh scripts/deliver-check.ps1 -Image piforge:local   125/125 checks passed（�
 一次说明（与上一批同一个原因）：deliver-check 的第一次跑在提交之前，唯一的失败是它自己的守卫
 「the source checkout is clean after the drill」（124/125）——工作树里是本批未提交的改动，
 不是产品缺陷；提交（`b7959cf`）后重跑是 125/125。
+
+## 本批：第六轮的三条收尾（镜像新鲜度 / 端口 / 文件面板语义，2026-11-01）
+
+第六轮（`e2e/.artifacts/adversarial6/EVIDENCE.md`）关掉 G9–G13 之后留下三条：两条在验收工具里（其中一条会
+让"验证过"的结论量到旧镜像），一条在文件面板的语义里。这一批三条全关。**不改变任何 FR 状态**：126 条 FR
+仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1，整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1。
+
+### fail-first（先打再修；证据在 `e2e/.artifacts/fix-round6/`）
+
+| # | 打之前（实测输出） | 修之后 |
+|---|---|---|
+| 1 镜像新鲜度 | `backend/internal/fsx/fsx.go` 改一行注释、mtime 回填 2023 → 旧脚本打印 `piforge:isolated is current (id sha256:330e2d24fa86, built 2026-11-01 09:16:00Z)`，而 `git diff` 显示文件已变 | 同一改动 → 三个镜像全部 `rebuilding … the source digest differs (image 9e9d08f1e7b0, tree c252e61c3a38)`；恢复时间戳 → 三个 `is current`；只 touch → 三个 `is current`；`-Rebuild` → 三个 `-Rebuild` |
+| 2 端口 | `-Port 7724` → `PiForge (isolated) is up: http://127.0.0.1:7724/login`；`docker ps` 里同一个容器改挂 7724，`7723=000`（全程没有一句提示） | `-Port 7724` → `ERROR: project pf-isolated is already up on port 7723; refusing to re-point it to 7724 … Pass -Force …`，exit 1；`-Force` 搬家并打印 `7724 will stop answering`；`-Down -Port 7777` 照常拆除 |
+| 3 文件面板 | `GET /v1/sessions/{id}/files?path=leak-passwd`（指向 `/etc/passwd` 的符号链接）→ 200，面板当工作区文件显示 | 200 + `"outside_workspace":true` + `"resolved_path":"/etc/passwd"`；普通文件 200 且**没有** `outside_workspace` 键；面板徽章「经符号链接指向工作区外」+ 实际路径 |
+
+### 修法（每条一句话 + 位置）
+
+1. **摘要**：`scripts/up-isolated.ps1` 的 `Source-Files` / `Source-Rows` / `Source-Digest`。682 个文件，
+   `git hash-object --stdin-paths` 一次进程（约 0.1 s），镜像标签 `piforge.source-digest`。判定顺序：
+   镜像缺失 → 重建；`-Rebuild` → 重建；算不出摘要 → 只用 mtime 兜底（日志明说）；无标签 → 重建；标签 ≠ 目标
+   摘要 → 重建。沙箱镜像的盐里含控制面镜像 **id**（`FROM` 的是它），所以控制面重建它就跟。新增 `-BuildOnly`。
+2. **端口**：`Get-PublishedPort`（按 `com.docker.compose.project` 标签找容器，再 `docker inspect` 取
+   `7700/tcp` 的 `HostPort`）在构建/启动**之前**跑；不同端口且没有 `-Force` 就拒绝并点名当前端口；`-Down`
+   在它之前执行。生效端口在开始时打印一次、摘要里再打印一次。
+3. **面板**：`contracts.FileContent` 增加 `outside_workspace` / `resolved_path`；
+   `workspaceremote.resolveOutside` 用**一次 exec、两条 `readlink -f`**（根 + 目标）在容器命名空间里回答，
+   目标离开根就置位，内容照常返回；宿主放置仍是 `fsx.Resolve` 的 400（那里的工作区就是宿主机）；
+   `file-preview.tsx` 头部徽章 + 正文实际路径，vitest 覆盖标记/未标记两个方向。
+
+### 实测（隔离栈 7723，镜像按新摘要从工作树重建）
+
+```
+scripts/verify-image-freshness.ps1      PASS: the digest decides; timestamps never do.
+  (a) backdated edit   -> piforge:isolated / sandbox-runner / sandbox-agent 全部 rebuild
+  (b) mtime restored   -> 三个 current
+  (c) touch only       -> 三个 current
+  (d) -Rebuild         -> 三个 rebuild (-Rebuild)
+  (e) content restored -> 三个 rebuild 一次回 HEAD，再跑一次三个 current（无重建循环）
+栈（摘要）：piforge:isolated id sha256:b969add843ca digest 49c73d219a4f
+           sandbox-runner  id sha256:bc288ae44814 digest f9a56cc4b2e9
+           sandbox-agent   id sha256:4414ceb1b974 digest 1a1975cb6929
+probe-data-flow.ps1                     18 of 18 checks ran, 0 failed, 0 skipped
+文件面板（7723 实测）                   leak-passwd -> 200 outside_workspace=true resolved_path=/etc/passwd
+                                         inside.txt  -> 200（JSON 里没有 outside_workspace）
+```
+
+`pf-local`（7722）全程未动：同一个容器 id `7dc14e4a7525a8…`、`/healthz -> 200`，deliver-check 自己的
+「pf-local still has the same container id」也 PASS。
+
+### 门禁（本批，实测输出）
+
+```
+go build ./...                                   ok
+go vet ./...                                     ok
+go test ./... -count=1                           48 个包：44 个 ok + 4 个 no test files，0 FAIL
+pnpm --dir web test -- --run                     38 files / 294 tests passed（新增 2 条）
+pnpm --dir web exec next build                   ok（Next.js 16.4.3 / Turbopack）
+pnpm --dir e2e test                              182 passed (9.3m)
+pwsh scripts/deliver-check.ps1 -Image piforge:local   125/125 checks passed
+                                                 （piforge:local sha256:1c6934513a93…，
+                                                  --build-arg INSTALL_CHROMIUM=true）
+```
+
+### 仍未做 / 按设计
+
+- **宿主放置仍是显式 opt-in**：`-sandbox local` 必须写出来，否则控制面拒绝启动；写了 boot 日志有 WARN。
+  这是第六轮的设计决定，这一批没有改，也不该改（默认值会决定边界落在哪）。
+- 下载端点（`download=1` / `inline=1`）仍是原始字节流，不带头部标记：声明来源的地方是预览
+  （`outside_workspace` / `resolved_path`），不是字节流本身。
+- 宿主放置不返回 `outside_workspace`：越界链接在那里是 400 拒绝，比标记更强。
+- 摘要覆盖 `backend/`、`web/`、`deploy/`、`Dockerfile`、`docker-compose.runner.yml` 的全部内容；改其中任何
+  一个都会让三个镜像的摘要都变，但 Docker 的层缓存让"内容没变的镜像"重建只花几秒。
