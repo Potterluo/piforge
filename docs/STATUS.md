@@ -2017,3 +2017,84 @@ DNS 拒绝）。drill 的浏览器在容器里（`remote` 放置），规则不�
 - `pnpm --dir web exec next build`：成功（同一组路由）
 - e2e 全量：**182（181 passed + 1 flaky，flaky 为 48-change-list 首跑，retry 后 passed，8.7m）**
 - `pwsh scripts/deliver-check.ps1 -Image piforge:gapfix`（镜像用 `--build-arg INSTALL_CHROMIUM=true` 构建）：**125 checks，0 failed，exit 0**（97.9 s；截图 35 042 B / 132 色；browser idle 55.9 s 后 chromium 0；drill 结束时源码树 clean）
+
+## 本批：第五轮对抗验收的 git 与路径五项（2026-11-01）
+
+第五轮对抗验收（`e2e/.artifacts/adversarial5/REPORT-adversarial5-git-and-paths.md`）打的是
+`2d3976a`（G1–G8 的修复）。它的结论一句话：**那些守卫描述的都是 argv**；而控制面在**租户可控的
+仓库**上跑 git，git 既是**命令解释器**（`.git/config` 租户可写），也是**第二个 HTTP 客户端**
+（`git clone` 会跟随 302）。这一批按报告的顺序关掉五条（`docs/DATA-FLOW-AUDIT.md` 的 G9–G13），
+并修了让上一轮"量到旧代码"的验收工具本身。**不改变任何 FR 状态**：126 条 FR 仍为 DONE 68 /
+PARTIAL 42 / MISSING 15 / 不做 1，整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1。
+
+### fail-first（同一套脚本、同一个实例，先打再修）
+
+驱动脚本 `e2e/.artifacts/adversarial6/attack-round6.ps1`（`-Tag before` / `-Tag after`），宿主放置
+实例在 8091（`-sandbox local -fake-pi -skill-import-roots <work>/imports`），隔离栈在 7723。
+原始输出：`round6-before.json/.txt`、`round6-after.json/.txt`、`listener.log`、`EVIDENCE.md`。
+
+| # | 打之前 | 修之后 |
+|---|---|---|
+| G9 命令执行 | `.git/config` 写 `core.fsmonitor = sh -c 'printf FSMONAPI > marker; exit 1'` → `GET /git/status` **200，marker=FSMONAPI**；`core.sshCommand` 经 `POST /git/push` **marker=SSHEXEC** | 同样的请求、同样的 marker 文件：`marker=absent`（status 仍是 200/400，功能没坏） |
+| G10 302 SSRF | `POST /skills/import {"url":"https://postman-echo.com/redirect-to?url=http://127.0.0.1:7700/healthz"}` → `fatal: repository … not found`（**它取了自己的回环**）；同一条 302 到关闭的 7999 → `Failed to connect to 127.0.0.1 port 7999` | 400 `The requested URL returned error: 302`；`docker logs piforge` 里 0 条 `/healthz/info/refs` |
+| G11 路径 | 导入根里的 **junction** → 200 且 `leak=LEAKED`；`.git./config` 作为 bundle 路径 → **200**（落盘 `.git\config`）；flip 竞态 **14/87** | junction → 400；`.git.`/`.git `/`.git..` → 400；竞态 **0/116** |
+| G12 repo_url | `root@127.0.0.1:acme/repo.git` → 201 + `ssh: connect to host 127.0.0.1 port 22` | 400 `urlguard: host "127.0.0.1" is refused: loopback`，日志里 0 次 22 端口拨号 |
+| G13 远端重写 | `url.git://127.0.0.1:9912/.pushInsteadOf …` → push 拨到监听器（`git-receive-pack`）；`remote.origin.proxy` → fetch `CONNECT 93.184.216.34:443` 到同一个监听器；`127.0.0.1:9912/x.git`（无 `user@`）→ ssh 22 | 三条全 400，监听器新增 0 次接受 |
+| 工具 | `up-isolated.ps1` 只建缺失镜像（于是量到 08:04Z 的旧镜像）；探针在干净栈上只跑 15 条 | 源文件比镜像新就重建（并打印 id + 构建时间）；探针 18/18、跑不满就 exit 2 |
+
+### 修法（每条一句话 + 位置）
+
+1. **G9**：`internal/gitx/harden.go`。每一次 git 都带**命令行 scope** 的配置，它高于 `.git/config`：
+   `core.fsmonitor=false`、`core.hooksPath=<0700 空目录、随机名>`、`core.sshCommand=<启动时
+   `exec.LookPath` 解析出的绝对 ssh>`、`core.pager=/core.askPass=/core.gitProxy=` 空、
+   `credential.helper=` 空、`commit.gpgSign=false`、`tag.gpgSign=false`、
+   `protocol.ext.allow=never`、`protocol.file.allow=user`、`http.followRedirects=false`；环境里
+   **每个 `GIT_*`** 在 git 启动前删掉（`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`、`GIT_SSH_COMMAND`、
+   `GIT_ASKPASS`、`GIT_TRACE`…），再由部署写入 `GIT_TERMINAL_PROMPT=0`、`GIT_HTTP_FOLLOW_REDIRECTS=0`、
+   `GIT_PAGER=`/`PAGER=`、`LC_ALL=C`。导入器自己的 `git clone`/`ls-files` 与 `fsx` 的 `check-ignore`
+   用同一份。**沙箱里**跑的那份把 `core.sshCommand` 换成容器自己的 `ssh`、`hooksPath` 换成不存在的
+   路径——把宿主的绝对路径写进容器会破坏合法的 ssh clone，而容器里的 agent 本来就有 shell。
+2. **G10**：同上的 `http.followRedirects=false` + `GIT_HTTP_FOLLOW_REDIRECTS=0`。**拒绝**而不是逐跳重验：
+   跟随一个租户能控制的 302 等于把已经做过的判断作废，逐跳重验只在"必须跟随"的场景才值得做。
+3. **G11**：`internal/tenantfs`。Windows 上 junction 不是符号链接——`os.Lstat` 说它是普通文件、
+   `EvalSymlinks` 原样返回、打开却到达目标。改用平台自己的两件事：`GetFileAttributesW` 的
+   `FILE_ATTRIBUTE_REPARSE_POINT`（逐分量）与 `GetFinalPathNameByHandleW`（在**已打开的句柄**上问
+   "你到底是谁"）。`bundleFiles` 对每个分量做 Win32 归一化（去掉结尾的 `.` 和空格）后再比 `.git`，
+   不一致就拒绝。导入改为把**解析后**的路径交给 git，并拒绝"检查时不存在"的目录——后者是第一次修完
+   仍漏 4/116 的原因（flip 脚本先 `rmdir` 再 `mklink`，中间那几毫秒名字不存在，`Resolve` 给了词法答案）。
+4. **G12**：`internal/sandbox`。`splitSCPLike` 按 git 自己的规则解析 `[user@]host:path`（第一个冒号前
+   没有斜杠、不是盘符），端口按 transport 判（ssh=22）。clone 与 push 现在共用同一个 `refuseTarget`，
+   两条边界不会再各说各话。
+5. **G13**：`internal/gitx/remotes.go`。`RemoteTargets` 读 `url.*.(insteadOf|pushInsteadOf)` 与
+   `remote.*.(url|pushurl)`，`scpHost` 接受无 `user@` 的形式；新增 `RemoteConfigIssues` 拒绝
+   "让 git 执行程序"的 key（`core.sshCommand`、`core.fsmonitor`、`remote.*.proxy|uploadpack|receivepack`、
+   `credential.helper`、`filter.*`、`diff.*.textconv`、`merge.*.driver`、`include.*`），只看 local 与
+   worktree scope——运维自己的 `~/.gitconfig` 不是租户写的，拿它拒绝会误伤每一次 push。
+
+**仍然成立**（有意保留）：ssh 远端照样 push/pull（部署自己的 ssh 与密钥，主机与端口仍过策略）；
+本地 fixture 仓库照常 clone（`protocol.file.allow=user`）；容器放置照旧（git 在沙箱里跑，边界是沙箱
+出口策略）。**仍未关闭**（写在 `docs/DATA-FLOW-AUDIT.md` §14）：POSIX 的 bind mount 不是 reparse point；
+解析后路径自身的分量在"解析"与"打开"之间仍可被换（能写这台机器磁盘的人）；容器放置里 git 的
+`origin` 仍是租户自己拨得到的地址。
+
+### 门禁（本批，实测输出）
+
+```
+go build ./...                                   ok
+go vet ./...                                     ok
+go test ./... -count=1                           45 个包全 ok（httpapi 63.8s，gitx 28.0s）
+pnpm --dir web test -- --run                     38 files / 292 tests passed (31.1s)
+pnpm --dir web exec next build                   ok（Next.js 16.4.3 / Turbopack）
+pnpm --dir e2e test                              182 passed (9.9m)
+pwsh scripts/deliver-check.ps1 -Image piforge:local   125/125 checks passed（镜像 piforge:local
+                                                 sha256:962b33c9e2f5…（--build-arg INSTALL_CHROMIUM=true））
+```
+
+栈：`pwsh scripts/up-isolated.ps1 -Port 7723`（源比镜像新就自动重建，本批实测打印
+`piforge:isolated id sha256:b56fdd4b9244 built 2026-11-01 08:39:43Z`），`-Down` 收掉；
+`pf-local`（7722）全程未动：同一个容器 id `7dc14e4a7525a8…`、`restarts=0`、`/healthz -> 200`。
+`scripts/probe-data-flow.ps1` 在干净栈上 **18 of 18 checks ran, 0 failed, 0 skipped**。
+
+一次说明（与上一批同一个原因）：deliver-check 的第一次跑在提交之前，唯一的失败是它自己的守卫
+「the source checkout is clean after the drill」（124/125）——工作树里是本批未提交的改动，
+不是产品缺陷；提交（`b7959cf`）后重跑是 125/125。
