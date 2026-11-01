@@ -299,7 +299,12 @@ change behavior until the docker/runner path has been proven on a throwaway inst
 **Stage 3 flips it, and only for the container providers**: `resolveAgentInSandbox` makes
 it on for `docker`/`runner` and off for `local`, so the local shape is not a special case
 that had to be re-tested — it is the one that never changed. `-sandbox` itself still
-defaults to `local`, which is what development uses.
+refuses to start without a value: after adversarial round 6 there is no default provider
+at all, `local` must be named (`-sandbox local` or `PIFORGE_SANDBOX=local`), and a local
+start logs a WARN naming the four things that run on the host. Refusing is better than
+defaulting to a container provider here: docker/runner need Docker, an image and (for
+runner) a service, so a silent switch would fail later and elsewhere — and a host-placement
+start that was never asked for is exactly what rounds 5 and 6 found.
 
 Stage 2 keeps that promise in the code, not only in the deployment: `DetachedWorkspace`
 is a `DockerConfig`/`RunnerConfig` field that only `-agent-in-sandbox` sets, the local

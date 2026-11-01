@@ -78,6 +78,10 @@ services:
       # docs/EXECUTION-BOUNDARY.md deleted the switch, so a runner placement always
       # runs the agent inside its sandbox. `=1` would still be accepted as a no-op;
       # `=0` is refused at startup, which is the point.
+      # Required, and deliberately not defaulted: host placement is no longer a
+      # fallback (adversarial round 6). A control plane that names no provider is
+      # refused at startup, and `local` is the only value that puts the agent on
+      # the host. This file is the isolated shape, so it says runner.
       PIFORGE_SANDBOX: runner
       PIFORGE_SANDBOX_RUNNER_URL: http://sandbox-runner:7801
       PIFORGE_SANDBOX_RUNNER_TOKEN: ${SANDBOX_RUNNER_TOKEN:?set SANDBOX_RUNNER_TOKEN to a long random string}

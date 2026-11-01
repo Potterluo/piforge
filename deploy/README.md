@@ -64,6 +64,7 @@ script moves the file aside for the duration of the build.
 ```bash
 docker run -d --init -p 7700:7700 \
   --cap-drop DAC_OVERRIDE \
+  -e PIFORGE_SANDBOX=local \
   -e PIFORGE_SEED_EMAIL=admin@piforge.local \
   -e PIFORGE_SEED_PASSWORD=change-me \
   -e PIFORGE_MASTER_KEY="$(openssl rand -base64 32)" \

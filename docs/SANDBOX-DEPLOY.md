@@ -971,6 +971,7 @@ docker run -d --name pf-drill-runner --network pf-drill-net `
   # ↑ 没有 -e SANDBOX_WORKSPACE_VOLUME / -v pf-drill-data:/data
 docker run -d --name pf-drill-control --network pf-drill-net -p 7723:7700 `
   -v pf-drill-data:/data --cap-drop DAC_OVERRIDE -e PIFORGE_AGENT_IN_SANDBOX=1 `
+  -e PIFORGE_SANDBOX=runner `
   … piforge:agent-drill
 ```
 

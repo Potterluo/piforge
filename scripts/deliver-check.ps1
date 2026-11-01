@@ -432,6 +432,12 @@ try {
         "-v", "${VolumeName}:/data",
         "-v", "${urlPolicyPath}:/etc/piforge/url-policy.json:ro",
         "-e", "PIFORGE_URL_ALLOW_FILE=/etc/piforge/url-policy.json",
+        # Host placement is deliberate here and has to be said: since adversarial
+        # round 6 the control plane refuses to start without a provider, and
+        # `local` is the only value that keeps the agent, the terminal, the
+        # browser and the files inside this one container. The pod is the
+        # boundary for the drill; the boot log carries the matching WARN.
+        "-e", "PIFORGE_SANDBOX=local",
     "-e", "PIFORGE_SKILL_IMPORT_ROOTS=$DrillImportRoot",
         "-e", "PIFORGE_SEED_EMAIL=$SeedAdminEmail",
         "-e", "PIFORGE_SEED_PASSWORD=$SeedAdminPassword",

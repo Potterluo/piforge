@@ -112,6 +112,7 @@ here; only the key is yours:
 ```powershell
 docker run -d --name pf-local -p 7722:7700 -v piforge-data:/data `
   --cap-drop DAC_OVERRIDE `
+  -e PIFORGE_SANDBOX=local `
   -e PIFORGE_PORT=7700 -e PIFORGE_DATA=/data `
   -e PIFORGE_SEED_EMAIL=admin@piforge.local -e PIFORGE_SEED_PASSWORD=piforge-admin-123 `
   -e PIFORGE_SEED_USER_EMAIL=dev@piforge.local -e PIFORGE_SEED_USER_PASSWORD=piforge-dev-123 `
@@ -124,6 +125,10 @@ docker run -d --name pf-local -p 7722:7700 -v piforge-data:/data `
 - **Ports**: 7700 inside, published here as 7722. One port serves the API *and* the UI
   (`http://127.0.0.1:7722/login`). The README's two-process flow (8080 + `pnpm dev` on
   3000) is a different, also-supported shape; the image does not need it.
+- **`-sandbox local` is explicit**: there is no default provider any more (adversarial
+  round 6), so this `docker run` says `PIFORGE_SANDBOX=local`. The boot log then carries
+  a WARN that the agent, terminal, browser and files run on this host with no container
+  boundary; that is the development shape, not the tenant one.
 - **Seeded accounts**: `admin@piforge.local / piforge-admin-123` (admin) and
   `dev@piforge.local / piforge-dev-123` (user). They exist only on a first boot against
   an empty data volume, and the log names them without printing the passwords. Unset

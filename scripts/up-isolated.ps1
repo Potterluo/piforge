@@ -151,6 +151,10 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 # stale or the compose file has grown a required variable.
 if ($Down) {
     Step "removing the compose stack, its sandboxes and its volumes"
+    # The compose file sets the provider too. Stating it here is the script's own
+    # answer to "which shape?": host placement is no longer a default (adversarial
+    # round 6), and this script only ever starts the isolated one.
+    $env:PIFORGE_SANDBOX = "runner"
     $env:PIFORGE_IMAGE = $controlPlaneImage
     $env:PIFORGE_RUNNER_IMAGE = $runnerImage
     $env:PIFORGE_SANDBOX_IMAGE = $sandboxImage
@@ -268,6 +272,7 @@ if ([string]::IsNullOrWhiteSpace($RunnerToken)) {
         $RunnerToken = $env:SANDBOX_RUNNER_TOKEN
     }
 }
+$env:PIFORGE_SANDBOX = "runner"
 $env:PIFORGE_IMAGE = $controlPlaneImage
 $env:PIFORGE_RUNNER_IMAGE = $runnerImage
 $env:PIFORGE_SANDBOX_IMAGE = $sandboxImage

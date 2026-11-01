@@ -144,7 +144,7 @@ start the agent — the trap the preflight exists to catch.
 cd backend
 PIFORGE_SEED_PASSWORD='piforge-admin-123' \
 PIFORGE_SEED_USER_PASSWORD='piforge-dev-123' \
-go run ./cmd/piforged -data ../data -addr 127.0.0.1:8080 -fake-pi \
+go run ./cmd/piforged -sandbox local -data ../data -addr 127.0.0.1:8080 -fake-pi \
   -chrome "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 # On Windows PowerShell:
 #   $env:PIFORGE_SEED_PASSWORD='piforge-admin-123'; $env:PIFORGE_SEED_USER_PASSWORD='piforge-dev-123'
@@ -169,6 +169,7 @@ Drop `-fake-pi` once `pi` is installed and configured; nothing else changes.
 
 | Flag | Default | Why you would change it |
 |---|---|---|
+| `-sandbox` | **none — required** | `local` runs the agent, terminal, browser and files on this host (development only: the boot log carries a WARN that there is no container boundary); `docker`/`runner` run them inside a sandbox. A start that names no provider is refused. |
 | `-data` | `./data` | Sandboxes, the SQLite file and the generated master key live here. |
 | `-fake-pi` | off | Run the whole product with no model account. |
 | `-pi` | `pi` on PATH | A specific Pi binary. |

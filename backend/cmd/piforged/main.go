@@ -343,8 +343,8 @@ func run() error {
 	flag.DurationVar(&opt.sessionReconcileInterval, "session-reconcile-interval",
 		envDuration("PIFORGE_SESSION_RECONCILE_INTERVAL", 30*time.Second),
 		"how often sessions that claim a run is in flight are checked against the live agent registry (0 disables the periodic pass; the startup pass always runs)")
-	flag.StringVar(&opt.sandboxKind, "sandbox", envOr("PIFORGE_SANDBOX", "local"),
-		"sandbox provider: local (directories), docker (one container per project, CLI here) or runner (a sandbox-runner service runs the CLI)")
+	flag.StringVar(&opt.sandboxKind, "sandbox", envOr("PIFORGE_SANDBOX", ""),
+		"REQUIRED sandbox provider: local (directories, host placement, development only) or docker / runner (isolated, needs Docker). There is no default; a start that names none is refused (env PIFORGE_SANDBOX)")
 	flag.StringVar(&opt.sandboxBrowser, "sandbox-browser", envOr("PIFORGE_SANDBOX_BROWSER", "auto"),
 		"browser placement: auto (container providers: remote, local: host), host, or remote (inside the sandbox container)")
 	flag.StringVar(&opt.sandboxTerminal, "sandbox-terminal", envOr("PIFORGE_SANDBOX_TERMINAL", "auto"),
@@ -410,6 +410,16 @@ func run() error {
 		"explicit path to the jail launcher")
 	flag.Parse()
 
+	// The provider is not a default any more (adversarial round 6): an unasked-for
+	// start used to place the agent, the terminal, the browser and the files on the
+	// host. Resolve it before anything else, so the refusal is the first thing an
+	// operator sees, and so every later check reads a provider that was named.
+	kind, err := resolveSandboxKind(flag.CommandLine, opt.sandboxKind, os.Getenv("PIFORGE_SANDBOX"))
+	if err != nil {
+		return err
+	}
+	opt.sandboxKind = kind
+
 	// FR-3.3: the cap is configuration, not a constant. Resolve and validate it
 	// before anything is created, so a bad value fails the startup instead of
 	// leaving a server that quietly runs with the default.
@@ -442,7 +452,8 @@ func run() error {
 
 	// Normalise the provider name before anything compares it: placement resolution
 	// ignores case, and the wiring below does not, so "-sandbox Docker" must mean
-	// the same thing in both places.
+	// the same thing in both places. resolveSandboxKind has already refused a start
+	// that named no provider, so the value here is one someone chose.
 	opt.sandboxKind = normalizedSandboxKind(opt.sandboxKind)
 	// The runner credentials and the provider have to agree before anything is
 	// created: a typo here would otherwise start a process that looks healthy and
@@ -532,6 +543,18 @@ func run() error {
 	logger := newLogger(opt)
 	logger.Info("starting piforged",
 		"addr", opt.addr, "data", abs(opt.dataDir), "dev", opt.dev, "fake_pi", opt.useFakePi)
+	// Host placement is explicit now, and it is still the one shape with no
+	// container boundary. It gets a WARN of its own — before any other boot line,
+	// so it cannot be mistaken for a note about a panel — naming the four things
+	// that run on this host. The message lives in sandbox_placement.go so a test
+	// pins its claims; this is only the sink.
+	if warning := hostPlacementWarning(opt.sandboxKind); warning != "" {
+		logger.Warn(warning,
+			"sandbox", opt.sandboxKind,
+			"lost", "the container boundary",
+			"runs_on_host", "agent, terminal, browser, files",
+			"for", "development only; -sandbox runner or -sandbox docker for untrusted code")
+	}
 	logger.Info("sandbox placement resolved",
 		"sandbox", opt.sandboxKind,
 		"browser", opt.sandboxBrowser,

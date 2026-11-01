@@ -27,6 +27,12 @@ services:
     ports:
       - "7700:7700"
     environment:
+      # Host placement on purpose, and it has to be said: since adversarial round
+      # 6 the control plane refuses to start without a provider, and this file is
+      # the single-container development shape where the pod *is* the boundary.
+      # The boot log carries the matching WARN; a tenant deployment uses
+      # docker-compose.runner.yml (runner), not this file.
+      PIFORGE_SANDBOX: local
       # Seeded on the first boot only; change these before exposing the port.
       PIFORGE_SEED_EMAIL: ${PIFORGE_SEED_EMAIL:-admin@piforge.local}
       PIFORGE_SEED_PASSWORD: ${PIFORGE_SEED_PASSWORD:-piforge-admin-123}

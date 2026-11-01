@@ -135,6 +135,10 @@ func isContainerSandbox(kind string) bool {
 // "-sandbox Docker " is the provider it looks like and "-sandbox Runner" is not
 // silently treated as local. An unknown value is returned normalised and left for
 // validateSandboxFlags to reject.
+//
+// Empty means local, but only for the callers that already resolved the provider:
+// startup goes through resolveSandboxKind first, which refuses an empty value
+// rather than treating it as a request for host placement.
 func normalizedSandboxKind(kind string) string {
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	if kind == "" {
@@ -308,4 +312,53 @@ func parseIsolationSwitch(raw string) (bool, bool) {
 	default:
 		return false, false
 	}
+}
+
+// resolveSandboxKind decides the provider before anything is created.
+//
+// Until this round an empty value fell through normalizedSandboxKind to "local":
+// the binary, a compose file with no PIFORGE_SANDBOX, and a hand-written
+// `piforged -data …` all started with the agent, the terminal, the browser and
+// the files on whatever host ran it, and nothing in the log said so. Adversarial
+// rounds 5 and 6 both flagged it: the isolated shape is what the product is built
+// for, and the default was the one shape with no container boundary.
+//
+// There is no default now. A start that names no provider is refused, and the
+// refusal names both ways to say it on purpose. Refusing — rather than silently
+// defaulting to a container provider — is deliberate: docker and runner need
+// Docker, an image and (for runner) a service, so defaulting would turn "I ran
+// the binary" into a different, later failure on a machine without them, and on
+// a machine with them into a deployment shape the operator never asked for. A
+// refusal cannot be mistaken for the old default, and it is the only one of the
+// two that states the cost of each choice at the moment it matters.
+//
+// The flag beats the environment, as every other knob here does. Whitespace is
+// not an answer. An unknown name is left to validateSandboxFlags so the operator
+// gets "must be local, docker or runner" rather than a resolution error.
+func resolveSandboxKind(fs *flag.FlagSet, value, env string) (string, error) {
+	if fs != nil && setBy(fs, "sandbox") {
+		if strings.TrimSpace(value) == "" {
+			return "", fmt.Errorf("-sandbox was given an empty value: -sandbox must be local, docker or runner (local is development, host placement; docker and runner are isolated)")
+		}
+		return normalizedSandboxKind(value), nil
+	}
+	if strings.TrimSpace(env) != "" {
+		return normalizedSandboxKind(env), nil
+	}
+	return "", fmt.Errorf("refusing to start without a sandbox provider: host placement is not a default any more. " +
+		"Pass -sandbox local for development (host placement: no container boundary; the agent, terminal, browser and files run on this host), " +
+		"or -sandbox runner / -sandbox docker for an isolated deployment. PIFORGE_SANDBOX is the environment spelling")
+}
+
+// hostPlacementWarning is the boot line a local placement must carry.
+//
+// The requirement is not "mention unsandboxed": it is to name what is lost and
+// where the four things that used to be in a container now run, because that is
+// the sentence an operator reading a shared log needs. Empty for a container
+// provider, which is the placement the warning is contrasting.
+func hostPlacementWarning(kind string) string {
+	if isContainerSandbox(kind) {
+		return ""
+	}
+	return "WARNING: host placement is NOT isolated: there is no container boundary; the agent, its terminal, the browser and the files it edits run on this host. Use it only for development — -sandbox runner or -sandbox docker isolates a deployment"
 }

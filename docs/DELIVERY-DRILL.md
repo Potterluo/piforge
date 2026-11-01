@@ -93,6 +93,7 @@ docker volume create pf-drill-data
 docker run -d --name pf-drill -p 7731:7700 -v pf-drill-data:/data `
   -v <artifact>/url-policy.json:/etc/piforge/url-policy.json:ro `
   -e PIFORGE_URL_ALLOW_FILE=/etc/piforge/url-policy.json `
+  -e PIFORGE_SANDBOX=local `
   -e PIFORGE_SEED_EMAIL=admin@piforge.local `
   -e PIFORGE_SEED_PASSWORD=<seed-admin-password> `
   -e PIFORGE_SEED_USER_EMAIL=dev@piforge.local `
