@@ -40,6 +40,10 @@ Shape of the system:
 
 ## Run it
 
+Budget, measured on 2026-11-01: **about a minute to a working stack and about half an hour
+for a first full pass**. `docs/HANDOFF-FINDINGS.md` is that from-zero acceptance record —
+what was measured, which lines of this document were wrong, and the replacement text.
+
 ### The isolated shape: one command
 
 The shape this document's isolation claims are about (control plane container, sandbox
@@ -47,9 +51,24 @@ runner holding `/var/run/docker.sock`, one sandbox container and one workspace v
 project) is one command from a clean checkout:
 
 ```powershell
-$env:PIFORGE_DRILL_KEY='...'
+# The provider key is the 36-char VOLCE_API_KEY on line 21 of ~/.dsh/.credentials.yaml,
+# under refs:. Check it first: this prints only length and SHA-256 prefix, never the key.
+pwsh scripts/drill-key.ps1 -Check        # -> drill key: len=36 sha256=xxxxxxxx...
+$key = ((Get-Content "$HOME/.dsh/.credentials.yaml")[20] -split ':',2)[1].Trim()
+$env:PIFORGE_DRILL_KEY = $key; $env:PIFORGE_BOOTSTRAP_PROVIDER_KEY = $key
 pwsh scripts/up-isolated.ps1
 ```
+
+`PIFORGE_DRILL_KEY` is only this drill's name for the value: `up-isolated.ps1` passes it
+to the control-plane container as `PIFORGE_BOOTSTRAP_PROVIDER_KEY`, and the manual
+`docker run` below uses that deployment name directly. **One 36-character value in two
+roles.** The file here stores it unquoted on line 21; `drill-key.ps1` finds
+`VOLCE_API_KEY` by name, so if your file's line 21 is something else, load it with
+`. ./scripts/drill-key.ps1` and `$env:PIFORGE_DRILL_KEY = Get-DrillKeyValue` instead
+(that helper also strips quotes, if yours has them).
+
+Without a key (or `-ProviderKey`) the stack still starts and prints `provider : volc (…)`
+— see Troubleshooting at the end of this section.
 
 It builds the three images in the only order that works — control plane, then the runner,
 then the sandbox image **from** the control plane so `pi` and `/opt/piforge/piforged` are
@@ -125,7 +144,7 @@ docker build --build-arg INSTALL_CHROMIUM=true -t piforge:local .
 ```
 
 Run — reconstructed from `docker inspect pf-local`, so it is what is actually running
-here; only the key is yours:
+here; only the key is yours (the same 36-char value, under the deployment's name):
 
 ```powershell
 docker run -d --name pf-local -p 7722:7700 -v piforge-data:/data `
@@ -136,7 +155,7 @@ docker run -d --name pf-local -p 7722:7700 -v piforge-data:/data `
   -e PIFORGE_SEED_USER_EMAIL=dev@piforge.local -e PIFORGE_SEED_USER_PASSWORD=piforge-dev-123 `
   -e PIFORGE_DEFAULT_PROVIDER=volc `
   -e 'PIFORGE_BOOTSTRAP_PROVIDER=volc|<base_url>|deepseek-v4-flash' `
-  -e "PIFORGE_BOOTSTRAP_PROVIDER_KEY=$env:PIFORGE_DRILL_KEY" `
+  -e "PIFORGE_BOOTSTRAP_PROVIDER_KEY=$env:PIFORGE_BOOTSTRAP_PROVIDER_KEY" `
   piforge:local
 ```
 
@@ -150,7 +169,9 @@ docker run -d --name pf-local -p 7722:7700 -v piforge-data:/data `
 - **Seeded accounts**: `admin@piforge.local / piforge-admin-123` (admin) and
   `dev@piforge.local / piforge-dev-123` (user). They exist only on a first boot against
   an empty data volume, and the log names them without printing the passwords. Unset
-  passwords means generated ones, not logged, not recoverable without another admin.
+  passwords means generated ones, not logged, not recoverable without another admin. The
+  login page still says the initial password is printed to the boot log; **it is not** —
+  the log names the accounts only, so use the values here.
 - **Provider env vars**: `PIFORGE_DEFAULT_PROVIDER` (here `volc`),
   `PIFORGE_BOOTSTRAP_PROVIDER='name|base_url|model'`,
   `PIFORGE_BOOTSTRAP_PROVIDER_KEY`. Bootstrap creates the shared provider only when none
@@ -165,13 +186,48 @@ GET /healthz   -> 200 in 20 ms   {"status":"ok"}
 GET /readyz    -> 200            {"status":"ok"}
 GET /v1/setup  -> 401 unauthenticated
 GET /v1/setup  -> 200 (as admin) {"needs_provider":false,"is_admin":true,
-                                  "shared_provider_available":true,"default_provider":"volc"}
+                                  "shared_provider_available":true,
+                                  "bootstrap":{"name":"volc","base_url":"https://…",
+                                               "model":"deepseek-v4-flash"},
+                                  "default_provider":"volc"}
 GET /v1/setup  -> 200 (as user)  {"needs_provider":false,"is_admin":false,
-                                  "shared_provider_available":true,"default_provider":"volc"}
+                                  "shared_provider_available":true,
+                                  "bootstrap":{"name":"volc","base_url":"https://…",
+                                               "model":"deepseek-v4-flash"},
+                                  "default_provider":"volc"}
 ```
+
+`bootstrap` is the non-secret prefill from `PIFORGE_BOOTSTRAP_PROVIDER` (name, base URL,
+model — never the key). It is present whenever that variable is set, even when no key was
+supplied, so it describes a configuration and not a working provider.
 
 `/healthz` is a liveness probe for the Go process; it does not mean the Next app is
 served. `/v1/admin/status` (admin only) is the operational truth — see below.
+
+### Troubleshooting
+
+**It starts without a key and still looks configured.** `up-isolated.ps1` exits 0 when no
+provider key was supplied; the summary's `note : no provider key was supplied` line says
+so, but its `provider : volc (…)` line reads as configured — that line names the bootstrap
+*configuration*, not a usable provider. `/v1/setup` is the authoritative answer:
+`needs_provider:true` and `shared_provider_available:false` mean nothing can answer. A
+session with no pinned model then carries `"model_unavailable": true` in `/status`, and a
+prompt is accepted (`200 {"accepted":true,…}`) but settles with an **empty** assistant
+message — do not blame the agent. Check the container in one command (it prints a word,
+never the key):
+
+```powershell
+docker exec piforge sh -c 'echo "${PIFORGE_BOOTSTRAP_PROVIDER_KEY:+key present}${PIFORGE_BOOTSTRAP_PROVIDER_KEY:-key MISSING}"'
+```
+
+(This reads the container's environment, so it is the *fresh-volume* check: a key sealed
+into the volume on an earlier boot still answers when the variable is now empty — as it
+does on the `pf-local` above. `/v1/setup` is the authority in both cases.)
+
+A session that pins a keyless provider explicitly (`model_ref` = that provider) fails
+earlier instead, with `400 {"code":"no_model",…"has no API key"}`; the empty answer above
+is the *unpinned* case, where the deployment default is unusable and the send still runs.
+Restart with the key (`-ProviderKey`) or add it in Settings → Providers, then resend.
 
 ## Operate it
 
@@ -431,44 +487,50 @@ value has to be passed as `--restart` on the `docker run` that recreates the con
 
 ## Use it
 
-Measured on this deployment, warm, single user, one browser tab:
+Measured on this deployment, single user, one browser tab. Rows are warm unless marked
+cold: the first send in a session (sandbox provisioning) and the first fork (worktree
+creation) pay for that provisioning, and are 2–6 s here.
 
 | Step | Measured |
 |---|---|
 | Workbench first paint (Playwright, same host) | **168–188 ms** |
-| Login `POST /v1/auth/login` | **44 ms** (200, returns `csrf` in the body + cookies) |
+| Login `POST /v1/auth/login` | **44 ms** (200, body `{user, csrf}`, sets cookies `pf_session` and `pf_csrf`; send the same value back as header **`X-Pf-Csrf`** on every write) |
 | `GET /v1/setup` | **1 ms** |
 | `POST /v1/projects` | **2 ms** (201) |
 | `POST /v1/projects/{id}/sessions` | **23 ms** (201) |
-| Send a message (`POST …/messages`) | **186 ms** to `{accepted:true, disposition:"started"}` |
+| Send a message (`POST …/messages`) | **186 ms** warm to `{accepted:true, disposition:"started"}`; **2 443 ms** for the first send in a session (sandbox provisioning) |
 | First contact: `run.started` on the SSE stream | **+600 ms** from stream open |
 | A short run (2-word answer, no tools) | **805 ms** started → settled |
 | `GET …/entries` (5 entries) | **2 ms** |
 | Interrupt (`POST …/interrupt`) | **7 ms**, answered `{cleared_steering:[],cleared_follow_up:[]}`; idle 1 ms later |
 | `GET …/fork-points` | **4 ms** (3 points) |
-| Fork (`POST …/fork`) | **227 ms** (201, `kind: branch`, own `worktree_id`) |
-| Adopt (`POST …/adopt` on a fresh branch) | **409 in 10 ms** — "这个分支没有可采纳的改动：既没有领先基准的提交，也没有未提交的文件" |
+| Fork (`POST …/fork`) | **227 ms** warm (201, `kind: branch`, own `worktree_id`); **6 314 ms** for the first fork (worktree creation) |
+| Adopt (`POST …/adopt` on a fresh branch) | **409, measured 1.8 s here** — the reason depends on the target's state: `这个分支没有可采纳的改动：既没有领先基准的提交，也没有未提交的文件` (nothing ahead of base, nothing uncommitted), or `目标会话的工作区有未提交的改动：先在目标会话里提交或撤销这些改动，再重试采纳（避免覆盖你正在写的内容）` (dirty target) |
 | Inline review (message with `review_comment`) | **191 ms** accepted; that run **30,528 ms** |
 | `GET …/git/pr` (no forge configured) | **12 ms**, 200, `remote:false, ahead:0, dirty:true` + warnings |
-| Terminal typing | 40 chars in **34–37 ms** (41 frames, all on an open socket) |
+| Terminal typing | **34–37 ms** for 41 echoed frames on an open socket — this measures the PTY round trip, not keystroke latency; typing 37 chars in a real browser took **1 232 ms** (~33 ms per character echo) |
 
 Flow notes:
 
-- **First contact** is not where the time goes: the message is accepted in ~200 ms and
-  provisioning happens on that first send. A trivial answer settles in 0.8 s; the review
-  turn took 30.5 s. Both are the model, not the product.
+- **First contact** is not where the time goes: the message is accepted in ~200 ms warm
+  (2.4 s the first time, which provisions the sandbox) and a trivial answer settles in
+  0.8 s; the review turn took 30.5 s. Both are the model, not the product.
 - **A run** is observed through `run.settled`, never `agent_end` — README rule 2, and the
   only signal that survives retries, compaction and steering. `GET …/status` is
-  `{running, streaming, compacting, queue_depth, last_seq, process_id, session_file,
-  resolved_model_ref}`; `process_id` is the agent process, absent/0 when idle.
+  `{running, streaming, compacting, queue_depth, model_ref, last_seq, process_id,
+  session_file, resolved_model_ref, model_unavailable}`; `process_id` is the agent process,
+  absent/0 when idle, and `model_unavailable: true` means nothing is configured to answer
+  (the keyless case in Troubleshooting).
 - **Stop/continue**: interrupt stops the run in ~7 ms and clears steering/follow-ups.
   Then it gets interesting — see the second Known limit.
 - **Fork/adopt**: fork is cheap and real (branch session, its own worktree). Adopt takes a
   *branch's* changes back, so it refuses when the branch has nothing ahead of its base —
-  409 with a readable reason, not a silent no-op.
+  409 with a readable reason, not a silent no-op — and it refuses a **dirty target** with
+  its own message (`目标会话的工作区有未提交的改动…`); measured 1.8 s, not 10 ms.
 - **Inline review** is server-assembled: the browser posts
-  `{path, line, side, hunk, quote, body}` and the server builds the `行内评论 · notes.txt:2`
-  turn with the code quoted and a "位置：…" note. Measured 191 ms to accept, 30.5 s round.
+  `{path, line, side, hunk, quote: ["<line text>"], body}` (`quote` is an array) and the
+  server builds the `行内评论 · notes.txt:2` turn with the code quoted and a "位置：…"
+  note. Measured 191 ms to accept, 30.5 s round.
 - **PR with a forge configured** (from DELIVERY-DRILL, not reproducible here — no forge on
   this deployment): `PUT /v1/projects/{id}/forge {kind:"github", api_base, repo,
   base_branch, token}`, `GET …/git/pr` previews, `POST …/git/pr` pushes
@@ -476,6 +538,39 @@ Flow notes:
   the same URL, and a forge 422 surfaces verbatim as `code=forge_error,
   details.step=create, forge_status=422`. With no remote, preview answers 200 with
   `remote:false` and a warning to set `repo_url` — which is what it did here.
+
+### API shapes
+
+Every write (`POST`/`PUT`/`PATCH`/`DELETE`) needs the CSRF token from login as the header
+**`X-Pf-Csrf`**; without it the answer is
+`403 {"code":"forbidden","message":"missing or invalid CSRF token"}`, and `X-CSRF-Token`
+is not the name. (Header names are case-insensitive; the code's constant is `X-PF-CSRF`.)
+Login is the cookie-auth exception (there is no session to protect yet; a bearer API key is
+exempt too, because it carries no cookie): `POST /v1/auth/login` with
+`{"email":"…","password":"…"}` → `200 {"user":{…},"csrf":"…"}`, sets cookies `pf_session`
+(HttpOnly) and `pf_csrf` (readable), and echoes the token in an `X-PF-CSRF` response
+header. Send that same `csrf` value back on every write.
+
+| Call | Body |
+|---|---|
+| `POST /v1/sessions/{id}/messages` | `{"text":"<prompt>","client_msg_id":"<uuid>"}` — `client_msg_id` is required (or send an `Idempotency-Key` header); it makes the send idempotent per session. `{"text": …}` alone is `400 {"code":"invalid_argument","message":"client_msg_id is required"}`. |
+| `POST /v1/sessions/{id}/fork` | `{"entry_id":"<id from /fork-points>"}` — one required field, and unknown fields are refused (`title` → `400 invalid JSON body: json: unknown field "title"`). `label` and `copy_changes` are the only other fields the handler accepts. |
+| message with `review_comment` | `{"client_msg_id":"…","review_comment":{"path":"notes.txt","line":12,"side":"new","hunk":"@@ -1,3 +1,4 @@","quote":["<line text>"],"body":"…"}}` — `quote` is a **`[]string`**, not a string (a scalar fails with `400 … cannot unmarshal string into Go struct field ReviewComment.review_comment.quote of type []string`); `path` is worktree-relative, `line` is 1-based, `side` is `new` or `old`, and `end_line` is optional. |
+
+These are the shapes a script gets wrong first because the UI never shows them: a message
+needs an idempotency key the browser generates, a fork body is one field (its title is
+`label`, not `title`), and a review comment quotes an array of lines.
+
+### What the panels call
+
+- terminal: `ws://…/v1/sessions/{id}/pty?tab=t1` (binary/UTF-8 frames; the char-echo
+  round trip)
+- diff: `GET /v1/sessions/{id}/git/diff?path=…&scope=unstaged` — `scope` accepts
+  `unstaged|staged|branch|commit|range` (`worktree` is a 400)
+- tests: `GET /v1/sessions/{id}/test-runs` (not `/tests`) →
+  `{count, runs:[{runner:"node --test", status:"passed", total, passed, …}]}`
+- transcript: `GET …/entries` → `{entries, leaf_id}`; each entry has `preview`, `role`,
+  `type`, `extra` — **not** `text`
 
 ## Extend it
 
