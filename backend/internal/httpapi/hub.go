@@ -28,6 +28,17 @@ type hub struct {
 	store *store.Store
 	rt    contracts.AgentRuntime
 	log   *slog.Logger
+	// workspace resolves the checkout's HEAD for the commit sha written onto
+	// each audit row. Nil is a hand-built test hub: the sha is then empty, which
+	// the trail records as "unknown" rather than inventing one.
+	workspace contracts.Workspace
+	// revision caches one session's HEAD for a couple of seconds. A tool-heavy
+	// turn would otherwise run `git rev-parse` (or a sandbox round trip) for
+	// every call, and a commit the agent makes is still visible almost
+	// immediately.
+	revisionMu  sync.Mutex
+	revisionAt  map[string]time.Time
+	revisionSHA map[string]string
 }
 
 // subscription is the in-flight Start for one session. Ready is closed once
@@ -39,7 +50,14 @@ type subscription struct {
 }
 
 func newHub(st *store.Store, rt contracts.AgentRuntime, log *slog.Logger) *hub {
-	return &hub{subs: map[string]*subscription{}, store: st, rt: rt, log: log}
+	return &hub{
+		subs:        map[string]*subscription{},
+		store:       st,
+		rt:          rt,
+		log:         log,
+		revisionAt:  map[string]time.Time{},
+		revisionSHA: map[string]string{},
+	}
 }
 
 // ensure starts the session's agent process if it is not already running and
@@ -149,6 +167,16 @@ func (h *hub) applyDerivedState(userID string, ev contracts.Event) {
 			}); err != nil {
 				h.log.Debug("run not created", slog.String("error", err.Error()))
 			}
+			// The run is the unit token usage and cost are reported for. Record
+			// its context now; the settle event fills the usage in.
+			if err := h.store.BeginAuditRun(ctx, store.AuditRun{
+				RunID: ev.RunID, SessionID: ev.SessionID, UserID: userID,
+				ModelRef:  h.modelRef(ctx, ev.SessionID),
+				CommitSHA: h.commitSHA(ctx, ev.SessionID),
+				StartedAt: ev.TS,
+			}); err != nil {
+				h.log.Debug("audit run not recorded", slog.String("error", err.Error()))
+			}
 		}
 	case contracts.EvRunSettled, contracts.EvRunAborted:
 		status := contracts.StatusIdle
@@ -179,6 +207,27 @@ func (h *hub) applyDerivedState(userID string, ev contracts.Event) {
 			if err := h.store.SettleRun(ctx, userID, ev.RunID, settle); err != nil {
 				h.log.Debug("run not settled", slog.String("error", err.Error()))
 			}
+			// The final usage the provider reported, on the row the audit query
+			// joins. A provider that reports nothing leaves zeroes, which the
+			// UI renders as "not reported".
+			if err := h.store.SettleAuditRun(ctx, store.AuditRunSettle{
+				RunID: ev.RunID, SessionID: ev.SessionID, Status: settle.Status,
+				TokensIn: settle.TokensIn, TokensOut: settle.TokensOut,
+				TokensCacheR: settle.TokensCacheR, TokensCacheW: settle.TokensCacheW,
+				CostUSD: settle.CostUSD, SettledAt: &ev.TS,
+			}); err != nil {
+				h.log.Debug("audit run not settled", slog.String("error", err.Error()))
+			}
+			// A call that never reported an outcome is closed as abandoned
+			// rather than left "running" forever. Appending the end row is the
+			// same write the tool.ended path makes; a late real end row is a
+			// no-op because the (call, end) id already exists.
+			if n, err := h.store.CloseAbandonedToolCalls(ctx, ev.SessionID, ev.RunID); err != nil {
+				h.log.Debug("abandoned tool calls not closed", slog.String("error", err.Error()))
+			} else if n > 0 {
+				h.log.Info("closed tool calls with no outcome",
+					slog.String("session", ev.SessionID), slog.Int("count", n))
+			}
 		}
 
 	case contracts.EvToolStarted:
@@ -190,13 +239,11 @@ func (h *hub) applyDerivedState(userID string, ev contracts.Event) {
 		if json.Unmarshal(ev.Payload, &p) != nil || p.ToolCallID == "" {
 			return
 		}
-		// Tool arguments can contain secrets, so the row keeps a hash and a
-		// bounded preview rather than the raw text (PRD §8.2).
+		// Tool arguments can contain secrets and file content, so the row keeps
+		// a hash and a bounded, redacted preview rather than the raw text
+		// (docs/AUDIT.md). The store builds that preview so every writer gets
+		// the same rule; the full arguments stay in the session.
 		sum := sha256.Sum256(append([]byte(p.Name+"\x00"), p.Args...))
-		preview := p.Args
-		if len(preview) > 2048 {
-			preview = nil
-		}
 		if err := h.store.CreateToolCall(ctx, userID, store.ToolCall{
 			ID:          p.ToolCallID,
 			SessionID:   ev.SessionID,
@@ -204,8 +251,10 @@ func (h *hub) applyDerivedState(userID string, ev contracts.Event) {
 			Name:        p.Name,
 			Namespace:   toolNamespace(p.Name),
 			ArgsHash:    hex.EncodeToString(sum[:]),
-			ArgsPreview: preview,
+			ArgsPreview: p.Args,
 			StartedAt:   ev.TS,
+			ModelRef:    h.modelRef(ctx, ev.SessionID),
+			CommitSHA:   h.commitSHA(ctx, ev.SessionID),
 		}); err != nil {
 			h.log.Debug("tool call not recorded", slog.String("error", err.Error()))
 		}
@@ -256,6 +305,64 @@ func toolNamespace(name string) string {
 		}
 	}
 	return ""
+}
+
+// startedModelReporter is implemented by the real runtime (internal/pi). A
+// session row says what the user picked; this says what the live process was
+// actually launched with, which is the difference a model switch creates. The
+// hub asserts for it rather than widening contracts.AgentRuntime, so a test
+// runtime that does not care keeps compiling.
+type startedModelReporter interface {
+	StartedModelRef(sessionID string) (string, bool)
+}
+
+// modelRef is the model reference written onto an audit row.
+func (h *hub) modelRef(ctx context.Context, sessionID string) string {
+	if reporter, ok := h.rt.(startedModelReporter); ok {
+		if ref, live := reporter.StartedModelRef(sessionID); live && strings.TrimSpace(ref) != "" {
+			return ref
+		}
+	}
+	sess, err := h.store.SessionAny(ctx, sessionID)
+	if err != nil {
+		return ""
+	}
+	return sess.ModelRef
+}
+
+// commitSHA is the workspace revision at the moment of the call. An unknown
+// revision is recorded as empty: guessing one would make the trail lie.
+func (h *hub) commitSHA(ctx context.Context, sessionID string) string {
+	if h.workspace == nil {
+		return ""
+	}
+	const ttl = 2 * time.Second
+	h.revisionMu.Lock()
+	if at, ok := h.revisionAt[sessionID]; ok && time.Since(at) < ttl {
+		sha := h.revisionSHA[sessionID]
+		h.revisionMu.Unlock()
+		return sha
+	}
+	h.revisionMu.Unlock()
+
+	sess, err := h.store.SessionAny(ctx, sessionID)
+	if err != nil || sess.WorktreeID == "" {
+		return ""
+	}
+	path, err := h.store.WorktreePathByID(ctx, sess.WorktreeID)
+	if err != nil || strings.TrimSpace(path) == "" {
+		return ""
+	}
+	graph, err := h.workspace.Log(ctx, path, 1, "")
+	if err != nil || graph == nil {
+		return ""
+	}
+	sha := graph.Head
+	h.revisionMu.Lock()
+	h.revisionAt[sessionID] = time.Now()
+	h.revisionSHA[sessionID] = sha
+	h.revisionMu.Unlock()
+	return sha
 }
 
 // liveCount is how many sessions currently have a subscription, which is the

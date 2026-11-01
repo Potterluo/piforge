@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/piforge/piforge/backend/internal/audit"
 	"github.com/piforge/piforge/backend/internal/contracts"
 )
 
@@ -32,6 +33,15 @@ type ToolCall struct {
 	ResultBytes *int            `json:"result_bytes,omitempty"`
 	StartedAt   time.Time       `json:"started_at"`
 	EndedAt     *time.Time      `json:"ended_at,omitempty"`
+	// ModelRef is the model the agent process was actually using. Empty asks
+	// the store to fall back to the session's reference.
+	ModelRef string `json:"model_ref,omitempty"`
+	// CommitSHA is the workspace revision at the moment of the call. Empty is
+	// recorded as empty: "unknown" is a fact, and a made-up hash is not.
+	CommitSHA string `json:"commit_sha,omitempty"`
+	// SandboxID overrides the sandbox resolved from the session. The event
+	// pump knows it already; a caller that does not passes empty.
+	SandboxID string `json:"sandbox_id,omitempty"`
 }
 
 // ToolCallFinish is the post-execution observation.
@@ -43,46 +53,69 @@ type ToolCallFinish struct {
 	EndedAt     *time.Time
 }
 
-// CreateToolCall records a tool invocation intent before it runs.
+// CreateToolCall records a tool invocation intent before it runs, and its
+// intent row in the forensic trail (audit_log) in the same transaction.
 func (s *Store) CreateToolCall(ctx context.Context, userID string, tc ToolCall) error {
 	if tc.ID == "" || tc.SessionID == "" || tc.Name == "" {
 		return fmt.Errorf("store: create tool call: id, session and name are required: %w", ErrInvalid)
-	}
-	if _, err := s.Session(ctx, userID, tc.SessionID); err != nil {
-		return err
 	}
 	started := tc.StartedAt
 	if started.IsZero() {
 		started = s.now()
 	}
-	preview := any(nil)
-	if len(tc.ArgsPreview) > 0 {
-		if !json.Valid(tc.ArgsPreview) {
-			return fmt.Errorf("store: create tool call %q: args_preview is not JSON: %w", tc.ID, ErrInvalid)
-		}
-		preview = string(tc.ArgsPreview)
+	tx, err := s.w.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: create tool call %q: %w", tc.ID, err)
 	}
-	_, err := s.w.ExecContext(ctx,
+	defer func() { _ = tx.Rollback() }()
+
+	meta, err := auditMetaTx(ctx, tx, userID, tc.SessionID)
+	if err != nil {
+		return err
+	}
+	if tc.SandboxID != "" {
+		meta.SandboxID = tc.SandboxID
+	}
+	// A preview is never the raw argument text: the builder bounds it, redacts
+	// key-shaped fields and replaces file content with sha256 + size.
+	preview := audit.BuildPreview(tc.ArgsPreview)
+	var storedPreview any
+	if len(tc.ArgsPreview) > 0 {
+		storedPreview = string(preview.JSON)
+	}
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO tool_calls (id, user_id, session_id, run_id, name, namespace, args_hash,
 		                         args_preview, started_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		tc.ID, userID, tc.SessionID, tc.RunID, tc.Name, tc.Namespace, tc.ArgsHash,
-		preview, formatTime(started))
-	if err != nil {
+		storedPreview, formatTime(started)); err != nil {
+		return fmt.Errorf("store: create tool call %q: %w", tc.ID, err)
+	}
+	if err := startAuditRowTx(ctx, tx, meta, tc, started); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: create tool call %q: %w", tc.ID, err)
 	}
 	return nil
 }
 
-// FinishToolCall records the result of a tool invocation. Replaying it is
-// harmless (last write wins), which keeps the event pump tolerant of retries.
+// FinishToolCall records the result of a tool invocation and closes its audit
+// call with an immutable 'end' row. Replaying it is harmless: both the
+// transcript update and the audit row are idempotent.
 func (s *Store) FinishToolCall(ctx context.Context, userID, toolCallID string, in ToolCallFinish) error {
 	ended := in.EndedAt
 	if ended == nil {
 		now := s.now()
 		ended = &now
 	}
-	res, err := s.w.ExecContext(ctx,
+	tx, err := s.w.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: finish tool call %q: %w", toolCallID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx,
 		`UPDATE tool_calls
 		    SET is_error = ?, exit_code = ?, duration_ms = ?, result_bytes = ?, ended_at = ?
 		  WHERE id = ? AND user_id = ?`,
@@ -91,7 +124,16 @@ func (s *Store) FinishToolCall(ctx context.Context, userID, toolCallID string, i
 	if err != nil {
 		return fmt.Errorf("store: finish tool call %q: %w", toolCallID, err)
 	}
-	return requireOneRow(res, "store: finish tool call "+toolCallID)
+	if err := requireOneRow(res, "store: finish tool call "+toolCallID); err != nil {
+		return err
+	}
+	if err := finishAuditRowTx(ctx, tx, userID, toolCallID, in, *ended); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: finish tool call %q: %w", toolCallID, err)
+	}
+	return nil
 }
 
 // ListToolCalls lists a session's tool calls oldest first.

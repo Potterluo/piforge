@@ -199,6 +199,111 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 );
 CREATE INDEX IF NOT EXISTS tool_calls_session ON tool_calls (session_id, started_at);
 
+-- ============ audit_log: the forensic trail (docs/AUDIT.md) ============
+--
+-- `tool_calls` above is the transcript's Trace: it cascades away with its
+-- session, and it is what the user reads. This table is the operator's copy of
+-- what happened, and it is deliberately a different thing:
+--
+--   * no foreign keys. Deleting a session, project or user must not erase the
+--     record of what that account's agent did — the same rule the gateway
+--     revocation tombstones follow (gateway_revocations, above).
+--   * append-only. A tool call is two rows: 'start' (intent: tool, bounded
+--     preview, ids, model, commit) and 'end' (observation: status, exit code,
+--     duration, bytes). Neither row is updated after it is written.
+--   * `seq` is monotonic per session, allocated by the writer (one SQLite
+--     writer connection, so COALESCE(MAX(seq),0)+1 is atomic). Ordering by
+--     (session_id, seq) reconstructs the order the facts were recorded.
+--   * `prev_hash`/`hash` chain every row to the one before it in the same
+--     session (internal/audit). Verification is /v1/admin/audit/verify.
+--
+-- The preview is bounded (2048 bytes, 256 runes per field) and redacted; file
+-- content is stored as sha256 + size, never as bytes. See internal/audit.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id             TEXT PRIMARY KEY,
+    seq            INTEGER NOT NULL,
+    session_id     TEXT NOT NULL,
+    tool_call_id   TEXT NOT NULL,
+    phase          TEXT NOT NULL CHECK (phase IN ('start', 'end')),
+    recorded_at    TEXT NOT NULL,
+    started_at     TEXT NOT NULL,
+    ended_at       TEXT,
+    -- Denormalised on purpose: a LEFT JOIN would lose the label when its
+    -- subject is deleted, which is exactly when an investigator needs it.
+    user_id        TEXT NOT NULL DEFAULT '',
+    project_id     TEXT NOT NULL DEFAULT '',
+    sandbox_id     TEXT NOT NULL DEFAULT '',
+    run_id         TEXT NOT NULL DEFAULT '',
+    user_email     TEXT NOT NULL DEFAULT '',
+    project_name   TEXT NOT NULL DEFAULT '',
+    session_title  TEXT NOT NULL DEFAULT '',
+    tool           TEXT NOT NULL,
+    namespace      TEXT NOT NULL DEFAULT '',
+    args_hash      TEXT NOT NULL DEFAULT '',
+    args_preview   TEXT NOT NULL DEFAULT '',
+    preview_bytes  INTEGER NOT NULL DEFAULT 0,
+    args_truncated INTEGER NOT NULL DEFAULT 0,
+    status         TEXT NOT NULL DEFAULT 'running',
+    is_error       INTEGER,
+    exit_code      INTEGER,
+    duration_ms    INTEGER,
+    result_bytes   INTEGER,
+    model_ref      TEXT NOT NULL DEFAULT '',
+    commit_sha     TEXT NOT NULL DEFAULT '',
+    prev_hash      TEXT NOT NULL DEFAULT '',
+    hash           TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS audit_log_seq ON audit_log (session_id, seq);
+-- The admin table's default order, and the retention cutoff's scan.
+CREATE INDEX IF NOT EXISTS audit_log_started ON audit_log (started_at DESC);
+CREATE INDEX IF NOT EXISTS audit_log_user ON audit_log (user_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS audit_log_project ON audit_log (project_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS audit_log_session ON audit_log (session_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS audit_log_tool ON audit_log (tool, started_at DESC);
+-- Retention deletes whole calls (both phases) by the call's start time.
+CREATE INDEX IF NOT EXISTS audit_log_call ON audit_log (tool_call_id);
+
+-- ============ audit_runs: the run-level facts a tool row points at ============
+--
+-- Token usage and cost are only final when the run settles, long after the
+-- tool calls it contains. They live here, keyed by (run_id, session_id), and
+-- the admin query joins them in; the tool rows themselves stay append-only so
+-- their chain does not change when a run ends. No foreign key for the same
+-- reason as audit_log: the row must survive the session it describes.
+CREATE TABLE IF NOT EXISTS audit_runs (
+    run_id       TEXT NOT NULL,
+    session_id   TEXT NOT NULL,
+    user_id      TEXT NOT NULL DEFAULT '',
+    project_id   TEXT NOT NULL DEFAULT '',
+    model_ref    TEXT NOT NULL DEFAULT '',
+    commit_sha   TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'running',
+    tokens_in    INTEGER NOT NULL DEFAULT 0,
+    tokens_out   INTEGER NOT NULL DEFAULT 0,
+    tokens_cache_r INTEGER NOT NULL DEFAULT 0,
+    tokens_cache_w INTEGER NOT NULL DEFAULT 0,
+    cost_usd     REAL NOT NULL DEFAULT 0,
+    started_at   TEXT NOT NULL,
+    settled_at   TEXT,
+    PRIMARY KEY (run_id, session_id)
+);
+CREATE INDEX IF NOT EXISTS audit_runs_started ON audit_runs (started_at DESC);
+CREATE INDEX IF NOT EXISTS audit_runs_session ON audit_runs (session_id, started_at DESC);
+
+-- ============ audit_pruned: why a session's chain starts mid-sequence ============
+--
+-- Retention deletes whole calls, which removes a prefix of a session's rows.
+-- Without a marker, "the first row I can see is seq 41" is indistinguishable
+-- from "somebody deleted rows 1–40". This row is the marker: verification only
+-- accepts a mid-chain head when the watermark covers the missing prefix. It is
+-- written by the same retention transaction, never by a read path.
+CREATE TABLE IF NOT EXISTS audit_pruned (
+    session_id        TEXT PRIMARY KEY,
+    pruned_through_seq INTEGER NOT NULL,
+    pruned_rows       INTEGER NOT NULL DEFAULT 0,
+    pruned_at         TEXT NOT NULL
+);
+
 -- ============ MCP (single table + scope) ============
 CREATE TABLE IF NOT EXISTS mcp_servers (
     id             TEXT PRIMARY KEY,

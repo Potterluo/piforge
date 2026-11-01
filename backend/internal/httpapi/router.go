@@ -406,11 +406,16 @@ func newServer(d Deps) *server {
 	if d.Logger == nil {
 		d.Logger = slog.Default()
 	}
+	h := newHub(d.Store, d.Runtime, d.Logger)
+	// The audit row records the checkout's revision at the call. A deployment
+	// wired without a workspace (API-only) leaves it empty; the trail says
+	// "unknown" rather than a guess.
+	h.workspace = d.Workspace
 	s := &server{
 		deps:         d,
 		log:          d.Logger,
 		now:          d.Now,
-		hub:          newHub(d.Store, d.Runtime, d.Logger),
+		hub:          h,
 		ssePoll:      200 * time.Millisecond,
 		sseKeepalive: 15 * time.Second,
 		// No git backend: artifacts are plain files, and this service must not
@@ -583,10 +588,11 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /v1/admin/users", s.authed(s.handleAdminUsers))
 	mux.Handle("POST /v1/admin/users", s.mutatingBearer(s.handleAdminCreateUser))
 	mux.Handle("PATCH /v1/admin/users/{id}", s.mutatingBearer(s.handleAdminUpdateUser))
-	// The audit trail: tool_calls read across tenants, for an operator. It is the
+	// The audit trail: audit_log read across tenants, for an operator. It is the
 	// one cross-tenant read besides the user list, and it is admin-only for the
-	// same reason.
+	// same reason. The verify route walks the chained hashes over a range.
 	mux.Handle("GET /v1/admin/audit", s.authed(s.handleAdminAudit))
+	mux.Handle("GET /v1/admin/audit/verify", s.authed(s.handleAdminAuditVerify))
 
 	// Anything else is a JSON 404 rather than Go's text/plain default, so the
 	// client's error parser always has the same shape to read.
