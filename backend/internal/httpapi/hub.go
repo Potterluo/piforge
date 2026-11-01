@@ -316,8 +316,21 @@ type startedModelReporter interface {
 	StartedModelRef(sessionID string) (string, bool)
 }
 
+// servedModelReporter is implemented by the real runtime too. StartedModelRef
+// is the platform's reference ("volc/deepseek-v4-flash"); this is the one Pi was
+// configured with ("piforge/deepseek-v4-flash"), which is the honest answer to
+// "which model actually served the call" when the session pinned none.
+type servedModelReporter interface {
+	ServedModelRef(sessionID string) (string, bool)
+}
+
 // modelRef is the model reference written onto an audit row.
 func (h *hub) modelRef(ctx context.Context, sessionID string) string {
+	if reporter, ok := h.rt.(servedModelReporter); ok {
+		if ref, live := reporter.ServedModelRef(sessionID); live && strings.TrimSpace(ref) != "" {
+			return ref
+		}
+	}
 	if reporter, ok := h.rt.(startedModelReporter); ok {
 		if ref, live := reporter.StartedModelRef(sessionID); live && strings.TrimSpace(ref) != "" {
 			return ref

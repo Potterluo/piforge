@@ -59,7 +59,7 @@ replayed event is a no-op and cannot fork the chain.
 | `args_truncated` | A field, array, object or the total budget was cut. |
 | `status` | `running` (start), `ok`, `error`, `abandoned` (end). |
 | `is_error`, `exit_code`, `duration_ms`, `result_bytes` | Observation. NULL means "not reported"; `0` is a real value. |
-| `model_ref` | The model the agent process was actually launched with (the runtime's `StartedModelRef`, falling back to the session's reference). |
+| `model_ref` | The model the agent process was actually configured with (the runtime's `ServedModelRef`, e.g. `piforge/deepseek-v4-flash` — this fills in the deployment default when the session pinned none), falling back to the platform reference and then the session's stored reference. |
 | `commit_sha` | The checkout's `HEAD` at the call (`git rev-parse HEAD`, host or sandbox). Empty means unknown — never a guess. |
 | `prev_hash`, `hash` | The chain (§6). |
 
@@ -297,9 +297,10 @@ and `ok: true`; the caller must not read that as "the whole trail is intact".
 * `commit_sha` is best-effort: with a workspace this process cannot reach (an
   API-only deployment or a detached sandbox whose `git` call fails), it is
   empty. The row still records model and ids.
-* `model_ref` is the model the **live process** was launched with when the
-  runtime reports it; otherwise the session's configured reference. A model
-  switched mid-run is reflected by the next call, not retroactively.
+* `model_ref` is the model Pi was configured with when the runtime reports it
+  (`ServedModelRef`, which fills in the deployment default); otherwise the
+  session's configured reference. It is recorded per call, so a model switched
+  mid-run is reflected by the next call, not retroactively.
 * Per-call token counts are **run totals joined at read time**, not the usage of
   that one call. A provider that reports nothing leaves zeroes.
 * `sandbox_id` is empty for a session with no sandbox (an ephemeral session).

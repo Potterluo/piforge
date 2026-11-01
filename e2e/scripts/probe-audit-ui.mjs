@@ -9,6 +9,24 @@ import fs from "node:fs";
 import path from "node:path";
 import { chromium } from "@playwright/test";
 
+// The build box has no access to Playwright's browser CDN; the suite drives the
+// locally installed Chrome (playwright.config.ts does the same). Fall back to
+// Playwright's bundled Chromium if one is present.
+function findChrome() {
+  const candidates = [
+    process.env.PIFORGE_CHROME,
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    process.env.LOCALAPPDATA
+      ? path.join(process.env.LOCALAPPDATA, "Google\\Chrome\\Application\\chrome.exe")
+      : undefined,
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+  ];
+  return candidates.find((candidate) => candidate && fs.existsSync(candidate));
+}
+
 const [baseArg, cookieFile, rowId, artifactDir] = process.argv.slice(2);
 if (!baseArg || !cookieFile || !rowId) {
   console.error("usage: probe-audit-ui.mjs <base> <cookie-file> <row-id> [artifact-dir]");
@@ -18,11 +36,21 @@ const base = baseArg.replace(/\/$/, "");
 const cookies = JSON.parse(fs.readFileSync(cookieFile, "utf8"));
 const host = new URL(base).hostname;
 
-const browser = await chromium.launch();
+const executablePath = findChrome();
+if (!executablePath) {
+  console.error("no Chrome found; set PIFORGE_CHROME to the executable");
+  process.exit(2);
+}
+const browser = await chromium.launch({ executablePath });
 try {
   const context = await browser.newContext();
   await context.addCookies(
-    cookies.map((cookie) => ({ ...cookie, domain: host })),
+    cookies.map((cookie) => ({
+      name: cookie.name ?? cookie.Name,
+      value: cookie.value ?? cookie.Value,
+      domain: host,
+      path: cookie.path ?? cookie.Path ?? "/",
+    })),
   );
   const page = await context.newPage();
   await page.goto(`${base}/admin/audit`, { waitUntil: "domcontentloaded" });

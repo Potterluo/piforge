@@ -603,8 +603,33 @@ func (r *Runtime) StartedModelRef(sessionID string) (string, bool) {
 	return s.startedRef, true
 }
 
-// StartedModelConfig reports whether the live process was spawned with the
-// platform's model configuration, and whether it is still alive.
+// ServedModelRef reports the model reference Pi was actually configured with
+// ("piforge/deepseek-v4-flash"), which is not always the session's platform
+// reference: a session with no pinned model runs the deployment default, and
+// Pi knows it under the generated gateway provider. It exists for the audit
+// trail, where "which model answered" must be the model that served the turn,
+// not an empty cell because the user never picked one.
+func (r *Runtime) ServedModelRef(sessionID string) (string, bool) {
+	r.mu.Lock()
+	s, ok := r.sessions[sessionID]
+	r.mu.Unlock()
+	if !ok || s == nil || !s.bridge.Alive() {
+		return "", false
+	}
+	ref := s.startedRef
+	if r.cfg.ModelFor != nil {
+		// ModelFor translates the platform reference into Pi's (and fills in the
+		// deployment default when the session pinned none).
+		ref = r.cfg.ModelFor(s.spec, ref)
+	}
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "", false
+	}
+	return ref, true
+}
+
+// StartedModelConfig reports whether the live process was spawned with the// platform's model configuration, and whether it is still alive.
 //
 // The control plane uses it to recognise the one broken state it cannot explain
 // away: an agent started while the session's provider did not exist. Pi's
