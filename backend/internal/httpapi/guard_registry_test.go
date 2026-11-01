@@ -53,7 +53,7 @@ var guardedEdges = []guardEdge{
 	// --- skills -------------------------------------------------------------
 	{"skill import (git)", "POST /v1/skills/import", "handleImportSkills", "skill_import.go", "refuseOutboundURL"},
 	{"skill import (git, checkouts)", "POST /v1/skills/import", "handleImportSkills", "skill_import.go", "tenantfs.Open"},
-	{"skill import (file:// path)", "POST /v1/skills/import", "handleImportSkills", "skill_import.go", "confineLocalImport"},
+	{"skill import (file:// path)", "POST /v1/skills/import", "handleImportSkills", "skill_import.go", "tenantfs.Resolve"},
 	{"skill import (zip)", "POST /v1/skills/import/zip", "handleImportSkillsZip", "skill_import.go", "extractSkillZipWithin"},
 	{"skill bundle read", "GET /v1/skills/{id}/bundle", "handleReadSkillBundle", "skill_bundle_handlers.go", "tenantfs.Open"},
 	{"skill bundle upload", "PUT /v1/skills/{id}/bundle", "handleUploadSkillBundle", "skill_bundle_handlers.go", "bundleFiles"},

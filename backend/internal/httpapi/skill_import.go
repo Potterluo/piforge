@@ -21,6 +21,7 @@ import (
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/diskquota"
+	"github.com/piforge/piforge/backend/internal/gitx"
 	"github.com/piforge/piforge/backend/internal/tenantfs"
 	"github.com/piforge/piforge/backend/internal/urlguard"
 )
@@ -99,12 +100,17 @@ func (s *server) handleImportSkills(w http.ResponseWriter, r *http.Request) {
 	}
 	// `file://` is not a URL this process fetches: it is a path it reads. It is
 	// the same class of boundary as a tenant-controlled tree (internal/tenantfs),
-	// so it is confined the same way — to the roots the deployment wrote down.
+	// so it is confined the same way — to the roots the deployment wrote down —
+	// and the clone is handed the *resolved* path, so a junction flipped between
+	// the check and the clone cannot change what git reads.
+	source := url
 	if strings.HasPrefix(url, "file://") {
-		if err := s.confineLocalImport(r.Context(), url); err != nil {
-			s.fail(w, r, err)
+		resolved, rerr := s.importURL(r.Context(), url)
+		if rerr != nil {
+			s.fail(w, r, rerr)
 			return
 		}
+		source = resolved
 	}
 
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 120*time.Second)
@@ -120,7 +126,7 @@ func (s *server) handleImportSkills(w http.ResponseWriter, r *http.Request) {
 	// The clone is confined twice: git is told not to create links (below), and
 	// the repository's own index is refused if it declares one. See
 	// cloneSkillRepo and refuseDeclaredSymlinks.
-	if cerr := cloneSkillRepo(ctx, url, in.Ref, dir, s.skillCloneMaxBytes(), s.outboundPolicy()); cerr != nil {
+	if cerr := cloneSkillRepo(ctx, source, in.Ref, dir, s.skillCloneMaxBytes(), s.outboundPolicy()); cerr != nil {
 		s.fail(w, r, cerr)
 		return
 	}
@@ -483,7 +489,13 @@ func cloneCheckout(ctx context.Context, url, ref, dir string, maxBytes int64, po
 	// history or its other branches. (Before this, --depth 1 already limited the
 	// commit graph but every branch tip and tag was still advertised and, for a
 	// ref named explicitly, fetched.)
-	args := []string{"-c", "core.symlinks=false", "clone", "--depth", "1", "--single-branch", "--no-tags"}
+	//
+	// The deployment's own configuration comes first (internal/gitx harden.go):
+	// the repository this clones is a tenant's, and `.git/config` in it can name
+	// commands git would run — a hook, an fsmonitor, a symlink filter. Command
+	// scope outranks the file.
+	args := append([]string{}, gitx.HardenedArgs()...)
+	args = append(args, "-c", "core.symlinks=false", "clone", "--depth", "1", "--single-branch", "--no-tags")
 	if strings.TrimSpace(ref) != "" {
 		args = append(args, "--branch", strings.TrimSpace(ref))
 	}
@@ -493,6 +505,11 @@ func cloneCheckout(ctx context.Context, url, ref, dir string, maxBytes int64, po
 	args = append(args, url, dir)
 
 	cmd := exec.CommandContext(ctx, "git", args...)
+	// Every GIT_* variable the daemon inherited (or that a hook started it with)
+	// is dropped, and the values git applies are this deployment's: see
+	// internal/gitx harden.go. Without this a `GIT_CONFIG_COUNT`/`GIT_SSH_COMMAND`
+	// in the environment would undo the `-c` list above.
+	cmd.Env = gitx.HardenedEnv()
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if cerr := cmd.Start(); cerr != nil {
@@ -587,28 +604,35 @@ func treeBytes(dir string) (int64, error) {
 	return total, err
 }
 
-// confineLocalImport answers the `file://` half of the import boundary: may git
-// be pointed at this path on this machine?
+// importURL answers the `file://` half of the import boundary and returns the
+// address git should actually clone.
 //
 // Two refusals, both before git runs. No configured roots means the deployment
 // has not said which parts of its disk a tenant may name, so no path is
 // acceptable — the empty list is "none", not "all". With roots, the path must
-// resolve inside one of them: internal/tenantfs.Contains resolves symlinks, so a
-// link placed inside an allowed root is still outside when it points outside.
-func (s *server) confineLocalImport(ctx context.Context, raw string) error {
+// resolve inside one of them.
+//
+// It returns the *resolved* path, not the path the tenant wrote, and that is the
+// point: internal/tenantfs.Resolve follows links and junctions through the
+// platform's own handle, so `imports/link` naming a repository outside the root
+// is refused — and when it is accepted, git is handed `imports/race-real` rather
+// than `imports/race`. A tenant who flips a junction between this check and the
+// clone (adversarial round 5, finding 3: two leaks in six) is flipping a name
+// nothing downstream reads any more.
+func (s *server) importURL(ctx context.Context, raw string) (string, error) {
 	path, err := localPathFromFileURL(raw)
 	if err != nil {
-		return apiErr(contracts.ErrInvalidArgument, "%v", err)
+		return "", apiErr(contracts.ErrInvalidArgument, "%v", err)
 	}
 	roots := s.deps.SkillImportRoots
 	if len(roots) == 0 {
-		return apiErr(contracts.ErrInvalidArgument,
+		return "", apiErr(contracts.ErrInvalidArgument,
 			"这个部署不接受 file:// 形式的 Skill 导入：它会让 Git 读取控制平面的本地路径。"+
 				"请改用 https:// 仓库地址；自托管安装如果确实把 Skill 仓库放在同一块磁盘上，请用 "+
 				"-skill-import-roots / PIFORGE_SKILL_IMPORT_ROOTS 写出允许的目录")
 	}
 	for _, root := range roots {
-		ok, cerr := tenantfs.Contains(root, path)
+		resolved, within, cerr := tenantfs.Resolve(root, path)
 		if cerr != nil {
 			// An unreadable or missing root is a configuration problem, and
 			// falling through to "refuse" would blame the tenant for it. Say
@@ -617,13 +641,41 @@ func (s *server) confineLocalImport(ctx context.Context, raw string) error {
 				"root", root, "error", cerr.Error())
 			continue
 		}
-		if ok {
-			return nil
+		if within {
+			// The resolved path must be there *now*. tenantfs.Resolve answers
+			// lexically for a name that does not exist (a destination path needs
+			// that), and a lexical answer for a repository is exactly the window
+			// a flip wins: the drill's flip script removes the junction and
+			// recreates it, so for a few milliseconds `imports/race` names
+			// nothing — Resolve would allow it, and git would then follow
+			// whatever the name pointed at by the time it opened it. An import
+			// names something that exists, so refusing a missing directory costs
+			// nothing and closes that window.
+			info, serr := os.Stat(resolved)
+			if serr != nil || !info.IsDir() {
+				return "", apiErr(contracts.ErrInvalidArgument,
+					"file:// 指向的目录不存在或不是目录：%s（导入的仓库必须已经存在）", resolved)
+			}
+			return fileURLFor(resolved), nil
 		}
 	}
-	return apiErr(contracts.ErrInvalidArgument,
+	return "", apiErr(contracts.ErrInvalidArgument,
 		"file:// 只允许导入 -skill-import-roots / PIFORGE_SKILL_IMPORT_ROOTS 里写出的目录："+
 			"这个路径不在任何一个允许的根目录下（%d 个根）", len(roots))
+}
+
+// fileURLFor is the file:// spelling of an absolute path, which is what git
+// accepts as a local repository on every platform.
+//
+// The path is escaped rather than concatenated: a directory named `100% done` or
+// `a#b` is a legal directory, and a hand-built URL would have git percent-decode
+// or truncate it into a different path than the one tenantfs verified.
+func fileURLFor(path string) string {
+	slashPath := filepath.ToSlash(path)
+	if !strings.HasPrefix(slashPath, "/") {
+		slashPath = "/" + slashPath
+	}
+	return (&url.URL{Scheme: "file", Path: slashPath}).String()
 }
 
 // localPathFromFileURL turns a file:// URL into the path it names.
@@ -724,7 +776,10 @@ func gitResolveArgs(ctx context.Context, policy *urlguard.Policy, raw string) []
 // (findSkills) is still the fence, and failing here would refuse an import that
 // may be perfectly ordinary.
 func refuseDeclaredSymlinks(ctx context.Context, dir string) error {
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "ls-files", "-s", "-z")
+	args := append([]string{}, gitx.HardenedArgs()...)
+	args = append(args, "-C", dir, "ls-files", "-s", "-z")
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = gitx.HardenedEnv()
 	out, err := cmd.Output()
 	if err != nil {
 		return nil

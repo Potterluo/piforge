@@ -47,6 +47,14 @@ var ErrRefusedRemoteTarget = errors.New("sandbox: refused remote target")
 // A nil policy keeps the local-path half and skips the network half, which is
 // what a caller with no deployment policy gets; cmd/piforged always passes one.
 func RefuseRemoteTarget(ctx context.Context, policy *urlguard.Policy, sandboxesRoot, userID, checkoutRoot, raw string) error {
+	return refuseTarget(ctx, policy, sandboxesRoot, userID, checkoutRoot, raw)
+}
+
+// refuseTarget is the rule itself, shared by the clone path and the remote path.
+// They ask the same question one step apart, so they must give the same answer:
+// the clone target arrives as a project's `repo_url`; the remote arrives as the
+// checkout's own configuration.
+func refuseTarget(ctx context.Context, policy *urlguard.Policy, sandboxesRoot, userID, checkoutRoot, raw string) error {
 	target := strings.TrimSpace(raw)
 	if target == "" {
 		return nil
@@ -116,29 +124,65 @@ func networkRemote(raw string) (host string, port int, kind remoteSource) {
 		return strings.TrimSuffix(strings.ToLower(u.Hostname()), "."), port, remoteNetwork
 	}
 	// The scp-like form git@host:path (and host:path) is ssh with a different
-	// spelling. A Windows drive path also contains a colon, so the form only
-	// counts when a user@ prefix is present.
-	if host, ok := scpHost(raw); ok {
+	// spelling. A Windows drive path also contains a colon, which splitSCPLike
+	// rules out.
+	if host, _, ok := splitSCPLike(raw); ok {
 		return host, 22, remoteNetwork
 	}
 	return "", 0, remoteNotNetwork
 }
 
-// scpHost extracts the host of `[user@]host:path`, and reports false for
-// anything else (a URL, an absolute path, a drive letter).
+// scpHost extracts the host of `[user@]host:path`.
 func scpHost(raw string) (string, bool) {
-	if strings.Contains(raw, "://") {
-		return "", false
+	host, _, ok := splitSCPLike(raw)
+	return host, ok
+}
+
+// splitSCPLike parses git's scp-like `[user@]host:path`, the form that has no
+// scheme for the policy to read.
+//
+// It is the rule git itself applies (git-clone(1), "GIT URLS"): the part before
+// the first colon is the host when it contains no slash. Two shapes are paths,
+// not remotes, and are refused here so the caller falls through to the local
+// half: a URL (it has `://`) and a Windows drive (`C:/repo`, one letter before
+// the colon). The user is optional in git — `root@127.0.0.1:x/y` and
+// `127.0.0.1:x/y` both dial that host — which is exactly the spelling
+// adversarial round 5 (finding 9) measured the guard missing.
+func splitSCPLike(raw string) (host, path string, ok bool) {
+	value := strings.TrimSpace(raw)
+	if value == "" || strings.Contains(value, "://") {
+		return "", "", false
 	}
-	at := strings.LastIndex(raw, "@")
-	if at < 0 {
-		return "", false
+	colon := strings.IndexByte(value, ':')
+	if colon <= 0 {
+		return "", "", false
 	}
-	host, _, ok := strings.Cut(raw[at+1:], ":")
-	if !ok || host == "" || strings.ContainsAny(host, `/\`) {
-		return "", false
+	before := value[:colon]
+	if strings.ContainsAny(before, `/\`) {
+		return "", "", false
 	}
-	return strings.TrimSuffix(strings.ToLower(host), "."), true
+	if len(before) == 1 && isASCIILetter(before[0]) {
+		return "", "", false // a Windows drive letter, not a host
+	}
+	hostPart := before
+	if at := strings.LastIndex(before, "@"); at >= 0 {
+		if at == 0 || at == len(before)-1 {
+			return "", "", false
+		}
+		hostPart = before[at+1:]
+	}
+	if hostPart == "" || strings.ContainsAny(hostPart, `@\`) {
+		return "", "", false
+	}
+	rest := value[colon+1:]
+	if strings.TrimSpace(rest) == "" {
+		return "", "", false
+	}
+	return strings.TrimSuffix(strings.ToLower(hostPart), "."), rest, true
+}
+
+func isASCIILetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // refusedTransport names a transport this deployment does not dial, or "" for

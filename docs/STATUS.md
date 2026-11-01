@@ -53,6 +53,7 @@
 
 > 说明：PRD 中没有「部署」类 FR（§12 是里程碑，`deploy/` 是 Dockerfile.app / Dockerfile.offline / Dockerfile.runner / k8s.yaml / entrypoint.sh，属交付物而非需求行），因此下面没有部署行。`sandbox-runner`（把 Docker CLI 从控制面移出去）同样是交付物而非 FR：它没有改变任何一条 FR 的状态，证据见 `docs/SANDBOX-DEPLOY.md` §1.4 与 `scripts/verify-runner-sandbox.ps1`。
 >
+- 本批（第五轮对抗验收的 git 与路径五项）**不改变任何 FR 状态**：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。它关闭的是 `docs/DATA-FLOW-AUDIT.md` 新增的 G9–G13：git 作为**命令解释器**（`core.fsmonitor` 经 `GET /git/status` 执行、`core.sshCommand` 经 `POST /git/push` 执行）与作为**第二个 HTTP 客户端**（`git clone` 跟随 302 取控制面自己的回环），以及 Windows 的 junction 与 `.git.`、`user@host:path`、`pushInsteadOf`/`remote.*.proxy` 未被读到。同一批还修了验收工具本身：`up-isolated.ps1` 只在镜像缺失时构建，于是审计量到的是改动前的镜像；探针在干净栈上只跑 15 条，文档却写 17 条。fail-first 与实测见文末「本批：第五轮对抗验收的 git 与路径五项（2026-11-01）」。
 > 后续交付（同样不改 FR 状态）：每沙箱一个 `SANDBOX_API_KEY`（`crypto/rand` 生成、创建时经内部 API 上报一次、AES-GCM 加密存 `sandboxes.api_key_cipher`；`-sandbox-api-key` 降为调试用固定覆盖）。它修的是「runner 让端点跨租户可达之后，一个部署级 key 等于所有沙箱的 key」这个问题，证据见 `docs/SANDBOX-DEPLOY.md` §1.4、`docs/SANDBOX.md`「每个沙箱一个 key」，以及 `TestDockerProviderPerSandboxAPIKey`（真实容器：A 的 key 打 B 是 401）与 `scripts/verify-runner-sandbox.ps1` 的 cross-tenant 检查。
 
 | FR | 状态 | 证据 |

@@ -1434,6 +1434,20 @@ func run() error {
 	var remoteCheck func(ctx context.Context, userID, root string) error
 	if localSandboxRoot != "" {
 		remoteCheck = func(ctx context.Context, userID, root string) error {
+			// What would git execute? A repository's own config can name a
+			// command (core.sshCommand ran one through POST /git/push,
+			// core.fsmonitor through GET /git/status — adversarial round 5).
+			// gitx now overrides every one of them with command-scope config;
+			// this refusal exists so the tenant is told which key did it
+			// instead of watching their push fail for an unexplained reason.
+			issues, ierr := git.RemoteConfigIssues(ctx, root)
+			if ierr != nil {
+				return ierr
+			}
+			if len(issues) > 0 {
+				return fmt.Errorf("%w: this checkout's git configuration names a program git would run: %s — remove the key and retry",
+					sandbox.ErrRefusedRemoteTarget, strings.Join(issues, ", "))
+			}
 			targets, terr := git.RemoteTargets(ctx, root)
 			if terr != nil {
 				return terr
@@ -1448,7 +1462,8 @@ func run() error {
 		logger.Info("a checkout's remote is checked before git dials it",
 			"placement", "host",
 			"covers", "push, pull, fetch and the push a pull request makes",
-			"rule", "urlguard (http(s), ssh, git://; public addresses or an operator allow entry) and no path inside another tenant's sandbox")
+			"rule", "urlguard (http(s), ssh, git://, the scp-like [user@]host:path form; public addresses or an operator allow entry) and no path inside another tenant's sandbox",
+			"exec", "repository configuration keys that name a program are refused, and every script-executing key is overridden by command-scope config")
 	}
 	handler := httpapi.NewServer(httpapi.Deps{
 		Store:           st,

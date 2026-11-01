@@ -2,8 +2,11 @@ package httpapi
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -122,7 +125,14 @@ func TestSkillBundleRefusesGitStoragePaths(t *testing.T) {
 	}
 	env.mustJSON(created, &body)
 
-	for _, rel := range []string{".git/config", "nested/.git/HEAD", ".GIT/index"} {
+	// The spellings Windows normalises onto `.git`: a trailing dot, a trailing
+	// space, and two dots. Adversarial round 5 uploaded `.git./config`, got 200,
+	// and found `.git\config` on the volume — Win32 strips the dot after the
+	// check has run.
+	for _, rel := range []string{
+		".git/config", "nested/.git/HEAD", ".GIT/index",
+		".git./config", ".git /config", ".git../HEAD", "nested/.git./config",
+	} {
 		rec := env.doAuthed(http.MethodPut, "/v1/skills/"+body.Skill.ID+"/bundle", map[string]any{
 			"files": []map[string]string{
 				{"path": "SKILL.md", "content": "ok\n"},
@@ -188,3 +198,65 @@ func TestLocalPathFromFileURL(t *testing.T) {
 		}
 	}
 }
+
+// The resolved path is what git is handed, and that is what closes the
+// check-then-use race: `imports/race` is verified once, and the clone then names
+// `imports/race-real`, which no flip can change. This asserts the property
+// directly, because a race is not something a test can schedule.
+func TestImportURLHandsGitTheResolvedPath(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "allowed")
+	real := filepath.Join(root, "race-real")
+	outside := filepath.Join(base, "outside")
+	for _, dir := range []string{real, outside} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	link := filepath.Join(root, "race")
+	if err := makeTestLink(link, real); err != nil {
+		t.Skipf("this machine cannot create a %s link: %v", testLinkKind(), err)
+	}
+
+	srv := &server{
+		deps: Deps{SkillImportRoots: []string{root}},
+		log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	got, err := srv.importURL(context.Background(), repoURL(link))
+	if err != nil {
+		t.Fatalf("importURL: %v", err)
+	}
+	if !strings.Contains(got, "race-real") || strings.Contains(got, "race/") {
+		t.Fatalf("git would be handed %q, want the resolved directory", got)
+	}
+
+	// And a link that leaves the root is refused, resolved or not.
+	outsideLink := filepath.Join(root, "escape")
+	if err := makeTestLink(outsideLink, outside); err == nil {
+		if _, err := srv.importURL(context.Background(), repoURL(outsideLink)); err == nil {
+			t.Fatal("a link to a directory outside the root was accepted")
+		}
+	}
+}
+
+func makeTestLink(link, target string) error {
+	if runtime.GOOS == "windows" {
+		out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput()
+		if err != nil {
+			return &testLinkError{msg: string(out)}
+		}
+		return nil
+	}
+	return os.Symlink(target, link)
+}
+
+func testLinkKind() string {
+	if runtime.GOOS == "windows" {
+		return "junction"
+	}
+	return "symbolic"
+}
+
+type testLinkError struct{ msg string }
+
+func (e *testLinkError) Error() string { return e.msg }

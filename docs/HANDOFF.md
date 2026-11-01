@@ -56,10 +56,14 @@ then the sandbox image **from** the control plane so `pi` and `/opt/piforge/pifo
 inside it at the same version — runs `backend/cmd/preflight` (Docker Engine ≥ 25, all
 three images, and that the sandbox image really contains `/opt/piforge/piforged` and
 `pi`), then starts the stack on 7723 with a fresh volume and waits for `/healthz`. It
-prints the URL and the seeded accounts at the end. `-Check` runs only the preflight;
-`-Down` removes the stack, its sandboxes and their volumes; `-Rebuild` rebuilds all three
-images after a source change; `-EgressFile` points at another egress policy than
-`deploy/tenant-egress.json` (the probe below uses that).
+prints the URL and the seeded accounts at the end, with each image's id and build time.
+`-Check` runs only the preflight; `-Down` removes the stack, its sandboxes and their
+volumes; `-Rebuild` forces all three images. Since 2026-11-01 it does not wait to be told:
+it compares each image's creation time with the newest tracked or untracked source file
+under `backend/`, `web/` and `deploy/`, rebuilds what is behind, and rebuilds the sandbox
+image when the control plane image it is built from changed. (Before that, a source change
+kept the previous image and an audit measured the old binary.) `-EgressFile` points at
+another egress policy than `deploy/tenant-egress.json` (the probe below uses that).
 
 The stack's sandboxes have **no route to the public internet** by default: each tenant's
 bridge is created `--internal` from the policy in `deploy/tenant-egress.json`, while the
@@ -1014,3 +1018,41 @@ them; `docs/DATA-FLOW-AUDIT.md` carries the verdicts, the test names and the rem
 (`PIFORGE_BROWSER_LOCALHOST_PORTS=3000,3100`), and if you push to an internal git server from a host
 workspace, name it in the URL allow-list with its port. Both refusals name the rule and answer 400, not
 500.
+
+## The sixth adversarial round: git is an interpreter and a second HTTP client (2026-11-01)
+
+Adversarial round 5 (`e2e/.artifacts/adversarial5/REPORT-adversarial5-git-and-paths.md`) attacked the
+G1–G8 fixes and showed that all of them described *argv*. Git is also a command interpreter and a second
+HTTP client, and it runs on repositories the tenant's agent can write. Five gaps (`G9`–`G13` in
+`docs/DATA-FLOW-AUDIT.md`), each proved fail-first on a host-placement instance (`-sandbox local`, port
+8091) and then re-proved as a refusal:
+
+| # | attack (before) | after |
+|---|---|---|
+| G9 | `core.fsmonitor = sh -c 'printf FSMONAPI > marker; exit 1'` + `GET /git/status` → **200, marker written**; `core.sshCommand = printf SSHEXEC > marker; false` + `POST /git/push` → **500, marker written** | `marker=absent` from both routes. Every control-plane git invocation carries `-c core.fsmonitor=false`, `core.hooksPath=<empty 0700 dir>`, `core.sshCommand=<absolute ssh resolved at start-up>`, `core.pager=`, `core.askPass=`, `core.gitProxy=`, `credential.helper=`, `commit.gpgSign=false`, `tag.gpgSign=false`, `protocol.ext.allow=never`, `protocol.file.allow=user`, `http.followRedirects=false`; every inherited `GIT_*` (including `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`) is dropped before git starts (`internal/gitx/harden.go`). Command scope outranks `.git/config` |
+| G10 | `POST /skills/import {"url":"https://postman-echo.com/redirect-to?url=http://127.0.0.1:7700/healthz"}` → the importer's git **fetched the control plane's own loopback** (`fatal: repository … not found`), and the same 302 to a closed port said `Failed to connect to 127.0.0.1 port 7999` | 400 with `The requested URL returned error: 302` — a redirect is a refusal, not a fetch. No `/healthz/info/refs` line in the control plane's log |
+| G11 | a **junction** inside an import root returned the outside repository (`leak=LEAKED`); `.git./config` uploaded as a bundle → **200** and `.git\config` on the volume; a junction flipped during imports leaked **14/87** | junction → 400 (the platform's `FILE_ATTRIBUTE_REPARSE_POINT` + `GetFinalPathNameByHandle`, because `EvalSymlinks` and `os.Lstat` do not see a junction); `.git.`/`.git `/`.git..` → 400; the clone is handed the *resolved* directory and a name that does not exist at check time is refused, so the flip ended at **0/116** |
+| G12 | `repo_url: root@127.0.0.1:acme/repo.git` → 201, `ssh: connect to host 127.0.0.1 port 22` | 400 naming `urlguard: host "127.0.0.1" is refused: loopback`, 0 ssh dials. Any `[user@]host:path` is parsed as ssh and judged on port 22 |
+| G13 | `url.git://127.0.0.1:9912/.pushInsteadOf https://93.184.216.34/` → the push **dialled loopback** (listener accept); `remote.origin.proxy = http://127.0.0.1:9912` → the fetch **CONNECTed to it**; `origin = 127.0.0.1:9912/x.git` (no `user@`) → ssh to port 22 | 400 on all three, 0 listener accepts. `RemoteTargets` reads `pushInsteadOf` and the scp form without a user; `RemoteConfigIssues` refuses repository config keys that name a program (`core.sshCommand`, `core.fsmonitor`, `remote.*.proxy|uploadpack|receivepack`, `credential.helper`, `filter.*`, `diff.*.textconv`, …) in the local and worktree scopes only |
+
+**Operator-visible consequences, stated.** (1) A tenant repository that sets `core.sshCommand`,
+`core.fsmonitor`, an `include.path`, a credential helper or a `remote.*.proxy` is **refused** before a
+push/pull/fetch, with a 400 naming the key — remove the key. (2) An ssh remote still pushes: the
+deployment's own `ssh`, resolved to an absolute path at start-up, with the deployment's keys
+(`-url-allow-file` is still how a private/internal *host* is allowed; there is no flag for a key).
+(3) `git` no longer follows an HTTP redirect for a clone or a fetch; a mirror that answers a 302 must be
+named by its final URL. (4) In host placement `ssh` must be on `PATH` at start-up; if it is not, an ssh
+remote fails closed with git's "cannot run" message instead of inheriting the repository's command.
+
+**Build/acceptance change.** `scripts/up-isolated.ps1` used to build only what was *missing*, so a
+source change kept the old image and an audit probe measured the previous binary. It now compares each
+image's creation time with the newest tracked or untracked source file under `backend/`, `web/` and
+`deploy/`, rebuilds what is behind (and the sandbox image when the control plane it is built from
+changed), and prints every image's id and build time. `-Rebuild` still forces all three.
+`scripts/probe-data-flow.ps1` now creates its own fixtures, so it runs **18 of 18** checks on a fresh
+stack (it used to run 15 of the 17 this document claimed), prints the count, and exits 2 when an edge
+could not be measured.
+
+**Gates for this round** (`go build`, `go vet`, `go test ./... -count=1`, `pnpm --dir web test -- --run`,
+`pnpm --dir web exec next build`, full e2e 182, `deliver-check.ps1 -Image` with 125 checks) — the numbers
+are in `docs/STATUS.md`.

@@ -15,6 +15,13 @@
 // What this package deliberately does not do: it does not detect hard links
 // (git and the zip reader cannot create them, so a tree staged by either has
 // none), and it does not police writes — only reads of somebody else's tree.
+//
+// Windows: a *junction* is not a symbolic link. Go's Lstat reports one as a
+// regular file and EvalSymlinks passes it through unchanged, while opening it
+// reaches the target — which is how adversarial round 5 read a repository
+// outside an import root. isReparsePoint and realPathOf (realpath_windows.go)
+// are the platform's own answer: FILE_ATTRIBUTE_REPARSE_POINT on the name, and
+// GetFinalPathNameByHandle on an open handle.
 package tenantfs
 
 import (
@@ -104,7 +111,17 @@ func Open(root string) (*Tree, error) {
 		return nil, fmt.Errorf("tenantfs: abs %q: %w", root, err)
 	}
 	abs = filepath.Clean(abs)
-	real, err := filepath.EvalSymlinks(abs)
+	// A root that is not there is a configuration error, not an empty tree:
+	// realPathOf answers lexically for a path that does not exist, so the
+	// existence check is the caller's to make and this is it.
+	info, serr := os.Stat(abs)
+	if serr != nil {
+		return nil, fmt.Errorf("tenantfs: root %q is not there: %w", root, serr)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("tenantfs: root %q is not a directory", root)
+	}
+	real, err := realPathOf(abs)
 	if err != nil {
 		return nil, fmt.Errorf("tenantfs: resolve root %q: %w", root, err)
 	}
@@ -230,7 +247,14 @@ func (t *Tree) walkDir(dir, relDir string, fn func(rel string, info os.FileInfo)
 		if ierr != nil {
 			return ierr
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
+		// A junction is a directory to the rest of the world and a regular file
+		// to Lstat; isReparsePoint is the platform's answer, and either way the
+		// walk refuses rather than descends.
+		reparse, rerr := isReparsePoint(full)
+		if rerr != nil {
+			return rerr
+		}
+		if reparse || info.Mode()&os.ModeSymlink != 0 {
 			return t.symlinkRefusal(rel, "a link inside a tenant-controlled tree")
 		}
 		if info.IsDir() {
@@ -249,7 +273,8 @@ func (t *Tree) walkDir(dir, relDir string, fn func(rel string, info os.FileInfo)
 	return nil
 }
 
-// refuseLinkComponents rejects a path whose parent directories include a link.
+// refuseLinkComponents rejects a path whose parent directories include a link,
+// a junction or any other reparse point.
 func (t *Tree) refuseLinkComponents(clean string) error {
 	cur := t.root
 	parts := strings.Split(clean, string(filepath.Separator))
@@ -259,7 +284,13 @@ func (t *Tree) refuseLinkComponents(clean string) error {
 		if err != nil {
 			return err
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
+		// reparse is the platform's answer: on Windows a junction is not a
+		// symlink to Lstat and would otherwise pass as a regular file.
+		reparse, rerr := isReparsePoint(cur)
+		if rerr != nil {
+			return rerr
+		}
+		if reparse || info.Mode()&os.ModeSymlink != 0 {
 			detail := "a link on the path to the file"
 			if i == len(parts)-1 {
 				detail = "the file itself is a link"
@@ -275,9 +306,10 @@ func (t *Tree) refuseLinkComponents(clean string) error {
 }
 
 // refuseOutside is the resolved-path half of the rule: whatever the filesystem
-// says this path really is, it has to live under the resolved root.
+// says this path really is, it has to live under the resolved root. It uses the
+// handle-based resolver, so a junction is followed only to be refused.
 func (t *Tree) refuseOutside(clean, full string) error {
-	real, err := filepath.EvalSymlinks(full)
+	real, err := realPathOf(full)
 	if err != nil {
 		return err
 	}
@@ -321,65 +353,62 @@ func (t *Tree) cleanRel(rel string) (string, error) {
 // It is the "is this path one the caller already owns" half of the rule, for a
 // caller that has a path in hand rather than a tree to read: a tenant-supplied
 // filesystem path may be handed to a tool (git, a reader) only when it lives
-// under a root the deployment wrote down. Like Tree, it resolves symlinks — a
-// link inside the root naming something outside it is outside — and it accepts a
-// path that does not exist yet by resolving its nearest existing ancestor, which
-// is what a destination path needs.
+// under a root the deployment wrote down. Like Tree, it resolves links *and
+// junctions* — a junction inside the root naming something outside it is
+// outside — and it accepts a path that does not exist yet by resolving its
+// nearest existing ancestor, which is what a destination path needs.
 //
 // root must exist: a root that is not there is a configuration error, not an
 // empty answer.
 func Contains(root, p string) (bool, error) {
-	if strings.TrimSpace(root) == "" {
-		return false, fmt.Errorf("tenantfs: empty root")
-	}
-	if strings.ContainsRune(p, 0) {
-		return false, &Refusal{Path: p, Kind: KindInvalid, Detail: "it contains a NUL byte"}
-	}
-	rootAbs, err := filepath.Abs(root)
-	if err != nil {
-		return false, fmt.Errorf("tenantfs: abs %q: %w", root, err)
-	}
-	rootReal, err := filepath.EvalSymlinks(filepath.Clean(rootAbs))
-	if err != nil {
-		return false, fmt.Errorf("tenantfs: resolve root %q: %w", root, err)
-	}
-	pAbs, err := filepath.Abs(p)
-	if err != nil {
-		return false, fmt.Errorf("tenantfs: abs %q: %w", p, err)
-	}
-	real, err := evalOrExisting(pAbs)
-	if err != nil {
-		return false, fmt.Errorf("tenantfs: resolve %q: %w", p, err)
-	}
-	return inside(rootReal, real), nil
+	_, within, err := Resolve(root, p)
+	return within, err
 }
 
-// evalOrExisting resolves symlinks for p, falling back to its nearest existing
-// ancestor when p itself does not exist yet. The non-existent tail is appended
-// lexically (it is already clean), so it cannot climb out on its own.
-func evalOrExisting(p string) (string, error) {
-	cur := filepath.Clean(p)
-	for {
-		real, err := filepath.EvalSymlinks(cur)
-		if err == nil {
-			if cur == filepath.Clean(p) {
-				return real, nil
-			}
-			tail, terr := filepath.Rel(cur, p)
-			if terr != nil {
-				return real, nil
-			}
-			return filepath.Join(real, tail), nil
-		}
-		if !os.IsNotExist(err) {
-			return "", err
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return p, nil
-		}
-		cur = parent
+// Resolve answers both halves at once: the path the filesystem really resolved p
+// to, and whether that is under root.
+//
+// Callers must *use* the returned path rather than p. That is what closes the
+// check-then-use race adversarial round 5 won two times in six (finding 3): a
+// check on `imports/race` followed by `git clone imports/race` re-resolves the
+// name, and the attacker flips the junction in between. A check that returns the
+// resolved path lets the clone name `imports/race-real` — the thing that was
+// verified — and flipping the junction afterwards changes nothing.
+//
+// What remains, stated rather than hidden: a component *inside* the resolved
+// path can still be re-pointed between the resolution and the open (the resolved
+// path is only as stable as the tree it names), and on POSIX a bind mount is not
+// a reparse point at all. Both are the deployment's tree, not the tenant's.
+func Resolve(root, p string) (resolved string, within bool, err error) {
+	if strings.TrimSpace(root) == "" {
+		return "", false, fmt.Errorf("tenantfs: empty root")
 	}
+	if strings.ContainsRune(p, 0) {
+		return "", false, &Refusal{Path: p, Kind: KindInvalid, Detail: "it contains a NUL byte"}
+	}
+	rootAbs, aerr := filepath.Abs(root)
+	if aerr != nil {
+		return "", false, fmt.Errorf("tenantfs: abs %q: %w", root, aerr)
+	}
+	// A root that is not there is a configuration error, not "false" (see Open).
+	if info, serr := os.Stat(rootAbs); serr != nil {
+		return "", false, fmt.Errorf("tenantfs: root %q is not there: %w", root, serr)
+	} else if !info.IsDir() {
+		return "", false, fmt.Errorf("tenantfs: root %q is not a directory", root)
+	}
+	rootReal, rerr := realPathOf(filepath.Clean(rootAbs))
+	if rerr != nil {
+		return "", false, fmt.Errorf("tenantfs: resolve root %q: %w", root, rerr)
+	}
+	pAbs, perr := filepath.Abs(p)
+	if perr != nil {
+		return "", false, fmt.Errorf("tenantfs: abs %q: %w", p, perr)
+	}
+	real, eerr := realPathOf(pAbs)
+	if eerr != nil {
+		return "", false, fmt.Errorf("tenantfs: resolve %q: %w", p, eerr)
+	}
+	return real, inside(rootReal, real), nil
 }
 
 // inside reports whether p is root or below it, comparing resolved paths.

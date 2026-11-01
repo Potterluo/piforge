@@ -97,8 +97,20 @@ func bundleFiles(files []skillFile) (map[string]string, error) {
 		// bundle from being turned into a repository on the control plane's disk
 		// — which is what a `file://` import would need to read it back as one —
 		// and keeps the bundle reader from serving repository metadata.
+		//
+		// The comparison is on the *Windows-normalised* segment: Win32 strips
+		// trailing dots and spaces from every path component, so `.git.`,
+		// `.git ` and `.git..` all land on disk as `.git`. Adversarial round 5
+		// (finding 5) uploaded `.git./config`, got 200, and found `.git\config`
+		// on the volume. A segment that Windows would rewrite is refused rather
+		// than silently written somewhere other than what was checked.
 		for _, segment := range strings.Split(rel, "/") {
-			if strings.EqualFold(segment, ".git") {
+			trimmed := strings.TrimRight(segment, ". ")
+			if trimmed != segment {
+				return nil, fmt.Errorf("path %q is not allowed: the segment %q ends in a dot or a space, which Windows strips (it would be written as %q)",
+					rel, segment, trimmed)
+			}
+			if strings.EqualFold(trimmed, ".git") {
 				return nil, fmt.Errorf("path %q is not allowed: a skill bundle may not contain git storage", rel)
 			}
 		}

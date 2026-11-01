@@ -2274,6 +2274,7 @@ POST /v1/providers/<id>/test                          -> 200 {"ok":true}
 8. **只有显式 allow-list 能放宽。** 默认空；一个 operator 写的文件在启动时解析（未知字段、坏 CIDR、
    缺 ports 都会让启动失败），条目按 **host 或 CIDR + 端口** 精确匹配，只能把"可拨"扩到那一条，
    改不了别的。这是部署规则，不是租户设置。
+9. **git 是第二个 HTTP 客户端。** 每一次 clone/fetch/push 都带 `-c http.followRedirects=false` 且环境里有 `GIT_HTTP_FOLLOW_REDIRECTS=0`：重定向是拒绝，不是抓取。理由是策略只看见第一个 URL（第五轮对抗验收用 `https://postman-echo.com/redirect-to?url=http://127.0.0.1:7700/healthz` 让控制面的 git 取了自己的回环）。逐跳重验是可选做法，这一轮选择拒绝：跟随一个租户能控制的 302，等于把已经验过的判断作废。规则同样适用于 `repo_url` 的 clone（host 放置）。
 
 #### 1.9.3 配置
 
@@ -2453,6 +2454,40 @@ gitx      TestRemoteTargetsReadsEveryPushRewrite    （url / pushurl / insteadOf
 ```
 
 
+#### 1.11 第三轮数据流审计：G9–G13（2026-11-01）
+
+第五轮对抗验收（`e2e/.artifacts/adversarial5/REPORT-adversarial5-git-and-paths.md`）打的是 §1.10 的修复，
+结论是那些守卫描述的都是 **argv**：git 还是一个**命令解释器**（`.git/config` 租户可写，`core.fsmonitor`
+经一次普通的 `GET /git/status` 执行了命令）和一个**第二个 HTTP 客户端**（`git clone` 跟随公网 URL 的 302
+去取控制面自己的回环）。五条 GAP 的判定与测试见 `docs/DATA-FLOW-AUDIT.md` §11（G9–G13）。运维要看的只有这些：
+
+| 现在会被拒绝的仓库/配置 | 拒绝长什么样 | 怎么办 |
+|---|---|---|
+| `.git/config` 里 `core.sshCommand`、`core.fsmonitor`、`core.hooksPath`、`credential.helper`、`remote.*.proxy`、`remote.*.uploadpack/receivepack`、`filter.*`、`diff.*.textconv`、`merge.*.driver`、`include.path` | push/pull/fetch 之前 400，消息点名那个 key | 删掉那个 key。这些 key 让 git 执行一个程序，而执行什么不该由仓库决定 |
+| `url.<base>.pushInsteadOf` / `remote.*.pushurl` / `[user@]host:path` 指向回环、私网、link-local | 400，`urlguard: host "127.0.0.1" is refused: loopback` | 合法内网远端写进 `-url-allow-file`（host/CIDR + 端口）；ssh 按 **22** 判，不是 443 |
+| 一个会 302 的 clone/fetch URL | 400，git 原文 `The requested URL returned error: 302` | 直接用最终地址（`http.followRedirects=false` 是故意的：跟随就要逐跳重验，而拒绝更便宜也更安全） |
+| 导入根里的 **junction**、`.git.`/`.git `/`.git..` 这样的 bundle 路径 | 400，点名路径 | 这不是"配置错了"，是有人试过。junction 在 Windows 上不是符号链接：`EvalSymlinks` 看不见它，`Lstat` 把它当普通文件，所以 `tenantfs` 改用 `FILE_ATTRIBUTE_REPARSE_POINT` 与 `GetFinalPathNameByHandle` |
+
+**机制**（`backend/internal/gitx/harden.go`）：每一次控制面发起的 git 都带
+`-c core.fsmonitor=false -c core.hooksPath=<空目录，0700，随机名> -c core.sshCommand=<启动时解析出的绝对
+ssh> -c core.pager= -c core.askPass= -c core.gitProxy= -c credential.helper= -c commit.gpgSign=false
+-c tag.gpgSign=false -c protocol.ext.allow=never -c protocol.file.allow=user -c http.followRedirects=false`，
+并且环境里每个 `GIT_*`（包括 `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`、`GIT_SSH_COMMAND`）在 git 启动前被删掉。
+**命令行 scope 高于任何配置文件**，所以仓库里的同名 key 不再生效。沙箱里跑的 git 用另一份：`core.sshCommand=ssh`
+（容器自己的 ssh 与 PATH），因为把宿主的绝对路径写进容器会破坏合法的 ssh clone；`core.hooksPath` 在那里是一个
+不存在的路径，等于没有 hook。
+
+**还成立的事**：ssh 远端照样能 push/pull——用的是**部署自己的** ssh 与密钥，主机与端口仍过策略；`repo_url`
+的 `[user@]host:path` 现在按 ssh（22 端口）判；`file://` 导入仍要求落在 `-skill-import-roots` 里，且用的是
+**解析后**的路径（把 junction 在检查与 clone 之间翻掉不再有用：演练里 `hits=14/87` → `0/116`）。
+
+**尚未关闭**（写在 `docs/DATA-FLOW-AUDIT.md` §14）：POSIX 的 bind mount 不是 reparse point；解析后的路径
+自身分量在"解析"与"打开"之间仍可被换掉（能写这台机器磁盘的人）；容器放置里 git 在沙箱内跑，边界是沙箱出口策略。
+
+**验收工具本身也修了两处**（重要，因为上一轮就是被它们骗了）：`scripts/up-isolated.ps1` 不再"只建缺失的镜像"，
+而是把每个镜像的创建时间与 `backend/`、`web/`、`deploy/` 下最新的（已跟踪或未忽略的）源文件比，落后就重建
+（控制面重建时沙箱镜像跟着重建），并打印每个镜像的 id 与构建时间；`scripts/probe-data-flow.ps1` 自己建夹具，
+在干净栈上跑满 **18/18** 条边（旧版会静默跳过 4 条、打印 15），打印计数，测不到就 exit 2。
 ## 2. Kubernetes：四种做法，各自什么时候是对的
 
 ### 2.1 方案（i）：一个 Pod 一个沙箱，控制面用 client-go 管

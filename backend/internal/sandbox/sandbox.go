@@ -66,7 +66,6 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/gitx"
-	"github.com/piforge/piforge/backend/internal/tenantfs"
 	"github.com/piforge/piforge/backend/internal/urlguard"
 )
 
@@ -547,62 +546,28 @@ var ErrRefusedCloneTarget = errors.New("sandbox: refused clone target")
 //
 // Two shapes, two rules:
 //
-//   - A URL (https, or the scp-like git over ssh form) is fetched from this
-//     machine's network position, so it goes through the same outbound policy as
-//     every other tenant fetch site.
+//   - A URL (https, ssh, git://, or the scp-like `[user@]host:path`) is fetched
+//     from this machine's network position, so it goes through the same outbound
+//     policy as every other tenant fetch site — with the *transport's* port, not
+//     a guess: an ssh clone dials 22, and checking 443 instead would have let
+//     `root@127.0.0.1:acme/repo.git` through (adversarial round 5, finding 6).
 //   - A local path is read, not fetched: it may be any repository this host has
 //     (a development fixture), except one inside another account's sandbox. That
 //     is the copy that would put somebody else's checkout behind this account's
 //     files API.
+//
+// It is refuseTarget, the same function the push/pull/fetch guard uses, so the
+// two boundaries cannot drift apart. The only difference is the sentence the
+// caller reads.
 func (l *Local) refuseCloneTarget(ctx context.Context, userID, repoURL string) error {
 	target := strings.TrimSpace(repoURL)
 	if target == "" {
 		return nil
 	}
-	if fetch := cloneFetchURL(target); fetch != "" {
-		if l.cfg.URLPolicy == nil {
-			return nil
-		}
-		if _, err := l.cfg.URLPolicy.Check(ctx, fetch); err != nil {
-			return fmt.Errorf("%w: %v", ErrRefusedCloneTarget, err)
-		}
-		return nil
+	if err := refuseTarget(ctx, l.cfg.URLPolicy, l.cfg.Root, userID, "", target); err != nil {
+		return fmt.Errorf("%w: %v", ErrRefusedCloneTarget, err)
 	}
-	if !filepath.IsAbs(target) {
-		return nil
-	}
-	withinSandboxes, err := tenantfs.Contains(l.cfg.Root, target)
-	if err != nil || !withinSandboxes {
-		// Not under the sandboxes root: a fixture, a bare repository in a temp
-		// directory, the local-path case the product supports. Nothing to
-		// compare against.
-		return nil
-	}
-	own, ownErr := tenantfs.Contains(filepath.Join(l.cfg.Root, userID), target)
-	if ownErr == nil && own {
-		return nil
-	}
-	return fmt.Errorf("%w: %q is inside another tenant's sandbox", ErrRefusedCloneTarget, target)
-}
-
-// cloneFetchURL is the address the policy should judge, or "" for a local path.
-// The scp form (git@host:path) is the same host with a different transport, so
-// it is judged as an https URL of that host — the same mapping the skill
-// importer uses.
-func cloneFetchURL(raw string) string {
-	lower := strings.ToLower(raw)
-	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
-		return raw
-	}
-	if !strings.HasPrefix(raw, "git@") {
-		return ""
-	}
-	rest := strings.TrimPrefix(raw, "git@")
-	host, path, ok := strings.Cut(rest, ":")
-	if !ok || strings.TrimSpace(host) == "" {
-		return ""
-	}
-	return "https://" + host + "/" + strings.TrimPrefix(path, "/")
+	return nil
 }
 
 // touch updates LastActiveAt and persists it.

@@ -112,3 +112,47 @@ func TestLocalRefusesAnotherTenantsCheckout(t *testing.T) {
 		t.Fatalf("a repository outside the sandbox root was refused: %v", err)
 	}
 }
+
+// Adversarial round 5, finding 6: the guard mapped only the literal `git@`
+// prefix, so any other user — `root@127.0.0.1:acme/repo.git` — was treated as a
+// local path and the control plane dialled 127.0.0.1:22. Git's scp form has an
+// optional user, and the host is the host either way.
+func TestLocalRefusesEveryScpSpellingOfARefusedHost(t *testing.T) {
+	provider := newLocal(t)
+	provider.cfg.URLPolicy = urlguard.Default()
+	ctx := context.Background()
+
+	refused := []string{
+		"root@127.0.0.1:acme/repo.git",
+		"git@127.0.0.1:acme/repo.git",
+		"deploy@169.254.169.254:acme/repo.git",
+		"root@10.0.0.5:acme/repo.git",
+		// A Windows drive letter is a path, not a host: this one must NOT be
+		// judged as the host "C" (it is refused later, as a path, or allowed as
+		// a fixture — what matters is that it is not a network dial).
+	}
+	for _, target := range refused {
+		if err := provider.refuseCloneTarget(ctx, "usr_a", target); err == nil {
+			t.Fatalf("%q was accepted as a clone target", target)
+		} else if !strings.Contains(err.Error(), "refus") {
+			t.Fatalf("%q failed for another reason: %v", target, err)
+		}
+	}
+
+	// The ssh:// spelling is refused by the URL shape check before it gets here,
+	// but the guard must agree if it ever does: same host, same answer.
+	if err := provider.refuseCloneTarget(ctx, "usr_a", "ssh://root@127.0.0.1/acme/repo.git"); err == nil {
+		t.Fatal("an ssh:// loopback clone target was accepted")
+	}
+
+	// A public host is allowed by design, in every spelling.
+	for _, target := range []string{
+		"deploy@93.184.216.34:acme/repo.git",
+		"93.184.216.34:acme/repo.git",
+		"https://93.184.216.34/acme/repo.git",
+	} {
+		if err := provider.refuseCloneTarget(ctx, "usr_a", target); err != nil {
+			t.Fatalf("%q (a public host) was refused: %v", target, err)
+		}
+	}
+}

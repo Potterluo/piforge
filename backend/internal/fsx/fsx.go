@@ -11,9 +11,10 @@
 // Reads follow the size classification of PRD FR-7.8: whole body up to 2 MiB,
 // head+tail up to 20 MiB, metadata only above that.
 //
-// The package depends only on the standard library and internal/contracts. Git
-// status letters and git operations are injected through Config (GitState /
-// Git), so the server can wire in internal/gitx without fsx importing it.
+// The package depends on the standard library, internal/contracts and
+// internal/gitx: the last one only for the deployment-owned -c list and the
+// scrubbed environment every git invocation carries (gitx harden.go), because a
+// listing runs git on a checkout the agent owns.
 package fsx
 
 import (
@@ -29,6 +30,7 @@ import (
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/gitx"
 )
 
 // Defaults for Config.
@@ -105,6 +107,14 @@ type Config struct {
 	MaxScanBytes int64
 	// GitBinary is used for `git check-ignore` (default "git").
 	GitBinary string
+	// GitPrefix is prepended to every git invocation this package makes, and
+	// GitEnv is its environment. The defaults are gitx.HardenedArgs() and
+	// gitx.HardenedEnv(): a listing runs git on a checkout the agent owns, and
+	// `.git/config` can make git execute a command (core.fsmonitor,
+	// core.hooksPath, …) through an ordinary `git check-ignore`. Nil means "the
+	// deployment's defaults", not "no hardening".
+	GitPrefix []string
+	GitEnv    []string
 	// Audit is called after every successful write/delete.
 	Audit AuditFunc
 	// GitState injects the per-path git status letters for the file tree
@@ -141,6 +151,12 @@ func (c Config) normalise() Config {
 	}
 	if strings.TrimSpace(c.GitBinary) == "" {
 		c.GitBinary = DefaultGitBinary
+	}
+	if len(c.GitPrefix) == 0 {
+		c.GitPrefix = gitx.HardenedArgs()
+	}
+	if len(c.GitEnv) == 0 {
+		c.GitEnv = gitx.HardenedEnv()
 	}
 	return c
 }

@@ -45,9 +45,14 @@ func (s *Service) checkIgnoreBatch(ctx context.Context, rootAbs string, rels []s
 	// -z keeps filenames containing newlines intact; input is NUL separated.
 	stdin := strings.Join(rels, "\x00") + "\x00"
 
-	cmd := exec.CommandContext(ctx, s.cfg.GitBinary, "check-ignore", "-z", "--stdin", "--no-index")
+	args := append([]string{}, s.cfg.GitPrefix...)
+	args = append(args, "check-ignore", "-z", "--stdin", "--no-index")
+	cmd := exec.CommandContext(ctx, s.cfg.GitBinary, args...)
 	cmd.Dir = rootAbs
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	// The checkout is the tenant's, so the configuration and the environment are
+	// this deployment's (gitx harden.go): `git check-ignore` reads the
+	// repository's config, and a repository's config can name a command git runs.
+	cmd.Env = s.cfg.GitEnv
 	cmd.Stdin = strings.NewReader(stdin)
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
@@ -173,10 +178,12 @@ func (r ignoreRule) matches(rel, base string) bool {
 
 // isGitRepo reports whether dir is inside a git work tree. It is a best-effort
 // probe used only to decide whether a status call is worth making.
-func isGitRepo(ctx context.Context, gitBinary, dir string) bool {
-	cmd := exec.CommandContext(ctx, gitBinary, "rev-parse", "--is-inside-work-tree")
+func (s *Service) isGitRepo(ctx context.Context, dir string) bool {
+	args := append([]string{}, s.cfg.GitPrefix...)
+	args = append(args, "rev-parse", "--is-inside-work-tree")
+	cmd := exec.CommandContext(ctx, s.cfg.GitBinary, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	cmd.Env = s.cfg.GitEnv
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {

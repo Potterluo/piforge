@@ -80,6 +80,63 @@ function Image-Exists([string]$ref) {
     return $LASTEXITCODE -eq 0
 }
 
+# Image-Created is when the image was built, in UTC, or $null when it is missing.
+# It is the other half of the staleness check: a tag that exists is not a tag
+# that matches the tree.
+function Image-Created([string]$ref) {
+    $text = & docker image inspect -f '{{.Created}}' $ref 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($text)) { return $null }
+    try { return ([DateTimeOffset]::Parse($text.Trim())).UtcDateTime } catch { return $null }
+}
+
+# Image-Id reports the short image id, for the log line an operator reads to know
+# which build actually ran.
+function Image-Id([string]$ref) {
+    $id = & docker image inspect -f '{{.Id}}' $ref 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($id)) { return 'missing' }
+    $id = $id.Trim()
+    if ($id.Length -gt 19) { return $id.Substring(0, 19) }
+    return $id
+}
+
+# Newest-Source is the last time anything this build compiles was touched, in UTC.
+#
+# Why: `up-isolated` used to build only what was *missing*, so after a source
+# change it happily started the previous image — and an audit probe then measured
+# the old binary (adversarial round 5, "the acceptance harness can test the wrong
+# binary"). Tracked files are enumerated through git, which is fast and exact;
+# untracked-but-not-ignored files count too, because a new file is a source
+# change. Without git the answer is the newest Dockerfile, which still rebuilds
+# on a Dockerfile edit and leaves -Rebuild for the rest.
+function Newest-Source([string]$root) {
+    $newest = [DateTime]::MinValue
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    $files = @()
+    if ($git) {
+        Push-Location $root
+        try {
+            $tracked = & git ls-files -z -- backend web deploy Dockerfile docker-compose.runner.yml 2>$null
+            $untracked = & git ls-files -z -o --exclude-standard -- backend web deploy Dockerfile docker-compose.runner.yml 2>$null
+            foreach ($blob in @($tracked, $untracked)) {
+                if ($null -eq $blob) { continue }
+                $files += ($blob -join "`n") -split "`0" | Where-Object { $_ }
+            }
+        }
+        finally { Pop-Location }
+    }
+    if ($files.Count -eq 0) {
+        $files = @('Dockerfile', 'deploy/Dockerfile.runner', 'deploy/Dockerfile.sandbox-agent')
+    }
+    foreach ($rel in $files) {
+        $full = Join-Path $root $rel
+        if (-not (Test-Path $full)) { continue }
+        $stamp = (Get-Item $full -ErrorAction SilentlyContinue).LastWriteTimeUtc
+        if ($stamp -and $stamp -gt $newest) { $newest = $stamp }
+    }
+    if ($newest -eq [DateTime]::MinValue) { return $null }
+    return $newest
+}
+
 function Build-File([string]$dockerfile, [string]$tag, [string[]]$extraArgs) {
     Step "building $tag ($dockerfile)"
     $args = @("build", "-f", $dockerfile, "-t", $tag) + $extraArgs + @(".")
@@ -136,15 +193,37 @@ if ($Down) {
 # `pi` and /opt/piforge/piforged are exactly the version the control plane runs.
 # ---------------------------------------------------------------------------
 if (-not $NoBuild -and -not $Check) {
-    $buildControlPlane = $Rebuild -or -not (Image-Exists $controlPlaneImage)
-    if ($buildControlPlane) {
-        Build-File "Dockerfile" $controlPlaneImage @()
+    $newest = Newest-Source $root
+    # A tag that exists is not a tag built from this tree: compare the image's
+    # creation time with the newest source file and rebuild what is behind.
+    # -Rebuild forces all three; an image that is missing is built.
+    function Build-IfStale([string]$tag, [string]$dockerfile, [string[]]$extraArgs) {
+        $created = Image-Created $tag
+        $why = $null
+        if ($null -eq $created) { $why = "missing" }
+        elseif ($newest -and $newest -gt $created) {
+            $why = "source is newer than the image ($($newest.ToString('yyyy-MM-dd HH:mm:ss'))Z > $($created.ToString('yyyy-MM-dd HH:mm:ss'))Z)"
+        }
+        if ($Rebuild) { $why = "-Rebuild" }
+        if (-not $why) {
+            $stamp = if ($created) { $created.ToString('yyyy-MM-dd HH:mm:ss') + 'Z' } else { 'missing' }
+            Write-Host ("    {0} is current (id {1}, built {2})" -f $tag, (Image-Id $tag), $stamp)
+            return $false
+        }
+        Step "rebuilding ${tag}: $why"
+        Build-File $dockerfile $tag $extraArgs
+        return $true
     }
-    if ($Rebuild -or -not (Image-Exists $runnerImage)) {
-        Build-File "deploy/Dockerfile.runner" $runnerImage @()
-    }
-    if ($Rebuild -or $buildControlPlane -or -not (Image-Exists $sandboxImage)) {
-        Build-File "deploy/Dockerfile.sandbox-agent" $sandboxImage @("--build-arg", "AGENT_IMAGE=$controlPlaneImage")
+
+    $rebuiltControlPlane = Build-IfStale $controlPlaneImage "Dockerfile" @()
+    Build-IfStale $runnerImage "deploy/Dockerfile.runner" @() | Out-Null
+    # The sandbox image is built *from* the control plane, so a rebuilt control
+    # plane makes it stale even when its own source file is older.
+    $sandboxArgs = @("--build-arg", "AGENT_IMAGE=$controlPlaneImage")
+    $rebuiltSandbox = Build-IfStale $sandboxImage "deploy/Dockerfile.sandbox-agent" $sandboxArgs
+    if ($rebuiltControlPlane -and -not $rebuiltSandbox -and -not $Rebuild) {
+        Step "rebuilding ${sandboxImage}: the control plane image it is built from changed"
+        Build-File "deploy/Dockerfile.sandbox-agent" $sandboxImage $sandboxArgs
     }
 }
 
@@ -225,6 +304,14 @@ Write-Host "PiForge (isolated) is up: http://127.0.0.1:$Port/login" -ForegroundC
 Write-Host "  accounts : admin@piforge.local / piforge-admin-123 (change before exposing)"
 Write-Host "              dev@piforge.local   / piforge-dev-123"
 Write-Host "  images   : $controlPlaneImage, $runnerImage, $sandboxImage"
+# The id and build time of what is actually running: "the tag exists" is not the
+# same claim as "the tag is this tree", and an audit measured the wrong binary
+# once because of the difference (adversarial round 5).
+foreach ($ref in @($controlPlaneImage, $runnerImage, $sandboxImage)) {
+    $created = Image-Created $ref
+    $stamp = if ($created) { $created.ToString('yyyy-MM-dd HH:mm:ss') + 'Z' } else { 'missing' }
+    Write-Host ("             {0,-34} id {1}  built {2}" -f $ref, (Image-Id $ref), $stamp)
+}
 Write-Host "  data     : volume $DataVolume"
 Write-Host "  provider : $DefaultProvider ($Provider)"
 Write-Host "  egress   : $EgressFile (default none: no route to the internet; the gateway on the tenant bridge still answers)"

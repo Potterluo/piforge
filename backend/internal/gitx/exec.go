@@ -10,6 +10,11 @@
 // CleanRel, SecurePath). Commands always run with a scrubbed environment:
 // a GIT_DIR or GIT_WORK_TREE inherited from the daemon (or from a git hook that
 // started the daemon) must not be able to redirect them at another repository.
+//
+// The second half of that sentence is that git *executes configuration*, and a
+// repository's `.git/config` is tenant-writable. Every invocation therefore also
+// carries the deployment-owned `-c` list in harden.go, which outranks every
+// config file, and the environment drops every `GIT_*` variable.
 package gitx
 
 import (
@@ -135,6 +140,7 @@ type Runner struct {
 	timeout  time.Duration
 	extraEnv []string
 	exec     ExecFunc
+	hardened *Hardened
 }
 
 // Option configures a Runner.
@@ -171,12 +177,32 @@ func WithExecutor(fn ExecFunc) Option {
 	}
 }
 
-// NewRunner builds a Runner.
+// WithHardened replaces the deployment-owned configuration (see harden.go).
+// Nil is ignored: a Runner always has one.
+func WithHardened(h *Hardened) Option {
+	return func(r *Runner) {
+		if h != nil {
+			r.hardened = h
+		}
+	}
+}
+
+// NewRunner builds a Runner. A runner that executes here gets the host's
+// hardening; one that executes in a sandbox gets the sandbox's (see
+// RemoteHardened), because a host path for ssh or for core.hooksPath names
+// nothing inside a container.
 func NewRunner(opts ...Option) *Runner {
 	r := &Runner{bin: DefaultBinary, timeout: DefaultTimeout}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(r)
+		}
+	}
+	if r.hardened == nil {
+		if r.exec != nil {
+			r.hardened = RemoteHardened()
+		} else {
+			r.hardened = DefaultHardened()
 		}
 	}
 	return r
@@ -188,50 +214,17 @@ func (r *Runner) Binary() string { return r.bin }
 // Timeout reports the configured per-invocation timeout.
 func (r *Runner) Timeout() time.Duration { return r.timeout }
 
-// scrub is the set of variables that would redirect git at another repository.
-var scrub = []string{
-	"GIT_DIR",
-	"GIT_WORK_TREE",
-	"GIT_INDEX_FILE",
-	"GIT_OBJECT_DIRECTORY",
-	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
-	"GIT_COMMON_DIR",
-	"GIT_NAMESPACE",
-	"GIT_PREFIX",
-	"GIT_CEILING_DIRECTORIES",
-	"GIT_DISCOVERY_ACROSS_FILESYSTEM",
-}
+// The environment git runs with is built in harden.go (Hardened.EnvWith): the
+// inherited environment with every GIT_* variable removed, then the values this
+// deployment owns. The old list of nine GIT_ names lived here; it missed
+// GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n, which is another way to inject
+// configuration, so the filter is a prefix now.
 
-// Env returns the environment used for every invocation.
+// Env returns the environment used for every invocation: the process
+// environment with every GIT_* variable removed, the deployment's extras, and
+// then the values the hardening owns (so an extra cannot undo a guarantee).
 func (r *Runner) Env() []string {
-	base := os.Environ()
-	env := make([]string, 0, len(base)+len(r.extraEnv)+4)
-	for _, kv := range base {
-		i := strings.IndexByte(kv, '=')
-		if i <= 0 {
-			continue
-		}
-		key := strings.ToUpper(kv[:i])
-		skip := false
-		for _, s := range scrub {
-			if key == s {
-				skip = true
-				break
-			}
-		}
-		if skip {
-			continue
-		}
-		env = append(env, kv)
-	}
-	env = append(env,
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_OPTIONAL_LOCKS=0",
-		"LC_ALL=C",
-		"LANG=C",
-	)
-	env = append(env, r.extraEnv...)
-	return env
+	return r.hardened.EnvWith(os.Environ(), r.extraEnv...)
 }
 
 // globalArgs are prepended to every invocation so that output stays machine
@@ -265,8 +258,13 @@ func (r *Runner) run(ctx context.Context, dir string, stdin []byte, args []strin
 		}
 	}
 
-	argv := make([]string, 0, len(globalArgs)+len(args))
+	hard := r.hardened.Args()
+	argv := make([]string, 0, len(globalArgs)+len(hard)+len(args))
 	argv = append(argv, globalArgs...)
+	// The deployment's own config comes after the cosmetic flags and before the
+	// subcommand: git applies `-c` at the command scope, which outranks the
+	// repository's `.git/config`.
+	argv = append(argv, hard...)
 	argv = append(argv, args...)
 
 	name := strings.Join(args, " ")
@@ -330,12 +328,15 @@ type Config struct {
 	Env []string
 	// Exec runs git through another machine (see WithExecutor). Nil runs it here.
 	Exec ExecFunc
+	// Hardened overrides the deployment-owned configuration (harden.go). Nil
+	// picks the host's for a local runner and the sandbox's for a remote one.
+	Hardened *Hardened
 }
 
 // New builds a Runner from a Config. *Runner implements the git half of
 // contracts.Workspace (see GitWorkspace) and is what fsx.New should receive.
 func New(cfg Config) *Runner {
-	opts := make([]Option, 0, 4)
+	opts := make([]Option, 0, 5)
 	if strings.TrimSpace(cfg.GitBinary) != "" {
 		opts = append(opts, WithBinary(cfg.GitBinary))
 	}
@@ -347,6 +348,9 @@ func New(cfg Config) *Runner {
 	}
 	if cfg.Exec != nil {
 		opts = append(opts, WithExecutor(cfg.Exec))
+	}
+	if cfg.Hardened != nil {
+		opts = append(opts, WithHardened(cfg.Hardened))
 	}
 	return NewRunner(opts...)
 }
