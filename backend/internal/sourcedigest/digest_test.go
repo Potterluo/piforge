@@ -210,3 +210,47 @@ func TestSourceFilesFallsBackToTheRecipes(t *testing.T) {
 		t.Fatalf("Digest on the fallback: %v", err)
 	}
 }
+
+// TestListSaysWhereTheFilesCameFrom: the fallback may still be computed, but a
+// caller has to be able to tell it from a full list. A digest over the recipes
+// alone does not change when backend/, web/ or deploy/ changes, so a caller that
+// cannot see the difference answers "current" for a tree it never read — the
+// silent guess this provenance exists to stop.
+func TestListSaysWhereTheFilesCameFrom(t *testing.T) {
+	gitAvailable(t)
+	root := t.TempDir()
+	write(t, root, "backend/keep.go", "package keep\n")
+	if out, err := exec.Command("git", "-C", root, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", root, "add", "backend/keep.go").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v: %s", err, out)
+	}
+
+	listing, err := List(root)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if listing.Via != "git" || listing.GitErr != nil {
+		t.Fatalf("in a checkout: Via=%q GitErr=%v, want git and nil", listing.Via, listing.GitErr)
+	}
+
+	// Not a checkout: the same directory without a .git, plus no git on PATH,
+	// is the tarball case the fallback is for.
+	other := t.TempDir()
+	write(t, other, "Dockerfile", "FROM scratch\n")
+	t.Setenv("PATH", "")
+	listing, err = List(other)
+	if err != nil {
+		t.Fatalf("List on the fallback: %v", err)
+	}
+	if listing.Via != "fallback" {
+		t.Fatalf("Via = %q, want fallback", listing.Via)
+	}
+	if listing.GitErr == nil {
+		t.Fatal("the fallback did not record why git was not used")
+	}
+	if !strings.Contains(listing.GitErr.Error(), "git") {
+		t.Fatalf("GitErr = %v, want it to name git", listing.GitErr)
+	}
+}

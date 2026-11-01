@@ -62,6 +62,7 @@ inside_container() {
 }
 
 cleanup() {
+  rm -f "${DIGEST_ERROR_FILE:-}" 2>/dev/null || true
   if [ "$KEEP" -eq 1 ]; then
     info "keeping $CONTAINER and volume $VOLUME for inspection"
     return
@@ -207,13 +208,34 @@ fi
 # ---------------------------------------------------------------------------
 short_digest() { printf '%s' "$1" | cut -c1-12; }
 
+# DIGEST_ERROR_FILE is why the last digest_of could not produce a digest (no go,
+# no git, a git that refused the directory, no control-plane image). It is a file
+# rather than a variable because digest_of is always called as
+# `want=$(digest_of …)`, and a subshell cannot set a variable for its parent. It
+# is carried into the SKIP text: "unproven" has to name its cause, or a reader
+# supplies their own — the reason printed here used to assume "needs go" even
+# when Go was present and git was the missing piece.
+DIGEST_ERROR_FILE=${TMPDIR:-/tmp}/piforge-verify-linux-digest.$$
+: > "$DIGEST_ERROR_FILE"
+
 digest_of() { # $1 dockerfile, $2 the control-plane image the sandbox was built FROM
+  local out line
   if [ -n "$2" ]; then
-    ( cd "$ROOT_DIR/backend" && go run ./cmd/sourcedigest -root "$ROOT_DIR" \
-        -dockerfile "$1" -agent-image "$2" 2>/dev/null )
+    out=$( cd "$ROOT_DIR/backend" && go run ./cmd/sourcedigest -root "$ROOT_DIR" \
+        -dockerfile "$1" -agent-image "$2" 2>&1 )
   else
-    ( cd "$ROOT_DIR/backend" && go run ./cmd/sourcedigest -root "$ROOT_DIR" -dockerfile "$1" 2>/dev/null )
+    out=$( cd "$ROOT_DIR/backend" && go run ./cmd/sourcedigest -root "$ROOT_DIR" -dockerfile "$1" 2>&1 )
   fi
+  # stdout is the digest and nothing else, so a 64-hex line is the answer and
+  # anything else is the reason there is none.
+  for line in $out; do
+    case "$line" in
+      *[!0-9a-f]*) continue ;;
+    esac
+    if [ ${#line} -eq 64 ]; then : > "$DIGEST_ERROR_FILE"; printf '%s' "$line"; return 0; fi
+  done
+  printf '%s' "$out" | tr '\n' ' ' | cut -c1-400 > "$DIGEST_ERROR_FILE"
+  return 0
 }
 
 rebuild_command() { # $1 image, $2 its parent ref, $3 the digest this tree expects
@@ -231,6 +253,7 @@ sandbox_freshness() {
   SD_WHY=""
   SD_WANT=""
   SD_AGENT=""
+  : > "$DIGEST_ERROR_FILE"
   label=$(docker image inspect -f '{{index .Config.Labels "piforge.source-digest"}}' "$image" 2>/dev/null | tr -d '\r\n')
   case "$label" in
     '<no value>') label="" ;;
@@ -264,7 +287,7 @@ sandbox_freshness() {
   fi
   if [ -z "$SD_WANT" ]; then
     SD_FRESH=unknown
-    SD_WHY="$image is labelled $(short_digest "$label"), but this tree's digest could not be computed here: it needs go and a local control-plane image (go run ./backend/cmd/sourcedigest -root . -dockerfile deploy/Dockerfile.sandbox-agent -agent-image piforge:isolated). Freshness is unproven, not asserted"
+    SD_WHY="$image is labelled $(short_digest "$label"), but this tree's digest could not be computed here: $(cut -c1-400 "$DIGEST_ERROR_FILE" 2>/dev/null | sed 's/  */ /g') (go run ./backend/cmd/sourcedigest -root . -dockerfile deploy/Dockerfile.sandbox-agent -agent-image piforge:isolated). Freshness is unproven, not asserted"
     return 2
   fi
   SD_FRESH=stale

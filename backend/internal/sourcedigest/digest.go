@@ -50,9 +50,10 @@ import (
 var Roots = []string{"backend", "web", "deploy", "Dockerfile", "docker-compose.runner.yml"}
 
 // FallbackFiles is what is hashed when git cannot list the tree (no git, or a
-// directory that is not a checkout): the recipes themselves. The digest keeps
-// its shape, so the fallback still compares like with like; it is narrower, and
-// the scripts say when they are on it.
+// directory that is not a checkout): the recipes themselves. It keeps the digest
+// shape-comparable, but it is narrower and cannot notice a source edit, so
+// List reports it as Via "fallback" and the command refuses to print a digest
+// from it unless the caller says -allow-fallback.
 var FallbackFiles = []string{"Dockerfile", "deploy/Dockerfile.runner", "deploy/Dockerfile.sandbox-agent", "docker-compose.runner.yml"}
 
 // SaltPrefix names the definition. Changing the algorithm changes this string,
@@ -104,15 +105,49 @@ func DigestOf(root string, files []string, dockerfile string, args []string) (st
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// SourceFiles lists the tree's content: tracked files plus untracked files git
-// does not ignore, under Roots. Missing files (deleted from the working tree) are
-// dropped, so the list names bytes that exist.
-func SourceFiles(root string) ([]string, error) {
+// Listing is the tree's content list plus how it was obtained.
+//
+// The provenance is not a detail: only a list read through git can notice an
+// edit to backend/, web/ or deploy/, and the scripts decide "is this image
+// current?" from the digest of that list. A caller that cannot tell a full list
+// from the recipe-only fallback would answer "current" for a tree it never read,
+// which is a guess, not a decision.
+type Listing struct {
+	Files []string
+	// Via is "git" when git listed the tree, "fallback" when only
+	// FallbackFiles could be read.
+	Via string
+	// GitErr is why git was not asked (no git, not a checkout, a git that
+	// refused the directory), or nil when Via is "git".
+	GitErr error
+}
+
+// List is SourceFiles plus the provenance of the list.
+func List(root string) (Listing, error) {
 	files, err := gitFiles(root)
 	if err == nil && len(files) > 0 {
-		return files, nil
+		return Listing{Files: files, Via: "git"}, nil
 	}
-	return fallbackFiles(root)
+	if err == nil {
+		err = fmt.Errorf("git listed no file under %s", root)
+	}
+	fallback, ferr := fallbackFiles(root)
+	if ferr != nil {
+		return Listing{}, ferr
+	}
+	return Listing{Files: fallback, Via: "fallback", GitErr: err}, nil
+}
+
+// SourceFiles lists the tree's content: tracked files plus untracked files git
+// does not ignore, under Roots. Missing files (deleted from the working tree) are
+// dropped, so the list names bytes that exist. It drops the provenance; a
+// caller that decides anything from the digest wants List instead.
+func SourceFiles(root string) ([]string, error) {
+	listing, err := List(root)
+	if err != nil {
+		return nil, err
+	}
+	return listing.Files, nil
 }
 
 // gitFiles lists the tree through git: tracked files plus untracked files git

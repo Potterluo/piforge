@@ -14,12 +14,21 @@
 //	go run ./backend/cmd/sourcedigest -root . \
 //	  -dockerfile deploy/Dockerfile.sandbox-agent -agent-image piforge:isolated
 //
-// The same value plus how many files it covers (what up-isolated.ps1 logs):
+// The same value plus how many files it covers and where they came from (what
+// up-isolated.ps1 logs):
 //
 //	go run ./backend/cmd/sourcedigest -root . -dockerfile Dockerfile -json
 //
 // Exit status 0 means a digest was printed; 1 means it could not be computed and
 // the reason is on stderr.
+//
+// "Could not be computed" includes one case that used to be silent: a tree git
+// cannot list (no git, not a checkout, a directory git refuses). The digest then
+// covers the recipe files alone and does not change when backend/, web/ or
+// deploy/ changes — so it would answer "current" for a tree it never read. That
+// is a guess, and this program refuses to print it. -allow-fallback exists for a
+// build that really is made of those files alone; it prints the digest, says so
+// on stderr, and marks the answer "source":"fallback" in -json.
 package main
 
 import (
@@ -49,7 +58,9 @@ func main() {
 		"the recipe's path, relative to root; its name is part of the digest")
 	agentImage := flag.String("agent-image", "",
 		"the control-plane image a sandbox image was built FROM; its full id is folded in as AGENT_IMAGE=<id>")
-	asJSON := flag.Bool("json", false, `print {"digest":…,"files":…,"dockerfile":…,"args":[…]} instead of the bare digest`)
+	asJSON := flag.Bool("json", false, `print {"digest":…,"files":…,"source":…,"dockerfile":…,"args":[…]} instead of the bare digest`)
+	allowFallback := flag.Bool("allow-fallback", false,
+		"print a digest from the recipe files alone when git cannot list the tree (it then cannot notice a source edit; the scripts refuse such a digest)")
 	var args stringList
 	flag.Var(&args, "arg", "a build argument that changes what the image contains (repeatable, KEY=VALUE)")
 	flag.Parse()
@@ -71,10 +82,19 @@ func main() {
 		buildArgs = append(buildArgs, "AGENT_IMAGE="+id)
 	}
 
-	files, err := sourcedigest.SourceFiles(*root)
+	listing, err := sourcedigest.List(*root)
 	if err != nil {
 		fail(err)
 	}
+	if listing.Via != "git" {
+		if !*allowFallback {
+			fail(fmt.Errorf("the tree could not be listed through git (%v), so the digest would cover only these %d file(s) — %s — and would not change when a source file under backend/, web/ or deploy/ changed; refusing to guess. Run from a checkout with git installed, or pass -allow-fallback if the image really is built from these files alone",
+				listing.GitErr, len(listing.Files), strings.Join(listing.Files, ", ")))
+		}
+		fmt.Fprintf(os.Stderr, "sourcedigest: WARNING: %v; the digest covers %d recipe file(s) only and cannot notice a source edit (source \"fallback\")\n",
+			listing.GitErr, len(listing.Files))
+	}
+	files := listing.Files
 	digest, err := sourcedigest.DigestOf(*root, files, *dockerfile, buildArgs)
 	if err != nil {
 		fail(err)
@@ -87,9 +107,10 @@ func main() {
 	payload := struct {
 		Digest     string   `json:"digest"`
 		Files      int      `json:"files"`
+		Source     string   `json:"source"`
 		Dockerfile string   `json:"dockerfile"`
 		Args       []string `json:"args"`
-	}{Digest: digest, Files: len(files), Dockerfile: *dockerfile, Args: buildArgs}
+	}{Digest: digest, Files: len(files), Source: listing.Via, Dockerfile: *dockerfile, Args: buildArgs}
 	if payload.Args == nil {
 		payload.Args = []string{}
 	}

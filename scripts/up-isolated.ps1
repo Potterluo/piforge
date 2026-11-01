@@ -163,6 +163,14 @@ function Source-Digest([string]$dockerfile, [string]$agentImage) {
     if ([string]::IsNullOrWhiteSpace([string]$parsed.digest)) {
         Fail ("the source digest tool printed no digest for {0}: {1}" -f $dockerfile, $text)
     }
+    # A list read from the recipe files alone does not change when backend/,
+    # web/ or deploy/ changes, so it must never answer "current".
+    # backend/cmd/sourcedigest refuses to print one now; this is the script's own
+    # refusal as well, so a caller that relaxes the tool cannot quietly bring the
+    # guess back.
+    if ([string]$parsed.source -ne 'git') {
+        Fail ("the source digest for {0} came from '{1}', not from git: it covers only the recipe files, so a change under backend/, web/ or deploy/ would not be noticed. Refusing to decide freshness from it (install git, or run from a checkout)" -f $dockerfile, [string]$parsed.source)
+    }
     return [pscustomobject]@{ Digest = [string]$parsed.digest; Files = [int]$parsed.files }
 }
 
