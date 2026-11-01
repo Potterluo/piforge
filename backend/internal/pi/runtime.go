@@ -75,6 +75,17 @@ type RuntimeConfig struct {
 	// header: a header naming the control plane's path is a session whose tools
 	// run in a directory that does not exist.
 	AgentWorktree func(spec contracts.SessionSpec) string
+	// OnStop is told that a session's agent is gone — after Stop, and for every
+	// live session when the runtime closes.
+	//
+	// It exists for the one thing that has to end *with the process*: the
+	// per-session model gateway token. That token is a bearer credential the
+	// sandbox holds, so "the agent stopped" has to mean "the token stopped
+	// working", not "it expires in an hour". Stop is the single choke point every
+	// path goes through — the idle reaper, manual pause, archive, delete, a model
+	// switch and shutdown — which is why the hook lives here rather than at each
+	// caller. Nil is fine (tests, and a deployment without a gateway).
+	OnStop func(sessionID string)
 }
 
 // Runtime implements contracts.AgentRuntime with one Pi child process per
@@ -385,11 +396,18 @@ func (r *Runtime) get(sessionID string) (*session, error) {
 
 // Stop tears the process down. It is idempotent: stopping a session that has no
 // live process succeeds, so archiving a session twice is harmless.
+//
+// The stop hook runs on every call, including the idempotent one: a session
+// whose process is already gone can still hold a model gateway token that was
+// minted for it, and "stop" is the last chance to end that token's life.
 func (r *Runtime) Stop(ctx context.Context, sessionID string) error {
 	r.mu.Lock()
 	s := r.sessions[sessionID]
 	delete(r.sessions, sessionID)
 	r.mu.Unlock()
+	if r.cfg.OnStop != nil {
+		r.cfg.OnStop(sessionID)
+	}
 	if s == nil {
 		return nil
 	}
@@ -418,6 +436,9 @@ func (r *Runtime) Close() error {
 	var firstErr error
 	for _, s := range sessions {
 		s.sub.Close()
+		if r.cfg.OnStop != nil {
+			r.cfg.OnStop(s.id)
+		}
 		if err := s.bridge.Close(); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("pi: close session %s: %w", s.id, err)
 		}

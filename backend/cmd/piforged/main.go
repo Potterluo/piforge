@@ -197,7 +197,11 @@ type options struct {
 	// sandboxDiskQuota is the per-sandbox disk budget in bytes (FR-5.8). Zero
 	// disables enforcement; the admin report still measures.
 	sandboxDiskQuota int64
-
+	// gatewayTokenTTL is how long a sandbox's model gateway token lives. The
+	// default (internal/llmgw.DefaultTTL) is one hour; a deployment whose agent
+	// turns legitimately run longer can raise it, at the cost of a longer window
+	// in which a leaked token is spendable.
+	gatewayTokenTTL time.Duration
 	// skillMaxBytes caps the total a single skill import may expand (FR-5.8).
 	skillMaxBytes int64
 	// sessionReconcileInterval is how often the watchdog compares persisted
@@ -287,7 +291,8 @@ func run() error {
 	flag.Int64Var(&opt.sandboxDiskQuota, "sandbox-disk-quota",
 		diskquota.DefaultQuotaBytes,
 		"per-sandbox disk budget in bytes, measured on the checkout; 0 disables (env PIFORGE_SANDBOX_DISK_QUOTA, default 2 GiB)")
-
+	flag.DurationVar(&opt.gatewayTokenTTL, "gateway-token-ttl", envDuration("PIFORGE_GATEWAY_TOKEN_TTL", llmgw.DefaultTTL),
+		"how long a sandbox's model gateway token lives (env PIFORGE_GATEWAY_TOKEN_TTL; one hour default): it is revoked when the session's agent stops, and this is the backstop for a token that outlived the process")
 	flag.Int64Var(&opt.skillMaxBytes, "skill-max-bytes",
 		httpapi.DefaultSkillMaxBytes,
 		"total bytes one skill import may expand on disk; 0 is refused (env PIFORGE_SKILL_MAX_BYTES, default 32 MiB)")
@@ -645,10 +650,17 @@ func run() error {
 	logger.Info("model gateway tokens survive a restart",
 		"key", abs(filepath.Join(opt.dataDir, "gateway.key")),
 		"detail", "the signing key is on the data volume, so an agent that outlived this process keeps working")
-	signer, err := llmgw.NewSigner(signingKey, llmgw.DefaultTTL)
+	signer, err := llmgw.NewSigner(signingKey, opt.gatewayTokenTTL)
 	if err != nil {
 		return fmt.Errorf("init gateway signer: %w", err)
 	}
+	// Say the number out loud: "how long is a leaked sandbox token worth" is a
+	// security property of the deployment, and it is now one hour rather than
+	// half a day.
+	logger.Info("model gateway token lifetime",
+		"ttl", signer.TTL().String(),
+		"revoked_on", "the session's agent stopping (pause, archive, delete, model switch, shutdown)",
+		"detail", "the token is minted per agent spawn and ends with the process; the TTL is the backstop")
 	gateway, err := llmgw.New(llmgw.Config{
 		Store:  st,
 		Box:    box,
@@ -1007,7 +1019,7 @@ func run() error {
 			"detail", "RPC over the sandbox exec stream; the provider key never enters the container")
 	}
 
-	rt, err := newRuntime(opt, logger, setupFor, modelFor, launcher, agent)
+	rt, err := newRuntime(opt, logger, setupFor, modelFor, launcher, agent, signer.Revoke)
 	if err != nil {
 		return err
 	}
@@ -1533,7 +1545,7 @@ func stopAgentsOnSandbox(ctx context.Context, logger *slog.Logger, st *store.Sto
 // nil, so the agent is this process's own child and the in-process registry is the
 // whole truth. Stage 4 removed the third shape — a locally spawned agent wrapped
 // in the sandbox heartbeat launcher — because no placement produces it any more.
-func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSpec) agentSetup, modelFor func(contracts.SessionSpec, string) string, launcher isolate.Launcher, agent *sandboxAgent) (*pi.Runtime, error) {
+func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSpec) agentSetup, modelFor func(contracts.SessionSpec, string) string, launcher isolate.Launcher, agent *sandboxAgent, onStop func(sessionID string)) (*pi.Runtime, error) {
 	bin := opt.piBin
 	args := []string{"--mode", "rpc"}
 
@@ -1562,7 +1574,11 @@ func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSp
 		EnvFor: func(spec contracts.SessionSpec) []string {
 			return setup(spec).Env
 		},
-
+		// Every path that stops an agent ends its model gateway token too (see
+		// pi.RuntimeConfig.OnStop). It is the difference between "the session
+		// ended" and "the bearer credential the sandbox holds is still good for
+		// the rest of its TTL".
+		OnStop: onStop,
 	}
 	if agent != nil {
 		// The process is not ours to spawn: Dial starts it in the sandbox and

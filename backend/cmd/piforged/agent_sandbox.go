@@ -636,7 +636,15 @@ func (a *sandboxAgent) stageModelConfig(ctx context.Context, sandboxID string, s
 	// The directory is created by the sandbox user, so both Pi's own files and
 	// the control plane's write end up with one owner.
 	//
-	if res, err := client.Exec(ctx, "mkdir -p -- "+aio.Quote(agentDir)+" && chmod -R a+rwX -- "+aio.Quote(agentDir), containerRoot); err != nil {
+	// 0700, not a+rwX: this directory holds the session's model gateway token,
+	// which is a live bearer credential on the operator's provider account. An
+	// adversarial acceptance run found it in a `drwxrwxrwx` directory readable by
+	// every process in the sandbox — including a dependency the agent installed —
+	// and it worked from outside the sandbox for its whole TTL. The agent's own
+	// account is the only account that needs to read it; the file API runs as
+	// that account, so 0700 here and 0600 on the files (below) is the whole
+	// permission story.
+	if res, err := client.Exec(ctx, "mkdir -p -- "+aio.Quote(agentDir)+" && chmod 700 -- "+aio.Quote(agentDir), containerRoot); err != nil {
 		return "", fmt.Errorf("agent-in-sandbox: prepare %s: %w", agentDir, err)
 	} else if res.ExitCode != 0 {
 		return "", fmt.Errorf("agent-in-sandbox: prepare %s: exit %d: %s", agentDir, res.ExitCode, strings.TrimSpace(res.Output))
@@ -657,6 +665,17 @@ func (a *sandboxAgent) stageModelConfig(ctx context.Context, sandboxID string, s
 		}
 	} else if !os.IsNotExist(merr) {
 		return "", fmt.Errorf("agent-in-sandbox: read the session's MCP configuration: %w", merr)
+	}
+	// The file API writes 0644. That is readable by every account in the
+	// container, so the mode is set after the write, in the sandbox, as the owner
+	// — the same account the API runs as. A failure here fails the spawn: a token
+	// the rest of the sandbox can read is not worth a session.
+	if res, err := client.Exec(ctx,
+		"chmod 600 -- "+aio.Quote(path.Join(agentDir, "models.json"))+" "+aio.Quote(path.Join(agentDir, "mcp.json"))+" 2>/dev/null; chmod 700 -- "+aio.Quote(agentDir),
+		containerRoot); err != nil {
+		return "", fmt.Errorf("agent-in-sandbox: restrict %s: %w", agentDir, err)
+	} else if res.ExitCode != 0 {
+		return "", fmt.Errorf("agent-in-sandbox: restrict %s: exit %d: %s", agentDir, res.ExitCode, strings.TrimSpace(res.Output))
 	}
 	return agentDir, nil
 }
