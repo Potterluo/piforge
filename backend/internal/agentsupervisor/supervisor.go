@@ -438,21 +438,15 @@ func (s *supervisor) deliver(chunk []byte) {
 // the old connection is gone, but this process may not have noticed yet — it
 // only notices when it writes. A new client is proof that the old one is dead.
 func (s *supervisor) attach(conn net.Conn) {
+	// The agent's pid comes from the liveness marker on disk. Read it before
+	// taking s.mu: this is the only file I/O on the attach path, and holding the
+	// lock across it would stall the agent's stdout pump for its duration.
+	agentPID := s.agentPID()
+
 	s.mu.Lock()
 	from := s.sent
 	start, data, gap := s.backlog.snapshotFrom(from)
 	c := newClient(conn, s)
-	old := s.client
-	s.client = c
-	// A gap means the requested offset was already trimmed: the next reattach
-	// must resume where this client resumes, not at the offset nobody can serve.
-	s.sent = start
-	s.mu.Unlock()
-	if old != nil {
-		old.drop(errors.New("agentsupervisor: a new client attached"))
-	}
-
-	agentPID := s.agentPID()
 	frame := Frame{
 		Type:        "ready",
 		Session:     s.cfg.SessionID,
@@ -464,18 +458,41 @@ func (s *supervisor) attach(conn net.Conn) {
 	}
 	head, err := json.Marshal(frame)
 	if err != nil {
+		s.mu.Unlock()
 		c.drop(err)
 		return
 	}
-	if !c.push(out{data: append(head, '\n'), end: s.currentSent()}) {
+	// Prime the client *before* publishing it as s.client, and while s.mu is
+	// still held. The wire contract is one handshake line followed by the agent's
+	// bytes; a client published first can be handed a live chunk by deliver()
+	// before this push runs, and its writer goroutine would then put an agent
+	// record on the wire ahead of the handshake. The control plane's bridge reads
+	// the first line as the frame, so a reattach that raced the agent's next
+	// record looked like "no supervisor here" — TestSupervisorKeepsTheAgentAlive
+	// WhenTheClientLeaves saw it as roughly one run in twenty on Windows.
+	// s.mu serialises this: deliver() appends to the backlog under the same
+	// lock, so it cannot slip a chunk between the snapshot and the priming.
+	primed := c.push(out{data: append(head, '\n'), end: start})
+	if primed && len(data) > 0 {
+		// data covers [start, backlog end), which is not from+len(data) when a
+		// gap was reported: the client resumes at start, not at the offset
+		// nobody can serve.
+		primed = c.push(out{data: data, end: start + int64(len(data))})
+	}
+	if !primed {
+		s.mu.Unlock()
 		c.drop(errors.New("agentsupervisor: the client could not be primed"))
 		return
 	}
-	if len(data) > 0 {
-		if !c.push(out{data: data, end: from + int64(len(data))}) {
-			c.drop(errors.New("agentsupervisor: the client could not be primed"))
-			return
-		}
+	old := s.client
+	s.client = c
+	// A gap means the requested offset was already trimmed: the next reattach
+	// must resume where this client resumes, not at the offset nobody can serve.
+	s.sent = start
+	s.mu.Unlock()
+
+	if old != nil {
+		old.drop(errors.New("agentsupervisor: a new client attached"))
 	}
 	s.cfg.Logger.Info("control plane attached to the agent stream",
 		"session", s.cfg.SessionID,
@@ -550,13 +567,6 @@ func (s *supervisor) detach(reason error) {
 		}
 		c.drop(reason)
 	}
-}
-
-// currentSent is the offset the next client resumes from.
-func (s *supervisor) currentSent() int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.sent
 }
 
 // markSent records the highest byte offset a client accepted. It is called by

@@ -140,6 +140,70 @@ func TestSupervisorKeepsTheAgentAliveWhenTheClientLeaves(t *testing.T) {
 	}
 }
 
+// TestEveryReattachSeesTheHandshakeFirst is the reattach-side guard for the
+// ordering bug the test above caught one reattach in twenty: attach() published
+// the new client before queueing its handshake, so the agent's next record could
+// reach the wire first and the bridge would read a tick as the frame.
+//
+// It is a *guard*, not the proof: a correct implementation is deterministically
+// green here because the handshake is queued before the client is published, but
+// a reintroduced publish-then-prime has a narrow window, so a handful of rounds
+// could slip through. The property itself is measured by the 50× run of
+// TestSupervisorKeepsTheAgentAliveWhenTheClientLeaves. The child ticks ten times
+// faster here to make the window easy to hit.
+func TestEveryReattachSeesTheHandshakeFirst(t *testing.T) {
+	t.Setenv("PIFORGE_AGENTSUPERVISOR_FAST_CHILD", "1")
+	ln := tcpListener(t)
+	addr := ln.Addr().String()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = Run(ctx, Config{
+			Root:      t.TempDir(),
+			SessionID: "ses_order",
+			Socket:    "test.sock",
+			StderrLog: t.TempDir() + string(os.PathSeparator) + "agent.log",
+			Listen:    func(string) (net.Listener, error) { return ln, nil },
+			Dial:      DialUnix,
+		}, []string{os.Args[0], "-test.run=TestFastTickChildProcess", "--"})
+	}()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for round := 1; ; round++ {
+		if time.Now().After(deadline) {
+			t.Fatalf("round %d: no handshake within the deadline", round)
+		}
+		frame, _, conn := dialFrame(t, addr)
+		if frame.Type != "ready" || frame.PID <= 0 {
+			_ = conn.Close()
+			t.Fatalf("round %d: the first line on a fresh connection was not the handshake: %+v", round, frame)
+		}
+		_ = conn.Close()
+		if round == 60 {
+			return
+		}
+		// Let the agent produce records between reattaches: the bug only shows
+		// when a chunk is in flight while attach() is in progress.
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestFastTickChildProcess is the agent TestEveryReattachSeesTheHandshakeFirst
+// hosts: JSONL on stdout as fast as a pipe will take it, one record per
+// millisecond, which is the "records keep arriving" condition the ordering bug
+// needed.
+func TestFastTickChildProcess(t *testing.T) {
+	if os.Getenv("PIFORGE_AGENTSUPERVISOR_FAST_CHILD") != "1" {
+		t.Skip("helper process")
+	}
+	for i := 0; ; i++ {
+		if _, err := fmt.Fprintf(os.Stdout, "{\"type\":\"tick\",\"n\":%d}\n", i); err != nil {
+			os.Exit(0)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // TestSupervisorSendsAHandshakeBeforeAnyAgentByte pins the shape the control
 // plane's bridge depends on: exactly one line, then raw agent bytes.
 func TestSupervisorSendsAHandshakeBeforeAnyAgentByte(t *testing.T) {
