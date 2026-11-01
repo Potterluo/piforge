@@ -1,0 +1,53 @@
+# gVisor, as a RuntimeClass the sandbox pods request.
+#
+# Why this file exists at all: the provider refuses to start without the class it
+# was told to use, and the sentence it prints is the point. A cluster without
+# gVisor still runs the pod — under runc, on the node's kernel, behind nothing but
+# seccomp — and every panel, session and screenshot then looks exactly like a
+# sandbox. The class is how "the sandbox is not the node's kernel" becomes a fact
+# about the object instead of a claim in a document.
+#
+# Installing the shim is a per-node job, not a kubectl apply: runsc has to be in
+# the node image (or installed by a DaemonSet) and registered as a container
+# runtime in the kubelet's config:
+#
+#   [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+#     runtime_type = "io.containerd.runsc.v1"
+#
+# Managed offerings do this for you (GKE: --sandbox type=gvisor on a node pool;
+# EKS: the Bottlerocket gVisor variant or a self-managed AL2 node with runsc).
+# On kind, gVisor needs a node image that carries runsc and a containerd config
+# that names it — there is no "kubectl apply" path.
+#
+# Then, and only then:
+#
+#   kubectl apply -f deploy/k8s/30-runtimeclass.yaml
+#
+# Verify that the *nodes* can actually honour it (the RuntimeClass object existing
+# is what the provider checks; this is what proves the scheduling will work):
+#
+#   kubectl get runtimeclass gvisor
+#   kubectl run gvisor-probe --rm -it --restart=Never \
+#     --image=busybox --overrides='{"spec":{"runtimeClassName":"gvisor"}}' \
+#     -- uname -a          # expects a gVisor kernel banner, not the host's
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+  labels:
+    app.kubernetes.io/name: piforge
+    app.kubernetes.io/part-of: piforge
+# The handler name is the key in the node's container-runtime configuration
+# (containerd: runtimes.runsc, CRI-O: runsc). A mismatch here is a pod that stays
+# Pending with "RuntimeHandler not found", which is why the provider's preflight
+# checks this object and the doc asks you to run the probe above.
+handler: runsc
+# A pod under gVisor does not need the node's PID or network namespace, and
+# letting the runtime pick keeps the sandbox's own namespaces inside the sentry.
+scheduling:
+  nodeSelector:
+    # Label the node pool that carries the shim, and keep the sandboxes on it:
+    # the RuntimeClass alone does not schedule (a cluster with one gVisor pool and
+    # one ordinary pool would put half the sandboxes on runc nodes).
+    #   kubectl label node <node> piforge.io/runtime=gvisor
+    piforge.io/runtime: gvisor

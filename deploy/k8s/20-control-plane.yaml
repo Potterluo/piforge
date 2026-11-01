@@ -1,0 +1,200 @@
+# The control plane itself, as a reference manifest.
+#
+# You do not strictly need this file: piforged can run anywhere that can reach the
+# cluster's API server and the sandbox pods' port 8080. It is here because the two
+# arrangements that make `-sandbox k8s` work need to be written down somewhere
+# executable, and because the NetworkPolicy in 40-networkpolicy.yaml selects the
+# control plane by the label this Deployment carries
+# (app.kubernetes.io/name: piforge-control-plane) — a deployment that names itself
+# something else silently gets no inbound rule and its sandboxes are unreachable.
+#
+# What is different from docker-compose:
+#
+#   - there is no sandbox-runner service and no Docker socket: the sandbox is a
+#     pod, created through the API server with the service account set here;
+#   - the workspace is a PVC per sandbox, which this pod never mounts;
+#   - PIFORGE_GATEWAY_URL must be a name *the sandbox* can resolve: the sandbox
+#     calls the gateway from inside its own pod, so 127.0.0.1 would be itself;
+#   - PIFORGE_TENANT_EGRESS_FILE is deliberately absent: a tenant egress policy is
+#     refused under -sandbox k8s, because this process creates no network. Egress
+#     is 40-networkpolicy.yaml's job (docs/SANDBOX-K8S.md §5).
+#
+# Before applying, create the two Secrets it references. Nothing here prints them:
+#
+#   kubectl -n piforge create secret generic piforge-master-key \
+#     --from-literal=PIFORGE_MASTER_KEY="$(openssl rand -hex 32)"
+#   kubectl -n piforge create secret generic piforge-seed \
+#     --from-literal=PIFORGE_SEED_EMAIL=admin@example.com \
+#     --from-literal=PIFORGE_SEED_PASSWORD='<a real password>' \
+#     --from-literal=PIFORGE_SEED_USER_EMAIL=dev@example.com \
+#     --from-literal=PIFORGE_SEED_USER_PASSWORD='<a real password>'
+#
+#   kubectl apply -f deploy/k8s/20-control-plane.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: piforge-data
+  namespace: piforge
+  labels:
+    app.kubernetes.io/name: piforge-control-plane
+    app.kubernetes.io/part-of: piforge
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # Empty means the cluster default. The control plane's state (SQLite, master.key,
+  # the gateway's signing key, artifacts) lives here; it is NOT a sandbox
+  # workspace, and the sandboxes never mount it.
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: piforge-control-plane
+  namespace: piforge
+  labels:
+    app.kubernetes.io/name: piforge-control-plane
+    app.kubernetes.io/part-of: piforge
+spec:
+  # One replica, and it is not a scaling knob: the process holds in-memory agent
+  # registries and a SQLite database. Two replicas against one /data volume would
+  # be two control planes disagreeing about who owns a session.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: piforge-control-plane
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: piforge-control-plane
+        app.kubernetes.io/part-of: piforge
+    spec:
+      serviceAccountName: piforge-control-plane
+      # The control plane talks to the API server: this one needs its token.
+      automountServiceAccountToken: true
+      # A rollover must finish its in-flight requests; the agents live in their
+      # own sandboxes and survive this pod (docs/EXECUTION-BOUNDARY.md §6).
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        # The image runs as root (it starts Next, git and the agent launcher in
+        # the same container). What is dropped is the capability the compose file
+        # drops, for the same measured reason: DAC_OVERRIDE is what would let it
+        # write through the read-only skill copies (0444) it creates.
+        capabilities:
+          drop: ["DAC_OVERRIDE"]
+      containers:
+        - name: piforge
+          image: ghcr.example/piforge:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 7700
+          env:
+            - name: PIFORGE_DATA
+              value: /data
+            - name: PIFORGE_PORT
+              value: "7700"
+            # The provider. Nothing else is a default (a start that names none is
+            # refused), and `k8s` is the shape this namespace is set up for.
+            - name: PIFORGE_SANDBOX
+              value: k8s
+            - name: PIFORGE_SANDBOX_IMAGE
+              value: ghcr.example/piforge/sandbox-agent:dev
+            - name: PIFORGE_SANDBOX_K8S_NAMESPACE
+              value: piforge
+            - name: PIFORGE_SANDBOX_K8S_RUNTIME_CLASS
+              value: gvisor
+            # -sandbox-k8s-storage-class is unset on purpose: the cluster's
+            # default StorageClass is the deployment's choice, made once, and
+            # naming one here would silently pin every sandbox to it.
+            - name: PIFORGE_SANDBOX_CPUS
+              value: "1"
+            - name: PIFORGE_SANDBOX_MEMORY
+              value: 2g
+            - name: PIFORGE_TENANT_MAX_SANDBOXES
+              value: "3"
+            # The agent is a process in a pod, so the gateway has to be a name
+            # that pod resolves — this Service, in this namespace.
+            - name: PIFORGE_GATEWAY_URL
+              value: http://piforge-control-plane.piforge.svc.cluster.local:7700
+            - name: PIFORGE_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: piforge-master-key
+                  key: PIFORGE_MASTER_KEY
+            - name: PIFORGE_SEED_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: piforge-seed
+                  key: PIFORGE_SEED_EMAIL
+            - name: PIFORGE_SEED_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: piforge-seed
+                  key: PIFORGE_SEED_PASSWORD
+            - name: PIFORGE_SEED_USER_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: piforge-seed
+                  key: PIFORGE_SEED_USER_EMAIL
+            - name: PIFORGE_SEED_USER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: piforge-seed
+                  key: PIFORGE_SEED_USER_PASSWORD
+            # The provider key is not here: it is entered in the UI (or through
+            # the bootstrap provider variables below) and sealed in SQLite.
+            # - name: PIFORGE_BOOTSTRAP_PROVIDER
+            # - name: PIFORGE_BOOTSTRAP_PROVIDER_KEY
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: piforge-data
+        - name: tmp
+          emptyDir: {}
+---
+# The address a sandbox pod calls (the model gateway and the panels' API), and the
+# one a human's port-forward targets. A normal Service, not headless: the control
+# plane is one pod and its own clients do not need to enumerate it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: piforge-control-plane
+  namespace: piforge
+  labels:
+    app.kubernetes.io/name: piforge-control-plane
+    app.kubernetes.io/part-of: piforge
+spec:
+  selector:
+    app.kubernetes.io/name: piforge-control-plane
+  ports:
+    - name: http
+      port: 7700
+      targetPort: http

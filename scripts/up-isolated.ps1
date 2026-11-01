@@ -25,6 +25,41 @@
 #
 # It never prints a secret: the runner token and the provider key are passed to
 # docker compose through the environment and are not echoed.
+#
+# ---------------------------------------------------------------------------
+# The Kubernetes shape is not this script.
+# ---------------------------------------------------------------------------
+#
+# `-sandbox k8s` is the third isolated deployment (docs/SANDBOX-K8S.md): the
+# sandbox is a pod in a cluster, its workspace is a PVC only that pod mounts, and
+# the control plane creates it through the Kubernetes API with no Docker CLI, no
+# daemon and no runner. This script is the Docker shape — it builds three images
+# and starts docker-compose.runner.yml — and it neither applies Kubernetes
+# manifests nor changes what it does when a cluster is configured. Nothing here
+# reads PIFORGE_SANDBOX, so a `-sandbox k8s` deployment never runs this script.
+#
+# What that deployment does instead (the whole sequence, from a clean checkout):
+#
+#   docker build -t piforge:k8s .                       # the control plane image
+#   docker build -f deploy/Dockerfile.sandbox-agent \
+#     --build-arg AGENT_IMAGE=piforge:k8s -t piforge/sandbox-agent:k8s .
+#   kubectl apply -f deploy/k8s/00-namespace.yaml
+#   kubectl apply -f deploy/k8s/10-serviceaccount-rbac.yaml
+#   kubectl apply -f deploy/k8s/30-runtimeclass.yaml
+#   kubectl apply -f deploy/k8s/40-networkpolicy.yaml
+#   kubectl apply -f deploy/k8s/20-control-plane.yaml   # after its two Secrets
+#
+# and then the control plane starts with `-sandbox k8s -sandbox-image
+# <the sandbox image>`, which refuses to start against a namespace, an RBAC rule
+# or a runtime class that is missing (the preflight that replaces this script's
+# `cmd/preflight` step). The sandbox image must still be the one built *from* the
+# control plane image — that is what puts `pi` and /opt/piforge/piforged inside
+# it, for the same reason it matters here.
+#
+# The one thing this script and that deployment share is
+# deploy/Dockerfile.sandbox-agent, and therefore the source-digest rule above: an
+# image whose piforge.source-digest does not match the tree is stale in both
+# shapes.
 param(
     [int]$Port = 7723,
     [string]$Project = "pf-isolated",

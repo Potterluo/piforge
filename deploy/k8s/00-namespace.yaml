@@ -1,0 +1,64 @@
+# The namespace every sandbox object lives in, plus the two policies that bound
+# what one tenant's pod can consume.
+#
+# Apply this first: the provider refuses to start against a namespace that does
+# not exist (it will not create one — a namespace is a quota, a NetworkPolicy and
+# an RBAC boundary, and those are an operator's decisions, not a provider's).
+#
+#   kubectl apply -f deploy/k8s/00-namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: piforge
+  labels:
+    app.kubernetes.io/name: piforge
+    app.kubernetes.io/part-of: piforge
+    # Pod Security Admission: the sandbox pods satisfy the restricted profile
+    # (non-root, no privilege escalation, seccomp RuntimeDefault, dropped
+    # capabilities, no host paths). Enforcing it here is what keeps a future
+    # change from quietly widening the pod — the API server refuses it, and the
+    # refusal lands at create time instead of in a review.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+---
+# One sandbox is one pod with one volume. A quota is the only thing that bounds
+# the *number* of them: the provider applies per-tenant CPU/memory limits to each
+# pod, but nothing stops a tenant with many projects from having many sandboxes —
+# that is -tenant-max-sandboxes on the control plane, and this quota is the
+# cluster-side backstop for the day that guard is misconfigured.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: piforge-sandboxes
+  namespace: piforge
+spec:
+  hard:
+    # Raise these together with -tenant-max-sandboxes; they are a ceiling, not a
+    # policy. 200 pods is roughly 25 projects per account for 8 accounts.
+    pods: "200"
+    requests.cpu: "200"
+    requests.memory: 400Gi
+    persistentvolumeclaims: "200"
+    requests.storage: 2Ti
+    services: "200"
+    secrets: "400"
+---
+# A default request/limit for anything in this namespace that forgets one. The
+# provider always sets both (from the tenant policy), so this is the fallback for
+# a pod a human creates while debugging — and having it means such a pod cannot
+# land unlimited next to the sandboxes.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: piforge-defaults
+  namespace: piforge
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 250m
+        memory: 512Mi
+      default:
+        cpu: "2"
+        memory: 2Gi

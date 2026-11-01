@@ -1,0 +1,155 @@
+# What a sandbox pod may reach: the control plane on 8080, DNS, and (optionally)
+# the public internet. Nothing else, including every other sandbox.
+#
+# The provider creates no NetworkPolicy — it creates pods, volumes and services,
+# and a network policy is a property of the cluster's CNI. That is why a tenant
+# egress policy on the control plane is *refused* under -sandbox k8s
+# (checkTenantEgress): a page that says "this tenant cannot reach the internet"
+# while nothing enforces it is the failure the boot gate exists to prevent.
+#
+# This is the shape that makes the statement true. Apply it after the namespace:
+#
+#   kubectl apply -f deploy/k8s/40-networkpolicy.yaml
+#
+# The first policy denies everything for the sandbox pods; the ones after it open
+# exactly three holes. A CNI that does not implement NetworkPolicy (flannel
+# without Calico, some managed defaults) accepts these objects and enforces
+# nothing — check with `kubectl describe networkpolicy` and a real connection
+# attempt from inside a pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: piforge-sandbox-deny-all
+  namespace: piforge
+  labels:
+    app.kubernetes.io/name: piforge
+    app.kubernetes.io/part-of: piforge
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: piforge-sandbox
+  policyTypes: ["Ingress", "Egress"]
+  # No ingress and no egress rules: deny both directions.
+---
+# 1. The control plane may dial a sandbox's API port. This is the one inbound
+#    hole, and it is narrow: the source is a pod label (the control plane's own
+#    Deployment must carry it), not a namespace, and the port is the API only —
+#    not the browser's CDP port, not anything the image happens to listen on.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: piforge-sandbox-allow-control-plane
+  namespace: piforge
+  labels:
+    app.kubernetes.io/name: piforge
+    app.kubernetes.io/part-of: piforge
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: piforge-sandbox
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: piforge-control-plane
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# 2. DNS. Without this every `git clone`, every model call through the gateway and
+#    every package install fails on name resolution — the deny-all default is
+#    correct and this rule is not optional.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: piforge-sandbox-allow-dns
+  namespace: piforge
+  labels:
+    app.kubernetes.io/name: piforge
+    app.kubernetes.io/part-of: piforge
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: piforge-sandbox
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# 3. The model gateway (and anything else the control plane serves to a sandbox:
+#    the package mirror, an internal registry). Egress to the control plane's pod
+#    on the port it listens on, and to nothing else in the cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: piforge-sandbox-allow-control-plane-egress
+  namespace: piforge
+  labels:
+    app.kubernetes.io/name: piforge
+    app.kubernetes.io/part-of: piforge
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: piforge-sandbox
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: piforge-control-plane
+      ports:
+        - protocol: TCP
+          port: 7700
+---
+# 4. The internet — the "open" egress mode, and the shape to delete if this
+#    deployment is meant to be closed. Note what it excludes: the cluster's own
+#    ranges (10/8, 172.16/12, 192.168/16) stay unreachable, so "the sandbox has
+#    internet" does not also mean "the sandbox can reach every other pod, the
+#    kubelet, the cloud metadata endpoint or another tenant's service".
+#
+#    The metadata endpoint (169.254.169.254) is the one worth naming: on most
+#    clouds it hands out node credentials to anything that can dial it, and it is
+#    link-local rather than private, so it needs its own exclusion.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: piforge-sandbox-allow-internet
+  namespace: piforge
+  labels:
+    app.kubernetes.io/name: piforge
+    app.kubernetes.io/part-of: piforge
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: piforge-sandbox
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+---
+# A closed deployment is: apply the deny-all rule and stop there. An open one is:
+# apply it, then this file. A per-tenant one is not expressible here — see
+# docs/SANDBOX-K8S.md §egress for why that is a product decision rather than a
+# missing flag.

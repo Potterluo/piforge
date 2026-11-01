@@ -1,0 +1,60 @@
+# The workspace volume, as a template.
+#
+# You do not have to apply this: the provider creates one PVC per (user, project)
+# on first use, named `piforge-ws-<pair hash>` and labelled with the pair. This
+# file exists for the three cases where the volume has to exist *before* the
+# sandbox does:
+#
+#   1. restoring a tenant's workspace from a VolumeSnapshot (a cluster migration,
+#      a disaster-recovery drill) — create the claim from the snapshot, then start
+#      the session and the provider adopts it;
+#   2. a cluster whose policy forbids dynamic provisioning, where volumes are
+#      pre-created by the storage team;
+#   3. a deployment that pins a project to a specific StorageClass (fast local SSD
+#      for one tenant, network storage for another).
+#
+# What "adopt" requires: the exact name, and the `app.kubernetes.io/managed-by:
+# piforge` label. The provider refuses to touch a PVC that does not carry that
+# label — the name is a hash, and a hash can be resolved against the wrong
+# cluster. It also never deletes a volume it did not create.
+#
+#   kubectl apply -f deploy/k8s/50-workspace-pvc-example.yaml
+#
+# Name: piforge-ws-<first 8 bytes of sha256("<userID>/<projectID>"), hex>.
+# The same derivation the container providers use for a sandbox's detached volume
+# (detachedVolumeName), so one pair has one storage name in both shapes.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: piforge-ws-0123456789abcdef
+  namespace: piforge
+  labels:
+    # Required: without this the provider will not adopt (or delete) the claim.
+    app.kubernetes.io/managed-by: piforge
+    app.kubernetes.io/name: piforge-sandbox
+    app.kubernetes.io/part-of: piforge
+    # The pair hash — the selector the Service and the pod use too.
+    piforge.io/sandbox: "0123456789abcdef"
+    piforge.io/user: "6f1e6a3c-8f7d-4b1e-9a2c-1d2e3f4a5b6c"
+    piforge.io/project: "0b7c2d11-1111-4222-8333-944455556666"
+  annotations:
+    # The verbatim ids: a label value is sanitised (Kubernetes' charset), so the
+    # annotations are what an audit reads.
+    piforge.io/user-id: "6f1e6a3c-8f7d-4b1e-9a2c-1d2e3f4a5b6c"
+    piforge.io/project-id: "0b7c2d11-1111-4222-8333-944455556666"
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # Empty means "the cluster's default StorageClass". A deployment that names one
+  # (-sandbox-k8s-storage-class) writes it here, and the provider compares nothing
+  # — an adopted claim keeps the class it already has.
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 10Gi
+  # To restore instead of provisioning empty, replace the storageClassName block
+  # with:
+  #
+  #   dataSource:
+  #     kind: VolumeSnapshot
+  #     apiGroup: snapshot.storage.k8s.io
+  #     name: piforge-ws-0123456789abcdef-2026-11-01
