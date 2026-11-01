@@ -516,11 +516,13 @@ Flow notes:
   (2.4 s the first time, which provisions the sandbox) and a trivial answer settles in
   0.8 s; the review turn took 30.5 s. Both are the model, not the product.
 - **A run** is observed through `run.settled`, never `agent_end` — README rule 2, and the
-  only signal that survives retries, compaction and steering. `GET …/status` is
-  `{running, streaming, compacting, queue_depth, model_ref, last_seq, process_id,
-  session_file, resolved_model_ref, model_unavailable}`; `process_id` is the agent process,
-  absent/0 when idle, and `model_unavailable: true` means nothing is configured to answer
-  (the keyless case in Troubleshooting).
+  only signal that survives retries, compaction and steering. `GET …/status` answers a flat
+  object whose **eleven** fields are listed one by one, with the always-present ones marked,
+  under "API shapes" (`session_id` was missing from this sentence's list, and four of the
+  fields are `omitempty`); in short: `process_id` is the agent process and stays set while an
+  idle one lives, `model_ref` is the **gateway alias** the process was started with, and
+  `model_unavailable: true` means nothing is configured to answer (the keyless case in
+  Troubleshooting — the send is still accepted).
 - **Stop/continue**: interrupt stops the run in ~7 ms and clears steering/follow-ups.
   Then it gets interesting — see the second Known limit.
 - **Fork/adopt**: fork is cheap and real (branch session, its own worktree). Adopt takes a
@@ -645,6 +647,128 @@ on the SSE stream and settles into `GET …/entries`, not in that response. The 
 passwords above are the values the documented `docker run` sets with
 `PIFORGE_SEED_*`; a deployment that did not set them has generated, unlogged passwords
 (see "Seeded accounts").
+
+**The two reads a script (or a person) hits before it writes anything.** Both are plain
+`GET`s — cookie only, no `X-Pf-Csrf` — and both carry fields that are only sometimes there:
+the Go structs use `omitempty`, so a conditional field is **absent**, not `null` and not `""`.
+Every JSON below was measured on a throwaway `pwsh scripts/up-isolated.ps1` stack on 7723
+(evidence: `e2e/.artifacts/doc-gaps/`), not read off the struct.
+
+#### `GET /v1/setup`
+
+```json
+{"needs_provider":false,"is_admin":false,"shared_provider_available":true,
+ "bootstrap":{"name":"volc","base_url":"https://…","model":"deepseek-v4-flash"},
+ "default_provider":"volc"}
+```
+
+| field | present | meaning |
+|---|---|---|
+| `needs_provider` | always | nothing can answer a prompt for this account: no enabled provider with a key **and** at least one model, considering inherited (shared) ones. `false` is the only value that means a send will work. |
+| `is_admin` | always | the caller's role is `admin`. |
+| `shared_provider_available` | always | the deployment-wide piece exists: some *usable* provider with `source: inherited` is visible to this account. `needs_provider:true` **and** this `false` means the gap is deployment-wide. |
+| `bootstrap` | only when `PIFORGE_BOOTSTRAP_PROVIDER` is set | the non-secret prefill (`name`, `base_url`, `model`). A *configuration*, not a working provider: present even when no key was supplied. |
+| `default_provider` | only when `-default-provider` / `PIFORGE_DEFAULT_PROVIDER` is set | the name a session with no `model_ref` falls back to. |
+| `default_provider_missing` | only when **`true`** | the default name does not resolve for this caller — see below. Omitted (not `false`) when it resolves, and omitted entirely when no default is configured. |
+
+`default_provider_missing: true` means **the deployment was started with a default provider
+name that this account cannot see**: no enabled provider row with that name resolves for the
+caller. Resolution is `store.ResolveProvider` (PRD §5.7.1), so it is a *name* check, not a
+usability check:
+
+- an inherited (`admin`-scope) provider with the name resolves for everyone;
+- a `user`-scope provider with the same name **shadows** the shared one for its owner only,
+  and is invisible to everybody else — the usual way to get this flag on a working
+  deployment is a default that only existed as one person's personal provider;
+- a provider that exists but is **disabled**, has **no key**, or lists **no models** does
+  *not* raise this flag (it is still "found"); `needs_provider` is the flag for "cannot
+  answer". Measured: with the shared `volc` provider's key cleared, `/v1/setup` answered
+  `needs_provider:true, shared_provider_available:false` and **no** `default_provider_missing`.
+
+Two measured `default_provider_missing:true` shapes — the difference matters:
+
+```json
+// shared provider disabled: nothing can answer, and the default is why
+{"needs_provider":true,"is_admin":false,"shared_provider_available":false,
+ "bootstrap":{"name":"volc","base_url":"https://…","model":"deepseek-v4-flash"},
+ "default_provider":"volc","default_provider_missing":true}
+
+// the account has a usable provider of its own ("mine"): sends work, but not through
+// the deployment default
+{"needs_provider":false,"is_admin":false,"shared_provider_available":false,
+ "bootstrap":{…},"default_provider":"volc","default_provider_missing":true}
+```
+
+What an operator does, in the order the fields answer the question:
+
+| `needs_provider` | `default_provider_missing` | state | action |
+|---|---|---|---|
+| `false` | absent | healthy | nothing. |
+| `false` | `true` | sends work, but a session with no `model_ref` uses a *fallback* provider rather than the documented default — the header names it under a different provider than the operator expects | create or enable a provider named `default_provider`, or restart with `PIFORGE_DEFAULT_PROVIDER` set to a name that resolves. Not an outage. |
+| `true` | `true` | nothing can answer, and the missing default is the reason the first send will not | create that provider (enabled, with a key and at least one model) or fix the name, then reload the page: `/v1/setup` is the authority, and `model_unavailable` in `/status` says the same thing per session. |
+| `true` | absent | nothing can answer, and the name is fine — the provider is missing a key or a model, or was never created | follow `shared_provider_available`: `false` → a deployment-wide gap (an admin adds a shared provider); `true` → this account's own view is broken. |
+
+#### `GET /v1/sessions/{id}/status`
+
+Eleven fields, six of them always present. `omitempty` is why the same call answers with
+four different shapes depending on where the session is in its life:
+
+| field | present | meaning |
+|---|---|---|
+| `session_id` | always | the session the answer is about. Filled by the handler even when the runtime has nothing to say. |
+| `running` | always | a run is in flight, as the runtime's event stream reports it. |
+| `streaming` | always | tokens are arriving *right now*; it can be `false` inside a `running:true` turn. |
+| `compacting` | always | a context compaction is in progress. |
+| `queue_depth` | always | queued steering / follow-up messages not yet delivered to the run. |
+| `last_seq` | always | the runtime's own event counter for this session; `0` before any event. It is **not** the transcript's `seq` (see the fork notes), so it is not a cursor for `/entries`. |
+| `model_ref` | conditional | the reference the **agent process was started with**. The agent talks to the model gateway, so this is the *gateway alias* — `piforge/deepseek-v4-flash`, not the account's provider name. Absent until a process has been started (and after it is gone). |
+| `process_id` | conditional | the pid of the live agent process inside the sandbox. It stays set while an idle process lives; absent when there is no process. |
+| `session_file` | conditional | Pi's session log **inside the sandbox** (`/workspace/.piforge/sessions/<id>.jsonl`). Not readable from the host in a container placement. |
+| `resolved_model_ref` | conditional | what the control plane would use *right now*: the session's pinned ref when it resolves, else the deployment default, else the first usable provider of the account. Absent exactly when nothing is configured to answer. |
+| `model_unavailable` | conditional | only ever present as `true`: nothing is configured to answer for this account (the pinned provider is gone and no fallback exists, or the account has no usable provider). Omitted when a model resolves — there is no `false`. |
+
+Measured, in the order a session lives through them (one `piforge:isolated` stack):
+
+```json
+// created, never run: the control plane can name the model, no process exists
+{"session_id":"ses_…","running":false,"streaming":false,"compacting":false,
+ "queue_depth":0,"last_seq":0,"resolved_model_ref":"volc/deepseek-v4-flash"}
+
+// during a real run (a prompt was accepted and the agent is streaming)
+{"session_id":"ses_…","running":true,"streaming":true,"compacting":false,
+ "queue_depth":0,"model_ref":"piforge/deepseek-v4-flash","last_seq":8,
+ "process_id":1447,
+ "session_file":"/workspace/.piforge/sessions/ses_….jsonl",
+ "resolved_model_ref":"volc/deepseek-v4-flash"}
+
+// after it settled: the flags fall, the process and its file stay
+{"session_id":"ses_…","running":false,"streaming":false,"compacting":false,
+ "queue_depth":0,"model_ref":"piforge/deepseek-v4-flash","last_seq":33,
+ "process_id":1447,
+ "session_file":"/workspace/.piforge/sessions/ses_….jsonl",
+ "resolved_model_ref":"volc/deepseek-v4-flash"}
+
+// default missing but the account has its own provider: the fallback is named
+{"session_id":"ses_…","running":false,"streaming":false,"compacting":false,
+ "queue_depth":0,"last_seq":0,"resolved_model_ref":"mine/deepseek-v4-flash"}
+```
+
+`model_unavailable` is **not** a refusal. With the shared provider enabled but keyless,
+`/status` answered `{"…","model_unavailable":true}` (no `resolved_model_ref`), and the very
+next send was accepted — `200 {"accepted":true,"disposition":"started",…}` — and a run
+started with a process and a gateway alias:
+
+```json
+{"session_id":"ses_…","running":true,"streaming":true,"compacting":false,
+ "queue_depth":0,"model_ref":"piforge/deepseek-v4-flash","last_seq":8,
+ "process_id":1423,
+ "session_file":"/workspace/.piforge/sessions/ses_….jsonl",
+ "model_unavailable":true}
+```
+
+That is the state described under "Troubleshooting": the run exists and produces an **empty**
+assistant message. `model_unavailable` means "look at the providers", not "the request was
+rejected".
 
 ### What the panels call
 
@@ -1270,6 +1394,12 @@ badges it 「经符号链接指向工作区外」 with the real path in the body
 stricter: `fsx.Resolve` refuses an escaping link with a 400, because there the workspace is the
 host.
 
-**Gates for this round** (`go build`, `go vet`, `go test ./... -count=1`, `pnpm --dir web test -- --run`,
-`pnpm --dir web exec next build`, full e2e 182, `deliver-check.ps1 -Image` with 125 checks) — the numbers
-are in `docs/STATUS.md`.
+**Gates for this round** (`go build`, `go vet`, `go test ./... -count=1`, `pnpm --dir web lint`,
+`pnpm --dir web test -- --run`, `pnpm --dir web exec next build`, full e2e 182,
+`deliver-check.ps1 -Image` with 125 checks) — the numbers are in `docs/STATUS.md`.
+
+`pnpm --dir web lint` is one of them now, and it is expected to **exit 0**: it had been red for several
+rounds (12 errors / 11 warnings when this line was written) and a red gate nobody runs is how the next
+finding hides. The rule set is `eslint-config-next`'s recommended one, which includes React's
+`react-hooks/set-state-in-effect` and `react-hooks/immutability`; the fixes are in `web/` only. Two
+exceptions live in the code with a comment each, and the list is in `docs/STATUS.md`.

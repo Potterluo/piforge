@@ -258,9 +258,14 @@ otherwise.
 
 ## Test
 
+These are the gates, and each one has to be green before a change is delivered:
+
 ```bash
 # backend unit + integration
 cd backend && go test ./... -race
+
+# frontend lint — a gate, not a suggestion; it must exit 0 with no warnings
+cd web && pnpm lint
 
 # frontend unit (git lane layout, SSE reducer, formatting)
 cd web && pnpm test
@@ -272,6 +277,11 @@ cd e2e && pnpm install && pnpm test
 # rebuild e2e/.data from empty when that is what you want
 cd e2e && pnpm test:fresh
 ```
+
+The from-zero delivery drill is the last gate: `pwsh scripts/deliver-check.ps1` (see
+`docs/DELIVERY-DRILL.md`). Lint ran red for several rounds without anyone noticing, which is
+the argument for listing it here rather than in a comment: a check nobody runs is a check
+that is already failing.
 
 ## Security model in one paragraph
 

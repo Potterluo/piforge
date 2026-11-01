@@ -2274,6 +2274,10 @@ pwsh scripts/deliver-check.ps1 -Image piforge:local   125/125 PASS，DRILL，exi
 `pnpm --dir web lint` 不在本批门禁内，且改动前就有 12 errors / 11 warnings（`use-pty.ts`、`workspace-panels.tsx`
 与 `review-comment.tsx` 里 `useReviewDrafts` 的 effect）；本批没有新增 lint 问题（新文件不在报错列表里）。
 
+> 后续批次已把 `pnpm --dir web lint` 纳入门禁并把它清零（exit 0，0 error / 0 warning）：那 12 errors / 11 warnings
+> 全部修完，**没有新增任何 eslint-disable，也没有改任何行为**（305 个 vitest、182 个 e2e 与 drill 都通过）。门禁清单见
+> `docs/HANDOFF.md` 末尾的 "Gates for this round" 与 `README.md` 的 "Test"。
+
 **仍未做 / 边界.**
 
 - 计数只覆盖「合成时的切」；模型上下文窗口对这条消息的进一步裁剪在产品之外，无法从这里观察。
