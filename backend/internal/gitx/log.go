@@ -34,7 +34,7 @@ func (r *Runner) Log(ctx context.Context, root string, limit int, cursor string)
 	if strings.TrimSpace(cursor) != "" {
 		n, cerr := strconv.Atoi(strings.TrimSpace(cursor))
 		if cerr != nil || n < 0 {
-			return nil, fmt.Errorf("gitx: log: bad cursor %q", cursor)
+			return nil, refuseRequest("log: bad cursor %q", cursor)
 		}
 		skip = n
 	}

@@ -15,6 +15,8 @@ import (
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/fsx"
+	"github.com/piforge/piforge/backend/internal/gitx"
+	"github.com/piforge/piforge/backend/internal/sandbox"
 	"github.com/piforge/piforge/backend/internal/store"
 )
 
@@ -135,6 +137,26 @@ func classify(err error) (int, *contracts.APIError) {
 		return http.StatusNotFound, &contracts.APIError{Code: contracts.ErrNotFound, Message: "no such file or directory"}
 	case errors.Is(err, fsx.ErrIsDir):
 		return http.StatusBadRequest, &contracts.APIError{Code: contracts.ErrInvalidArgument, Message: "path is a directory"}
+	// A checkout's remote this deployment refuses to dial is a client error:
+	// the value is tenant-written repository configuration, and the sentence
+	// names the rule (docs/DATA-FLOW-AUDIT.md G6).
+	case errors.Is(err, sandbox.ErrRefusedRemoteTarget):
+		return http.StatusBadRequest, &contracts.APIError{Code: contracts.ErrInvalidArgument, Message: userMessage(err)}
+	// A git argument this package refused is the caller's mistake, not an
+	// outage: a revision beginning with '-', a branch name git cannot accept, a
+	// cursor that is not a number, a range without a left side. docs/DATA-FLOW-AUDIT.md
+	// G7 measured `POST /git/branch {"name":"-D"}` answering 500 while the guard
+	// held; the status is what was wrong, and this is where it is fixed for every
+	// git route at once (branch, checkout, commit, diff range/base/commit, log,
+	// and the provisioning worktree path that has no route).
+	case errors.Is(err, gitx.ErrInvalidRequest):
+		return http.StatusBadRequest, &contracts.APIError{
+			Code: contracts.ErrInvalidArgument, Message: userMessage(err)}
+	// A path that climbs out of the checkout is the same class: stage, commit
+	// and diff paths reach gitx.CleanRel.
+	case errors.Is(err, gitx.ErrPathEscape):
+		return http.StatusBadRequest, &contracts.APIError{
+			Code: contracts.ErrInvalidArgument, Message: "path escapes the repository"}
 	case errors.Is(err, auth.ErrInvalidCredentials):
 		return http.StatusUnauthorized, &contracts.APIError{Code: contracts.ErrUnauthenticated, Message: "invalid email or password"}
 	case errors.Is(err, auth.ErrNoSession):

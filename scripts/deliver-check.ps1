@@ -673,7 +673,20 @@ try {
     Assert-Check "the transcript has a run.started frame" ($startedMatches.Count -ge 1) "frames=$($startedMatches.Count)"
 
     $settleEvent = $settledMatches[$settledMatches.Count - 1].Groups[1].Value | ConvertFrom-Json
-    $settleAt = ([DateTimeOffset]::Parse($settleEvent.ts)).UtcDateTime
+    # ConvertFrom-Json already turns an ISO string into a [datetime] when its
+    # fraction has seven digits or fewer (PowerShell 7.6). Casting that back to a
+    # string drops the offset and the parse then reads the UTC wall clock as
+    # local, which made this check report "-28,788.64s" on a run whose event was
+    # 13s after the prompt (a nine-digit fraction stayed a string and passed, so
+    # the failure depended on the platform's clock precision). Use the value the
+    # parser produced, converting only when it is a local/unspecified kind.
+    if ($settleEvent.ts -is [datetime]) {
+        $stamp = [datetime]$settleEvent.ts
+        $settleAt = if ($stamp.Kind -eq [System.DateTimeKind]::Utc) { $stamp } else { $stamp.ToUniversalTime() }
+    }
+    else {
+        $settleAt = ([DateTimeOffset]::Parse([string]$settleEvent.ts)).UtcDateTime
+    }
     $settleSeconds = ($settleAt - $promptSentAt).TotalSeconds
     Assert-Check "run.settled carries a timestamp after the prompt" ($settleSeconds -gt 0) ("{0:N2}s" -f $settleSeconds)
     $script:Metrics["prompt_to_settle_seconds"] = [Math]::Round($settleSeconds, 2)

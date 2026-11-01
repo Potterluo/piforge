@@ -92,6 +92,13 @@ func (s *server) handleOpenBrowserTab(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "%s", err.Error()))
 		return
 	}
+	// Which page the browser may render is a placement question (G5): with
+	// Chrome on the host, the target is read from the control plane's network
+	// position, so the loopback/private rule applies before a tab is opened.
+	if err := s.refuseBrowserNavigation(r.Context(), in.URL); err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	if s.deps.Browser == nil || !s.deps.Browser.Available() {
 		s.fail(w, r, apiErr(contracts.ErrSandboxUnavail, "no chrome binary is configured on this server"))
 		return

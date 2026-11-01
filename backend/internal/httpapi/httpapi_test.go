@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -587,7 +588,10 @@ type fakeWorkspace struct {
 	ahead     int
 	behind    int
 	remoteErr error
-	content   *contracts.FileContent
+	// fetches counts the ahead/behind fetch the Git tab performs, so a test can
+	// prove a refused remote never reached it.
+	fetches int
+	content *contracts.FileContent
 	// readErr fails only the text preview, the way the remote workspace fails
 	// when /v1/file/read hits a binary file. OpenFile deliberately ignores it:
 	// a download must not depend on the preview decode.
@@ -864,7 +868,29 @@ func (f *fakeWorkspace) Pull(_ context.Context, root string) (contracts.RemoteRe
 	return f.remote, f.remoteErr
 }
 
-func (f *fakeWorkspace) Fetch(context.Context, string) error { return f.remoteErr }
+func (f *fakeWorkspace) Fetch(context.Context, string) error {
+	f.mu.Lock()
+	f.fetches++
+	err := f.remoteErr
+	f.mu.Unlock()
+	return err
+}
+
+// remoteCalls reports how many times the remote operations were forwarded, so a
+// guard can be proved to run *before* the dial rather than after it (G6).
+func (f *fakeWorkspace) remoteCalls() (pushes, pulls, fetches int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, root := range f.roots {
+		switch {
+		case strings.HasPrefix(root, "push:"):
+			pushes++
+		case strings.HasPrefix(root, "pull:"):
+			pulls++
+		}
+	}
+	return pushes, pulls, f.fetches
+}
 
 func (f *fakeWorkspace) AheadBehind(context.Context, string) (int, int, error) {
 	return f.ahead, f.behind, f.remoteErr

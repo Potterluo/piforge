@@ -2381,6 +2381,78 @@ llmgw       TestGatewayRefusesAPrivateProviderBaseURL     （/gw/llm 对私网 b
 隔离栈（7723，镜像从本轮 HEAD 重建）的实测输出见 `docs/STATUS.md` 本批那一节和
 `e2e/.artifacts/adversarial5/REPORT.md`。
 
+### 1.10 第二轮数据流审计：G5–G8（2026-11-01）
+
+`docs/DATA-FLOW-AUDIT.md` 第二轮关掉了四个 GAP。这一节写运维要做的两件事（发布端口、放行内网远端），以及两个纯 API 修复。
+
+#### 1.10.1 宿主放置的内置浏览器只开被发布的回环端口（G5）
+
+宿主放置（`-sandbox-browser host`；`-sandbox local` 下 `auto` 解析成它）里 Chrome 是控制面进程的子进程：它渲染的页面是从控制面的网络位置读出来的，截图再回给租户。旧规则只看 scheme，所以
+`POST /v1/sessions/{id}/browser/tabs {"url":"http://127.0.0.1:7700/v1/admin/…"}` 就能让控制面把自己的管理页拍给租户。
+
+规则（`urlguard.CheckBrowserNavigation`，由 `handleOpenBrowserTab` 经 `Deps.BrowserNavigation` 调用）：
+
+| 目标 | 判定 |
+|---|---|
+| 公网 http(s) | 放行（公网页面不借控制面的权限） |
+| 回环（`127.0.0.0/8`、`::1`、`localhost`、`*.localhost`）+ 已发布端口 | 放行（dev server / 自己服务的 UI） |
+| 回环 + 其它端口 | 拒绝（`loopback`，消息里列出已发布端口） |
+| 控制面自己的监听端口 | 拒绝（`control-port`），**即使出现在已发布列表里也一样** |
+| 169.254/16（云 metadata）、私网、ULA、CGNAT、保留段 | 拒绝，并点名地址段 |
+| `host.docker.internal`、compose 服务名、本容器主机名、`*.internal`/`*.local` | 拒绝 |
+| `file:`/`javascript:`/`data:` 等非 http(s) | 拒绝 |
+
+```bash
+# dev server 在 3000、同机 UI 在 3100
+piforged -sandbox local -browser-localhost-ports 3000,3100 …
+# 或 PIFORGE_BROWSER_LOCALHOST_PORTS=3000,3100
+```
+
+默认空 = 除"本部署自己服务的 UI"之外，宿主放置下不允许任何回环导航。`-web-upstream` 是回环地址时，它的端口自动进入已发布集合（镜像里的 Next 在 `127.0.0.1:3100`，控制面代理它），因为那本来就是平台发布的端口；控制面自己的监听端口仍然优先拒绝。容器放置（`browser=remote`）不跑这条规则：那里 Chrome 在沙箱里，`127.0.0.1` 就是沙箱自己的回环。
+
+**代价（明说）**：agent 自己起在未声明端口上的 dev server，在宿主放置下看不了；拒绝消息会列出已发布端口，运维要么补端口，要么用容器放置。反过来放行全部回环，等于把控制面的截图交给租户——比一个被拒的标签页糟得多。
+
+e2e 跑宿主放置，所以 `e2e/playwright.config.ts` 显式声明 `-browser-localhost-ports 3100,3101`（3100 是它起的 UI，3101 是 `72-observe-input` 绑的固定端口；控制面自己的 8080 永远拒绝）。drill 在容器里开浏览器（`remote` 放置），不受影响。
+
+#### 1.10.2 push/pull/fetch 之前先读远端并过同一套策略（G6）
+
+`origin` 是仓库配置，agent 在沙箱里可以随便改（`git remote set-url`、加 `pushurl`、`url.<base>.insteadOf`）。宿主放置下是控制面在跑 `git push`，所以旧行为等于"按租户写的 URL 从控制面拨号"。
+
+现在（只接在宿主放置，`cmd/piforged`）在每次 push/pull/fetch（包括 PR 的那次 push）之前：
+
+1. `gitx.RemoteTargets` 读出 `remote.*.url`、`remote.*.pushurl`、`url.<base>.insteadOf` 里的目标；
+2. `sandbox.RefuseRemoteTarget` 按 `refuseCloneTarget` 的同一套规则判：http(s)/`git@`/ssh/git:// 过 `urlguard`（公网地址或运维 allow-list）；`ext::` 和未知 transport 直接拒；本地路径在别的租户沙箱里拒；
+3. 拒绝是类型化 400（`details.reason` / host），且 0 次拨号。
+
+合法内网远端用同一个 `-url-allow-file`（`deploy/url-policy.json` 的形状）：
+
+```json
+{"allow": [{"host": "git.internal.example", "ports": [9418]}]}
+```
+
+容器放置不接这个检查：git 在沙箱里跑，`origin` 是租户自己拨得到的地址，边界是沙箱的网络出口策略（§1.7）。
+
+#### 1.10.3 git 语法拒绝统一 400（G7）
+
+`gitx` 的每个语法拒绝（revision、分支名、cursor、diff range、路径）现在都是类型化错误（`gitx.ErrInvalidRequest` / `ErrPathEscape`），`httpapi.classify` 统一映射成 400。`POST /git/branch {"name":"-D"}` 从 500 变成 400；branch / checkout / commit / diff（commit、branch base、range）/ log / worktree 一致。
+
+#### 1.10.4 审计 CSV 不再执行租户文本（G8）
+
+`GET /v1/admin/audit?format=csv` 的每个字符串列都过 `csvFormulaSafe`：以 `=`、`+`、`-`、`@`、TAB、CR 开头的单元格前面加一个 `'`（OWASP）。数字列（`duration_ms`、`exit_code`、`result_bytes`）不加：负的 exit code 是数字，不是公式。测试用 GAP 里的原 payload `=cmd|' /C calc'!A0`，并逐个触发字符断言。
+
+#### 1.10.5 怎么证明它还在
+
+```
+urlguard  TestCheckBrowserNavigation                （规则：已发布端口 / 控制端口 / metadata / 私网 / docker 名 / allow-list）
+httpapi   TestBrowserNavigationIsRestrictedInHostPlacement （路由层；容器放置仍放行回环）
+          TestGitRemoteGuardRefusesARewrittenOrigin （origin 被改成 127.0.0.1:7700 或别的租户路径 → 400 且 0 次 push/pull/fetch）
+          TestGitRemoteGuardHonoursTheOperatorAllowList
+          TestGitValidationRefusalsAre400           （每个 git 路由的真实拒绝都是 400）
+          TestAuditCSVNeutralisesFormulaCells / TestCSVFormulaSafe
+gitx      TestRemoteTargetsReadsEveryPushRewrite    （url / pushurl / insteadOf 都读）
+```
+
+
 ## 2. Kubernetes：四种做法，各自什么时候是对的
 
 ### 2.1 方案（i）：一个 Pod 一个沙箱，控制面用 client-go 管

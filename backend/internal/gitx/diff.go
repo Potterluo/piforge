@@ -54,7 +54,7 @@ func (r *Runner) Diff(ctx context.Context, root string, req contracts.DiffReques
 	case contracts.ScopeRange:
 		from, to := strings.TrimSpace(req.From), strings.TrimSpace(req.To)
 		if from == "" {
-			return nil, fmt.Errorf("gitx: diff range: from is required")
+			return nil, refuseRequest("diff range: from is required")
 		}
 		if to == "" {
 			to = "HEAD"
@@ -69,7 +69,7 @@ func (r *Runner) Diff(ctx context.Context, root string, req contracts.DiffReques
 		}
 		args = append(args, from+".."+to)
 	default:
-		return nil, fmt.Errorf("gitx: diff: unknown scope %q", req.Scope)
+		return nil, refuseRequest("diff: unknown scope %q", req.Scope)
 	}
 
 	if path := strings.TrimSpace(req.Path); path != "" {
@@ -171,7 +171,7 @@ func (r *Runner) DiffPatch(ctx context.Context, root string, req contracts.DiffR
 	case contracts.ScopeRange:
 		from, to := strings.TrimSpace(req.From), strings.TrimSpace(req.To)
 		if from == "" {
-			return "", fmt.Errorf("gitx: diff range: from is required")
+			return "", refuseRequest("diff range: from is required")
 		}
 		if to == "" {
 			to = "HEAD"
@@ -184,7 +184,7 @@ func (r *Runner) DiffPatch(ctx context.Context, root string, req contracts.DiffR
 		}
 		args = []string{"diff", "--no-color", "--no-ext-diff", "--find-renames", from + ".." + to}
 	default:
-		return "", fmt.Errorf("gitx: diff: unknown scope %q", req.Scope)
+		return "", refuseRequest("diff: unknown scope %q", req.Scope)
 	}
 	if path := strings.TrimSpace(req.Path); path != "" {
 		rel, perr := CleanRel(path)

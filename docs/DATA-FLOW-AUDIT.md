@@ -1,7 +1,8 @@
 # Data-flow audit: tenant input at every read, fetch, exec and id
 
-Status: first pass, 2026-11-01. 79 edges enumerated, 8 GAPs found, 4 fixed
-here, 4 recorded open.
+Status: 2026-11-01. 79 edges enumerated, 8 GAPs found, all 8 fixed — G1–G4 in
+the first pass, G5–G8 in the second. G5 is a policy with a stated tradeoff
+rather than a blanket refusal; the rule and what it costs are in §10.1.
 
 Three adversarial acceptance rounds each found the same class of defect in a
 different place: a value a tenant supplies reaching an action the control plane
@@ -125,14 +126,14 @@ new sink appears unregistered.
 | entry point | tenant value | control plane does | guard | verdict | residual |
 |---|---|---|---|---|---|
 | `GET …/git/status` — `handleGitStatus` — `workspace_handlers.go:206` | `id` | runs `git status` | `rootOrFail`; `gitx` argv + scrubbed env | **VERIFIED GUARDED** | — |
-| `GET …/git/diff` — `handleGitDiff` — `workspace_handlers.go:220` | `scope`, `path`, `commit`, `base`, `from`, `to` | runs `git diff` | `parseDiffScope` allow-list; `cleanRels`; `safeRevArg` | **VERIFIED GUARDED** | a bad revision answers 500 (observed) instead of 400 — see open list. |
+| `GET …/git/diff` — `handleGitDiff` — `workspace_handlers.go:220` | `scope`, `path`, `commit`, `base`, `from`, `to` | runs `git diff` | `parseDiffScope` allow-list; `cleanRels`; `safeRevArg` | **VERIFIED GUARDED** | a refused revision used to answer 500; it is a typed 400 now (G7). |
 | `GET …/git/log` — `handleGitLog` — `workspace_handlers.go:255` | `limit`, `cursor` | runs `git log` | bounds; `safeRevArg` on the cursor | **VERIFIED GUARDED** | — |
 | `POST …/git/stage` / `unstage` — `workspace_handlers.go:270,277` | `paths[]` | `git add/reset -- <paths>` | `cleanRels` + `--` separator + argv | **VERIFIED GUARDED** (argv separation) | — |
 | `POST …/git/commit` — `handleGitCommit` — `workspace_handlers.go:308` | `message`, `paths[]` | `git commit -m <msg>` | message is a single argv element; paths cleaned | **VERIFIED GUARDED** | — |
-| `POST …/git/branch` / `checkout` — `workspace_handlers.go:343,356` | `name` | `git branch -- <name>`, `git checkout <name>` | `safeRevArg` (no leading `-`, no `..`, no whitespace) + `check-ref-format`; probe: `-D` and `../../x` refused | **VERIFIED GUARDED** | the refusal is a 500, not a 400 (open list). |
+| `POST …/git/branch` / `checkout` — `workspace_handlers.go:343,356` | `name` | `git branch -- <name>`, `git checkout <name>` | `safeRevArg` (no leading `-`, no `..`, no whitespace) + `check-ref-format`; probe: `-D` and `../../x` refused | **VERIFIED GUARDED** | the refusal is a typed 400, not a 500 (G7), and every gitx syntactic refusal maps the same way. |
 | `POST …/git/hunk`, `…/discard` — `git_hunks.go:18,70` | `path`, `index` | applies/discards one hunk | `rootOrFail`; `gitx` path cleaning | **VERIFIED GUARDED** | — |
-| `GET/POST …/git/remote`, `…/push`, `…/pull` — `git_remote.go:86,42,63` | `id` | `git fetch/push/pull` against the checkout's `origin` | `remoteRoot` ownership; argv; scrubbed env (`GIT_DIR`, `GIT_WORK_TREE`, …) | **VERIFIED GUARDED** for the endpoint | the *origin URL* is repository config: an agent can edit it in-sandbox, and in host placement the push then dials it — open list (same class as `repo_url`, but the tenant has a host shell where it would run). |
-| `GET/POST …/git/pr` — `handlePRPreview`/`handleCreatePR` — `pr.go:84,186` | `title`, `body`, `base_branch` | pushes, then calls the forge | ownership; `forgeClient` uses `outboundHTTPClient`; push is the repo's own remote | **VERIFIED GUARDED** | same origin-URL residual as push/pull. |
+| `GET/POST …/git/remote`, `…/push`, `…/pull` — `git_remote.go:86,42,63` | `id` | `git fetch/push/pull` against the checkout's `origin` | `remoteRoot` ownership; argv; scrubbed env (`GIT_DIR`, `GIT_WORK_TREE`, …); **added**: before any push/pull/fetch, `Deps.RemoteCheck` reads every `remote.*.url`, `remote.*.pushurl` and `url.<base>.insteadOf` rewrite (`gitx.RemoteTargets`) and applies `urlguard` (http(s), ssh, git://; `ext::` and unknown transports refused) plus the cross-tenant local-path rule (`sandbox.RefuseRemoteTarget`) | **GAP (fixed)** (G6) | the guard is wired only for a *host* workspace (`cmd/piforged`): a container placement runs git inside the sandbox, where the tenant already has the network position. The operator's `-url-allow-file` is the documented way to keep a legitimate internal remote. |
+| `GET/POST …/git/pr` — `handlePRPreview`/`handleCreatePR` — `pr.go:84,186` | `title`, `body`, `base_branch` | pushes, then calls the forge | ownership; `forgeClient` uses `outboundHTTPClient`; push is the repo's own remote; **added**: the same remote check before the push | **VERIFIED GUARDED** | the PR push dials the same origin the push button does, so it passes the same boundary (G6). |
 | branch **worktree** (provisioning) — `provision` / `sandbox.AddWorktree` | branch name | `git worktree add` inside the sandbox | `validateBranchName` + `check-ref-format`; argv | **VERIFIED GUARDED** | — |
 
 ## 8. Admin
@@ -142,7 +143,7 @@ new sink appears unregistered.
 | `GET/POST /v1/admin/users`, `PATCH /v1/admin/users/{id}` — `admin_handlers.go:25,46,106` | `id`, role, status, password | reads/writes accounts | handler `RoleAdmin` check **and** `store.requireAdmin`; cannot disable yourself; last admin cannot be demoted | **VERIFIED GUARDED** (role check) | — |
 | `GET /v1/admin/users/{id}/features`, `POST …/features` — `feature_handlers.go:29,45` | `id`, `flag` | toggles a flag | role check + `store.requireAdmin` + `KnownFeature` allow-list | **VERIFIED GUARDED** | — |
 | `GET /v1/admin/status` — `handleAdminStatus` — `admin_handlers.go:175` | — | counts, walks `DataDir` | role check | **VERIFIED GUARDED** | the walk is over deployment-owned directories only. |
-| `GET /v1/admin/audit` — `handleAdminAudit` — `audit_handlers.go:52` | filters (`user_id`, `session_id`, `tool`, `since`, …), `format=csv` | queries `tool_calls`, exports CSV | role check; filters are bound parameters; limit capped | **VERIFIED GUARDED** | a tool name or command beginning with `=`/`+`/`@` lands in a CSV cell an admin may open in a spreadsheet (formula injection). Low, recorded open. |
+| `GET /v1/admin/audit` — `handleAdminAudit` — `audit_handlers.go:52` | filters (`user_id`, `session_id`, `tool`, `since`, …), `format=csv` | queries `tool_calls`, exports CSV | role check; filters are bound parameters; limit capped; **added**: every string column passes `csvFormulaSafe`, which prefixes a cell beginning with `=`, `+`, `-`, `@`, TAB or CR with a single quote (OWASP) | **VERIFIED GUARDED** (G8) | the numeric columns (`duration_ms`, `exit_code`, `result_bytes`) are deliberately not prefixed: a negative exit code is a number, not a formula. |
 | `POST /v1/admin/support-access`, `GET …/{id}/transcript` — `support_handlers.go:20,58` | `session_id`, `reason` | reads a session the admin does not own | `store.requireAdmin` inside `CreateSupportAccess`/`SupportAccessGrant`; a reason is mandatory; the grant is (admin, session) and expires; the owner is notified | **VERIFIED GUARDED** (role + grant) | — |
 | `GET /v1/support-notices`, `POST …/{id}/seen` — `support_handlers.go:99,116` | `id` | marks a receipt read | user-scoped | **VERIFIED GUARDED** | — |
 | admin **seeds** (`PIFORGE_SEED_*`) — `cmd/piforged` | — | creates the first accounts at boot | deployment environment, no request reaches it | **N/A** | — |
@@ -167,10 +168,66 @@ new sink appears unregistered.
 | sandbox **create/attach/reattach/destroy** — `provision`, `Docker.Ensure`, `reattach`, `reaper`/`janitor` | — | creates containers, starts agents, reclaims disk | internal: no request reaches these with a tenant-shaped id; `NormalizeSandboxID` on every lifecycle call; the boot pass reattaches from stored rows | **N/A** (not reachable) | — |
 | `GET /v1/sessions/{id}/pty` — `handleSessionPTY` — `pty_handlers.go:52` | `tab`, `from_offset` | opens a terminal in the sandbox | ownership; `sanitizeTab` (alnum, `-`, `_`, ≤32) + session prefix; origin check | **VERIFIED GUARDED** | — |
 | `GET /v1/sessions/{id}/browser` — `handleSessionBrowser` — `browser_handlers.go:41` | `tab` | screencast + input relay | ownership; `featureDenied`; `browserFor` (one Chrome per sandbox) | **VERIFIED GUARDED** | — |
-| `POST …/browser/tabs` — `handleOpenBrowserTab` — `browser_tab_handlers.go:79` | `url` | asks Chrome to open a page | ownership; `browser.ValidateNavigationURL` — **scheme only** (`http(s)`/about:blank, no `file:`/`javascript:`/`data:`) | **GAP (open)** | in **host** placement (`-sandbox-browser host`, the default under `-sandbox local`) Chrome is a control-plane process, so navigating it to `http://127.0.0.1:<control port>` or a private address renders that page to the tenant — the same confused-deputy read as the MCP broker. In container placement Chrome is inside the sandbox and the target is the sandbox's own network. Not fixed here: "a dev server on localhost" is the panel's main use, so the fix is a placement/policy decision, not a URL rule. |
+| `POST …/browser/tabs` — `handleOpenBrowserTab` — `browser_tab_handlers.go:79` | `url` | asks Chrome to open a page | ownership; `browser.ValidateNavigationURL` (scheme: http(s)/about:blank only); **added**: in host placement, `urlguard.CheckBrowserNavigation` — loopback only on a published port, never the control port, link-local/metadata/private/docker names refused | **GAP (fixed)** (G5) | container placement relies on the sandbox's own loopback and runs no rule. The rule and its cost are in §10.1. |
 | `POST …/browser/screenshot` | see files | — | — | **VERIFIED GUARDED** | — |
 | `GET/POST …/browser/mode` — `browser_mode.go:152` | `mode` | observe/takeover | ownership + lease (a second viewer cannot type) | **VERIFIED GUARDED** | — |
 | `GET …/browser/tabs`, `DELETE …/tabs/{tab}` — `browser_tab_handlers.go:47,117` | `tab` | CDP calls | ownership; the tab id is matched/compared, never spliced into a URL | **VERIFIED GUARDED** | — |
+
+### 10.1 The browser navigation rule (G5)
+
+In **host** placement (`-sandbox-browser host`, the default under `-sandbox
+local`) Chrome is a child of this process: a page it renders is fetched from the
+control plane's network position and painted back to the tenant. Before G5 was
+fixed the only rule was the scheme, so
+`POST …/browser/tabs {"url":"http://127.0.0.1:7700/v1/admin/…"}` put the control
+plane's own UI in front of a tenant's screenshot.
+
+The rule, implemented in `urlguard.CheckBrowserNavigation` and called from
+`handleOpenBrowserTab` through `Deps.BrowserNavigation`:
+
+| target | verdict |
+|---|---|
+| `http(s)` public address | allowed — a public page is not this process's authority |
+| loopback (`127.0.0.0/8`, `::1`, `localhost`, `*.localhost`) on a port the deployment published | allowed — the panel's dev-server / UI use |
+| loopback on any other port | refused (`loopback`): "not one this deployment published for the session's sandbox or dev server" |
+| the control plane's own listener port | refused (`control-port`), **even when it appears in the published list** |
+| link-local (169.254/16, where cloud metadata lives), private (10/8, 172.16/12, 192.168/16), unique-local, CGNAT, documentation, reserved | refused, naming the range |
+| `host.docker.internal`, the compose service, this container's hostname, `*.internal` / `*.local` | refused |
+| `file:`, `javascript:`, `data:`, anything not http(s) | refused (scheme) |
+| an operator `-url-allow-file` entry for the host and port | allowed — a deployment rule, not a tenant setting |
+
+The published set is `-browser-localhost-ports` /
+`PIFORGE_BROWSER_LOCALHOST_PORTS` (comma-separated), plus the loopback port of
+`-web-upstream` when the deployment serves its own UI (the image starts Next on
+`127.0.0.1:3100` and proxies it). The flag is **empty by default**, which means no
+loopback navigation at all beyond the UI the deployment itself serves. Container placement (`browser=remote`)
+runs no rule: there Chrome is inside the sandbox, `127.0.0.1` is the sandbox's
+own loopback, and the tenant already has it.
+
+**The tradeoff, stated.** A dev server on localhost is the panel's main use, and
+naming *ports* instead of hosts means the deployment has to say which ports it
+published. An agent-started dev server on an undeclared port is therefore not
+viewable in host placement: the refusal names the published set, and the two
+honest answers are "declare the port" (`-browser-localhost-ports`) or "run a
+container placement", where the whole question disappears. The alternative —
+allowing loopback because "the panel needs a dev server" — hands a tenant a
+screenshot of the control plane, which is worse than a refused tab.
+
+Two harnesses would otherwise have broken, and both now declare what they
+publish instead of the rule being weakened:
+
+- `e2e/playwright.config.ts` runs host placement and passes
+  `-browser-localhost-ports 3100,3101`: the UI it serves on 3100, and the
+  fixture page `72-observe-input` binds on 3101 (it used an ephemeral port
+  before, which no deployment can publish in advance). The control plane's own
+  8080 stays refused.
+- The delivery drill drives the browser inside the container
+  (`docs/DELIVERY-DRILL.md`), so it is `remote` placement and unaffected.
+
+`26-browser-tabs` opens `https://93.184.216.34/second` rather than
+`https://example.com/second`: the rule resolves a name, and this suite runs
+offline, where a name is an unrelated DNS refusal. A public literal is still a
+public page.
 
 ## 11. GAPs found
 
@@ -180,10 +237,10 @@ new sink appears unregistered.
 | G2 | `.git` inside a skill bundle (`bundleFiles`) | upload `.git/config` + objects as bundle files, then point G1 at `<SkillsDir>/<id>` — turns the tenant's own bundle directory into a repository, which removes G1's remaining excuse | **fixed** — `.git` segments refused |
 | G3 | `worktree_id` / `parent_id` on session create (`project_handlers.go:538`) | 201 with another account's fiducial stored on the row; no read followed (every read is user-scoped), so the impact was a lying row rather than a leak | **fixed** — ownership before the insert |
 | G4 | `repo_url` clone target (`project_handlers.go:169`, `sandbox/sandbox.go`) | `https://127.0.0.1:7700/…`, `git@169.254.169.254:…` or `/data/sandboxes/<other>/repo` accepted (201); under `-sandbox local` this process clones it — an SSRF and a cross-tenant read. Container placements clone inside the tenant's sandbox. | **fixed** — `Local.refuseCloneTarget` (urlguard + cross-tenant path refusal) |
-| G5 | browser navigation in **host** placement (`browser_tab_handlers.go:79`) | screenshot of `http://127.0.0.1:7700/v1/admin/…` (or any private host) rendered by the control plane's own Chrome | **open** — needs a placement/policy decision (allow-list for host-mode navigation, or run the panel in the sandbox) |
-| G6 | `push`/`pull` dial the checkout's `origin` (`git_remote.go:42,63`) | the agent edits `origin` in-sandbox; in host placement the panel's push then dials it | **open** — same placement caveat as G4; the tenant has a host shell there already |
-| G7 | git refusals answer 500 (`workspace_handlers.go:343`) | `git/branch {"name":"-D"}` → 500 with `gitx: revision "-D" may not start with '-'` instead of 400 | **open** — cosmetic/API hygiene, the guard holds |
-| G8 | audit CSV (`audit_handlers.go`) | a tool name starting with `=` becomes a formula in an admin's spreadsheet | **open** — admin-only, low |
+| G5 | browser navigation in **host** placement (`browser_tab_handlers.go:79`) | screenshot of `http://127.0.0.1:7700/v1/admin/…` (or any private host) rendered by the control plane's own Chrome | **fixed** — `urlguard.CheckBrowserNavigation`: loopback only on a published port, the control port never, link-local/metadata/private/docker names refused. Rule and tradeoff in §10.1. |
+| G6 | `push`/`pull` dial the checkout's `origin` (`git_remote.go:42,63`) | the agent edits `origin` in-sandbox (or adds a `pushurl`, or a `url.<base>.insteadOf` rewrite); in host placement the panel's push then dials it | **fixed** — `gitx.RemoteTargets` + `sandbox.RefuseRemoteTarget` + `Deps.RemoteCheck`, wired for a host workspace; the operator allow-list keeps a legitimate internal remote reachable |
+| G7 | git refusals answer 500 (`workspace_handlers.go:343`) | `git/branch {"name":"-D"}` → 500 with `gitx: revision "-D" may not start with '-'` instead of 400 | **fixed** — `gitx.ErrInvalidRequest` / `InvalidRequestError` at every validation site, mapped once in `httpapi.classify` (branch, checkout, commit, diff range/base/commit, log cursor, worktree) |
+| G8 | audit CSV (`audit_handlers.go`) | a tool name starting with `=` becomes a formula in an admin's spreadsheet | **fixed** — `csvFormulaSafe` on every string column (OWASP prefix), tested with `=cmd|' /C calc'!A0` |
 
 ## 12. The guard test
 
@@ -204,6 +261,21 @@ new sink appears unregistered.
 what a tenant can send and assert the status the guard produces. It passes on
 the throwaway stack. It is not part of `go test` (it needs a deployment) and not
 part of `deliver-check.ps1` (that suite is the delivery gate, not this one).
+
+The second pass (G5–G8) is proven by go tests, because the shape of each fix is
+a status, a cell or a dial decision rather than a route a probe can reach:
+
+| GAP | test |
+|---|---|
+| G5 | `urlguard/navigation_test.go` (the rule), `httpapi/browser_navigation_test.go` (the route: control port, unpublished port, metadata, private, and the container-placement case that must keep working) |
+| G6 | `httpapi/git_remote_guard_test.go` (a rewritten origin is refused with 0 pushes/pulls/fetches; a fixture remote and a public https remote still push; an allow-listed internal remote still pushes), `gitx/remotes_test.go` (url, pushurl and insteadOf are all read) |
+| G7 | `httpapi/git_validation_status_test.go` (a real gitx refusal on every route answers 400) |
+| G8 | `httpapi/audit_csv_injection_test.go` (the `=cmd|' /C calc'!A0` payload and every trigger character) |
+
+G5 and G6 cannot be probed on the isolated stack: it runs the runner placement,
+where Chrome and git are inside the sandbox and the host-placement rules are
+deliberately not wired. The e2e suite runs host placement and covers the
+allowance end to end (`-browser-localhost-ports 3100,3101`).
 
 **Limits — what this does not prove.**
 
@@ -233,6 +305,9 @@ pwsh scripts/up-isolated.ps1 -Down
 # the code half
 cd backend; go test ./internal/httpapi/ -run 'TestGuardedEdges|TestEverySink' -count=1
 go test ./internal/tenantfs/ ./internal/sandbox/ -count=1
+# the second pass
+go test ./internal/httpapi/ -run 'TestGitValidationRefusalsAre400|TestAuditCSV|TestGitRemoteGuard|TestBrowserNavigation' -count=1
+go test ./internal/urlguard/ ./internal/gitx/ -count=1
 ```
 
 Two harnesses import over `file://` and therefore declare a root, the way an
@@ -244,12 +319,16 @@ refuses `file://` outright.
 
 ## 14. Open list
 
+The eight GAPs are closed. What remains are residuals that are stated rather
+than fixed, because each is either outside the boundary (the tenant already has
+the authority in question) or a hardening step whose absence is not an exploit:
+
 | # | edge | why it is still open | what a fix looks like |
 |---|---|---|---|
-| G5 | browser navigation, host placement | refusing loopback/private hosts would remove the panel's main use (a dev server on localhost); the honest fix is placement | either an operator allow-list for host-mode navigation (urlguard-shaped), or make host placement refuse the panel and say so |
-| G6 | push/pull to a tenant-set `origin` | same placement caveat; in-sandbox the tenant can run `git push` themselves | route `gitx` fetches through the same policy when the runner is the host |
-| G7 | 500 on a refused revision | the guard holds; only the status is wrong | sentinel error from `gitx.safeRevArg`, mapped to 400 in the handlers |
-| G8 | CSV formula injection in the audit export | admin-only data, and the cell is a tool name the admin already sees | prefix a cell that starts with `= + - @` with `'` |
+| — | G5's published-port set is a deployment decision | an agent-started dev server on a port the operator did not list is not viewable in host placement; the refusal says so and names the set (§10.1) | an operator tool that publishes a session's listening ports into `-browser-localhost-ports` dynamically |
+| — | G6 in a *container* placement | git runs inside the sandbox, where `origin` is a URL the tenant can dial themselves; the host check is deliberately not wired there | nothing to fix at this boundary; the sandbox's egress policy is the control |
+| — | `remote.<name>.proxy` / credential helpers in a host checkout | the guard reads `url`, `pushurl` and `url.<base>.insteadOf`; a proxy or a helper is another way for git to reach the network, and neither is read | include `remote.*.proxy` in `gitx.RemoteTargets` (same policy), and pin `credential.helper` off in the scrubbed env |
 | — | `rest` in `/gw/mcp/<token>/…` | stays on the tenant's own MCP host | normalise the sub-path before proxying (belt and braces) |
 | — | `repo` in the forge config | interpolation into the tenant's own forge URL path | validate `owner/name` shape in `forge.New` |
+| — | residual from the earlier rounds | recorded in `docs/SANDBOX-DEPLOY.md` §1.9 | — |
 | — | residual from the earlier rounds | recorded in `docs/SANDBOX-DEPLOY.md` §1.9 | — |

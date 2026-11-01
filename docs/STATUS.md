@@ -1946,3 +1946,73 @@ fetcher，都在隔离栈上量到（`e2e/.artifacts/adversarial4/REPORT.md` 攻
 `git@` 只校验 host、不做地址钉住（ssh 不受 `http.curloptResolve` 管）；allow-list 是 host/CIDR +
 端口，不是路径；broker 仍然把完整的方法/body/响应转发给**被允许**的主机——那是功能，
 变的是"被允许"现在是一条写下来的部署决定。
+
+## 本批：数据流审计第二轮，G5–G8 全部关闭（2026-11-01）
+
+审计的四个 open GAP（`docs/DATA-FLOW-AUDIT.md` §11）各有一条 fail-first 输出，然后同一条测试转绿；
+判据、规则与残余写在 `docs/DATA-FLOW-AUDIT.md`（§10.1 是 G5 的规则与代价，§14 是残余）和
+`docs/SANDBOX-DEPLOY.md` §1.10。
+
+### G7：拒绝的 revision 回 500 而不是 400
+
+失败先（类型化错误已加、状态映射还没接）`TestGitValidationRefusalsAre400`：
+
+    POST .../git/branch = 500, want 400: {"error":{"code":"internal","message":"internal error"}}
+    POST .../git/checkout = 500 / POST .../git/commit = 500
+    GET .../git/diff?scope=range&from=-D = 500（branch base / commit 同）
+    GET .../git/log?cursor=not-a-number = 500
+    branch: classify = 500, want 400 (error: gitx: revision "-D" may not start with '-')
+
+修法：`gitx.ErrInvalidRequest` / `InvalidRequestError` 落在 `safeRevArg`、`validateBranchName`、
+diff 的 `from is required` 与 unknown scope、log cursor、worktree 分支名；路径拒绝沿用
+`ErrPathEscape`。`httpapi.classify` 一处映射成 400。修后 7 条路由 + classify 8 条全 PASS。
+
+### G8：审计 CSV 的公式注入
+
+失败先（helper 已加、还没接进导出）`TestAuditCSVNeutralisesFormulaCells`：
+
+    column "tool" still begins a formula: "\rcmd" (row [... \rcmd ...])
+
+修法：`csvFormulaSafe`，每个字符串列（0,1,3–12,15,16）加 `'`，数字列（duration_ms / exit_code /
+result_bytes）不加。修后 PASS：payload `=cmd|' /C calc'!A0` 以 `'=cmd...` 出现，`+ - @ TAB CR LF`
+逐字符断言。
+
+### G6：push/pull/fetch 拨租户改写的 origin
+
+失败先（守卫已实现、handler 还没接）`TestGitRemoteGuardRefusesARewrittenOrigin`，7 种形态全部 200
+（push 真的发生了）：
+
+    POST .../git/push with origin "http://127.0.0.1:7700/v1/admin/audit" = 200, want 400
+    ... 169.254.169.254 / 10.1.2.3 / 另一个租户的 checkout / git@127.0.0.1: / ssh://git@127.0.0.1:2222 / ext::sh -c ...
+
+修法：`gitx.RemoteTargets`（url / pushurl / insteadOf 都读）→ `sandbox.RefuseRemoteTarget`
+（urlguard + 跨租户路径，transport 白名单）→ `Deps.RemoteCheck`，接在 push / pull / fetch（Git 面板
+的 ahead-behind）/ PR 的 push 之前。修后：400，push/pull/fetch 计数 0；fixture 远端与公网 https
+字面量仍 200；allow-list 的内网远端仍 200（`TestGitRemoteGuardHonoursTheOperatorAllowList`）。
+
+### G5：宿主放置的浏览器导航
+
+失败先（路由已建、规则还没接）`TestBrowserNavigationIsRestrictedInHostPlacement`：
+
+    open "http://127.0.0.1:8080/v1/admin/audit" = 422, want 400: {"error":{"code":"sandbox_unavailable",...}}
+
+422 = URL 被接受，只是没装 Chrome。修法：`urlguard.CheckBrowserNavigation` + `Deps.BrowserNavigation`；
+回环只在已发布端口（`-browser-localhost-ports` + `-web-upstream` 的回环端口），控制面端口永远拒绝，
+169.254/16、私网、ULA、CGNAT、`host.docker.internal` 与 `*.internal` 拒绝。修后：control-port /
+loopback / link-local / private 各自 400 并带 reason；已发布端口、about:blank、公网字面量仍放行；
+容器放置不跑规则（同一条回环 URL 仍 422 通过）。
+
+**对 e2e 与 drill 的影响（明说）**：e2e 是宿主放置，`e2e/playwright.config.ts` 声明
+`-browser-localhost-ports 3100,3101`；`72-observe-input` 从临时端口改成固定 3101；`26-browser-tabs`
+的第二个页面改成公网字面量 `https://93.184.216.34/second`（规则要解析域名，离线跑时域名会是无关的
+DNS 拒绝）。drill 的浏览器在容器里（`remote` 放置），规则不跑；镜像 `-web-upstream 127.0.0.1:3100`
+自动发布，截图的 3100 页面照旧。
+
+### 门禁（本批，实测）
+
+- `go build ./...`、`go vet ./...`、`go test ./... -count=1`：全绿（`httpapi` 49.4s，`gitx` 21.6s，
+  `sandbox` 13.6s；新增测试按包见 §1.10.5）
+- `pnpm --dir web test -- --run`：38 files / 292 tests passed（30.5s）
+- `pnpm --dir web exec next build`：成功（同一组路由）
+- e2e 全量：**182（181 passed + 1 flaky，flaky 为 48-change-list 首跑，retry 后 passed，8.7m）**
+- `pwsh scripts/deliver-check.ps1 -Image piforge:gapfix`（镜像用 `--build-arg INSTALL_CHROMIUM=true` 构建）：**125 checks，0 failed，exit 0**（97.9 s；截图 35 042 B / 132 色；browser idle 55.9 s 后 chromium 0；drill 结束时源码树 clean）

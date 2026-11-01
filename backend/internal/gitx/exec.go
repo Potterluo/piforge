@@ -36,6 +36,42 @@ const (
 // repository (traversal, absolute path, NUL byte, ...).
 var ErrPathEscape = errors.New("gitx: path escapes repository root")
 
+// ErrInvalidRequest is the sentinel behind every syntactic refusal from this
+// package: a revision, branch name, cursor, diff range or path the caller wrote
+// in a shape git cannot use.
+//
+// It exists so the HTTP layer can tell apart the two failures that used to look
+// identical: a request that is wrong (400) and a control plane that is broken
+// (500). docs/DATA-FLOW-AUDIT.md G7 measured `POST /git/branch {"name":"-D"}`
+// answering 500 with this package's own guard sentence — the guard held, only
+// the status was a lie.
+var ErrInvalidRequest = errors.New("gitx: the request names something git cannot use")
+
+// InvalidRequestError is one syntactic refusal, carrying the sentence a person
+// reads. It matches ErrInvalidRequest through Is, so a caller can ask "was this
+// the caller's mistake?" without parsing English.
+type InvalidRequestError struct {
+	Detail string
+	Cause  error
+}
+
+func (e *InvalidRequestError) Error() string {
+	if e.Cause != nil {
+		return "gitx: " + e.Detail + ": " + e.Cause.Error()
+	}
+	return "gitx: " + e.Detail
+}
+
+func (e *InvalidRequestError) Unwrap() error { return e.Cause }
+
+// Is makes every InvalidRequestError match ErrInvalidRequest.
+func (e *InvalidRequestError) Is(target error) bool { return target == ErrInvalidRequest }
+
+// refuseRequest builds one typed refusal.
+func refuseRequest(format string, args ...any) error {
+	return &InvalidRequestError{Detail: fmt.Sprintf(format, args...)}
+}
+
 // CommandError is a git invocation that ran but exited non-zero.
 type CommandError struct {
 	Args   []string

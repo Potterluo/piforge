@@ -38,10 +38,35 @@ func (s *server) remoteRoot(w http.ResponseWriter, r *http.Request) (string, *co
 	return wt.Path, sess, true
 }
 
+// refuseRemoteDials is the G6 boundary: before git dials a checkout's remote,
+// the deployment gets to say no.
+//
+// The remote is repository configuration, which the agent can rewrite inside the
+// sandbox (`git remote set-url origin …`, or a pushurl, or a url.<base>.insteadOf
+// rewrite). In host placement this process runs the push, so without this check
+// the control plane dials a URL the tenant chose — from its own network
+// position, with its own credentials. Deps.RemoteCheck is the deployment's
+// answer (urlguard + the cross-tenant path rule, wired in cmd/piforged); nil
+// means this deployment does not run git on the host, and there is nothing to
+// check here.
+func (s *server) refuseRemoteDials(w http.ResponseWriter, r *http.Request, userID, root string) bool {
+	if s.deps.RemoteCheck == nil {
+		return true
+	}
+	if err := s.deps.RemoteCheck(r.Context(), userID, root); err != nil {
+		s.fail(w, r, err)
+		return false
+	}
+	return true
+}
+
 // handleGitPush sends the session's branch to origin.
 func (s *server) handleGitPush(w http.ResponseWriter, r *http.Request) {
 	root, sess, ok := s.remoteRoot(w, r)
 	if !ok {
+		return
+	}
+	if !s.refuseRemoteDials(w, r, sess.UserID, root) {
 		return
 	}
 	ctx, cancel := detach(r.Context(), 120*time.Second)
@@ -65,6 +90,9 @@ func (s *server) handleGitPull(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.refuseRemoteDials(w, r, sess.UserID, root) {
+		return
+	}
 	ctx, cancel := detach(r.Context(), 120*time.Second)
 	defer cancel()
 
@@ -84,8 +112,14 @@ func (s *server) handleGitPull(w http.ResponseWriter, r *http.Request) {
 // handleGitRemote reports how far the branch is from its remote, so the UI can show a
 // push button only when there is something to push.
 func (s *server) handleGitRemote(w http.ResponseWriter, r *http.Request) {
-	root, _, ok := s.remoteRoot(w, r)
+	root, sess, ok := s.remoteRoot(w, r)
 	if !ok {
+		return
+	}
+	// The panel's "is there anything upstream?" fetches, so the same boundary
+	// applies before the fetch: a rewritten origin must not be dialled just
+	// because the user opened the Git tab.
+	if !s.refuseRemoteDials(w, r, sess.UserID, root) {
 		return
 	}
 	ctx, cancel := detach(r.Context(), 30*time.Second)

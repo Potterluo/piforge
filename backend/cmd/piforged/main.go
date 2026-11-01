@@ -118,6 +118,11 @@ type options struct {
 	isolationBinary string
 	// browserProxy is handed to Chrome via --proxy-server.
 	browserProxy string
+	// browserLocalhostPortsRaw is the comma-separated set of loopback ports a
+	// *host-placement* browser may open (G5). Empty means none: the panel can
+	// still render public pages, but a dev server on localhost has to be
+	// declared by the deployment that published it.
+	browserLocalhostPortsRaw string
 	// browserIdleTimeout stops a sandbox browser that no viewer has been
 	// attached to for this long. Zero uses the manager's 60s default.
 	browserIdleTimeout time.Duration
@@ -393,6 +398,8 @@ func run() error {
 		"run the sandbox browser headless")
 	flag.StringVar(&opt.browserProxy, "browser-proxy", envOr("PIFORGE_BROWSER_PROXY", ""),
 		"proxy the sandbox browser should use (host:port)")
+	flag.StringVar(&opt.browserLocalhostPortsRaw, "browser-localhost-ports", envOr("PIFORGE_BROWSER_LOCALHOST_PORTS", ""),
+		"comma-separated loopback ports a host-placement browser may open (the dev server or UI this deployment published); the control plane's own port is always refused")
 	flag.DurationVar(&opt.browserIdleTimeout, "browser-idle-timeout", envDuration("PIFORGE_BROWSER_IDLE_TIMEOUT", browser.DefaultIdleTimeout),
 		"stop a sandbox browser after this long with no viewer attached (0: 60s default, negative disables)")
 	flag.DurationVar(&opt.browserTakeoverTTL, "browser-takeover-ttl", envDuration("PIFORGE_BROWSER_TAKEOVER_TTL", 45*time.Second),
@@ -467,6 +474,36 @@ func run() error {
 	opt.sandboxBrowser, opt.sandboxTerminal, opt.sandboxFiles =
 		string(resolved.Browser), string(resolved.Terminal), string(resolved.Files)
 
+	// G5: which loopback ports a host-placement browser may render. The set is
+	// the deployment's — the UI it serves, a dev server it started, a port a
+	// harness published — and it fails the boot when it cannot be parsed, because
+	// a silently dropped port is a panel that refuses a page with no explanation.
+	// The control plane's own listener is refused even when an operator lists it.
+	browserLocalhostPorts, err := parsePortList(opt.browserLocalhostPortsRaw)
+	if err != nil {
+		return fmt.Errorf("invalid -browser-localhost-ports: %w", err)
+	}
+	var browserControlPorts []int
+	if port, ok := listenPort(opt.addr); ok {
+		browserControlPorts = append(browserControlPorts, port)
+	}
+	// The UI this deployment serves is itself a published loopback port: the
+	// image's entrypoint starts Next on 127.0.0.1:3100 and the control plane
+	// proxies it, so "look at your own app in the panel" works out of the box.
+	// The control plane's own listener is still refused (it is checked first).
+	if port, ok := webUpstreamPort(opt.webUpstream); ok {
+		listed := false
+		for _, seen := range browserLocalhostPorts {
+			if seen == port {
+				listed = true
+				break
+			}
+		}
+		if !listed {
+			browserLocalhostPorts = append(browserLocalhostPorts, port)
+		}
+	}
+
 	// The quota policy and the network mode are configuration, and configuration
 	// that cannot mean anything must fail the start: a tenant that quietly runs
 	// unlimited is the failure mode both of these exist to prevent.
@@ -500,6 +537,19 @@ func run() error {
 		"browser", opt.sandboxBrowser,
 		"terminal", opt.sandboxTerminal,
 		"files", opt.sandboxFiles)
+	// G5 is only a boundary where Chrome is this process's child. Say which
+	// shape this deployment runs, and — for host placement — the exact loopback
+	// set, because a refusal the operator cannot explain is a support ticket.
+	if opt.sandboxBrowser == "host" {
+		logger.Info("host-placement browser navigation is restricted",
+			"published_ports", browserLocalhostPorts,
+			"control_ports", browserControlPorts,
+			"rule", "a loopback page only on a published port; the control plane's own port, link-local/metadata, private addresses and docker-host names are refused")
+	} else {
+		logger.Info("browser navigation is the sandbox's own network position",
+			"browser", opt.sandboxBrowser,
+			"detail", "Chrome runs inside the sandbox, so 127.0.0.1 is the sandbox's own loopback")
+	}
 	// A retired switch that was exported in this deployment's environment is worth
 	// one line: it is one of the few keys in a compose file that no longer does
 	// anything (stage 4 of docs/EXECUTION-BOUNDARY.md).
@@ -1372,6 +1422,34 @@ func run() error {
 		Logger:  logger,
 		Now:     time.Now,
 	})
+	// G6 of docs/DATA-FLOW-AUDIT.md: with a host workspace this process runs the
+	// checkout's git, and the checkout's `origin` is written by the agent inside
+	// the sandbox. Before any push/pull/fetch, read every remote git would dial
+	// (url, pushurl, and url.<base>.insteadOf rewrites) and apply the same rule
+	// the clone path applies: urlguard for a network transport, and a refusal for
+	// a path inside another tenant's sandbox. A container placement runs git
+	// inside the sandbox and is deliberately not wired: the tenant already owns
+	// that network position, and checking it here would read a host path that
+	// does not exist.
+	var remoteCheck func(ctx context.Context, userID, root string) error
+	if localSandboxRoot != "" {
+		remoteCheck = func(ctx context.Context, userID, root string) error {
+			targets, terr := git.RemoteTargets(ctx, root)
+			if terr != nil {
+				return terr
+			}
+			for _, target := range targets {
+				if rerr := sandbox.RefuseRemoteTarget(ctx, urlPolicy, localSandboxRoot, userID, root, target); rerr != nil {
+					return rerr
+				}
+			}
+			return nil
+		}
+		logger.Info("a checkout's remote is checked before git dials it",
+			"placement", "host",
+			"covers", "push, pull, fetch and the push a pull request makes",
+			"rule", "urlguard (http(s), ssh, git://; public addresses or an operator allow entry) and no path inside another tenant's sandbox")
+	}
 	handler := httpapi.NewServer(httpapi.Deps{
 		Store:           st,
 		Auth:            authn,
@@ -1392,6 +1470,10 @@ func run() error {
 		// provider probe, the forge client and the skill importer
 		// (docs/SANDBOX-DEPLOY.md §1.9).
 		URLPolicy: urlPolicy,
+		// The same policy, applied to a checkout's configured remotes before a
+		// push, pull or fetch dials one (G6). Nil under a container placement,
+		// where git runs in the sandbox.
+		RemoteCheck: remoteCheck,
 		// The quota is measured where the workspace is. With a container provider
 		// that is inside the sandbox: the reported root is /workspace, a path this
 		// process cannot open, and walking it here is how the admin page came to
@@ -1430,8 +1512,17 @@ func run() error {
 		LLMGateway:           gateway,
 		// The same binder, for the MCP broker's half of the rule: a broker token
 		// copied out of the sandbox is refused from anywhere else too (§16.3).
-		SandboxBinding:     binder,
-		Browser:            browsers,
+		SandboxBinding: binder,
+		Browser:        browsers,
+		// G5: the loopback rule applies only when Chrome is this process's
+		// child. The published set is the deployment's, the control port is this
+		// listener's, and container placement runs no rule (Chrome is in the
+		// sandbox).
+		BrowserNavigation: httpapi.BrowserNavigationPolicy{
+			HostPlacement: opt.sandboxBrowser == "host",
+			Published:     browserLocalhostPorts,
+			Control:       browserControlPorts,
+		},
 		Term:               termAdapter{m: terminals},
 		Provisioner:        prov,
 		SetupDefaults:      setupDefaults,

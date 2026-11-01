@@ -324,13 +324,13 @@ func (r *Runner) SetRemote(ctx context.Context, dir, url string) error {
 // validateBranchName asks git itself whether name is a legal branch name.
 func (r *Runner) validateBranchName(ctx context.Context, dir, name string) error {
 	if strings.TrimSpace(name) == "" {
-		return fmt.Errorf("gitx: empty branch name")
+		return refuseRequest("empty branch name")
 	}
 	if err := safeRevArg(name); err != nil {
 		return err
 	}
 	if _, err := r.Run(ctx, dir, "check-ref-format", "--branch", name); err != nil {
-		return fmt.Errorf("gitx: invalid branch name %q: %w", name, err)
+		return &InvalidRequestError{Detail: fmt.Sprintf("invalid branch name %q", name), Cause: err}
 	}
 	return nil
 }

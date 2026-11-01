@@ -1,6 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
 import http from "node:http";
-import type { AddressInfo } from "node:net";
 
 import { USER, apiWrite, login, openNewSession, sendPrompt } from "./helpers";
 
@@ -47,8 +46,12 @@ test("observe mode drops clicks and keys, takeover delivers them", async ({ page
   </script>
 </body></html>`);
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const port = (server.address() as AddressInfo).port;
+  // A host-placement browser may only open loopback ports the deployment
+  // published (docs/DATA-FLOW-AUDIT.md G5). The e2e control plane publishes 3100
+  // for the UI and 3101 for this fixture server (playwright.config.ts), so the
+  // page is a published dev server rather than an arbitrary loopback port.
+  const port = 3101;
+  await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${port}`;
 
   try {

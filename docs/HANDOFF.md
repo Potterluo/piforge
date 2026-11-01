@@ -973,8 +973,44 @@ internet, so the sandbox had an HTTP channel out. No key, file or database row w
   `-skill-clone-max-bytes` (16 MiB default), the directory is deleted, and the import is refused with a
   400 naming the cap and the bytes measured.
 
-**What is still open**: `file://` skill import URLs have no allow-list (a symlink-bearing repository is
-refused, but a tenant can still point the importer at a repository this host can read); `git@host:path`
-is host-checked only (the HTTP address pinning does not apply to ssh); the allow-list is host/CIDR +
-port, not path. The full list is §1.9.6 of `docs/SANDBOX-DEPLOY.md` and §18.3 of
-`docs/EXECUTION-BOUNDARY.md`.
+**What is still open**: `git@host:path` is host-checked only (the HTTP address pinning does not apply to
+ssh); the allow-list is host/CIDR + port, not path; a host checkout's `remote.<name>.proxy` and
+credential helpers are not read by the G6 guard. `file://` skill imports are confined to
+`-skill-import-roots` now (empty means refuse). The full list is §1.9.6 / §1.10 of
+`docs/SANDBOX-DEPLOY.md`, §14 of `docs/DATA-FLOW-AUDIT.md` and §18.3 of `docs/EXECUTION-BOUNDARY.md`.
+
+## The data-flow audit, second pass: G5–G8 (2026-11-01)
+
+The first pass (`0d3a2bc`, `25dfe8e`, `e303c82`) closed four edges and left four open. This pass closes
+them; `docs/DATA-FLOW-AUDIT.md` carries the verdicts, the test names and the remaining residuals, and
+`docs/SANDBOX-DEPLOY.md` §1.10 is the operational half.
+
+- **G7 — the status was the bug.** `POST /git/branch {"name":"-D"}` answered 500 with
+  `gitx: revision "-D" may not start with '-'`; the guard held, the status lied. Every syntactic refusal
+  from `gitx` is now a typed error (`ErrInvalidRequest` / `ErrPathEscape`) mapped once in
+  `httpapi.classify`, so branch, checkout, commit, diff (commit / branch base / range), log and the
+  provisioning worktree path all answer 400.
+- **G8 — the export is a spreadsheet.** A tool name beginning `=`, `+`, `-`, `@`, TAB or CR was a live
+  formula in the admin's CSV. Every string column is prefixed with a quote (`csvFormulaSafe`), tested
+  with `=cmd|' /C calc'!A0`.
+- **G6 — the remote was the tenant's to rewrite.** In host placement `git push` dialled whatever `origin`
+  the agent had rewritten in the sandbox. Before any push/pull/fetch (and the PR's push) the control
+  plane now reads every `remote.*.url`, `remote.*.pushurl` and `url.<base>.insteadOf`
+  (`gitx.RemoteTargets`), runs it through the same `urlguard` policy as every other tenant fetch,
+  refuses `ext::` and unknown transports, refuses a local path inside another tenant's sandbox, and
+  answers a typed 400 with zero dials. A legitimate internal remote is allowed with `-url-allow-file`
+  (host + ports). Not wired under a container placement: git runs in the sandbox there.
+- **G5 — a policy with a stated cost.** With `-sandbox-browser host` the panel's Chrome is this
+  process's child, so a page it rendered came from the control plane's network position. A loopback page
+  is now allowed only on a port the deployment published — `-browser-localhost-ports`
+  (comma-separated) plus the port of `-web-upstream` when it is loopback (the image's own UI on 3100) —
+  and never on the control plane's own listener; 169.254/16 (metadata), private and docker-host names
+  stay refused. Default is "no loopback navigation"; an agent-started dev server on an undeclared port
+  is not viewable in host placement, which is the cost. Container placement runs no rule, and the drill
+  (browser inside the container) is unaffected; the e2e suite declares
+  `-browser-localhost-ports 3100,3101`.
+
+**If you operate this build**: publish the ports you want viewable
+(`PIFORGE_BROWSER_LOCALHOST_PORTS=3000,3100`), and if you push to an internal git server from a host
+workspace, name it in the URL allow-list with its port. Both refusals name the rule and answer 400, not
+500.

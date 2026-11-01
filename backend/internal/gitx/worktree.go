@@ -43,7 +43,7 @@ func (r *Runner) AddWorktree(ctx context.Context, repoDir, path, branch string, 
 	switch {
 	case createBranch:
 		if branch == "" {
-			return fmt.Errorf("gitx: add worktree: branch name required when createBranch is set")
+			return refuseRequest("add worktree: branch name required when createBranch is set")
 		}
 		if err := r.validateBranchName(ctx, dir, branch); err != nil {
 			return err

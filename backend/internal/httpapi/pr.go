@@ -189,6 +189,11 @@ func (s *server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := auth.MustUser(r.Context())
+	// A PR pushes before it opens anything, so the G6 boundary applies here
+	// too: the push dials the same origin the push button does.
+	if !s.refuseRemoteDials(w, r, user.ID, root) {
+		return
+	}
 	var in createPRRequest
 	if err := decodeJSON(r, &in); err != nil {
 		s.fail(w, r, err)

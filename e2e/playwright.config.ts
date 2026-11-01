@@ -100,7 +100,12 @@ export default defineConfig({
       // -skill-import-roots: the suite stages a repository under the OS temp
       // directory and imports it over file://, which is confined to the roots
       // the deployment writes down (docs/DATA-FLOW-AUDIT.md G1).
-      command: `"${backendExe}" -addr 127.0.0.1:8080 -data "${dataDir}" -fake-pi -dev -skill-import-roots "${tmpdir()}"${chromeBinary ? ` -chrome "${chromeBinary}"` : ""}`,
+      // -browser-localhost-ports: with -sandbox local the browser is a child of
+      // the control plane, and the G5 rule only lets it open loopback ports the
+      // deployment published. This harness publishes the UI (3100) and the
+      // fixture server 72-observe-input listens on (3101); the control plane's
+      // own 8080 is always refused.
+      command: `"${backendExe}" -addr 127.0.0.1:8080 -data "${dataDir}" -fake-pi -dev -skill-import-roots "${tmpdir()}" -browser-localhost-ports 3100,3101${chromeBinary ? ` -chrome "${chromeBinary}"` : ""}`,
       url: "http://127.0.0.1:8080/healthz",
       reuseExistingServer: false,
       timeout: 30_000,

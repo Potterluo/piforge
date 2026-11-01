@@ -25,8 +25,13 @@ test("the browser panel keeps several pages", async ({ page }) => {
   expect(await tabs.count()).toBeGreaterThanOrEqual(1);
 
   // Open a second page through the API, then find it in the strip.
+  //
+  // A public *literal* address, not a name: the control plane's G5 rule resolves
+  // a hostname to decide whether it is loopback or private, and this suite runs
+  // offline, where a name would be an unrelated DNS refusal. The page does not
+  // need to load — the test is about the tab, its viewer and its close button.
   const opened = await apiWrite(page, "POST", `/v1/sessions/${sessionId}/browser/tabs`, {
-    url: "https://example.com/second",
+    url: "https://93.184.216.34/second",
   });
   expect(opened.status).toBe(201);
   const id = (opened.body as { tab: { id: string } }).tab.id;

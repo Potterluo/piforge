@@ -117,16 +117,16 @@ func RepoRelative(root, abs string) (string, error) {
 // mistaken for an option or an option-injection.
 func safeRevArg(s string) error {
 	if strings.TrimSpace(s) == "" {
-		return fmt.Errorf("gitx: empty revision")
+		return refuseRequest("empty revision")
 	}
 	if strings.HasPrefix(s, "-") {
-		return fmt.Errorf("gitx: revision %q may not start with '-'", s)
+		return refuseRequest("revision %q may not start with '-'", s)
 	}
 	if strings.ContainsAny(s, "\x00\r\n\t ") {
-		return fmt.Errorf("gitx: revision %q contains whitespace or control characters", s)
+		return refuseRequest("revision %q contains whitespace or control characters", s)
 	}
 	if strings.Contains(s, "..") {
-		return fmt.Errorf("gitx: revision %q may not contain '..'", s)
+		return refuseRequest("revision %q may not contain '..'", s)
 	}
 	return nil
 }

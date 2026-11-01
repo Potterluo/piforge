@@ -156,6 +156,34 @@ var auditCSVHeader = []string{
 	"run_id", "exit_code", "result_bytes", "args_hash", "id",
 }
 
+// auditCSVStringColumns is every column whose value is text. The three numeric
+// columns (duration_ms, exit_code, result_bytes) are excluded on purpose: a
+// negative exit code is a number and prefixing it would turn it into a string.
+var auditCSVStringColumns = []int{0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15, 16}
+
+// csvFormulaSafe makes one cell inert in a spreadsheet.
+//
+// The audit export is opened by an operator in Excel, LibreOffice or Sheets,
+// and several columns carry text a tenant wrote: the tool name comes from the
+// agent's run, the project and session labels from the account. A cell whose
+// first character is `=`, `+`, `-`, `@`, TAB or CR (OWASP's CSV-injection set)
+// is a formula to those programs, so `=cmd|' /C calc'!A0` as a tool name would
+// execute on open — a tenant's text running in the operator's spreadsheet.
+//
+// The mitigation is the one OWASP names first: prefix the cell with a single
+// quote. Every one of those readers treats a leading quote as "this cell is
+// text" and does not show it, so the value a person reads is unchanged.
+func csvFormulaSafe(cell string) string {
+	if cell == "" {
+		return cell
+	}
+	switch cell[0] {
+	case '=', '+', '-', '@', '\t', '\r', '\n':
+		return "'" + cell
+	}
+	return cell
+}
+
 // writeAuditCSV streams one page as CSV.
 //
 // The download is the *current page*, and the response says how large the total
@@ -203,6 +231,13 @@ func (s *server) writeAuditCSV(w http.ResponseWriter, rows []store.AuditRow) {
 		}
 		if row.ResultBytes != nil {
 			record[14] = strconv.Itoa(*row.ResultBytes)
+		}
+		// Every text column goes through the spreadsheet rule, including the
+		// ones a tenant wrote (tool, project, session, labels). The numeric
+		// columns were just formatted and are skipped: prefixing a negative
+		// exit code would turn a number into text.
+		for _, i := range auditCSVStringColumns {
+			record[i] = csvFormulaSafe(record[i])
 		}
 		_ = out.Write(record)
 	}

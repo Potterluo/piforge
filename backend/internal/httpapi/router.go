@@ -270,9 +270,23 @@ type Deps struct {
 	// widen it the same way, with explicit allow entries
 	// (docs/SANDBOX-DEPLOY.md §1.9).
 	URLPolicy *urlguard.Policy
+	// RemoteCheck refuses a checkout's configured remotes before a push, pull or
+	// fetch dials one (docs/DATA-FLOW-AUDIT.md G6). It is wired only for a
+	// *host* workspace: under `-sandbox local` the control plane runs the
+	// checkout's git, and `origin` is a value the agent rewrote inside the
+	// sandbox, so an unchecked push dials a URL the tenant chose from the
+	// control plane's own network position. A container placement runs git
+	// inside the sandbox and needs nothing here — the tenant already has that
+	// network position. Nil (hand-built test servers) skips the check.
+	RemoteCheck func(ctx context.Context, userID, root string) error
 	// Browser owns one Chrome per sandbox. Nil disables the browser panel with
 	// a typed 422 rather than a hanging socket.
 	Browser *browser.Manager
+	// BrowserNavigation is the host-placement navigation rule (G5): with
+	// `-sandbox-browser host` Chrome is this process's child, so a page it
+	// renders is read from the control plane's network position. The zero value
+	// means "not host placement" (Chrome is in the sandbox) and runs no rule.
+	BrowserNavigation BrowserNavigationPolicy
 	// Term backs the terminal panel. When nil the PTY endpoint returns
 	// sandbox_unavailable instead of opening a socket it cannot serve.
 	Term TermManager
