@@ -1,6 +1,7 @@
 package llmgw
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -9,14 +10,17 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // Claims is what a sandbox token carries.
 //
-// It is deliberately small and stateless: the gateway must be able to validate
-// a request without a database round trip on every model call, and the only
-// thing it actually needs is which user's provider to use.
+// It is deliberately small: the gateway validates the signature without a
+// database round trip, and the only thing it needs from the claim is which
+// user's provider to use. The one database read it does make is the revocation
+// generation, which is the price of a revocation that survives a restart (see
+// RevocationStore).
 type Claims struct {
 	SessionID string `json:"s"`
 	UserID    string `json:"u"`
@@ -62,6 +66,28 @@ type Claims struct {
 // turns are longer; the default is the one a shared deployment should run.
 const DefaultTTL = time.Hour
 
+// RevocationStore is the durable half of revocation (store/gateway_revocations.go).
+//
+// It is an interface here rather than a concrete store so this package keeps its
+// single dependency (the claims) and so a signer can be built without a database
+// in a unit test. A nil store means "memory only", which is what a test and a
+// bare `llmgw.NewSigner` get; every deployment wires the real one.
+//
+// The store is authoritative: Verify reads it on every model call, and the
+// in-memory map is only a fast path for the value just written or read.
+type RevocationStore interface {
+	// RevokeGatewayToken bumps a session's generation and returns it.
+	RevokeGatewayToken(ctx context.Context, sessionID string, expiresAt time.Time) (int64, error)
+	// GatewayRevocationGeneration returns the number tokens must carry (0 when
+	// nothing was ever revoked).
+	GatewayRevocationGeneration(ctx context.Context, sessionID string) (int64, error)
+	// ExtendGatewayRevocation keeps a revocation row alive while a token minted
+	// after it can still be presented.
+	ExtendGatewayRevocation(ctx context.Context, sessionID string, expiresAt time.Time) error
+	// SweepGatewayRevocations deletes rows past their expiry.
+	SweepGatewayRevocations(ctx context.Context, now time.Time) (int64, error)
+}
+
 // Signer issues and verifies tokens with HMAC-SHA256.
 //
 // It also holds the revocation state: the gateway asks Verify on every model call
@@ -69,15 +95,27 @@ const DefaultTTL = time.Hour
 // another hour. Each session has a generation counter — Revoke increments it and
 // every issue stamps the current value into the claims — so "tokens from before
 // the stop" and "tokens for the next spawn" are distinguished exactly, even when
-// a pause and the following resume happen inside one second. The state is in
-// memory on purpose: it describes live processes, which do not survive a restart
-// either.
+// a pause and the following resume happen inside one second.
+//
+// The counter is persisted (RevocationStore). It used to be memory-only, and the
+// second adversarial acceptance run showed what that cost: a control-plane
+// restart inside the token's lifetime forgot every revocation and re-enabled
+// every token minted before it. The map below is a fast path and a fallback for
+// a failed durable read; it is not the authority.
 type Signer struct {
-	key []byte
-	ttl time.Duration
+	key   []byte
+	ttl   time.Duration
+	store RevocationStore
+	// log is where a failed durable write is reported. It never fails the call:
+	// a revocation that could not be persisted is still enforced in memory, and
+	// saying so is better than pretending it was durable.
+	log func(format string, args ...any)
 
 	mu         sync.RWMutex
 	generation map[string]int64
+	// storeErrors counts durable reads that failed, so "the fast path is being
+	// used" is a number a test can assert on instead of a log line nobody reads.
+	storeErrors atomic.Int64
 }
 
 // NewSigner builds a signer. The key should be random and process-local unless
@@ -89,12 +127,36 @@ func NewSigner(key []byte, ttl time.Duration) (*Signer, error) {
 	if ttl <= 0 {
 		ttl = DefaultTTL
 	}
-	return &Signer{key: key, ttl: ttl, generation: map[string]int64{}}, nil
+	return &Signer{
+		key:        key,
+		ttl:        ttl,
+		log:        func(string, ...any) {},
+		generation: map[string]int64{},
+	}, nil
 }
+
+// UseRevocations makes the durable store authoritative. It is called once at
+// boot, before the gateway serves.
+func (s *Signer) UseRevocations(store RevocationStore) { s.store = store }
+
+// SetLogger routes the "the durable write failed" warnings somewhere visible.
+func (s *Signer) SetLogger(log func(format string, args ...any)) {
+	if log != nil {
+		s.log = log
+	}
+}
+
+// StoreErrors is how many durable reads fell back to the in-memory set.
+func (s *Signer) StoreErrors() int64 { return s.storeErrors.Load() }
 
 // TTL reports the lifetime this signer gives a token. The boot log prints it so
 // "how long is a leaked token worth" is answerable without reading the code.
 func (s *Signer) TTL() time.Duration { return s.ttl }
+
+// revokeTimeout bounds the durable half of a revocation. The stop path is
+// synchronous on purpose (a pause that returned 200 must mean the row is on
+// disk), but it must not be able to hang the caller forever on a locked database.
+const revokeTimeout = 5 * time.Second
 
 // Revoke invalidates every token issued for sessionID so far.
 //
@@ -102,17 +164,104 @@ func (s *Signer) TTL() time.Duration { return s.ttl }
 // delete, a model switch, and the project delete that stops every agent it owns.
 // The next spawn of the same session gets the next generation and works; only the
 // tokens that were already in the sandbox die.
+//
+// The in-memory generation is bumped first and the durable row is written in the
+// same call. If the write fails the revocation still holds for this process's
+// lifetime (the pre-fix behaviour, never weaker) and the failure is logged with
+// what it means: a restart before the row lands would re-enable the token.
 func (s *Signer) Revoke(sessionID string) {
+	s.RevokeContext(context.Background(), sessionID)
+}
+
+// RevokeContext is Revoke with the caller's deadline.
+func (s *Signer) RevokeContext(ctx context.Context, sessionID string) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return
+	}
+	s.mu.Lock()
+	if s.generation == nil {
+		s.generation = map[string]int64{}
+	}
+	s.generation[sessionID]++
+	local := s.generation[sessionID]
+	s.mu.Unlock()
+
+	if s.store == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, revokeTimeout)
+	defer cancel()
+	// The row must outlive every token that was minted before this stop: their
+	// own `exp` is at most now+ttl, so the same instant is the sweep deadline.
+	generation, err := s.store.RevokeGatewayToken(ctx, sessionID, time.Now().Add(s.ttl))
+	if err != nil {
+		s.log("model gateway token revocation is in memory only: the durable write failed, so a control-plane restart inside the token TTL would re-enable it",
+			"session", sessionID, "error", err.Error())
+		return
+	}
+	s.remember(sessionID, generation, local)
+}
+
+// remember keeps the in-memory fast path at least at the durable value.
+func (s *Signer) remember(sessionID string, values ...int64) {
+	highest := int64(0)
+	for _, v := range values {
+		if v > highest {
+			highest = v
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.generation == nil {
 		s.generation = map[string]int64{}
 	}
-	s.generation[sessionID]++
+	if s.generation[sessionID] < highest {
+		s.generation[sessionID] = highest
+	}
+}
+
+// durableGeneration asks the store for the number tokens must carry. A failure
+// is reported and the in-memory value is used: a read that could not be made
+// must never accept a token the fast path would have refused.
+func (s *Signer) durableGeneration(ctx context.Context, sessionID string) int64 {
+	if s.store == nil {
+		return 0
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, revokeTimeout)
+	defer cancel()
+	generation, err := s.store.GatewayRevocationGeneration(ctx, sessionID)
+	if err != nil {
+		s.storeErrors.Add(1)
+		s.log("model gateway token check fell back to the in-memory revocation set",
+			"session", sessionID, "error", err.Error())
+		return 0
+	}
+	if generation > 0 {
+		s.remember(sessionID, generation)
+	}
+	return generation
+}
+
+// Sweep deletes revocation rows whose last affected token has expired, and
+// reports how many went. The control plane runs it on a timer; tests call it
+// directly.
+func (s *Signer) Sweep(ctx context.Context, now time.Time) (int64, error) {
+	if s.store == nil {
+		return 0, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, revokeTimeout)
+	defer cancel()
+	return s.store.SweepGatewayRevocations(ctx, now)
 }
 
 // Revoked reports whether sessionID has ever been revoked. It is diagnostics,
@@ -141,9 +290,18 @@ func (s *Signer) RevokedCount() int {
 }
 
 // Issue mints a token for a session.
+//
+// The generation is read from the durable store when there is one: a session
+// that was revoked before a control-plane restart must mint its next token with
+// the *persisted* number, or the resumed session's token would be refused by the
+// very rule that keeps the old one dead.
 func (s *Signer) Issue(sessionID, userID, provider, model string, now time.Time) (string, error) {
 	if sessionID == "" || userID == "" || provider == "" {
 		return "", errors.New("llmgw: session, user and provider are required to issue a token")
+	}
+	generation := s.generationFor(sessionID)
+	if durable := s.durableGeneration(context.Background(), sessionID); durable > generation {
+		generation = durable
 	}
 	claims := Claims{
 		SessionID:  sessionID,
@@ -151,7 +309,7 @@ func (s *Signer) Issue(sessionID, userID, provider, model string, now time.Time)
 		Provider:   provider,
 		Model:      model,
 		IssuedAt:   now.Unix(),
-		Generation: s.generationFor(sessionID),
+		Generation: generation,
 		ExpiresAt:  now.Add(s.ttl).Unix(),
 	}
 	payload, err := json.Marshal(claims)
@@ -159,11 +317,31 @@ func (s *Signer) Issue(sessionID, userID, provider, model string, now time.Time)
 		return "", fmt.Errorf("llmgw: encode claims: %w", err)
 	}
 	body := base64.RawURLEncoding.EncodeToString(payload)
+	// Keep the revocation row alive for at least as long as this token: the
+	// sweep must not delete the generation this token relies on before the token
+	// itself expires.
+	if s.store != nil && generation > 0 {
+		s.extend(context.Background(), sessionID, time.Unix(claims.ExpiresAt, 0))
+	}
 	return body + "." + s.sign(body), nil
 }
 
-// Verify checks the signature and the expiry.
-func (s *Signer) Verify(token string, now time.Time) (Claims, error) {
+// extend pushes the row's expiry out to cover a token minted after the revoke.
+// A failure is logged, not returned: the token is already signed and the worst
+// case (the row is swept early) is a rejected token at the next check, which the
+// next prompt reissues.
+func (s *Signer) extend(ctx context.Context, sessionID string, expiresAt time.Time) {
+	ctx, cancel := context.WithTimeout(ctx, revokeTimeout)
+	defer cancel()
+	if err := s.store.ExtendGatewayRevocation(ctx, sessionID, expiresAt); err != nil {
+		s.log("model gateway: could not extend the revocation record for a resumed session",
+			"session", sessionID, "error", err.Error())
+	}
+}
+
+// Verify checks the signature, the expiry and the session's revocation
+// generation.
+func (s *Signer) Verify(ctx context.Context, token string, now time.Time) (Claims, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return Claims{}, errors.New("missing token")
@@ -196,7 +374,16 @@ func (s *Signer) Verify(token string, now time.Time) (Claims, error) {
 	// credential behind for the rest of the TTL. The comparison is against the
 	// generation, so the token minted for the next spawn of the same session (a
 	// resume, a restart) verifies immediately.
-	if claims.Generation != s.generationFor(claims.SessionID) {
+	//
+	// The durable number is authoritative — it is what survives the restart that
+	// used to re-enable every token — and the in-memory number is the fallback
+	// when the store cannot be read. Only the signature is checked before this,
+	// so an unauthenticated caller cannot make the gateway hit the database.
+	generation := s.generationFor(claims.SessionID)
+	if durable := s.durableGeneration(ctx, claims.SessionID); durable > generation {
+		generation = durable
+	}
+	if claims.Generation != generation {
 		return Claims{}, errors.New("token revoked: the session's agent has stopped")
 	}
 	return claims, nil

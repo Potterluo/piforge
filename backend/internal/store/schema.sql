@@ -414,3 +414,31 @@ CREATE TABLE IF NOT EXISTS mcp_tokens (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS mcp_tokens_hash ON mcp_tokens (token_hash);
 CREATE UNIQUE INDEX IF NOT EXISTS mcp_tokens_session_server ON mcp_tokens (session_id, server_id);
+
+-- ============ gateway_revocations: the durable half of token revocation ============
+--
+-- A model-gateway token is an HMAC claim (internal/llmgw), so the only way to
+-- end one before its TTL is a counter the verifier can compare against. That
+-- counter used to live in the control plane's memory, which meant a restart
+-- inside the token's lifetime silently re-enabled every token minted before it
+-- — the adversarial acceptance run #2 named this as one of the three risks it
+-- left open.
+--
+-- The row is the authority: `generation` is the number every token for this
+-- session must carry, `expires_at` is the moment the last token that could
+-- still be alive expires (so the row is swept, not kept forever), and
+-- `revoked_at` says when the counter last moved. The in-memory map in
+-- internal/llmgw stays as a fast path but is no longer authoritative.
+--
+-- There is deliberately NO foreign key to sessions. A revoked session can be
+-- deleted, and its tokens (generation 0, the ones minted before the revoke)
+-- must not become valid again when the row cascades away. The row is removed by
+-- the sweep at `expires_at`, which is exactly when the last affected token
+-- expires by its own claims.
+CREATE TABLE IF NOT EXISTS gateway_revocations (
+    session_id TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL,
+    revoked_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS gateway_revocations_expiry ON gateway_revocations (expires_at);

@@ -104,13 +104,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var claims Claims
 	verified := false
 	if pathToken != "" {
-		if cl, verr := h.cfg.Signer.Verify(pathToken, h.cfg.Now()); verr == nil {
+		if cl, verr := h.cfg.Signer.Verify(r.Context(), pathToken, h.cfg.Now()); verr == nil {
 			claims, verified = cl, true
 		}
 	}
 	if !verified {
 		if bearerToken := bearer(r.Header.Get("Authorization")); bearerToken != "" {
-			if cl, verr := h.cfg.Signer.Verify(bearerToken, h.cfg.Now()); verr == nil {
+			if cl, verr := h.cfg.Signer.Verify(r.Context(), bearerToken, h.cfg.Now()); verr == nil {
 				claims, verified = cl, true
 				// The segment was part of the upstream path after all.
 				rest = "/" + pathToken + rest

@@ -77,6 +77,7 @@ func main() {
 	if code, handled := agentsupervisor.MaybeRun(context.Background(), os.Args); handled {
 		os.Exit(code)
 	}
+
 	if err := run(); err != nil {
 		slog.Error("piforged exited with an error", "err", err)
 		os.Exit(1)
@@ -654,12 +655,35 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("init gateway signer: %w", err)
 	}
+	// Revocation is durable, not a process-local set. Adversarial acceptance #2
+	// found the difference the hard way: pause revoked the token correctly, and
+	// a control-plane restart inside the one-hour TTL re-enabled every token
+	// minted before it, because the generation counter started again from zero.
+	// store/gateway_revocations.go is the authority now; the signer's map is a
+	// fast path over it.
+	//
+	// The signing key was already persisted for the same class of reason (an
+	// agent that outlives this process keeps using its token). The two now
+	// agree: the signature survives a restart *and* so does the revocation.
+	signer.UseRevocations(st)
+	signer.SetLogger(func(format string, args ...any) { logger.Warn(fmt.Sprintf(format, args...)) })
+	if count, cerr := st.GatewayRevocationCount(ctx); cerr == nil {
+		logger.Info("model gateway revocations are durable",
+			"table", "gateway_revocations",
+			"on_record", count,
+			"detail", "a revoked token stays revoked across a restart; a row is swept when the last token it covers expires")
+	}
+	// The sweep. A revocation row is needed only while a token minted before it
+	// can still be presented (one TTL, plus the extension a resumed session
+	// applies), so the table stays proportional to the revocations that are
+	// still load-bearing rather than to every stop the deployment ever had.
+	go sweepGatewayRevocations(ctx, signer, logger)
 	// Say the number out loud: "how long is a leaked sandbox token worth" is a
 	// security property of the deployment, and it is now one hour rather than
 	// half a day.
 	logger.Info("model gateway token lifetime",
 		"ttl", signer.TTL().String(),
-		"revoked_on", "the session's agent stopping (pause, archive, delete, model switch, shutdown)",
+		"revoked_on", "the session's agent stopping (pause, archive, delete, model switch); not on shutdown, because a container agent outlives this process",
 		"detail", "the token is minted per agent spawn and ends with the process; the TTL is the backstop")
 	gateway, err := llmgw.New(llmgw.Config{
 		Store:  st,
@@ -1019,11 +1043,20 @@ func run() error {
 			"detail", "RPC over the sandbox exec stream; the provider key never enters the container")
 	}
 
-	rt, err := newRuntime(opt, logger, setupFor, modelFor, launcher, agent, signer.Revoke)
+	// The stop hook ends a session's model-gateway token when its agent goes
+	// away — with one deliberate exception (a control-plane shutdown, where a
+	// container agent is expected to keep running), documented on
+	// revocationHook in gateway_revocations.go.
+	revocations := &revocationHook{signer: signer}
+	rt, err := newRuntime(opt, logger, setupFor, modelFor, launcher, agent, revocations.onStop)
 	if err != nil {
 		return err
 	}
 	defer rt.Close()
+	// Registered after `defer rt.Close()` so it runs *before* it (defers are
+	// LIFO): rt.Close stops every live session, and those stops must not be
+	// persisted as revocations for agents that are meant to survive.
+	defer revocations.drain()
 
 	// 5. Terminals. The manager owns the PTY processes; the HTTP layer only
 	// relays bytes (PRD §7.6.1).

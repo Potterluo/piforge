@@ -2,6 +2,7 @@ package llmgw
 
 import (
 	"encoding/base64"
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -120,19 +121,19 @@ func TestRevokeIsIdempotentAndTheNextTokenWorks(t *testing.T) {
 	if got := signer.RevokedCount(); got != 1 {
 		t.Fatalf("revocation state holds %d sessions, want 1", got)
 	}
-	if _, err := signer.Verify(before, now); err == nil {
+	if _, err := signer.Verify(context.Background(), before, now); err == nil {
 		t.Fatal("a token issued before the revoke still verifies")
 	}
 	after, err := signer.Issue("ses_one", "usr_1", "volc", "", now)
 	if err != nil {
 		t.Fatalf("Issue after revoke: %v", err)
 	}
-	if _, err := signer.Verify(after, now); err != nil {
+	if _, err := signer.Verify(context.Background(), after, now); err != nil {
 		t.Fatalf("the token minted after the revoke does not verify: %v", err)
 	}
 	// A second stop kills the second token too, and the first stays dead.
 	signer.Revoke("ses_one")
-	if _, err := signer.Verify(after, now); err == nil {
+	if _, err := signer.Verify(context.Background(), after, now); err == nil {
 		t.Fatal("the second revoke left the current token valid")
 	}
 }
