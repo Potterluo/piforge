@@ -16,8 +16,19 @@
 # /proc/self/limits in bytes: `ulimit -f` is not portable here (bash counts 1024
 # byte blocks, dash 512, and a quota that is off by 2x is worse than none).
 #
-# It runs as gem because the enforcer has to signal gem's processes, and killing
-# or stopping another uid needs CAP_KILL, which the sandbox drops.
+# Two things changed after the third adversarial acceptance (2026-11-01):
+#
+#   1. The measurement is no longer "the workspace only". 4.84 GB in /tmp with the
+#      workspace at 125 KB and no event was the finding: the budget is about
+#      *disk*. The writable layers outside the workspace are measured as the
+#      container's root filesystem minus this script's boot baseline, so the
+#      image's own files are not charged to the tenant and a /tmp burst is.
+#   2. The loop is wrapped in a root-owned supervisor. The enforcer itself must
+#      run as gem (it has to signal gem's processes, and the sandbox has CapEff 0,
+#      so a root process could not), which made it killable by the tenant:
+#      `kill -9 $(pgrep -f quota-enforcer)` took the bound from 1.04x to 1.56x.
+#      A root loop cannot be signalled by gem and restarts the child within
+#      ~0.2 s, so killing it is a hiccup rather than an escape.
 #
 # Nothing here is secret and nothing is configurable by the tenant: the script and
 # the binary are root-owned 0555 in the image, and the only input is the rlimit.
@@ -47,7 +58,7 @@ log "starting: limit=${soft} bytes (RLIMIT_FSIZE)"
 
 # The user exists by now (the base image creates it before this hook), but the
 # workspace may still be root-owned for a moment; wait for it briefly so the
-# marker file can be written.
+# baseline below and the enforcer see the tree they are meant to.
 for _ in $(seq 1 30); do
   if su -s /bin/sh gem -c 'test -w /workspace' 2>/dev/null; then
     break
@@ -55,14 +66,39 @@ for _ in $(seq 1 30); do
   sleep 0.2
 done
 
-# nohup + a redirect: the hook's shell exits immediately and the loop must outlive
-# it. It dies with the container, which is exactly the lifecycle it should have.
-nohup su -s /bin/sh gem -c "exec /opt/piforge/piforged quota-enforcer -limit $soft -root /workspace -interval 100ms -kill-after 12" \
-  >>/tmp/quota-enforcer.log 2>&1 &
+# The boot baseline: how large the container's writable layers already are
+# (the image's own files), measured before any tenant process runs. Kept in /run,
+# which is root-owned, so the tenant cannot rewrite it — a baseline the tenant
+# controls would be a budget the tenant controls.
+baseline_dir=/run/piforge
+baseline_file="$baseline_dir/disk-baseline"
+mkdir -p "$baseline_dir"
+chmod 755 "$baseline_dir"
+boot_bytes=$(du -sbx / 2>/dev/null | awk '{print $1}')
+case "$boot_bytes" in
+  ''|*[!0-9]*) log "could not measure the boot baseline; the enforcer will measure the workspace only" ;;
+  *)
+    printf '%s\n' "$boot_bytes" > "$baseline_file"
+    chmod 644 "$baseline_file"
+    log "writable-layer baseline: ${boot_bytes} bytes (${baseline_file})"
+    ;;
+esac
 
-sleep 0.3
+# The supervisor. Root-owned and detached, it starts the enforcer as gem and
+# restarts it whenever it exits — a tenant `kill -9` of the gem process is
+# therefore a ~0.2 s gap in enforcement, not the end of it. It dies with the
+# container, which is the lifecycle it should have.
+nohup setsid /bin/bash -c "
+  while :; do
+    su -s /bin/sh gem -c 'exec /opt/piforge/piforged quota-enforcer -limit $soft -root /workspace -sysroot / -baseline $baseline_file -interval 100ms -kill-after 12' >>/tmp/quota-enforcer.log 2>&1
+    echo \$(date -u +%Y-%m-%dT%H:%M:%SZ) quota-enforcer-supervisor: the enforcer exited, restarting >>/tmp/quota-enforcer.log
+    sleep 0.2
+  done
+" >>/tmp/quota-enforcer-supervisor.log 2>&1 &
+
+sleep 0.5
 if pgrep -u 1000 -f 'quota-enforcer' >/dev/null 2>&1; then
-  log "running as gem, pid=$(pgrep -u 1000 -f 'quota-enforcer' | head -1), log=/tmp/quota-enforcer.log"
+  log "running as gem, pid=$(pgrep -u 1000 -f 'quota-enforcer' | head -1), supervisor=root, log=/tmp/quota-enforcer.log"
 else
   log "WARNING: the enforcer did not stay up; the platform watchdog is the remaining bound"
 fi

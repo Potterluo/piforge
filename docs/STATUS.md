@@ -1798,3 +1798,56 @@ pwsh scripts/deliver-check.ps1                   119/119
 
 栈：`pwsh scripts/up-isolated.ps1 -Rebuild` 起在 7723，`-Down` 收掉；`pf-local`（7722）全程
 未动：同一个容器 id `7dc14e4a7525a8…`、`/healthz -> 200`。
+
+## 本批：租户树上的读取（FIX 1）+ 磁盘预算的三层（FIX 2/3）
+
+第三轮对抗验收的结论是"这台机器今天不能托管不可信的租户代码"，原因是一条路径：`POST /v1/skills/import`
+克隆租户给的仓库，`findSkills` 用 `os.ReadFile` 读每个 `SKILL.md` 同目录的文件——`os.ReadFile` 跟符号链接。
+`leakskill/key.txt -> /proc/1/environ` 于是把控制面自己的环境（真实的 36 字符 provider key、
+`PIFORGE_MASTER_KEY`）当成 skill bundle 还给了租户，`/data/master.key` 和别人的 `models.json` 是同一个原语。
+
+### 本轮修复
+
+1. **FIX 1（租户可控树的读取边界）**：新增 `internal/tenantfs`（`Tree.ReadFile/Walk/WalkFiles`，
+   逐分量 `Lstat` + `SameFile` + `EvalSymlinks`/`Rel`，类型化 `*tenantfs.Refusal` 点名路径）。
+   `findSkills` 与 bundle 读回改走它；git 侧 `-c core.symlinks=false` 且索引里出现 `120000` 就拒绝整次
+   导入；zip 的绝对路径/`..`/链接条目本来就是拒绝。整次拒绝，不写行、不写 bundle。
+2. **审计了其它每一处"控制面读租户路径"**（表在 `docs/SANDBOX-DEPLOY.md` §1.8）：工作区预览/下载已有
+   `fsx.Resolve`，是对的；搜索回退、`.gitignore`、`git status` 的未跟踪行数、agent 日志四处**修了**；
+   挂载/快照/digest 本来就拒绝链接；artifacts、MCP、repo_url、导出、快照 listFiles 逐个确认过。
+3. **FIX 2（磁盘预算）**：测量 = workspace + 容器可写层（`du -sbx /` 减开机基线
+   `/run/piforge/disk-baseline`）。enforcer 仍以 gem 运行（必须，才能 signal 租户进程），但外面套一个
+   root 所有的监督循环（gem 不能 signal 另一个 uid），平台磁盘看门狗在每次测量里用 `pgrep` 补一次。
+4. **FIX 3（pids / 检测）**：`deploy/tenant-limits.json` 的 pids 256 → 512（镜像自身占 216/256，40 个
+   fork 就能顶死）；liveness watchdog 探测间隔 10 s → 5 s，失败后 1.5 s 确认一次
+   （`sandboxConfirmDelay`），健康容器仍然不会因一次错过被重启。
+
+### 实测（隔离栈 7723，镜像从本轮 HEAD 重建）
+
+```
+attack1  POST /v1/skills/import （leakskill/key.txt -> /proc/1/environ） -> 400，点名 leakskill/key.txt
+attack2  同仓库改指 /data/master.key                                   -> 400
+rows     before/after 都是 [code-review, explain-codebase, test-gap]：没有 leakskill 行，没有 bundle 目录
+clone    naive=符号链接；confined=普通文件，内容 "/proc/1/environ"；PIFORGE_MASTER_KEY 出现 0 次
+legit    两文件仓库 -> 200；bundle = SKILL.md + scripts/split.py
+scan     36 字符 drill key 在 1016 字符的响应里出现 0 次
+disk     /tmp 写 1.5 GiB、workspace 129 306 B -> admin bytes=1 539 211 060；再写 1.5 GiB -> over=1
+enforcer root 监督循环 275 / su 277 / gem 278；gem `pkill -9` 杀不掉 275/277（Operation not permitted），
+         gem enforcer 被杀后 3 s 内以新 pid 回来；gem `kill -9 275` -> Operation not permitted
+pids     PidsLimit=512，cgroup 512 / current 191；watchdog log interval=5s
+storm    441 个 sleep 顶死 512 的 cgroup：first miss 05:01:00.810 -> repair 05:01:02.374（1.56 s，确认）
+         -> "the sandbox answers again" 05:01:20.122（elapsed 17.7 s，端到端 19.3 s）
+```
+
+### 门禁
+
+- `go build ./...`、`go vet ./...`、`go test ./... -count=1`
+- `pnpm --dir web test -- --run`（38 files / 292 tests）、`pnpm --dir web exec next build`
+- e2e 全量、`pwsh scripts/deliver-check.ps1`（`PIFORGE_DRILL_KEY` 经 `scripts/drill-key.ps1` 读取，不打印值）
+- 新增 Go 测试：`internal/tenantfs` 10 个、`internal/httpapi` 8 个（见 `docs/SANDBOX-DEPLOY.md` §1.8 末）
+
+### 仍未做
+
+`file://` 导入源没有白名单（只保证带链接的仓库被拒）；clone 的落盘没有上限（4 MB 是**读**的上限）；
+硬链接不在 `tenantfs` 检测范围（git/zip 造不出，未来的 tar 导入要重新想）；"根文件系统减基线"包含沙箱
+自身服务写的东西，空闲沙箱会缓慢增长。

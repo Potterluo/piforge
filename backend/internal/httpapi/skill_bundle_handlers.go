@@ -3,7 +3,9 @@ package httpapi
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
+	"github.com/piforge/piforge/backend/internal/tenantfs"
 )
 
 // Limits on an uploaded skill bundle. A skill is instructions, not a project:
@@ -207,21 +210,27 @@ func (s *server) handleReadSkillBundle(w http.ResponseWriter, r *http.Request) {
 	root := filepath.Join(s.deps.SkillsDir, filepath.Base(skill.BundleKey))
 	files := make([]skillFile, 0, 8)
 
-	walkErr := filepath.WalkDir(root, func(p string, entry os.DirEntry, err error) error {
-		if err != nil {
-			if os.IsNotExist(err) {
-				return filepath.SkipAll
-			}
-			return err
+	// Read back through the containment every tenant-derived tree is read
+	// through (internal/tenantfs): the bundle directory is written by this
+	// process, but it is served to the tenant and nothing here should be able to
+	// follow a link out of it if one ever appeared (a restore, a hand-copied
+	// directory, a future upload path). A missing bundle is an empty editor, not
+	// an error.
+	tree, terr := tenantfs.Open(root)
+	if terr != nil {
+		if errors.Is(terr, fs.ErrNotExist) {
+			writeJSON(w, http.StatusOK, map[string]any{"files": []skillFile{}})
+			return
 		}
-		if entry.IsDir() {
-			return nil
+		s.fail(w, r, apiErr(contracts.ErrInternal, "%v", terr))
+		return
+	}
+	walkErr := tree.WalkFiles("", func(rel string, info os.FileInfo) error {
+		if info.Size() > maxSkillFileBytes {
+			return &tenantfs.Refusal{Path: rel, Kind: tenantfs.KindTooLarge,
+				Detail: fmt.Sprintf("more than %d bytes", maxSkillFileBytes)}
 		}
-		rel, rerr := filepath.Rel(root, p)
-		if rerr != nil {
-			return rerr
-		}
-		data, rerr := os.ReadFile(p)
+		data, rerr := tree.ReadFile(rel, maxSkillFileBytes)
 		if rerr != nil {
 			return rerr
 		}

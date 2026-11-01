@@ -48,11 +48,19 @@ import (
 
 // defaultSandboxWatchInterval is how often one sandbox is probed.
 //
-// Ten seconds is the product's own wake window divided by "fast enough to be a
-// repair": detection is at most two intervals (20 s) plus one probe timeout, and
-// the contract this ships with is "a wedged sandbox is recovered within ~30 s".
-// A shorter interval probes every sandbox more often than its state changes.
-const defaultSandboxWatchInterval = 10 * time.Second
+// Five seconds, and a missed probe is confirmed 1.5 s later rather than waiting
+// for the next interval: detection is one interval plus the confirm plus one
+// probe timeout, where two ten-second intervals put the measured detection at
+// 76 s in the third adversarial acceptance (the probe kept succeeding while the
+// tenant's own forks failed, so the clock, not the probe, was the cost). The
+// confirm is what keeps the shorter interval from restarting a healthy container
+// on one missed probe.
+const defaultSandboxWatchInterval = 5 * time.Second
+
+// sandboxConfirmDelay is the pause between a missed probe and the probe that
+// confirms it. Long enough for a probe that timed out on a loaded host to be
+// retried, short enough that detection stays inside one interval.
+const sandboxConfirmDelay = 1500 * time.Millisecond
 
 // sandboxRecoveryTimeout bounds one recovery (stop + start + verification).
 //
@@ -162,19 +170,47 @@ func (s *server) sandboxWatchPass(ctx context.Context) {
 			slog.Int("strike", strikes),
 			slog.String("error", perr.Error()))
 		if strikes < sandboxWedgedStrikes {
+			// Confirm now rather than on the next tick: one missed probe is a
+			// suspicion (a loaded host), and the second one is the verdict. Doing
+			// it here is what makes detection one interval instead of two.
+			if !s.confirmUnresponsive(ctx, sb.ID) {
+				continue
+			}
+			strikes = s.noteProbeFailure(sb.ID, "the confirmation probe also failed")
+		}
+		if strikes < sandboxWedgedStrikes {
 			continue
 		}
-		s.startRecovery(sb, "the sandbox stopped answering its own API")
+		s.startRecovery(sb, "the sandbox stopped answering its own API (confirmed)")
 	}
 }
 
-// sandboxWedgedStrikes is how many consecutive failed probes mean "wedged".
+// sandboxWedgedStrikes is how many failed probes — the first one plus its
+// confirmation — mean "wedged".
 //
-// Two, at ten seconds apart. One is not enough: a loaded host can miss a 5 s
-// probe while the sandbox is fine, and restarting a healthy container costs the
-// user its /tmp and a few seconds of work. Two is 20 s of a sandbox that cannot
-// run `true`, which no healthy sandbox does.
+// Two, but 1.5 s apart rather than ten: the first failure is a suspicion and the
+// confirmation is taken immediately instead of on the next tick. Restarting a
+// healthy container still needs two failures, so a loaded host that misses one
+// probe costs nothing; a sandbox that cannot run `true` twice in 1.5 s is wedged.
 const sandboxWedgedStrikes = 2
+
+// confirmUnresponsive waits out the confirm delay and probes once more. It
+// reports true when the sandbox still cannot run a command, i.e. when the miss
+// was not a loaded host.
+func (s *server) confirmUnresponsive(ctx context.Context, sandboxID string) bool {
+	delay := s.deps.SandboxConfirmDelay
+	if delay <= 0 {
+		delay = sandboxConfirmDelay
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(delay):
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, s.probeTimeout())
+	defer cancel()
+	return s.deps.ProbeSandbox(probeCtx, sandboxID) != nil
+}
 
 // sandboxShouldBeProbed reports whether a state has a running container to probe.
 func sandboxShouldBeProbed(state contracts.SandboxState) bool {
@@ -467,11 +503,11 @@ func (s *server) handleSandboxRecover(w http.ResponseWriter, r *http.Request) {
 	s.noteProbe(sb.ID, false, probeErr.Error())
 	if !s.beginRecovery(sb.ID) {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"state":     sb.State,
-			"recovered": false,
-			"restarted": false,
+			"state":      sb.State,
+			"recovered":  false,
+			"restarted":  false,
 			"recovering": true,
-			"message":   "沙箱正在恢复中，请稍候。",
+			"message":    "沙箱正在恢复中，请稍候。",
 		})
 		return
 	}

@@ -891,3 +891,49 @@ sandbox in a loop will be repaired in a loop (one WARN per episode). A `ulimit n
 reserve was measured and rejected (`nproc=192` breaks the image's own bootstrap), and a
 value high enough to boot reserves too few pids to matter. A container that is *gone*
 (not wedged) is `reconcile`'s job, not the watchdog's.
+
+## The third adversarial acceptance (2026-11-01)
+
+The headline of that pass was not a sandbox escape: it was the **control plane reading a tree a
+tenant controls**. `POST /v1/skills/import` cloned a tenant-supplied repository and read every file
+under a `SKILL.md` with `os.ReadFile`, which follows symlinks — so `leakskill/key.txt ->
+/proc/1/environ` returned the deployment's own environment to a normal tenant as a skill bundle, with
+the real provider key in it (measured: `import 200`, `provider_key_occurrences=1`). `/data/master.key`
+and another session's `models.json` were the same primitive.
+
+**What to know if you are operating this build**
+
+- **A repository or archive containing a symlink is refused, whole.** The refusal is a 400 naming the
+  path (`导入被拒绝：仓库里的 "leakskill/key.txt" 是符号链接…`), and it happens before any skill row or
+  bundle is written. That is deliberate: a tenant shipping a link is hostile, not unlucky, and a
+  partial import would hide the attempt. `git clone` is also told `-c core.symlinks=false`, so even a
+  repository git itself materialises cannot put a live link on the control plane's disk.
+- **The rule now applies to every read of a tenant tree**, not just the importer: the skill bundle
+  read-back, the workspace search fallback, `.gitignore` parsing, `git status`'s untracked line
+  count and the agent log all go through the same containment (`internal/tenantfs`). The audit table
+  — every entry point, what it read before, what it does now — is `docs/SANDBOX-DEPLOY.md` §1.8. If
+  you add an endpoint that reads a path a tenant can shape, that table is the question you have to
+  answer.
+- **The disk budget now measures disk.** It is the workspace *plus* the container's writable layers
+  (`/tmp`, `/var/tmp`, `/home/gem`) minus a boot baseline the image writes to
+  `/run/piforge/disk-baseline`. 4.84 GB in `/tmp` with a 125 KB workspace used to produce no event;
+  measured now: 1.5 GiB in `/tmp` reads as 1 539 211 060 bytes, and a second 1.5 GiB trips the quota
+  with the sandbox still running.
+- **The enforcer is no longer tenant-killable in one step.** It still runs as `gem` (it must, to signal
+  the tenant's processes), but a root-owned supervisor loop in the image restarts it within ~0.2 s,
+  and the platform's disk watchdog restarts it too when a measurement finds it missing. Measured:
+  `pkill -9` as `gem` cannot signal the root supervisor or its `su` ("Operation not permitted") and
+  the gem enforcer is back with a new pid; `kill -9` on the supervisor from `gem` fails the same way.
+- **`pids` is 512 again and detection is faster.** The image idles at 216/256, so 40 forks used to
+  wedge a sandbox; 512 leaves ~300 slots (measured `pids.max=512 pids.current=191`). The liveness
+  watchdog probes every 5 s and confirms a miss 1.5 s later. Measured with that pass's own storm: the
+  first failed probe at 05:01:00.810, the repair at 05:01:02.374 (1.56 s, the confirmation), the
+  sandbox answering again at 05:01:20.122 (17.7 s of repair, 19.3 s end to end) — against the 76 s
+  detection and 87 s recovery measured before. A loaded host that misses one probe still restarts
+  nothing.
+
+**What is still open** (unchanged by this round): `file://` import URLs have no allow-list; a clone
+still writes the whole working tree before the 4 MB read cap applies; hard links are outside the
+containment check (neither transport can create one today); and "root filesystem minus baseline"
+counts what the sandbox's own services write, which is honest but means an idle sandbox grows slowly.
+The full list is at the end of `docs/EXECUTION-BOUNDARY.md` §17.

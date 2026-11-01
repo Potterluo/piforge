@@ -126,12 +126,38 @@ func sandboxDiskMeasurer(remote sandbox.Remote, keys sandboxKeys) diskquota.Meas
 		if err != nil {
 			return diskquota.Measurement{}, fmt.Errorf("measure %s: %w", sandboxID, err)
 		}
-		// One walk, two numbers. `%y` is the entry type ("d" for a directory) and
-		// `%s` its apparent size; the awk pass sums every entry (du does too) and
-		// counts only the non-directories, so "files" is files rather than
-		// "things walked".
-		command := "find " + aio.Quote(root) + ` -printf '%y %s\n' 2>/dev/null` +
-			` | awk '{s+=$2; if ($1 != "d") n++} END{printf "%d %d\n", s, n}'`
+		// Two walks, one number: the checkout, and everything the tenant can
+		// write outside it. The second term is why 4.84 GB in /tmp next to a
+		// 125 KB workspace is no longer invisible: the budget is about disk, not
+		// about one directory (third adversarial acceptance, attack 9(e)).
+		//
+		// `%y` is the entry type ("d" for a directory) and `%s` its apparent size;
+		// the awk pass sums every entry (du does too) and counts only the
+		// non-directories, so "files" is files rather than "things walked". The
+		// root walk uses -xdev, so the workspace volume (a different device) is
+		// not counted twice, and subtracts the boot baseline the image's hook
+		// wrote — the image's own files are not the tenant's usage. A missing
+		// baseline disables the second term rather than charging the image.
+		//
+		// The same command restarts the in-sandbox enforcer when it is gone. The
+		// enforcer runs as the tenant's uid (it has to, to signal the tenant's
+		// processes), so the tenant can kill it; the image's hook also wraps it in
+		// a root-owned supervisor, and this is the platform-side half for a
+		// sandbox whose hook never ran. It is deliberately in the same exec: the
+		// watchdog is already talking to the sandbox every couple of seconds.
+		command := `base=$(cat /run/piforge/disk-baseline 2>/dev/null || echo 0); ` +
+			`case "$base" in ''|*[!0-9]*) base=0;; esac; ` +
+			`if ! pgrep -f '[q]uota-enforcer' >/dev/null 2>&1; then ` +
+			`lim=$(awk '/^Max file size/ {print $4}' /proc/self/limits); ` +
+			`case "$lim" in ''|unlimited|*[!0-9]*) : ;; *) ` +
+			`setsid nohup /opt/piforge/piforged quota-enforcer -limit "$lim" -root /workspace ` +
+			`-sysroot / -baseline /run/piforge/disk-baseline -interval 100ms -kill-after 12 ` +
+			`>>/tmp/quota-enforcer.log 2>&1 </dev/null & ;; esac; fi; ` +
+			`w=$(find ` + aio.Quote(root) + ` -printf '%y %s\n' 2>/dev/null` +
+			` | awk '{s+=$2; if ($1 != "d") n++} END{printf "%d %d", s, n}'); ` +
+			`r=$(find / -xdev -printf '%y %s\n' 2>/dev/null` +
+			` | awk -v base="$base" '{s+=$2; if ($1 != "d") n++} END{if (base <= 0) {printf "0 0"} else {e=s-base; if (e < 0) e=0; printf "%d %d", e, n}}'); ` +
+			`set -- ${w:-0 0} ${r:-0 0}; echo $(( $1 + $3 )) $(( $2 + $4 ))`
 		res, err := client.Exec(ctx, command, sandbox.ContainerWorkspace)
 		if err != nil {
 			return diskquota.Measurement{}, fmt.Errorf("measure %s: %w", sandboxID, err)

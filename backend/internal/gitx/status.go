@@ -133,7 +133,11 @@ func mergeNumstat(counts map[string][2]int, out string) {
 // than blocking the status call.
 func countLines(file string) (int, error) {
 	const maxScannedFile = 4 << 20
-	info, err := os.Stat(file)
+	// Lstat, not Stat: the file is inside a checkout the tenant owns, so it can be
+	// a link to a file the control plane owns. A link is not a regular file here
+	// and is reported as zero lines without being opened — the same rule the skill
+	// importer applies to a tree it did not write.
+	info, err := os.Lstat(file)
 	if err != nil {
 		return 0, err
 	}

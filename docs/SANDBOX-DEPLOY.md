@@ -1834,6 +1834,119 @@ failures=0
 scripts/deliver-check.ps1`（119/119，`PIFORGE_DRILL_KEY` 由 `scripts/drill-key.ps1` 读入
 子进程，只打印长度和 sha256 前缀）。
 
+### 1.4.10 第五轮：租户树上的每一个读取（FIX 1），以及磁盘预算的三层（FIX 2/3，2026-11-01）
+
+第三轮对抗验收（`e2e/.artifacts/adversarial3/REPORT.md` 攻击 3）给出的不是"某个校验漏了"，而是一类
+原语：**控制面用 root 读了一棵租户能控制的树，读的时候跟着符号链接走。** 具体路径是
+`POST /v1/skills/import` → `git clone` → `findSkills` 用 `filepath.WalkDir` 找 `SKILL.md`，再用
+`os.ReadFile` 读目录下的每个文件；`WalkDir` 不跟链接，`os.ReadFile` 跟。于是一个正常的租户账号，
+用一个仓库里的 `leakskill/key.txt -> /proc/1/environ`，就拿到了控制面自己的环境——**真实的 provider
+key（36 字符精确匹配）**、`PIFORGE_MASTER_KEY`，以及 `/data/master.key`、`/data/secret.key`、
+`/data/piforge.db`、别人的 `/data/pi-agents/<session>/models.json`。报告里的测量是
+`import STATUS=200`、`provider_key_occurrences=1`。
+
+这一轮把这一类读取收拢成一条规则，并在每条读路径上落实（规则本身写在 §1.8，那是一节给后来人看的
+规范）。三处改动：
+
+**FIX 1：租户可控的树只按"每个路径分量都是真目录/真文件"来读**
+
+- 新增 `backend/internal/tenantfs`：`Tree.ReadFile` / `Tree.Walk` / `Tree.WalkFiles`。
+  读一个路径前，逐分量 `os.Lstat`，任何分量是符号链接就拒绝；打开后 `os.SameFile` 比对（防止检查与
+  打开之间被换成链接），再用 `filepath.EvalSymlinks` + `filepath.Rel` 确认实体落在导入根内。
+  `Walk` 在整个树上拒绝**任何**链接——包括没有任何 `SKILL.md` 的目录里的链接——因为拒绝必须是
+  "整次导入"，不是"这一个文件"：链接是敌意，不是倒霉。拒绝是类型化的 `*tenantfs.Refusal`，带
+  `Path`（仓库内路径，租户认得）/ `Absolute`（日志用）/ `Kind`。
+- git 这一侧两道：`git -c core.symlinks=false clone --depth 1`（链接落盘就是**内容为目标路径的普通
+  文本文件**，不在控制面磁盘上产生活链接），并且克隆后读 `git ls-files -s -z`，任何 `120000` 条目都
+  拒绝整次导入（`refuseDeclaredSymlinks`）。两道都留着：第一道让链接不可能变成活对象，第二道让"仓库
+  声明了链接"这件事本身被拒绝并点名，而不是悄悄导入一个 key 文件里写着 `/proc/1/environ` 的 Skill。
+- zip 这一侧本来就有绝对路径 / `..` / 非普通文件（含符号链接条目）的拒绝；现在外面那层 `findSkills`
+  也走 `tenantfs`，所以解压之后即使出现链接也一样被拒。
+- 读回（`GET /v1/skills/{id}/bundle`）也走 `tenantfs`：这个目录是控制面自己写的，但它被服务给租户，
+  一次恢复/一次手工拷贝就可能带进一个链接，读回没有理由比导入更宽松。
+
+**实测（隔离栈 7723，镜像从本轮 HEAD 重建；仓库用 smart HTTP 提供，和报告里的
+`http://host.docker.internal:9011` 同一个形状）**
+
+```
+ATTACK 1  POST /v1/skills/import {"url": ".../leakrepo.git"}        -> 400
+          {"code":"invalid_argument","message":"导入被拒绝：仓库里的 \"leakskill/key.txt\"
+           是符号链接。…整次导入都不会进行，也没有创建任何 Skill。"}
+ATTACK 2  leakskill/key.txt -> /data/master.key                     -> 400，同样点名 leakskill/key.txt
+skills    before=[code-review,explain-codebase,test-gap] after=[code-review,explain-codebase,test-gap]
+          没有 leakskill 行、没有 bundle 目录
+clone     naive_clone_is_symlink=yes          （仓库确实是报告里那个形状）
+          fixed_clone_is_symlink=no           （confined clone 不在磁盘上留活链接）
+          fixed_clone_content=/proc/1/environ （链接落盘为文本，就是目标路径本身）
+          fixed_clone_has_master_key_name=0
+legit     POST import -> 200 {"name":"pdf-tools","files":2} ；bundle 里只有 SKILL.md + scripts/split.py
+leak-scan 36 字符 drill key 在全部 1016 字符的响应/工件里出现 0 次；PIFORGE_MASTER_KEY 出现 0 次
+```
+
+**FIX 2：磁盘预算覆盖所有可写层，执行者不再是"租户能杀掉的那个进程"**
+
+- 以前只量 `/workspace`：报告测到 `/tmp` 4.84 GB、workspace 125 KB、没有任何事件，因为 `/tmp`、
+  `/var/tmp`、`/home/gem` 是容器的可写层，不在那个数里。现在两个数相加：workspace 一棵树，加上
+  **容器根文件系统减去开机基线**（`du -sbx /`，`-x` 让卷不被重复计，基线由镜像的 hook 在任何租户
+  进程之前写进 `/run/piforge/disk-baseline`，root 所有 0644）。sandbox 内的 enforcer 100 ms 量
+  workspace、1 s 量第二项；平台侧的同一次测量用 `find /workspace` + `find / -xdev` 做同样的减法，
+  所以管理页和 enforcer 看到的是同一个"磁盘"。
+- 执行者本来必须以 `gem` 运行（它要 signal 租户的进程，而容器 `CapEff=0`，root 反而没有 CAP_KILL），
+  所以旧的 `kill -9 $(pgrep -f quota-enforcer)` 一次就把它拿掉。现在镜像的 hook 起一个**root 所有的
+  监督循环**（`deploy/quota-enforcer.sh`，`nohup setsid /bin/bash -c 'while :; do su …; sleep 0.2; done'`）：
+  gem 不能 signal 另一个 uid 的进程，所以租户杀掉 enforcer 只是 ~0.2 s 的空档；平台侧的磁盘看门狗
+  在每次测量里 `pgrep -f '[q]uota-enforcer'`，缺失就用同一个命令行把它重新拉起来（hook 没跑过的
+  沙箱也能自愈，不需要重启容器）。
+
+```
+baseline  /run/piforge/disk-baseline = 9 044 327 151 B（root:root 0644）
+process   pid 275 root  /bin/bash -c while :; do su -s /bin/sh gem -c 'exec … quota-enforcer …'
+          pid 277 root  su -s /bin/sh gem -c exec … quota-enforcer …
+          pid 278 gem   /opt/piforge/piforged quota-enforcer -limit 2147483648 -root /workspace
+                        -sysroot / -baseline /run/piforge/disk-baseline -interval 100ms
+tenant    docker exec -u gem … pkill -9 -f '[q]uota-enforcer'
+          -> pkill: killing pid 275 failed: Operation not permitted
+             pkill: killing pid 277 failed: Operation not permitted      （root 的杀不掉）
+          -> gem enforcer 278 被杀；3 s 后 pid=1405                        （监督循环拉起来了）
+          -> docker exec -u gem … kill -9 275 -> Operation not permitted
+measure   1.5 GiB 一个文件写进 /tmp，workspace 129 306 B
+          admin sandbox_usage bytes = 1 539 211 060                         （/tmp 进了预算）
+          再写 1.5 GiB：over=1，容器 running，控制面有事件                 （以前是"没有事件"）
+```
+
+**FIX 3：pids 的余量与检测时间**
+
+- `deploy/tenant-limits.json` 的 `pids` 从 256 回到 512：镜像自己的运行时实测占到 216/256，256 只剩
+  ~40 个 fork 的余量，一行 `for i in $(seq 80); do sleep 600 & done` 就把沙箱顶死。512 留 ~296 个
+  槽位（本轮实测 `pids.max=512 pids.current=196`），wedge 需要一次真正的风暴而不是一次手滑。
+- 检测从"每 10 s 探一次、连续失败两次"改成"每 5 s 探一次、失败立刻在 1.5 s 后确认一次"：
+  `defaultSandboxWatchInterval = 5s`、`sandboxConfirmDelay = 1.5s`、`sandboxWedgedStrikes = 2`
+  （第一次失败 + 确认失败）。"加载中的宿主机错过一次探针"仍然不会重启任何健康容器，因为确认那一次会成功。
+  测试相应改成两半：`flaky` 一次（第一次失败、确认成功）不重启；持续失败在**同一趟**里重启。
+- 实测（同一套隔离栈，`for i in $(seq 441); do sleep 900 & done` 把 512 的 cgroup 顶死）：
+
+```
+pids       max/current = 512 / 191（顶死前）
+first miss 05:01:00.810  strike=1  "[Errno 11] Resource temporarily unavailable"
+repair     05:01:02.374  "stopping and starting the container" reason="…(confirmed)"   （1.56 s 后）
+answered   05:01:20.122  "the sandbox answers again" elapsed=17.7s                    （端到端 19.3 s）
+```
+
+  第三轮报告测到的是 DETECTED t+76 s、RECOVERED t+87 s；现在是"第一次探测失败 → 1.56 s 确认 → 修复"，
+  端到端 19.3 s。
+
+**这一轮没有做的事，写在明处**
+
+- `file://` 仓库地址仍然被接受（自托管场景），它能把控制面自己能读到的**本地 git 仓库**当导入源。
+  带链接的仓库会被拒绝，但"能指向本机仓库"这件事本身没有收窄——它需要部署级的白名单，不是一次
+  路径校验。
+- `git clone` 仍会把仓库的工作树完整写到控制面的临时目录：4 MB 的读取上限是**读**的上限，不是
+  **落盘**的上限。一个 10 GB 的仓库能填控制面的磁盘（不是沙箱的预算管得到的地方）。
+- 硬链接不在 `tenantfs` 的检测范围：git 和 zip 解压都造不出硬链接，所以这两种传输不会产生，但
+  "以后加一个 tar 导入"就必须重新想这件事。
+- 磁盘第二项是"根文件系统减基线"，它包含沙箱自己的服务写的东西（浏览器 profile、node 缓存）。
+  这是诚实的记法（那确实是这个沙箱占的盘），但它意味着一个"什么都没干"的沙箱也会缓慢增长。
+- 检测再快也还是"检测 + 修复"，不是资源策略：租户可以循环触发它，一次一条 WARN。
 ### 1.5 推荐方案下仍然会坏的地方（这一节是重点）
 
 | 事件 | 会发生什么 | 缓解 |
@@ -2028,6 +2141,78 @@ closed tenant prompt: settled，助手回复 DONE，
 
 ---
 
+### 1.8 租户可控目录：读取的收拢规则（containment）
+
+这一节是规范，不是历史。任何一个**新**的"控制面读一个路径"的入口，都要先回答这一节的问题。
+
+**规则**
+
+1. **谁写的这棵树？** 一条路径如果有一部分是租户能写或能影响的（skill 仓库、skill zip、workspace
+   卷、agent 自己的目录），这条路径就是"租户可控的树"，读它必须走 `internal/tenantfs`，或者有
+   等价的检查写在同一个函数里。
+2. **不跟链接。** 读之前逐分量 `os.Lstat`；任何分量是符号链接 → 拒绝。打开之后再
+   `os.SameFile(lstat, fstat)` 比一次（检查与打开之间被换成链接的窗口），再
+   `filepath.EvalSymlinks` + `filepath.Rel` 确认实体在根内。`WalkDir` 不够：它不跟目录链接，但
+   `os.ReadFile` 跟文件链接，这正是本轮那个洞。
+3. **只读普通文件。** 目录、设备、fifo、socket 都不是"内容"；一个 fifo 会让 `os.ReadFile` 挂住。
+4. **拒绝整次操作，不是跳过那一个文件。** 拒绝要是类型化错误（`*tenantfs.Refusal`，带 offending
+   path），并且要在写任何一行数据库 / 任何一个文件之前发生：半个导入比一次拒绝更难解释。
+5. **传输层先减一次。** `git clone` 用 `-c core.symlinks=false`（链接落盘为文本），zip 解压拒绝
+   绝对路径、`..`、非普通文件条目；然后再用规则 2 做第二道。两道都要：第一道让链接不能变成活对象，
+   第二道让"你带了链接"这件事被拒绝并点名。
+6. **测量要覆盖租户能写的全部地方。** 磁盘预算不是"某个目录的预算"：workspace + 容器可写层
+   （`du -sbx /` 减开机基线）。同理，任何"这个租户占了多少"的指标，先问"他还能写哪里"。
+
+**这一轮审计过的每一个读取点**
+
+| 入口 | 路径来源 | 结论 / 改动 |
+|---|---|---|
+| `POST /v1/skills/import`（git） | 租户仓库 | **就是那个洞**。`core.symlinks=false` + `refuseDeclaredSymlinks`（`ls-files -s` 的 120000）+ `findSkills` 全树 `tenantfs` 走查 |
+| `POST /v1/skills/import/zip` | 租户压缩包 | 绝对路径 / `..` / 非普通文件（含链接条目）已拒绝；解压后同样走 `tenantfs` |
+| `GET /v1/skills/{id}/bundle` | 控制面写的目录，但服务给租户 | 改走 `tenantfs`（恢复/手工拷贝可能带进链接） |
+| 工作区预览 / 下载 / 树（`/files`、`/files?download`） | 租户 workspace | **已经是对的**：`fsx.Resolve` 做 `EvalSymlinks` + `Rel`，越界即 `ErrEscape` |
+| 工作区搜索（`/search`，无 rg 时的回退） | 租户 workspace | **修了**：`walkSearch` 跳过 `ModeSymlink`（rg 默认不跟链接，回退路径以前会 `os.Open` 跟） |
+| `.gitignore` 解析 | 租户 workspace | **修了**：`Lstat` + 只读普通文件（链接的 `.gitignore` 以前会被跟） |
+| `git status` 未跟踪文件行数 | 租户 workspace | **修了**：`Lstat`，链接不打开（以前 `os.Stat` 跟进去，只泄漏行数，仍然是读） |
+| skill 挂载 / 快照拷贝 / digest | skill bundle 目录 | **已经是对的**：`materialize.copyTree` / `copyTreeFS` / `walkDigest` 都拒绝链接 |
+| agent 日志（`ReadLog`） | agent 自己的目录 | **修了**：`Lstat` + `SameFile`，非普通文件直接报错 |
+| artifacts / 截图（`/artifacts?path=`） | 服务端生成的名字 | **已经是对的**：走 `fsx.Resolve`；会话 id 有分隔符/`..` 直接拒 |
+| MCP 配置（`mcp.json`） | 租户配置，控制面路径 | 路径是控制面自己的；isolated 下 stdio server 直接不 stage（`internal/mcpstage`） |
+| 项目 `repo_url` 导入 | 租户 URL，在**沙箱里** clone | 不在控制面读；`validateRepoURL` 只放 https / `git@` |
+| 会话导出（`/export`） | 只导出事件/消息 | 不读文件 |
+| workspace 快照（`internal/snapshot` 的 `listFiles`） | 租户 workspace | 只记大小、链接标记 `Symlink=true`，不读内容 |
+| `file://` 导入源 | 租户 URL | **残余风险**：能指向控制面能读的本地仓库；本轮只保证带链接的仓库被拒，没有做部署级白名单 |
+
+**代码位置**
+
+- `backend/internal/tenantfs`：`Tree.Open/ReadFile/Walk/WalkFiles`，`Refusal{Path, Absolute, Kind}`。
+- `backend/internal/httpapi/skill_import.go`：`cloneCheckout`、`refuseDeclaredSymlinks`、`findSkills`、
+  `importRefusalMessage`。
+- `backend/internal/httpapi/skill_bundle_handlers.go`：读回。
+- `backend/internal/fsx/search.go`、`ignore.go`、`backend/internal/gitx/status.go`、
+  `backend/internal/agentsupervisor/supervisor.go`：上面表里的四处"修了"。
+
+**怎么证明它还在**
+
+Go 测试（都在 `go test ./...` 里）：
+
+```
+tenantfs   TestReadFileRefusesALinkToAFileOutsideTheTree / …DanglingLink / …LinkInAParentDirectory
+           TestReadFileRefusesADirectory / …OversizedFile / …TraversingOrAbsolutePath
+           TestWalkRefusesALinkAnywhereInTheTree / TestWalkSkipsGitStorage
+           TestRefusesTheReportsOwnTargets（Linux：/proc/1/environ、/data/master.key）
+httpapi    TestImportRefusesASymlinkToTheEnvironment          （报告的攻击，端到端，无行、无 bundle 目录）
+           TestImportRefusesASymlinkToTheMasterKey            （/data 变体，整次导入被拒，旁边那个正常 skill 也没进）
+           TestFindSkillsRefusesALinkOnDisk                   （磁盘上真链接：类型化 Refusal 点名路径）
+           TestCloneMaterialisesADeclaredSymlinkAsAFile       （clone 半：落盘是文本，不是活链接）
+           TestImportRefusesARepositoryThatDeclaresASymlink   （索引声明也拒）
+           TestZipImportRefusesAnAbsoluteOrTraversingEntry    （绝对路径 / .. / 链接条目，三例都无行）
+           TestLegitimateRepositoryStillImportsAndMounts      （正常仓库 200，会话真的挂上）
+           TestSkillBundleReadRefusesALink
+```
+
+**残余**（同 §1.4.10 末段）：`file://` 没有白名单；clone 的工作树落盘没有上限；硬链接不在检测范围；
+"根文件系统减基线"包含沙箱服务自己写的东西。
 ## 2. Kubernetes：四种做法，各自什么时候是对的
 
 ### 2.1 方案（i）：一个 Pod 一个沙箱，控制面用 client-go 管

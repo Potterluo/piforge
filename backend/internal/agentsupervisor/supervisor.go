@@ -759,20 +759,35 @@ func openLog(path string, max int64) (*os.File, error) {
 // It exists for the control-plane side, which reads the file through the
 // sandbox's own file API; the sandbox-side helper below is used by tests and by
 // anything running inside the container.
+//
+// Lstat, not Stat: the log lives in a directory the agent process writes to, so
+// a link there would be a way to serve a file the control plane owns (the same
+// primitive as the skill-import leak, one file over). A non-regular file is not
+// a log.
 func ReadLog(path string, maxBytes int) ([]byte, error) {
 	if maxBytes <= 0 {
 		maxBytes = 64 << 10
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("agentsupervisor: %s is not a regular file", path)
 	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	info, err := f.Stat()
+	opened, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
-	size := info.Size()
+	if !os.SameFile(info, opened) {
+		return nil, fmt.Errorf("agentsupervisor: %s changed while it was being read", path)
+	}
+	size := opened.Size()
 	off := int64(0)
 	if size > int64(maxBytes) {
 		off = size - int64(maxBytes)

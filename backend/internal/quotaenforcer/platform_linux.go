@@ -27,6 +27,41 @@ import (
 // takes long, NextInterval backs the loop off, which is cheaper than cancelling
 // a half-finished du every tick.
 func Measure(ctx context.Context, root string) (int64, error) {
+	return duBytes(ctx, root)
+}
+
+// MeasureRoot measures the container's root filesystem, which is where /tmp,
+// /var/tmp and /home/gem live. -x keeps the walk on one device, so the workspace
+// volume (a different device, mounted at /workspace) is not counted twice: it is
+// measured by Measure. The image's own files are part of the number and are
+// subtracted through the boot baseline, not filtered out here — a filter list is
+// a thing that goes stale the moment the image grows a directory.
+func MeasureRoot(ctx context.Context, root string) (int64, error) {
+	return duBytes(ctx, root)
+}
+
+// ReadBaseline reads the size the container's writable layers had at boot.
+//
+// A missing file, an empty one or garbage all return 0, and the caller treats 0
+// as "no baseline": the second term is then off rather than counting the image as
+// the tenant's usage.
+func ReadBaseline(path string) int64 {
+	if strings.TrimSpace(path) == "" {
+		return 0
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	value, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
+	if err != nil || value < 0 {
+		return 0
+	}
+	return value
+}
+
+// duBytes is the one walk both measurements use.
+func duBytes(ctx context.Context, root string) (int64, error) {
 	cmd := exec.CommandContext(ctx, "du", "-sbx", root)
 	out, err := cmd.Output()
 	if err != nil {
@@ -63,9 +98,19 @@ func Measure(ctx context.Context, root string) (int64, error) {
 // This process, its ancestors and anything in its own session are excluded:
 // signalling them would either end the enforcer or freeze the shell that started
 // it.
-func Writers(root string) ([]int, error) {
-	root = filepath.Clean(root)
-	if root == "" || root == "." {
+func Writers(roots ...string) ([]int, error) {
+	cleaned := make([]string, 0, len(roots))
+	for _, root := range roots {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		root = filepath.Clean(root)
+		if root == "" || root == "." {
+			continue
+		}
+		cleaned = append(cleaned, root)
+	}
+	if len(cleaned) == 0 {
 		return nil, fmt.Errorf("quota-enforcer: a workspace root is required")
 	}
 	self := os.Getpid()
@@ -98,7 +143,7 @@ func Writers(root string) ([]int, error) {
 		if uidOf(pid) != uid {
 			continue
 		}
-		if !writesBelow(pid, root) {
+		if !writesBelow(pid, cleaned...) {
 			continue
 		}
 		// The writer, and the chain that can start another one.
@@ -271,17 +316,22 @@ func uidOf(pid int) int {
 	return -1
 }
 
-// writesBelow reports whether pid has a regular file below root open for writing.
-func writesBelow(pid int, root string) bool {
+// writesBelow reports whether pid has a regular file below one of the roots open
+// for writing. The second root is "/" when the container's writable layers are
+// measured, which is every file outside the workspace — the listener guard below
+// is what keeps the sandbox's own services out of that set.
+func writesBelow(pid int, roots ...string) bool {
 	dir := fmt.Sprintf("/proc/%d/fd", pid)
 	fds, err := os.ReadDir(dir)
 	if err != nil {
 		return false
 	}
-	prefix := root + string(os.PathSeparator)
 	for _, fd := range fds {
 		target, err := os.Readlink(filepath.Join(dir, fd.Name()))
-		if err != nil || !strings.HasPrefix(target, prefix) {
+		if err != nil {
+			continue
+		}
+		if !belowAny(target, roots) {
 			continue
 		}
 		if !writableFD(pid, fd.Name()) {
@@ -292,6 +342,20 @@ func writesBelow(pid int, root string) bool {
 			continue
 		}
 		return true
+	}
+	return false
+}
+
+// belowAny reports whether an absolute path is inside one of the roots. A root of
+// "/" matches everything, which is what "the container's writable layers" means.
+func belowAny(target string, roots []string) bool {
+	for _, root := range roots {
+		if root == string(os.PathSeparator) {
+			return strings.HasPrefix(target, string(os.PathSeparator))
+		}
+		if strings.HasPrefix(target, root+string(os.PathSeparator)) {
+			return true
+		}
 	}
 	return false
 }

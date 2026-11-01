@@ -18,10 +18,13 @@ import (
 // container, which is exactly why stop+start is the repair.
 type wedgedSandbox struct {
 	contracts.SandboxProvider
-	wedged atomic.Bool
-	paused atomic.Int32
+	wedged  atomic.Bool
+	paused  atomic.Int32
 	resumed atomic.Int32
-	probes atomic.Int32
+	probes  atomic.Int32
+	// flaky makes the next n probes fail and then succeed: a loaded host that
+	// misses one probe and answers the confirmation.
+	flaky atomic.Int32
 }
 
 func (w *wedgedSandbox) Probe(context.Context, string) error { return nil }
@@ -44,6 +47,10 @@ func (w *wedgedSandbox) Resume(_ context.Context, sandboxID string) (*contracts.
 func (w *wedgedSandbox) probeHook() func(context.Context, string) error {
 	return func(context.Context, string) error {
 		w.probes.Add(1)
+		if n := w.flaky.Load(); n > 0 {
+			w.flaky.Add(-1)
+			return errors.New("probe timed out")
+		}
 		if w.wedged.Load() {
 			return errors.New("unable to spawn stage-1: Resource temporarily unavailable")
 		}
@@ -64,6 +71,9 @@ func newWatchEnv(t *testing.T) (*testEnv, *Server, *wedgedSandbox, string, strin
 	env.deps.Sandbox = provider
 	env.deps.ProbeSandbox = provider.probeHook()
 	env.deps.SandboxProbeTimeout = 2 * time.Second
+	// The confirmation is a real pause in production; the test only needs it not
+	// to be a second and a half.
+	env.deps.SandboxConfirmDelay = 5 * time.Millisecond
 	srv := NewServer(env.deps)
 	// The handlers the assertions use must be the same server the watchdog
 	// belongs to, or the status endpoint reads a different probe cache.
@@ -74,19 +84,29 @@ func newWatchEnv(t *testing.T) (*testEnv, *Server, *wedgedSandbox, string, strin
 // TestSandboxWatchRecoversAWedgedSandbox is the operational defect from
 // adversarial acceptance #2: a fork storm left the sandbox unable to fork, the
 // agent could not start, and the only recovery was a manual pause/resume. The
-// watchdog must notice (two consecutive failed probes) and do that pause/resume
-// itself, and the session must say so before and after.
+// watchdog must notice and do that pause/resume itself, and the session must say
+// so before and after.
+//
+// The rule since acceptance #3 is "one missed probe, confirmed 1.5 s later": the
+// first half of this test is the loaded host (the confirmation answers, nothing is
+// restarted) and the second half is the wedge (both probes fail, the repair runs
+// inside the same pass instead of two 10 s intervals later).
 func TestSandboxWatchRecoversAWedgedSandbox(t *testing.T) {
 	env, srv, provider, userID, sessionID, containerID := newWatchEnv(t)
-	provider.wedged.Store(true)
 
-	// One failed probe is not a wedge: a loaded host can miss a 5 s probe.
+	// A single missed probe is a suspicion: the confirmation answers, so the
+	// container is left alone.
+	provider.flaky.Store(1)
 	srv.s.sandboxWatchPass(context.Background())
 	if got := provider.paused.Load(); got != 0 {
-		t.Fatalf("a single missed probe restarted the sandbox (%d pauses)", got)
+		t.Fatalf("one missed probe restarted the sandbox (%d pauses)", got)
+	}
+	if got := provider.probes.Load(); got < 2 {
+		t.Fatalf("the missed probe was not confirmed (probes = %d)", got)
 	}
 
-	// The second consecutive failure is.
+	// A failure the confirmation repeats is a wedge, in this pass.
+	provider.wedged.Store(true)
 	srv.s.sandboxWatchPass(context.Background())
 
 	deadline := time.Now().Add(10 * time.Second)

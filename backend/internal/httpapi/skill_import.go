@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,12 +12,14 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/diskquota"
+	"github.com/piforge/piforge/backend/internal/tenantfs"
 )
 
 // Importing skills from a repository (PRD FR-14.x).
@@ -69,24 +72,17 @@ func (s *server) handleImportSkills(w http.ResponseWriter, r *http.Request) {
 	}
 	defer os.RemoveAll(dir)
 
-	args := []string{"clone", "--depth", "1"}
-	if strings.TrimSpace(in.Ref) != "" {
-		args = append(args, "--branch", strings.TrimSpace(in.Ref))
-	}
-	args = append(args, url, dir)
-	cmd := exec.CommandContext(ctx, "git", args...)
-	if out, cerr := cmd.CombinedOutput(); cerr != nil {
-		detail := strings.TrimSpace(string(out))
-		if len(detail) > 400 {
-			detail = detail[len(detail)-400:]
-		}
-		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "克隆失败：%s", detail))
+	// The clone is confined twice: git is told not to create links (below), and
+	// the repository's own index is refused if it declares one. See
+	// cloneSkillRepo and refuseDeclaredSymlinks.
+	if cerr := cloneSkillRepo(ctx, url, in.Ref, dir); cerr != nil {
+		s.fail(w, r, cerr)
 		return
 	}
 
 	found, err := findSkills(dir, skillImportMaxBytes)
 	if err != nil {
-		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "%v", err))
+		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "%s", importRefusalMessage(err)))
 		return
 	}
 	if len(found) == 0 {
@@ -269,7 +265,7 @@ func (s *server) handleImportSkillsZip(w http.ResponseWriter, r *http.Request) {
 
 	found, err := findSkills(dir, skillImportMaxBytes)
 	if err != nil {
-		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "%v", err))
+		s.fail(w, r, apiErr(contracts.ErrInvalidArgument, "%s", importRefusalMessage(err)))
 		return
 	}
 	if len(found) == 0 {
@@ -405,46 +401,167 @@ type skillCandidate struct {
 	Files       map[string]string
 }
 
+// cloneSkillRepo clones a tenant-supplied URL into dir under the two rules a
+// repository from a tenant has to obey.
+//
+// First, git is told not to create symbolic links (`core.symlinks=false`), so a
+// link in the repository is checked out as the regular text file it would have
+// pointed at. That removes the link from the control plane's disk. Second, the
+// checkout's index is read: a repository that declares a link is refused
+// outright, naming the path, because a tenant who ships one is trying to have
+// this process read a file outside the checkout — materialising it quietly would
+// import a skill whose "key" file now contains "/proc/1/environ" as text, which
+// is a confusing success where a refusal is the honest answer.
+//
+// Depth stays at 1: the import only reads what a skill directory contains, and a
+// tenant's repository should not be able to make this process fetch its history.
+func cloneSkillRepo(ctx context.Context, url, ref, dir string) error {
+	if cerr := cloneCheckout(ctx, url, ref, dir); cerr != nil {
+		return cerr
+	}
+	if rerr := refuseDeclaredSymlinks(ctx, dir); rerr != nil {
+		return apiErr(contracts.ErrInvalidArgument, "%s", importRefusalMessage(rerr))
+	}
+	return nil
+}
+
+// cloneCheckout is the clone half on its own: git, with links materialised as
+// text files instead of created. It is separate from cloneSkillRepo so the flag
+// that makes a link harmless can be tested without the index check that refuses
+// the repository anyway.
+func cloneCheckout(ctx context.Context, url, ref, dir string) error {
+	args := []string{"-c", "core.symlinks=false", "clone", "--depth", "1"}
+	if strings.TrimSpace(ref) != "" {
+		args = append(args, "--branch", strings.TrimSpace(ref))
+	}
+	args = append(args, url, dir)
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if out, cerr := cmd.CombinedOutput(); cerr != nil {
+		detail := strings.TrimSpace(string(out))
+		if len(detail) > 400 {
+			detail = detail[len(detail)-400:]
+		}
+		return apiErr(contracts.ErrInvalidArgument, "克隆失败：%s", detail)
+	}
+	return nil
+}
+
+// refuseDeclaredSymlinks reads the index a clone just wrote and refuses the
+// import if any entry is declared as a symbolic link (git mode 120000).
+//
+// An index that cannot be read is not a refusal: the walk over the checkout
+// (findSkills) is still the fence, and failing here would refuse an import that
+// may be perfectly ordinary.
+func refuseDeclaredSymlinks(ctx context.Context, dir string) error {
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "ls-files", "-s", "-z")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	for _, entry := range strings.Split(string(out), "\x00") {
+		tab := strings.IndexByte(entry, '\t')
+		if tab < 0 {
+			continue
+		}
+		meta := strings.Fields(entry[:tab])
+		if len(meta) == 0 || meta[0] != "120000" {
+			continue
+		}
+		return &tenantfs.Refusal{
+			Path:   entry[tab+1:],
+			Kind:   tenantfs.KindSymlink,
+			Detail: "the repository declares it as a symbolic link (git mode 120000)",
+		}
+	}
+	return nil
+}
+
 // findSkills walks a checkout and collects every directory with a SKILL.md, keeping only
 // the files under that directory.
+//
+// The walk is confined (internal/tenantfs): the checkout is a tree a tenant
+// controls, and a path in it is read only when every component is a real
+// directory or a real file inside the checkout. A link anywhere in the tree
+// refuses the whole import — the whole repository, not the one file — because a
+// symlink in a repository is an attempt to read the control plane's own disk:
+// `leakskill/key.txt -> /proc/1/environ` was a real, measured attack
+// (e2e/.artifacts/adversarial3/REPORT.md, attack 3). The refusal is returned
+// before a single skill row or bundle is written.
 func findSkills(root string, maxBytes int) ([]skillCandidate, error) {
-	var out []skillCandidate
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
+	tree, err := tenantfs.Open(root)
+	if err != nil {
+		return nil, err
+	}
+
+	// One pass over the whole tree. It does two jobs: it finds the skill
+	// directories, and it is the fence — a link in a directory nobody would have
+	// read still refuses the import, because the scan visits everything.
+	var dirs []string
+	scanErr := tree.Walk("", func(rel string, info os.FileInfo) error {
+		if info.Name() != "SKILL.md" {
+			return nil
 		}
-		if entry.IsDir() {
-			// Never descend into git's own storage.
-			if entry.Name() == ".git" {
-				return filepath.SkipDir
+		dir := filepath.ToSlash(filepath.Dir(rel))
+		if dir == "." {
+			dir = ""
+		}
+		dirs = append(dirs, dir)
+		return nil
+	})
+	if scanErr != nil {
+		return nil, scanErr
+	}
+
+	// A skill inside another skill is part of the outer one, exactly as the
+	// directory walk's SkipDir made it before: the outer bundle carries the inner
+	// directory's files, so importing it twice would only create two rows fighting
+	// over the same content.
+	sort.Slice(dirs, func(i, j int) bool {
+		di, dj := strings.Count(dirs[i], "/"), strings.Count(dirs[j], "/")
+		if dirs[i] == "" {
+			di = -1
+		}
+		if dirs[j] == "" {
+			dj = -1
+		}
+		if di != dj {
+			return di < dj
+		}
+		return dirs[i] < dirs[j]
+	})
+	kept := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		nested := false
+		for _, parent := range kept {
+			if dir == parent || parent == "" || strings.HasPrefix(dir, parent+"/") {
+				nested = true
+				break
 			}
-			return nil
 		}
-		if entry.Name() != "SKILL.md" {
-			return nil
+		if !nested {
+			kept = append(kept, dir)
 		}
-		dir := filepath.Dir(path)
-		rel, rerr := filepath.Rel(root, dir)
-		if rerr != nil {
-			return rerr
-		}
+	}
+
+	out := make([]skillCandidate, 0, len(kept))
+	for _, dir := range kept {
 		files := map[string]string{}
 		size := 0
-		werr := filepath.WalkDir(dir, func(inner string, ie os.DirEntry, ierr error) error {
-			if ierr != nil {
-				return ierr
-			}
-			if ie.IsDir() {
-				if ie.Name() == ".git" {
-					return filepath.SkipDir
+		werr := tree.WalkFiles(dir, func(rel string, info os.FileInfo) error {
+			inner := rel
+			if dir != "" {
+				var rerr error
+				inner, rerr = filepath.Rel(dir, rel)
+				if rerr != nil {
+					return rerr
 				}
-				return nil
 			}
-			relInner, rerr := filepath.Rel(dir, inner)
-			if rerr != nil {
-				return rerr
+			// Checked before the read so a huge file is refused rather than
+			// buffered.
+			if info.Size() > int64(maxBytes) {
+				return errImportTooLarge
 			}
-			body, berr := os.ReadFile(inner)
+			body, berr := tree.ReadFile(rel, int64(maxBytes))
 			if berr != nil {
 				return berr
 			}
@@ -452,26 +569,52 @@ func findSkills(root string, maxBytes int) ([]skillCandidate, error) {
 			if size > maxBytes {
 				return errImportTooLarge
 			}
-			files[filepath.ToSlash(relInner)] = string(body)
+			files[filepath.ToSlash(inner)] = string(body)
 			return nil
 		})
 		if werr != nil {
-			return werr
+			return nil, werr
 		}
-		name := slugSkill(filepath.Base(dir))
-		if rel == "." {
+		name := slugSkill(filepath.Base(filepath.FromSlash(dir)))
+		if dir == "" {
 			// A repository that *is* one skill: use the repository's own name.
 			name = slugSkill(filepath.Base(root))
 		}
 		out = append(out, skillCandidate{
 			Name:        name,
 			Description: describeSkill(files["SKILL.md"]),
-			Rel:         filepath.ToSlash(rel),
+			Rel:         dir,
 			Files:       files,
 		})
-		return filepath.SkipDir
-	})
-	return out, err
+	}
+	return out, nil
+}
+
+// importRefusalMessage turns a containment refusal into the sentence the tenant
+// reads. It names the offending path: "this import was refused" without saying
+// which file is a bug report nobody can act on.
+func importRefusalMessage(err error) string {
+	var refusal *tenantfs.Refusal
+	if errors.As(err, &refusal) {
+		switch refusal.Kind {
+		case tenantfs.KindSymlink:
+			return fmt.Sprintf(
+				"导入被拒绝：仓库里的 %q 是符号链接。符号链接可以指向导入目录之外的任何文件"+
+					"（例如控制面自己的密钥），所以整次导入都不会进行，也没有创建任何 Skill。请把该文件换成普通文件后重试。",
+				refusal.Path)
+		case tenantfs.KindOutside:
+			return fmt.Sprintf(
+				"导入被拒绝：仓库里的 %q 解析到了导入目录之外（%s），整次导入都不会进行，也没有创建任何 Skill。",
+				refusal.Path, refusal.Detail)
+		case tenantfs.KindNotRegular:
+			return fmt.Sprintf(
+				"导入被拒绝：仓库里的 %q 不是普通文件（%s），整次导入都不会进行，也没有创建任何 Skill。",
+				refusal.Path, refusal.Detail)
+		case tenantfs.KindTooLarge:
+			return fmt.Sprintf("这个技能超过了单次导入上限（4 MB）：%s", refusal.Path)
+		}
+	}
+	return err.Error()
 }
 
 var errImportTooLarge = &importError{"这个技能超过了单次导入上限（4 MB）"}

@@ -98,8 +98,17 @@ type ignoreRule struct {
 type ignoreRules []ignoreRule
 
 // loadGitignore parses <root>/.gitignore. Unreadable files yield no rules.
+//
+// A symlinked .gitignore is ignored, not followed: the file is inside a
+// workspace the tenant owns, and following a link would let it decide what this
+// process reads. The rules are only patterns, but the rule is the same one the
+// skill importer applies — a link in a tenant tree is not read.
 func loadGitignore(rootAbs string) ignoreRules {
-	f, err := os.Open(filepath.Join(rootAbs, ".gitignore"))
+	path := filepath.Join(rootAbs, ".gitignore")
+	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}

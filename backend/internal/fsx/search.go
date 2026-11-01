@@ -134,6 +134,14 @@ func (s *Service) walkSearch(ctx context.Context, rootAbs, q string, byContent b
 		if visited > s.cfg.MaxWalkFiles {
 			return fs.SkipAll
 		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			// A workspace belongs to the tenant, and a search reads what it
+			// finds: a link in it can name any file the control plane can read
+			// (`/data/master.key`). The walk never follows one, so a search
+			// cannot be turned into that read. ripgrep's path already behaves
+			// this way — it does not follow links unless asked to.
+			return nil
+		}
 		rel, rerr := filepath.Rel(rootAbs, p)
 		if rerr != nil {
 			return nil

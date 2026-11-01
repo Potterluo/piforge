@@ -166,11 +166,16 @@ type Deps struct {
 	// log line saying so — a watchdog that cannot probe must not pretend.
 	ProbeSandbox func(ctx context.Context, sandboxID string) error
 	// SandboxWatchInterval is how often the watchdog probes one sandbox. Zero
-	// uses the package default (10s). Only used when ProbeSandbox is set.
+	// uses the package default (5s). Only used when ProbeSandbox is set.
 	SandboxWatchInterval time.Duration
 	// SandboxProbeTimeout bounds one probe as the watchdog applies it (it also
 	// bounds the sandbox's endpoint resolution). Zero uses 5s.
 	SandboxProbeTimeout time.Duration
+	// SandboxConfirmDelay is the pause between a missed probe and the probe that
+	// confirms it before the container is restarted. Zero uses 1.5s; tests set a
+	// few milliseconds so a "missed once, answered on the retry" case does not
+	// cost the suite a second and a half per pass.
+	SandboxConfirmDelay time.Duration
 	// AgentIsolated reports that this deployment runs every agent inside a
 	// sandbox container (a docker or runner placement; stage 4 of
 	// docs/EXECUTION-BOUNDARY.md made that the only placement for them). It is a
@@ -313,10 +318,10 @@ type server struct {
 	// the last verdict per sandbox, the consecutive-failure counter, and the set
 	// of sandboxes a recovery is running for. It is one mutex because the three
 	// are read together by the status endpoint.
-	probeMu       sync.Mutex
-	probeState    map[string]sandboxProbeVerdict
-	probeStrikes  map[string]int
-	recovering    map[string]bool
+	probeMu      sync.Mutex
+	probeState   map[string]sandboxProbeVerdict
+	probeStrikes map[string]int
+	recovering   map[string]bool
 }
 
 // NewRouter builds the complete HTTP handler, including the recover middleware.

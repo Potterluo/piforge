@@ -32,11 +32,26 @@
 // so the overshoot is bounded by the write rate and the interval, not by zero.
 // Measured after the change: see docs/SANDBOX-DEPLOY.md §6.
 //
-// It is also not a guarantee against a tenant that kills it. The process runs as
-// the same uid as the tenant (it must, to be allowed to signal the tenant's
-// processes), so `pkill -f quota-enforcer` ends it, and the platform watchdog is
-// what is left. The hook that starts it is root-owned and 0555 in the image, so
-// the tenant cannot stop the *next* container start from running it.
+// It is also not, by itself, a guarantee against a tenant that kills it. The
+// process runs as the same uid as the tenant (it must, to be allowed to signal
+// the tenant's processes), so `pkill -f quota-enforcer` ends it. Since the third
+// adversarial acceptance there are two answers to that, in this order:
+//
+//   - the image's hook starts a *root-owned* supervisor loop around it
+//     (deploy/quota-enforcer.sh). The tenant cannot signal another uid — the
+//     sandbox has CapEff 0 — so the loop restarts the enforcer within ~0.2 s of
+//     it being killed, indefinitely;
+//   - the platform's disk watchdog also restarts it when a measurement finds it
+//     missing (cmd/piforged, one `pgrep` in the measurement command), so a
+//     sandbox whose hook never ran is repaired without a container restart.
+//
+// # What it measures
+//
+// The budget is about disk, not about one directory. The workspace is measured
+// on the volume it lives on, and the container's writable layer outside it
+// (/tmp, /var/tmp, /home/gem — where the third acceptance put 4.84 GB while the
+// workspace stayed at 125 KB) is measured as the root filesystem minus the size
+// it had at boot, so the image's own files are not charged to the tenant.
 package quotaenforcer
 
 import (
@@ -127,6 +142,43 @@ type Policy struct {
 	// KillAfter escalates a freeze to a kill after this many consecutive
 	// over-budget readings (DefaultKillAfter when zero).
 	KillAfter int
+	// SysRoot is the container's root filesystem, measured so /tmp and /home/gem
+	// are inside the budget too. Empty disables the second term (a host build or
+	// a test that only wants the workspace walk).
+	SysRoot string
+	// BaselineFile holds the size of the container's writable layers at boot. The
+	// image's hook measures it before any tenant process runs
+	// (deploy/quota-enforcer.sh); subtracting it is what makes "root filesystem
+	// minus baseline" the tenant's own bytes rather than the image's.
+	//
+	// A missing or unreadable baseline disables the second term instead of
+	// counting the image as usage: over-counting would pause every sandbox at
+	// boot, which is worse than the gap it would close.
+	BaselineFile string
+	// SysInterval is how often the second term is re-measured. It walks the whole
+	// container, so it is much slower than the workspace walk; the loop adds the
+	// cached value on every 100 ms reading.
+	SysInterval time.Duration
+}
+
+// DefaultSysInterval is how often the non-workspace term is measured. One second
+// is the compromise between "a /tmp burst is inside the bound" and "measuring the
+// container's whole root four times a second".
+const DefaultSysInterval = time.Second
+
+// DefaultSysRoot and DefaultBaselineFile are where the image puts the container's
+// root filesystem and the boot-time size of its writable layers.
+const (
+	DefaultSysRoot      = "/"
+	DefaultBaselineFile = "/run/piforge/disk-baseline"
+)
+
+// sysInterval resolves the second-term interval.
+func (p Policy) sysInterval() time.Duration {
+	if p.SysInterval > 0 {
+		return p.SysInterval
+	}
+	return DefaultSysInterval
 }
 
 // killAfter resolves the policy's escalation threshold.
@@ -186,11 +238,15 @@ func NextInterval(base, walk time.Duration) time.Duration {
 // rather than a log line because the control plane does not read this process's
 // stdout.
 type Marker struct {
-	At      time.Time `json:"at"`
-	Action  string    `json:"action"`
-	Used    int64     `json:"used_bytes"`
-	Limit   int64     `json:"limit_bytes"`
-	Writers []int     `json:"writers"`
+	At     time.Time `json:"at"`
+	Action string    `json:"action"`
+	Used   int64     `json:"used_bytes"`
+	// Workspace and System split the total, so an operator can see which layer
+	// grew: "the checkout is 120 KB and /tmp is 4.8 GB" was the finding.
+	Workspace int64 `json:"workspace_bytes"`
+	System    int64 `json:"system_bytes"`
+	Limit     int64 `json:"limit_bytes"`
+	Writers   []int `json:"writers"`
 	// Readings counts how many times the enforcer has acted in this container's
 	// life, so "it fired once" and "it is firing constantly" are distinguishable.
 	Readings int `json:"readings"`
@@ -216,13 +272,32 @@ func Run(ctx context.Context, p Policy, logger func(format string, args ...any))
 	// "SIGSTOP the writers" from ours can never meet at this process.
 	isolate()
 
-	logger("quota-enforcer: watching", "root", p.Root, "limit_bytes", p.LimitBytes,
-		"interval", p.Interval.String(), "escalate_after", p.killAfter())
+	// The container's writable layers outside the workspace. A missing baseline
+	// turns the second term off instead of charging the image's own files to the
+	// tenant: over-counting would pause every sandbox at boot, which is a worse
+	// failure than the gap it would close.
+	var baseline int64
+	sysRoot := p.SysRoot
+	if sysRoot != "" {
+		baseline = ReadBaseline(p.BaselineFile)
+		if baseline <= 0 {
+			logger("quota-enforcer: no boot baseline for the container's writable layers; measuring the workspace only",
+				"baseline_file", p.BaselineFile)
+			sysRoot = ""
+		}
+	}
+
+	logger("quota-enforcer: watching", "root", p.Root, "sys_root", sysRoot,
+		"baseline_bytes", baseline, "limit_bytes", p.LimitBytes,
+		"interval", p.Interval.String(), "sys_interval", p.sysInterval().String(),
+		"escalate_after", p.killAfter())
 
 	var (
 		strikes         int
 		lastUsed        int64
 		readings        int
+		sysUsed         int64
+		sysMeasuredAt   time.Time
 		lastAct         = time.Time{}
 		lastNoWriterLog time.Time
 		// halted remembers what the last action stopped. A burst is usually a
@@ -240,8 +315,27 @@ func Run(ctx context.Context, p Policy, logger func(format string, args ...any))
 		}
 
 		start := time.Now()
-		used, err := Measure(ctx, p.Root)
+		workspace, err := Measure(ctx, p.Root)
 		walk := time.Since(start)
+
+		// The second term: everything the tenant can write outside the workspace
+		// (/tmp, /var/tmp, /home/gem), re-measured on its own slower cadence and
+		// added to every reading. Without it the budget was a per-directory number
+		// and 4.84 GB in /tmp left the workspace at 125 KB with no event.
+		if sysRoot != "" && (sysMeasuredAt.IsZero() || time.Since(sysMeasuredAt) >= p.sysInterval()) {
+			if total, serr := MeasureRoot(ctx, sysRoot); serr != nil {
+				logger("quota-enforcer: could not measure the container's writable layers",
+					"sys_root", sysRoot, "error", serr.Error())
+			} else {
+				extra := total - baseline
+				if extra < 0 {
+					extra = 0
+				}
+				sysUsed = extra
+				sysMeasuredAt = time.Now()
+			}
+		}
+		used := workspace + sysUsed
 		if err != nil {
 			// A transient failure must not silently end enforcement; it also must
 			// not count as "under budget".
@@ -270,6 +364,7 @@ func Run(ctx context.Context, p Policy, logger func(format string, args ...any))
 					}
 					writeMarker(p.Root, Marker{
 						At: time.Now().UTC(), Action: action.String(), Used: used,
+						Workspace: workspace, System: sysUsed,
 						Limit: p.LimitBytes, Writers: signalled, Readings: readings,
 					})
 					lastAct = time.Now()
@@ -335,7 +430,13 @@ func (h *halted) merge(now time.Time, current []int) []int {
 // pids it signalled for the marker.
 func apply(p Policy, used int64, action Action, h *halted, lastNoWriterLog *time.Time, logger func(string, ...any)) []int {
 	now := time.Now()
-	current, err := Writers(p.Root)
+	// Both roots: a burst into /tmp is a writer too, and leaving it out is how
+	// the enforcer would log "over budget with no writer" while /tmp grew.
+	roots := []string{p.Root}
+	if p.SysRoot != "" {
+		roots = append(roots, p.SysRoot)
+	}
+	current, err := Writers(roots...)
 	if err != nil {
 		logger("quota-enforcer: could not list the writers", "error", err.Error())
 		return nil
@@ -414,6 +515,9 @@ func MaybeRun(ctx context.Context, argv []string) (int, bool) {
 	root := fs.String("root", "/workspace", "workspace root as this process sees it")
 	interval := fs.Duration("interval", DefaultInterval, "how often to walk the workspace")
 	killAfter := fs.Int("kill-after", DefaultKillAfter, "readings over budget before a frozen writer is killed")
+	sysRoot := fs.String("sysroot", DefaultSysRoot, "the container's root filesystem, so writable layers outside the workspace are in the budget too (empty disables it)")
+	baselineFile := fs.String("baseline", DefaultBaselineFile, "boot-time size of the container's writable layers, written by the image's hook")
+	sysInterval := fs.Duration("sys-interval", DefaultSysInterval, "how often the writable layers outside the workspace are measured")
 	if err := fs.Parse(argv[2:]); err != nil {
 		return 2, true
 	}
@@ -426,7 +530,10 @@ func MaybeRun(ctx context.Context, argv []string) (int, bool) {
 		}
 		fmt.Fprintf(os.Stderr, "%s %s\n", time.Now().UTC().Format(time.RFC3339), line)
 	}
-	if err := Run(ctx, Policy{LimitBytes: *limit, Root: *root, Interval: *interval, KillAfter: *killAfter}, logger); err != nil {
+	if err := Run(ctx, Policy{
+		LimitBytes: *limit, Root: *root, Interval: *interval, KillAfter: *killAfter,
+		SysRoot: *sysRoot, BaselineFile: *baselineFile, SysInterval: *sysInterval,
+	}, logger); err != nil {
 		fmt.Fprintln(os.Stderr, "quota-enforcer:", err)
 		return 1, true
 	}

@@ -1472,3 +1472,116 @@ unauthenticated caller cannot make the gateway do either; one new sealed column;
 in `models.json`; and one more way for a sandbox to be told "no" (a bridge the control
 plane is not joined to would turn every model call into `403 sandbox_address_unresolved`,
 which is why the boot log names the binding and the refusal names the address).
+
+## 17. The third pass (2026-11-01): a tenant tree read with root, and a budget that measured one directory
+
+The third adversarial acceptance (`e2e/.artifacts/adversarial3/`) found one thing that makes the
+others secondary: **a normal tenant could read the control plane's own files through
+`POST /v1/skills/import`.** The importer cloned a tenant-supplied repository and read every file
+under a directory containing `SKILL.md` with `os.ReadFile`, which follows a symlink;
+`leakskill/key.txt -> /proc/1/environ` came back to the tenant as a skill bundle with the real
+provider key inside (`import 200`, `provider_key_occurrences=1`). `/data/master.key`,
+`/data/secret.key`, `/data/piforge.db` and another session's `models.json` were the same primitive.
+
+That is not a missing validation. It is a **primitive**: the control plane, running as root, reads a
+path a tenant can shape. So the fix is a rule about every such read, not a check in one handler.
+
+### 17.1 The rule
+
+A path is read only when every component of it is a real directory or a real file inside the tree
+that path belongs to: no component is a symlink (checked with `Lstat` on the way down, and with a
+`SameFile` comparison between the check and the open), and the resolved path stays inside the root
+(`EvalSymlinks` + `filepath.Rel`). The refusal is typed and names the offending path, and it refuses
+the **whole operation** — the whole import, not the one file — because a tenant shipping a symlink is
+hostile, not unlucky, and a partial import hides the attempt.
+
+The implementation is `backend/internal/tenantfs` (`Tree.ReadFile`, `Tree.Walk`, `Tree.WalkFiles`,
+`Refusal{Path, Absolute, Kind}`). The full audit — every entry point that reads a tenant-derived path
+and what each one does now — is `docs/SANDBOX-DEPLOY.md` §1.8, together with the four places that
+were **also** reading a tenant tree without the rule and were fixed with it (the search fallback,
+`.gitignore`, `git status`'s untracked line count, the agent log).
+
+### 17.2 The transport half
+
+Two belts, because either alone is a single point of failure:
+
+- `git -c core.symlinks=false clone --depth 1`. A link in the repository is checked out as the regular
+  text file it would have pointed at, so no live link reaches the control plane's disk.
+- `git ls-files -s -z` after the clone: any `120000` entry refuses the import and names the path. The
+  repository declaring a link is itself the hostile fact; materialising it quietly would import a
+  "key" file whose contents are the string `/proc/1/environ`, which is a confusing success where a
+  refusal is the honest answer.
+- The zip path already refused absolute entries, `..` and non-regular entries (including symlink
+  entries); the walk behind it is now confined too, so extraction cannot smuggle one in.
+
+### 17.3 Measured after the change (isolated stack 7723, images rebuilt from this HEAD)
+
+```
+ATTACK 1  symlink -> /proc/1/environ   POST /v1/skills/import -> 400
+          "导入被拒绝：仓库里的 \"leakskill/key.txt\" 是符号链接。…整次导入都不会进行，也没有创建任何 Skill。"
+ATTACK 2  symlink -> /data/master.key  -> 400, same path named
+ROWS      before and after: [code-review, explain-codebase, test-gap]; no leakskill row, no bundle dir
+CLONE     naive clone: key.txt is a symlink; confined clone: regular file whose content is "/proc/1/environ";
+          PIFORGE_MASTER_KEY occurrences in it: 0
+LEGIT     a two-file skill still imports (200) and its bundle reads back (SKILL.md + scripts/split.py)
+SCAN      the 36-character drill key appears 0 times in 1016 characters of collected responses
+```
+
+### 17.4 The budget measured one directory, and its enforcement belonged to the tenant
+
+Two more findings from the same pass, both about the *disk* boundary rather than the filesystem one:
+
+- **4.84 GB in `/tmp`, workspace at 125 KB, no event.** The budget was measured over `/workspace`
+  only. The writable layers a sandbox actually has are `/workspace`, `/tmp`, `/var/tmp` and
+  `/home/gem` — the container's own overlay. The measurement is now the workspace **plus** the root
+  filesystem minus the size it had at boot (the image's hook writes that baseline to
+  `/run/piforge/disk-baseline`, root-owned, before any tenant process runs, so the image's own files
+  are not charged to the tenant). Measured: 1.5 GiB written to `/tmp` with a 129 306-byte workspace
+  reads as **1 539 211 060 bytes**; a second 1.5 GiB trips `over=true` with the container still
+  running — previously there was no event at all.
+- **The enforcer was a `gem` process the tenant could `kill -9`.** It has to run as `gem` (it signals
+  gem's processes; the container has `CapEff 0`, so a root process could not), which made it
+  tenant-killable: one `pkill` took the bound from 1.04× to 1.56× and pause/resume did not bring it
+  back. Two answers now: the image's hook starts a **root-owned supervisor loop** around it (the
+  tenant cannot signal another uid — measured `Operation not permitted` on both the loop and the `su`,
+  and the killed gem enforcer was back with a new pid), and the platform's disk watchdog restarts it
+  from the same command line when its measurement finds it missing, so a sandbox whose hook never ran
+  heals without a container restart.
+
+### 17.5 The pids ceiling and the 76-second detection
+
+`pids` went back to 512 (the image idles at 216/256, so 40 forks wedged a sandbox; measured
+`pids.max=512 pids.current=191`). Detection went from "probe every 10 s, two strikes" to "probe every
+5 s, one strike confirmed 1.5 s later": `defaultSandboxWatchInterval = 5s`,
+`sandboxConfirmDelay = 1.5s`, `sandboxWedgedStrikes = 2` (the miss plus its confirmation). A loaded
+host that misses one probe still restarts nothing — the confirmation answers — while a sandbox that
+cannot run `true` twice in 1.5 s is repaired immediately.
+
+Measured on the isolated stack with the report's own storm (`for i in $(seq 441); do sleep 900 &
+done`, 441 forks on top of 191 pids, limit 512):
+
+```
+05:01:00.810  WARN sandbox liveness watchdog: the sandbox did not answer   strike=1
+              error="[Errno 11] Resource temporarily unavailable"
+05:01:02.374  WARN sandbox recovery: stopping and starting the container   reason="…(confirmed)"
+05:01:20.122  WARN sandbox recovery: the sandbox answers again             elapsed=17.7s
+```
+
+Detection-to-repair is 1.56 s (the confirmation), end to end 19.3 s — against the third acceptance's
+detected t+76 s and recovered t+87 s.
+
+### 17.6 What this pass did not fix, stated
+
+- `file://` import URLs are still accepted (a self-hosted install keeps skills on the same disk).
+  A repository with a link is refused, but "the control plane can be pointed at its own local
+  repositories" is a deployment-level allow-list question, not a path check.
+- `git clone --depth 1` still writes the whole working tree to the control plane's temp directory:
+  the 4 MB cap is on what is *read*, not on what lands. A 10 GB repository fills the control plane's
+  disk, which is not the sandbox budget's business.
+- Hard links are outside `tenantfs`'s check: git and the zip reader cannot create them, so neither
+  transport produces one — but a future tar importer must reconsider this.
+- "Root filesystem minus baseline" includes what the sandbox's own services write (browser profile,
+  node caches). That is honest accounting — it is this sandbox's disk — but it means an idle sandbox
+  grows slowly.
+- The skill-mount project needed no change: `materialize`'s copy, copy-to-sandbox and digest paths
+  already refused symlinks, which is also why the leak was in the importer and not in the mount.
