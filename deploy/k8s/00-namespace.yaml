@@ -13,14 +13,30 @@ metadata:
   labels:
     app.kubernetes.io/name: piforge
     app.kubernetes.io/part-of: piforge
-    # Pod Security Admission: the sandbox pods satisfy the restricted profile
-    # (non-root, no privilege escalation, seccomp RuntimeDefault, dropped
-    # capabilities, no host paths). Enforcing it here is what keeps a future
-    # change from quietly widening the pod — the API server refuses it, and the
-    # refusal lands at create time instead of in a review.
-    pod-security.kubernetes.io/enforce: restricted
+    # Pod Security Admission.
+    #
+    # `baseline` is enforced and `restricted` is only a warning — and the delta is
+    # the one thing this provider does that `restricted` forbids:
+    # securityContext.capabilities.add. The sandbox container drops ALL and adds
+    # back exactly the five the image was measured to need (CHOWN, DAC_OVERRIDE,
+    # FOWNER, SETUID, SETGID; internal/sandbox/k8s_objects.go). Under a real API
+    # server, enforcing `restricted` answers:
+    #
+    #   pods "piforge-…" is forbidden: violates PodSecurity "restricted:latest":
+    #   unrestricted capabilities (container "sandbox" must not include "CHOWN",
+    #   "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID" in
+    #   securityContext.capabilities.add)
+    #
+    # So the choice is stated rather than hidden: the pod is `restricted` in every
+    # other respect (non-root, no privilege escalation, RuntimeDefault seccomp,
+    # no host namespaces or paths, dropped capabilities), and the five add-backs
+    # are the documented price of the image's own bootstrap. A cluster that
+    # *mandates* `restricted` (a policy engine, not this label) must drop those
+    # five — which means an image whose entrypoint needs none of them.
+    pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/enforce-version: latest
     pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
 ---
 # One sandbox is one pod with one volume. A quota is the only thing that bounds
 # the *number* of them: the provider applies per-tenant CPU/memory limits to each

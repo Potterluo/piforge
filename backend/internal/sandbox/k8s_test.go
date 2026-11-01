@@ -448,6 +448,12 @@ func TestK8sEnsureCreatesTheSandbox(t *testing.T) {
 	if container.Image != "piforge/sandbox-agent:test" {
 		t.Fatalf("image = %q", container.Image)
 	}
+	// The container provider appends `sleep infinity` to every `docker run`; the pod
+	// says the same thing with Args (CMD override, entrypoint untouched), so an
+	// image whose default command exits is still a sandbox that stays up.
+	if strings.Join(container.Args, " ") != "sleep infinity" {
+		t.Fatalf("args = %v, want the keep-alive argv the container provider passes", container.Args)
+	}
 	csc := container.SecurityContext
 	if csc == nil {
 		t.Fatal("no container securityContext")

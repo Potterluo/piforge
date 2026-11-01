@@ -32,7 +32,7 @@ Secret 是那个沙箱的凭据。控制面**从不挂载**这个 PVC——`Root
 
 | 文件 | 内容 | 不 apply 会怎样 |
 |---|---|---|
-| `deploy/k8s/00-namespace.yaml` | namespace `piforge`、ResourceQuota、LimitRange、`pod-security.kubernetes.io/enforce: restricted` | preflight 拒绝启动：`namespace "piforge" does not exist` |
+| `deploy/k8s/00-namespace.yaml` | namespace `piforge`、ResourceQuota、LimitRange、`pod-security.kubernetes.io/enforce: baseline`（`warn: restricted`，原因见 §4） | preflight 拒绝启动：`namespace "piforge" does not exist` |
 | `deploy/k8s/10-serviceaccount-rbac.yaml` | 两个 ServiceAccount（控制面用的 `piforge-control-plane`、沙箱用的 `piforge-sandbox`）+ 一个 Role + 一个 ClusterRole | preflight 拒绝启动，逐条列出缺哪个 `verb "resource"` |
 | `deploy/k8s/20-control-plane.yaml` | 参考清单：控制面自己的 Deployment（不 apply 也行，但那段 env 是权威的） | 控制面起不来或没有权限 |
 | `deploy/k8s/30-runtimeclass.yaml` | RuntimeClass `gvisor`（`handler: runsc`） | preflight 拒绝启动，并说明后果 |
@@ -182,8 +182,23 @@ endpoint 是 headless Service 的集群 DNS 名字，只有控制面**在集群�
 | pod | `volumes` | 只有 PVC + 上述 emptyDir | **没有 hostPath、没有 hostNetwork、没有 hostPID、没有 privileged**：集群里没有一条能把节点文件系统带进沙箱的路 |
 | 整个对象 | label/annotation | `app.kubernetes.io/managed-by=piforge`、`piforge.io/sandbox=<hash8>`、`piforge.io/user`、`piforge.io/project`（原值在 annotation） | 标签用于选择器与清理；annotation 是审计读的原文（label value 有字符集限制，必须 sanitize） |
 
-`00-namespace.yaml` 还开了 `pod-security.kubernetes.io/enforce: restricted`：即使有人
-改了代码把 pod 放宽，API server 也会拒绝，而不是让它悄悄上线。
+### Pod Security Admission：为什么是 baseline 而不是 restricted
+
+`00-namespace.yaml` 里 `enforce: baseline`、`warn: restricted`，这个差别就是本
+provider 唯一一处违反 `restricted` 的东西：`capabilities.add`。真实集群（k3s v1.31.4）
+上的原话是：
+
+```
+pods "piforge-…" is forbidden: violates PodSecurity "restricted:latest":
+unrestricted capabilities (container "sandbox" must not include "CHOWN",
+"DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID" in securityContext.capabilities.add)
+```
+
+所以这个选择是**写下来的**，不是漏掉的：pod 在其它每一条上都是 restricted（非 root、
+不提升权限、`RuntimeDefault` seccomp、没有 host namespace/path、drop ALL），而那五个
+add-back 是镜像自身 bootstrap 的代价（`sandboxCapAdd` 的注释逐条写了"没有它哪一步
+启动失败"）。一个**强制** `restricted` 的集群（策略引擎，不是这个 label）必须去掉那
+五个，也就意味着换一个不需要它们的镜像——这是产品决策，不是这个 provider 能替人做的。
 
 ### 镜像的一个已知前提
 
@@ -304,6 +319,30 @@ go test ./internal/sandbox -run TestK8sClusterLifecycle -count=1 -v
 - 冷启动时延（`docs/SANDBOX-K8S-AGENTSANDBOX.md` §1.4 引的上游数字是 GKE/kops 的，
   不是我们的镜像和我们的 StorageClass）；
 - `ReadWriteOnce` 卷跨可用区/跨节点 Resume 能不能挂上（取决于 CSI 与 StorageClass）。
+
+### 这一轮实际跑过的那次（2026-11-02，k3s v1.31.4）
+
+```sh
+kubectl apply -f deploy/k8s/00-namespace.yaml \
+              -f deploy/k8s/10-serviceaccount-rbac.yaml \
+              -f deploy/k8s/30-runtimeclass.yaml \
+              -f deploy/k8s/40-networkpolicy.yaml        # 16 个对象全部创建成功
+
+PIFORGE_K8S_TEST=1 PIFORGE_K8S_TEST_CONTEXT=piforge-test \
+PIFORGE_K8S_TEST_IMAGE=piforge-test/gitbox:test \
+PIFORGE_K8S_TEST_NAMESPACE=piforge \
+PIFORGE_K8S_TEST_RUNTIME_CLASS="" PIFORGE_K8S_TEST_ALLOW_RUNC=1 \
+go test ./internal/sandbox -run TestK8sCluster -count=1 -v
+```
+
+结果：`TestK8sClusterLifecycle` PASS（42.5s）、`TestK8sClusterLabelsAreSelectable`
+PASS（18.9s）。k3s 上没有 runsc，所以这次证的是**生命周期与 API 形状**，不是 gVisor
+的 syscall 边界——测试自己在第一行就把这句打出来。
+
+它抓到一个真问题，值得记下来：namespace 最初写的是 `enforce: restricted`，而真集群
+直接拒绝创建 pod（§4 引的那段错误）。假客户端不可能发现这一点，因为它不实现
+PodSecurity。修正是把 namespace 降到 `baseline` + `warn: restricted`，并把这一处差别
+写进 §4，而不是把 add-back 悄悄删掉。**这就是"只有真集群能证明"的那一类。**
 
 ---
 

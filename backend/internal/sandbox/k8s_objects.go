@@ -272,7 +272,13 @@ func (k *K8s) k8sPod(names k8sNames, userID, projectID string, withAPIKey bool, 
 				Image:           k.cfg.Image,
 				ImagePullPolicy: k.pullPolicy(),
 				WorkingDir:      containerWorkspace,
-				Env:             env,
+				// The same argv the container provider appends (docker run <image>
+				// sleep infinity): it overrides the image's CMD, not its ENTRYPOINT, so
+				// an image whose default command exits still yields a sandbox that stays
+				// up between prompts — and an image whose entrypoint starts services
+				// receives exactly the arguments it receives under Docker today.
+				Args: []string{"sleep", "infinity"},
+				Env:  env,
 				Ports: []corev1.ContainerPort{{
 					Name:          K8sAPIPortName,
 					ContainerPort: int32(k.apiPort()),
