@@ -680,6 +680,58 @@ func (a *sandboxAgent) stageModelConfig(ctx context.Context, sandboxID string, s
 	return agentDir, nil
 }
 
+// Transcript returns a session's JSONL transcript, read from inside the sandbox.
+//
+// It is pi.RuntimeConfig.TranscriptFor, and it exists because the conversation
+// lives in the workspace, not in the control plane's memory: pause+resume
+// replaces the container, no agent is started until the next prompt, and the
+// entries endpoint used to answer with an empty page while /stats still counted
+// the turns (adversarial acceptance #2, 2026-11-01). The file is the truth; this
+// reads it through the same door the agent's files already use.
+//
+// A missing file is an empty transcript, not an error: a session that never ran
+// a turn has no conversation to show, and the caller renders that as the empty
+// page it always was.
+func (a *sandboxAgent) Transcript(ctx context.Context, sessionID string) ([]byte, error) {
+	target, err := a.store.SessionSandboxFor(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("agent-in-sandbox: resolve the sandbox for session %s: %w", sessionID, err)
+	}
+	if strings.TrimSpace(target.RootDir) == "" {
+		return nil, fmt.Errorf("agent-in-sandbox: sandbox %s reports no workspace", target.SandboxID)
+	}
+	root, err := a.provider.ContainerPath(target.RootDir)
+	if err != nil {
+		return nil, fmt.Errorf("agent-in-sandbox: map the workspace of %s: %w", target.SandboxID, err)
+	}
+	client, err := a.client(ctx, target.SandboxID)
+	if err != nil {
+		return nil, err
+	}
+	// A container that was just started answers `true` before its HTTP API is
+	// listening. The resume handler waits for the API, and this retry covers the
+	// remaining race: a transcript that exists must not be reported as an empty
+	// conversation because a request arrived a second early.
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		file, err := client.ReadFile(ctx, workspacePath(root, ".piforge", "sessions", sessionID+".jsonl"))
+		if err == nil {
+			return []byte(file.Content), nil
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("agent-in-sandbox: read the transcript of %s: %w", sessionID, lastErr)
+		case <-time.After(1500 * time.Millisecond):
+		}
+	}
+	// A session with no turn yet has no file; a sandbox that cannot answer has no
+	// usable one. Both are reported, and the caller renders the empty page it
+	// always did — what it must not do is call an unreadable transcript an empty
+	// conversation and mean it.
+	return nil, fmt.Errorf("agent-in-sandbox: read the transcript of %s: %w", sessionID, lastErr)
+}
+
 // Logs returns the tail of the agent's stderr log, read from inside the sandbox.
 //
 // Stage 3 item 3 of docs/EXECUTION-BOUNDARY.md. The agent's stderr used to land

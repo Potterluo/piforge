@@ -45,6 +45,15 @@ type RuntimeConfig struct {
 	// with the session id) or falls back to
 	// <Dir>/.piforge/sessions/<session-id>.jsonl.
 	SessionFileFor func(sessionID string) string
+	// TranscriptFor returns one session's JSONL transcript as bytes, from
+	// wherever it actually lives.
+	//
+	// Entries falls back to it when the session has no live process, which is
+	// the state every resumed session is in until its next prompt: pause and
+	// resume replace the container and start no agent, so the in-memory view is
+	// empty while the conversation is on disk. The deployment answers this
+	// because the file may be inside a sandbox this process cannot open.
+	TranscriptFor func(ctx context.Context, sessionID string) ([]byte, error)
 	// Dial replaces the subprocess spawn with an arbitrary transport. Tests use
 	// it to run the fake peer in-process over io.Pipe; a production deployment
 	// can use it to reach Pi through a sandbox shim's stdio channel.
@@ -776,9 +785,25 @@ func (r *Runtime) Tree(ctx context.Context, sessionID string) ([]*contracts.Tree
 }
 
 // Entries returns entries appended after `since` plus the current leaf id.
+//
+// With a live agent the answer comes from the process (it is authoritative and
+// includes a message that is still streaming). Without one — a session that was
+// paused and resumed, or a control plane that restarted before the next prompt —
+// it comes from the session file, because "no process" is not "no conversation":
+// the transcript is on disk and reporting an empty one is a lie the user acts on.
 func (r *Runtime) Entries(ctx context.Context, sessionID, since string) ([]*contracts.TreeEntry, string, error) {
 	s, err := r.get(sessionID)
 	if err != nil {
+		if r.cfg.TranscriptFor != nil {
+			entries, leaf, terr := r.transcriptEntries(ctx, sessionID, since)
+			if terr == nil {
+				return entries, leaf, nil
+			}
+			// The file could not be read. The process-less error is still the
+			// truthful answer, and the HTTP layer already renders it as an empty
+			// page rather than a failure; the read error is not swallowed into a
+			// successful empty transcript, because that is the bug being fixed.
+		}
 		return nil, "", err
 	}
 	fields := map[string]any{}

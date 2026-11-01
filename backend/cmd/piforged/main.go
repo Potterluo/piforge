@@ -1239,6 +1239,12 @@ func run() error {
 		// And the kill that makes "the watchdog stops the agent" true for a
 		// container placement, where the agent outlives this process's stream.
 		StopAgent: sandboxAgentStopper(remoteSB, keys),
+		// And the liveness probe the watchdog needs: `true` through the sandbox's
+		// own API, bounded to a few seconds. A fork storm that exhausted the
+		// sandbox's pids cgroup leaves it unable to fork, so the only honest
+		// question is "can it still run a command" — and the answer has to come
+		// from the same door the agent uses.
+		ProbeSandbox: sandboxProbe(remoteSB, keys),
 		// The quota policy and the network mode are what the admin status page
 		// reports next to each tenant's sandbox count: "what limit is this tenant
 		// running with" has to be answerable without reading the deployment file.
@@ -1308,6 +1314,15 @@ func run() error {
 	// no-ops (loudly) when no quota is configured or nothing can measure a
 	// sandbox from inside.
 	handler.StartDiskWatch(ctx)
+
+	// The liveness half: a sandbox whose pids cgroup is exhausted cannot fork,
+	// so `docker exec`, the platform's own `du`, and the agent all fail while the
+	// container is still "running" — the only recovery the product used to offer
+	// was a manual pause+resume (adversarial acceptance #2). This probes every
+	// running sandbox through its own API and performs that pause+resume itself,
+	// telling the session before and after. It no-ops (loudly) for a deployment
+	// that cannot run a command inside a sandbox.
+	handler.StartSandboxWatch(ctx)
 
 	// Stage 3: after reconciliation has decided which runs are really alive,
 	// reconnect to them. The agents kept running inside their sandboxes while this
@@ -1591,6 +1606,10 @@ func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSp
 			return agent.ContainerWorktree(context.Background(), spec)
 		}
 		cfg.SessionFileFor = agent.SessionFile
+		// And the same file is readable without an agent: a resumed session has
+		// a transcript on disk and no process, and the entries endpoint must not
+		// answer that with an empty conversation.
+		cfg.TranscriptFor = agent.Transcript
 		// The agent's stderr is a file inside the workspace now, not a pipe this
 		// process owns: the Logs panel reads it through the sandbox API.
 		cfg.LogsFor = agent.Logs
