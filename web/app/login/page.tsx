@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -20,6 +20,20 @@ import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
 
+/**
+ * The "is this a client render yet" store.
+ *
+ * Nothing ever notifies: the only fact it carries is that a client render is
+ * happening, which `useSyncExternalStore` answers with different snapshots on
+ * the server (false) and after hydration (true). That is the same transition
+ * `useEffect(() => setMounted(true), [])` produced, without setting state
+ * synchronously inside an effect (which React's lint rules refuse, and which
+ * costs a frame the user can click through).
+ */
+const noSubscription = () => () => {};
+const onClient = () => true;
+const onServer = () => false;
+
 const SEEDED_ACCOUNTS = [
   { email: "admin@piforge.local", role: "管理员" },
   { email: "dev@piforge.local", role: "普通用户" },
@@ -35,8 +49,7 @@ export default function LoginPage() {
   // Before hydration a submit falls through to the browser's native form GET,
   // which would put the password in the URL. Keeping the button disabled until
   // React is attached makes that impossible.
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  const mounted = useSyncExternalStore(noSubscription, onClient, onServer);
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();

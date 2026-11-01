@@ -5,6 +5,7 @@ import { Play, Square } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { useOnChange } from "@/hooks/use-on-change";
 import { api } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
 import type { InterruptionMarker } from "@/lib/session/reduce";
@@ -54,34 +55,47 @@ export function RecoveryMarker({
   marker: InterruptionMarker;
   active: boolean;
 }) {
-  const [view, setView] = useState<RecoveryView | null>(null);
-  const [loading, setLoading] = useState(active);
+  // The read is keyed by what it is about — the session, whether this marker is
+  // the live one, and how many times it has become live — and `loading`/`view`
+  // are *derived* from that key instead of being written at the top of the
+  // effect. Setting state synchronously inside an effect is what
+  // `react-hooks/set-state-in-effect` refuses (and what costs an extra frame):
+  // the answer to "is this read still the one on screen" is the signature
+  // comparison below.
+  const [read, setRead] = useState<{ signature: string; view: RecoveryView | null }>({
+    signature: "",
+    view: null,
+  });
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
 
+  // A marker that becomes live again is a new thing to read: bumping the
+  // generation is what makes the signature differ and the read start over.
+  const [generation, setGeneration] = useState(0);
+  if (useOnChange(active) && active) setGeneration((value) => value + 1);
+
+  const signature = `${sessionId}:${active ? "on" : "off"}:${generation}`;
+  const loading = active && read.signature !== signature;
+  // An inactive marker shows none of it: the read belongs to the live one, and
+  // a stale survival summary under an old marker would describe work that has
+  // since been continued or replaced.
+  const view = active && read.signature === signature ? read.view : null;
+
   useEffect(() => {
-    if (!active) {
-      setView(null);
-      setLoading(false);
-      return;
-    }
+    if (!active) return;
     let cancelled = false;
-    setLoading(true);
     api.sessions
       .recovery(sessionId)
       .then((next) => {
-        if (!cancelled) setView(next);
+        if (!cancelled) setRead({ signature, view: next });
       })
       .catch(() => {
-        if (!cancelled) setView(null);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) setRead({ signature, view: null });
       });
     return () => {
       cancelled = true;
     };
-  }, [sessionId, active]);
+  }, [sessionId, active, signature]);
 
   const sendContinue = async () => {
     if (sending || sent) return;

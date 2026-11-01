@@ -331,7 +331,13 @@ export function GitChangesPanel() {
     () => api.git.diff(git.sessionId, scope, "", range),
     { enabled: historical },
   );
-  const scopeFiles: FileDiff[] = historical ? (scopeDiff.data?.diffs ?? []) : [];
+  // Memoised: the array below is a dependency of `activePath`, and a fresh `[]`
+  // or `.diffs` on every render made that memo recompute every time (and made
+  // the dependency itself change identity each render).
+  const scopeFiles = React.useMemo<FileDiff[]>(
+    () => (historical ? (scopeDiff.data?.diffs ?? []) : []),
+    [historical, scopeDiff.data],
+  );
   // Which file the diff below shows. Historical scopes fall back to their first
   // file without writing that choice into state (which would fight the user's
   // own selection when they switch back).

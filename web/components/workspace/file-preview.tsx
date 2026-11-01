@@ -16,6 +16,7 @@ import {
   Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import api from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
+import { useOnChange } from "@/hooks/use-on-change";
 import {
   type FileKind,
   baseName,
@@ -96,13 +97,17 @@ export function FilePreview({ sessionId, path, line, onSaved, onClose }: FilePre
   // message says the quote came from the file, not from a diff.
   const [commentAt, setCommentAt] = React.useState<{ line: number; text: string } | null>(null);
 
-  React.useEffect(() => {
-    // Changing file while editing would silently throw the draft away.
+  // Changing file while editing would silently throw the draft away, so the
+  // editor closes with it. Done in the render that sees the new path (see
+  // useOnChange): the reset and the swap of the file body land in the same
+  // frame, so there is no moment where the new file is shown under the old
+  // file's draft.
+  if (useOnChange(path)) {
     setEditing(false);
     setDraft("");
     setSaveError(null);
     setCommentAt(null);
-  }, [path]);
+  }
 
   const commentOnLine = React.useCallback(
     (line: number, text: string) => setCommentAt({ line, text }),

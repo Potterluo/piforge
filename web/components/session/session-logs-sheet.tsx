@@ -11,11 +11,22 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
+import { useOnChange } from "@/hooks/use-on-change";
 
 import { SessionSkillsSection } from "./session-skills-section";
+
+/** One read of the agent's stderr tail, with the key it answered. */
+interface ReadState {
+  signature: string;
+  lines: string[];
+  truncated: boolean;
+  reason: string | null;
+  error: string | null;
+}
+
+const EMPTY_READ: ReadState = { signature: "", lines: [], truncated: false, reason: null, error: null };
 
 /**
  * The agent's stderr tail (PRD FR-5.10).
@@ -34,33 +45,54 @@ export function SessionLogsSheet({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const [lines, setLines] = React.useState<string[]>([]);
-  const [truncated, setTruncated] = React.useState(false);
-  const [reason, setReason] = React.useState<string | null>(null);
-  const [loading, setLoading] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
+  // One read is identified by what it is about: the session, whether the sheet
+  // is open, which open it is, and which poll it is. `loading` is derived from
+  // that key rather than written at the top of the effect — the sheet refreshes
+  // every three seconds, and a synchronous setLoading there is the cascading
+  // render `react-hooks/set-state-in-effect` exists to prevent.
+  const [read, setRead] = React.useState<ReadState>(EMPTY_READ);
+  const [poll, setPoll] = React.useState(0);
+  // Reopening re-reads immediately, even if the previous open left a result for
+  // the same session: a fresh open is a fresh question.
+  const [generation, setGeneration] = React.useState(0);
+  if (useOnChange(open) && open) setGeneration((value) => value + 1);
 
-  const load = React.useCallback(async () => {
-    setLoading(true);
-    try {
-      const result = await api.sessions.logs(sessionId);
-      setLines(result.logs?.lines ?? []);
-      setTruncated(Boolean(result.logs?.truncated));
-      setReason(result.reason ?? null);
-      setError(null);
-    } catch (cause) {
-      setError(humanizeError(cause, "读取失败"));
-    } finally {
-      setLoading(false);
-    }
-  }, [sessionId]);
+  const signature = `${sessionId}:${open ? "on" : "off"}:${generation}:${poll}`;
+  const loading = open && read.signature !== signature;
+  const { lines, truncated, reason, error } = read;
 
   React.useEffect(() => {
     if (!open) return;
-    void load();
-    const timer = window.setInterval(() => void load(), 3_000);
+    let alive = true;
+    api.sessions
+      .logs(sessionId)
+      .then((result) => {
+        if (!alive) return;
+        setRead({
+          signature,
+          lines: result.logs?.lines ?? [],
+          truncated: Boolean(result.logs?.truncated),
+          reason: result.reason ?? null,
+          error: null,
+        });
+      })
+      .catch((cause: unknown) => {
+        if (!alive) return;
+        // Keep the lines that are already on screen: a poll that failed says
+        // nothing about what the agent wrote before it.
+        setRead((previous) => ({ ...previous, signature, error: humanizeError(cause, "读取失败") }));
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open, sessionId, signature]);
+
+  // The poll only asks for another read; it never touches the read itself.
+  React.useEffect(() => {
+    if (!open) return;
+    const timer = window.setInterval(() => setPoll((value) => value + 1), 3_000);
     return () => window.clearInterval(timer);
-  }, [open, load]);
+  }, [open]);
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -80,7 +112,7 @@ export function SessionLogsSheet({
         </SheetHeader>
 
         <div className="flex items-center gap-2">
-          <Button size="xs" variant="outline" onClick={() => void load()} disabled={loading}>
+          <Button size="xs" variant="outline" onClick={() => setPoll((value) => value + 1)} disabled={loading}>
             刷新
           </Button>
           {loading ? <span className="text-[11px] text-muted-foreground">读取中…</span> : null}

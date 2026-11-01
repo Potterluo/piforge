@@ -10,6 +10,7 @@ import { useOptionalSessionEventState } from "@/components/session/session-event
 import { api } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
 import {
+  EMPTY_DRAFTS,
   listDrafts,
   newDraftId,
   removeDraft,
@@ -38,21 +39,36 @@ import { cn } from "@/lib/utils";
  *     that is the whole point of commenting on the diff you are looking at.
  */
 
-/** useReviewDrafts is the React view of the persisted draft store. */
+/**
+ * useReviewDrafts is the React view of the persisted draft store.
+ *
+ * The store (lib/review/comments.ts) is external to React — it is localStorage
+ * plus a listener set, written from the diff view and from the file preview —
+ * so `useSyncExternalStore` is the honest binding: React subscribes once and
+ * re-reads on every notification. The previous version copied the list into
+ * state from an effect, which set state synchronously on every mount and every
+ * session change (react-hooks/set-state-in-effect).
+ *
+ * `listDrafts` returns the store's own array, so the snapshot is stable between
+ * writes, which is what useSyncExternalStore requires.
+ */
 export function useReviewDrafts(sessionId: string) {
-  const [drafts, setDrafts] = React.useState<ReviewDraft[]>([]);
-
-  React.useEffect(() => {
-    setDrafts(listDrafts(sessionId));
-    return subscribeDrafts(() => setDrafts(listDrafts(sessionId)));
-  }, [sessionId]);
+  const subscribe = React.useCallback(
+    (listener: () => void) => subscribeDrafts(listener),
+    [],
+  );
+  const getSnapshot = React.useCallback(() => listDrafts(sessionId), [sessionId]);
+  // The drafts live in localStorage, so the server has none of them; the
+  // snapshot it renders with is the empty list, and hydration re-reads.
+  const getServerSnapshot = React.useCallback(() => EMPTY_DRAFTS, []);
+  const drafts = React.useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 
   const save = React.useCallback(
-    (draft: ReviewDraft) => setDrafts(saveDraft(sessionId, draft)),
+    (draft: ReviewDraft) => saveDraft(sessionId, draft),
     [sessionId],
   );
   const remove = React.useCallback(
-    (id: string) => setDrafts(removeDraft(sessionId, id)),
+    (id: string) => removeDraft(sessionId, id),
     [sessionId],
   );
   return { drafts, save, remove };
@@ -174,7 +190,12 @@ export function ReviewCommentEditor({
     hunk: anchor.hunk,
     quote: anchor.quote,
     body,
-    origin: existing?.origin ?? "diff",
+    // Where the comment was written. `origin` is the prop the caller passes
+    // ("file" from the file preview); it used to be dropped on the floor, so
+    // every draft claimed to come from the diff. The field stays local
+    // metadata — the message sent to the server carries only the anchor and the
+    // text — so this changes what is stored, not what anyone sees.
+    origin: existing?.origin ?? origin,
     createdAt: existing?.createdAt ?? new Date().toISOString(),
   });
 

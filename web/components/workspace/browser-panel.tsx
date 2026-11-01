@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
+import { useOnChange } from "@/hooks/use-on-change";
 import { toast } from "sonner";
 import { useFeature } from "@/lib/session/queries";
 
@@ -129,10 +130,16 @@ export function BrowserPanel({ sessionId, className, onCaptured }: BrowserPanelP
     enabled: browserEnabled,
     refetchInterval: 5_000,
   });
-  React.useEffect(() => {
-    if (tabId || !tabs.data) return;
+  // A viewer must point at a page. The first tab list (and a list that arrives
+  // after the active page was closed, which is what `tabId` turning null means)
+  // picks the server's default. The choice is made in the render that sees
+  // either input change (see useOnChange) instead of after paint, so the panel
+  // never opens a socket with no page named while it still has no tab.
+  const tabsArrived = useOnChange(tabs.data);
+  const tabClosed = useOnChange(tabId);
+  if ((tabsArrived || tabClosed) && !tabId && tabs.data) {
     setTabId(tabs.data.default_tab || tabs.data.tabs[0]?.id || null);
-  }, [tabs.data, tabId]);
+  }
 
   React.useEffect(() => {
     // The flag is already known: opening a socket the server will refuse only

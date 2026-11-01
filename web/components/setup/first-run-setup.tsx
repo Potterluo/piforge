@@ -172,13 +172,18 @@ function SharedProviderDialog({
   const [apiKey, setApiKey] = React.useState("");
 
   // The dialog may mount before /v1/setup resolves, so the documented defaults
-  // are applied when they arrive unless the user already typed something.
-  React.useEffect(() => {
-    if (!defaults) return;
+  // are applied when they arrive unless the user already typed something. The
+  // comparison is on the values, not on the object: a refetched `/v1/setup`
+  // hands over an equal-looking object, and re-seeding on that would overwrite
+  // what the user typed with the deployment's defaults.
+  const defaultsKey = defaults ? `${defaults.name}\u0000${defaults.base_url ?? ""}\u0000${defaults.model}` : "";
+  const [appliedKey, setAppliedKey] = React.useState(defaultsKey);
+  if (defaults && defaultsKey !== appliedKey) {
+    setAppliedKey(defaultsKey);
     setName((current) => (current === "shared" ? defaults.name : current));
     setBaseUrl((current) => (current === "" ? defaults.base_url ?? "" : current));
     setModel((current) => (current === "" ? defaults.model : current));
-  }, [defaults]);
+  }
 
   const create = useMutation({
     mutationFn: () =>

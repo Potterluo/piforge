@@ -126,9 +126,19 @@ export function newDraftId(): string {
   return `rc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/**
+ * The empty list, shared by every "no drafts" answer.
+ *
+ * `listDrafts` is read by `useSyncExternalStore`, which compares snapshots with
+ * Object.is: returning a fresh `[]` for the empty case would look like a change
+ * on every render and loop. Callers only read the array (filter/map/spread), so
+ * one shared empty list is safe.
+ */
+export const EMPTY_DRAFTS: ReviewDraft[] = [];
+
 /** listDrafts returns this session's drafts, oldest first. */
 export function listDrafts(sessionId: string): ReviewDraft[] {
-  return load()[sessionId] ?? [];
+  return load()[sessionId] ?? EMPTY_DRAFTS;
 }
 
 /** draftsForPath is what the diff/file view renders markers from. */

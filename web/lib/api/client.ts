@@ -16,7 +16,6 @@ import {
   type ForkPoint,
   type GitGraph,
   type GitStatus,
-  type ForgeConfig,
   type PRPreview,
   type CreatePRResult,
   type InterruptResult,

@@ -222,7 +222,10 @@ export function FileTree({ sessionId, revision = 0, activePath, onOpenFile, onRe
         setLoadingDirs((previous) => previous.filter((entry) => entry !== path));
       }
     },
-    [dirs, loadingDirs, sessionId],
+    // `showIgnored` is a dependency because it is part of the request: without
+    // it, a directory expanded after the toggle fetched its children with the
+    // flag from whenever this callback was last re-created.
+    [dirs, loadingDirs, sessionId, showIgnored],
   );
 
   const handleToggleDir = React.useCallback(

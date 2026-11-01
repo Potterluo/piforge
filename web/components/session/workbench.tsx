@@ -34,7 +34,7 @@ import { WorkspacePanels } from "@/components/workspace/workspace-panels";
 import { api } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
 import { ApiError } from "@/lib/types";
-import { toast } from "sonner";
+import { useOnChange } from "@/hooks/use-on-change";
 import { sessionKindLabel } from "@/lib/session/format";
 import { sessionModelLabel } from "@/lib/session/model-display";
 import { qk, useProject, useProviders, useSession, useSessionSkills, useSkills } from "@/lib/session/queries";
@@ -179,10 +179,11 @@ function WorkbenchBody({
     return () => window.removeEventListener("piforge:no-model", onNoModel);
   }, []);
   // A later send that starts a run means the configuration now works (or the
-  // user picked a working model); the old refusal must not outlive it.
-  useEffect(() => {
-    if (state.running) setModelRefusal(null);
-  }, [state.running]);
+  // user picked a working model); the old refusal must not outlive it. The
+  // clear happens in the render that sees `running` turn true (see
+  // useOnChange): an effect would paint one frame of the stale refusal over a
+  // run that is already going.
+  if (useOnChange(state.running) && state.running) setModelRefusal(null);
   // The first message names an untitled session on the server. Nothing pushes
   // that title, so a settled run is the cue to re-read it.
   const queryClient = useQueryClient();
@@ -228,10 +229,15 @@ function WorkbenchBody({
     reconcileRunning(Boolean(data.running || data.streaming));
   }, [runtime.data, runtime.dataUpdatedAt, reconcileRunning]);
 
+  // `refetch` is a stable function in react-query v5; naming it here keeps the
+  // effect's dependency list honest without depending on the whole query result
+  // object (which lint reads as `runtime` and re-runs the effect on every
+  // fetch).
+  const refetchRuntime = runtime.refetch;
   React.useEffect(() => {
     if (runSignal === 0) return;
-    void runtime.refetch();
-  }, [runSignal, runtime.refetch]);
+    void refetchRuntime();
+  }, [runSignal, refetchRuntime]);
   const forkPoints = useQuery({
     queryKey: ["session-fork-points", sessionId],
     queryFn: () => api.sessions.forkPoints(sessionId),

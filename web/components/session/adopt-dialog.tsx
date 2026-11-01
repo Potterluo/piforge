@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { api } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
+import { useOnChange } from "@/hooks/use-on-change";
 import { useSession } from "@/lib/session/queries";
 import { useAsync } from "@/components/workspace/use-async";
 import {
@@ -69,11 +70,14 @@ export function AdoptDialog({
 
   // Opening the dialog is the moment to re-read both checkouts: the lists can
   // change while the sheet is closed (a commit in another tab, a run settling).
-  React.useEffect(() => {
-    if (!open) return;
+  // `revision` is part of every read's key, so bumping it re-reads even when the
+  // keys would otherwise be identical to the previous open. Done during the
+  // render that sees `open` turn true (see useOnChange) so the dialog never
+  // paints one frame of the previous attempt's error.
+  if (useOnChange(open) && open) {
     setError(null);
     setRevision((value) => value + 1);
-  }, [open]);
+  }
 
   const branchStatus = useAsync(`adopt-source:${branchId}:${revision}`, () => api.git.status(branchId), {
     enabled: open,

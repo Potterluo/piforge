@@ -79,7 +79,14 @@ export function AssistantRun({
     }
   };
 
-  let toolsDrawn = false;
+  // Every tool call in the run folds into *one* summary row, drawn where the
+  // first tool block sits. That position is computed up front instead of being
+  // latched by a `let drawn = false` inside the map: a render function is not
+  // allowed to reassign a variable once it has returned (react-hooks/immutability),
+  // and the index pair says the same thing in one place.
+  const toolTurnIndex = turns.findIndex((turn) => turn.blocks.some((block) => block.kind === "tool"));
+  const toolBlockIndex =
+    toolTurnIndex >= 0 ? turns[toolTurnIndex].blocks.findIndex((block) => block.kind === "tool") : -1;
 
   return (
     <MessageGroup data-testid="run-block" className={cn("gap-2", className)}>
@@ -94,7 +101,7 @@ export function AssistantRun({
             ) : null}
           </MessageHeader>
 
-          {turns.map((turn) => (
+          {turns.map((turn, turnIndex) => (
             <div key={turn.id} data-testid="turn-assistant" className="flex min-w-0 flex-col gap-2">
               {turn.blocks.map((block, blockIndex) => {
                 if (block.kind === "thinking") {
@@ -103,8 +110,7 @@ export function AssistantRun({
                   );
                 }
                 if (block.kind === "tool") {
-                  if (toolsDrawn) return null;
-                  toolsDrawn = true;
+                  if (turnIndex !== toolTurnIndex || blockIndex !== toolBlockIndex) return null;
                   return <ToolGroup key={`tools-${tools[0]?.id ?? turn.id}`} blocks={tools} />;
                 }
                 return (

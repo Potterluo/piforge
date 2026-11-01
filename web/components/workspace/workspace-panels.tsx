@@ -435,9 +435,6 @@ export function WorkspacePanels({
               <SharedPanel
                 id={split}
                 sessionId={sessionId}
-                openPath={openPath}
-                onOpenFile={handleOpenFile}
-                onRevealInTerminal={handleRevealInTerminal}
                 onCaptured={handleCaptured}
                 onTerminalOutput={handleTerminalOutput}
                 coverageRef={coverageRef}
@@ -478,9 +475,6 @@ function otherPanel(primary: string): string {
 function SharedPanel({
   id,
   sessionId,
-  openPath,
-  onOpenFile,
-  onRevealInTerminal,
   onCaptured,
   onTerminalOutput,
   coverageRef,
@@ -490,9 +484,6 @@ function SharedPanel({
 }: {
   id: string;
   sessionId: string;
-  openPath: string | null;
-  onOpenFile: (path: string) => void;
-  onRevealInTerminal: (path: string) => void;
   onCaptured: (path: string) => void;
   /** The same coalesced "the shell printed something" signal as the primary pane. */
   onTerminalOutput: () => void;

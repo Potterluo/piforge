@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/dialog";
 import { api } from "@/lib/api/client";
 import { humanizeError } from "@/lib/errors";
+import { useOnChange } from "@/hooks/use-on-change";
 import { cn } from "@/lib/utils";
 import type { SearchResult } from "@/lib/types";
 
@@ -77,14 +78,21 @@ export function QuickOpen({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  // An empty query means "no search": the rows and any error belong to the
+  // query that produced them, and showing them under a blank input is how a
+  // palette looks broken. Cleared in the render that sees the query go empty
+  // (see useOnChange) rather than from the debounce effect below, which may
+  // only write state from its timer callback.
+  const queryEmpty = query.trim().length === 0;
+  if (useOnChange(queryEmpty) && queryEmpty) {
+    setResults([]);
+    setError(null);
+  }
+
   React.useEffect(() => {
     if (!open) return;
     const trimmed = query.trim();
-    if (trimmed.length === 0) {
-      setResults([]);
-      setError(null);
-      return;
-    }
+    if (trimmed.length === 0) return;
 
     // Debounced: one search per keystroke would spawn one `rg` per character.
     const handle = window.setTimeout(() => {

@@ -137,8 +137,12 @@ export function usePtySession({ sessionId, tab = "main", enabled = true }: Optio
 
   React.useEffect(() => {
     if (!enabled || typeof window === "undefined") {
+      // No shell is wanted (or possible): nothing may reach one. The status the
+      // hook reports for this case is derived at the return below instead of
+      // being written here — a synchronous setState inside an effect is the
+      // cascading render `react-hooks/set-state-in-effect` refuses, and the
+      // value only exists to be returned.
       acceptInput.current = false;
-      setStatus("closed");
       return () => {};
     }
 
@@ -280,7 +284,7 @@ export function usePtySession({ sessionId, tab = "main", enabled = true }: Optio
       socket.current?.close(1000, "unmount");
       socket.current = null;
     };
-  }, [sessionId, tab, enabled, generation]);
+  }, [sessionId, tab, enabled, generation, flushPending]);
 
   const send = React.useCallback((data: string) => {
     if (!data) return;
@@ -337,5 +341,10 @@ export function usePtySession({ sessionId, tab = "main", enabled = true }: Optio
     setNotice(null);
   }, []);
 
-  return { status, error, notice, onData, send, resize, reconnect, terminate };
+  // A disabled terminal has no shell behind it, so "connecting" would describe
+  // a connection nothing is making. Derived, so the effect above stays free of
+  // state writes.
+  const reported: PtyStatus = enabled ? status : "closed";
+
+  return { status: reported, error, notice, onData, send, resize, reconnect, terminate };
 }
