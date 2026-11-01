@@ -3,7 +3,9 @@
 package quotaenforcer
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -27,7 +29,17 @@ import (
 // takes long, NextInterval backs the loop off, which is cheaper than cancelling
 // a half-finished du every tick.
 func Measure(ctx context.Context, root string) (int64, error) {
-	return duBytes(ctx, root)
+	bytes, err := duBytes(ctx, root)
+	var partial *WalkError
+	if errors.As(err, &partial) {
+		// The workspace is the tree being limited, so a walk that could not see
+		// all of it is not a measurement: gem owns the tree and can hide a
+		// directory from its own uid with `chmod 000`, so accepting the number
+		// would be accepting a number the tenant chose. The caller resets its
+		// strike counter and logs; the platform watchdog and RLIMIT_FSIZE remain.
+		return 0, fmt.Errorf("quota-enforcer: refusing a partial workspace walk (%d entries unreadable under %s)", partial.Unreadable, root)
+	}
+	return bytes, err
 }
 
 // MeasureRoot measures the container's root filesystem, which is where /tmp,
@@ -60,22 +72,22 @@ func ReadBaseline(path string) int64 {
 	return value
 }
 
-// duBytes is the one walk both measurements use.
+// duBytes is the one walk both measurements use. It hands du's raw result to
+// classifyDu, which is shared with the other platforms' tests (measure.go), and
+// keeps a failure to *start* du as a plain error rather than a measurement.
 func duBytes(ctx context.Context, root string) (int64, error) {
 	cmd := exec.CommandContext(ctx, "du", "-sbx", root)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return 0, fmt.Errorf("du -sbx %s: %w", root, err)
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) {
+			return 0, fmt.Errorf("du -sbx %s: %w", root, err)
+		}
+		return classifyDu(root, out, stderr.String(), exit.ExitCode())
 	}
-	fields := strings.Fields(string(out))
-	if len(fields) < 2 {
-		return 0, fmt.Errorf("du -sbx %s printed %q, want a byte total", root, strings.TrimSpace(string(out)))
-	}
-	bytes, err := strconv.ParseInt(fields[0], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("du -sbx %s printed %q: %w", root, fields[0], err)
-	}
-	return bytes, nil
+	return classifyDu(root, out, stderr.String(), 0)
 }
 
 // Writers returns the pids to stop for one over-budget reading: every process

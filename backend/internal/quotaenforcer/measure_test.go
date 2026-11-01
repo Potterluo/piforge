@@ -1,11 +1,56 @@
 package quotaenforcer
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+// The walk has three outcomes, and the middle one is the one that was missing:
+// GNU du exits 1 when *some* entries were unreadable, which is what `du -sbx /`
+// does for the sandbox uid on every reading (17 root-only directories in the
+// shipped image, measured). Treating that as "no measurement" turned the
+// whole-container term off in exactly the deployment the product ships, so the
+// total was the workspace plus zero and /tmp had no budget at all.
+func TestClassifyDuWalkOutcomes(t *testing.T) {
+	// success
+	bytes, err := classifyDu("/", []byte("108199\t/\n"), "", 0)
+	if err != nil || bytes != 108199 {
+		t.Fatalf("success = %d, %v; want 108199, nil", bytes, err)
+	}
+
+	// partial: exit 1, a real total, complaints on stderr
+	var walk *WalkError
+	bytes, err = classifyDu("/", []byte("8576239753\t/\n"),
+		"du: cannot read directory '/root/x': Permission denied\ndu: cannot read directory '/var/lib/y': Permission denied\n", 1)
+	if !errors.As(err, &walk) {
+		t.Fatalf("partial walk error = %v, want a *WalkError", err)
+	}
+	if bytes != 8576239753 || walk.Unreadable != 2 || walk.Bytes != 8576239753 {
+		t.Fatalf("partial = %d bytes, %d unreadable (%d carried); want 8576239753, 2, 8576239753",
+			bytes, walk.Unreadable, walk.Bytes)
+	}
+	if !strings.Contains(walk.Error(), "2 entries could not be read") {
+		t.Fatalf("partial error text = %q", walk.Error())
+	}
+
+	// a genuine failure is not usable at any price
+	if _, err := classifyDu("/", []byte(""), "du: cannot access '/nope': No such file or directory\n", 1); err == nil || errors.As(err, &walk) {
+		t.Fatalf("missing root = %v, want a plain error rather than a partial walk", err)
+	}
+	if _, err := classifyDu("/", []byte(""), "", 2); err == nil || errors.As(err, &walk) {
+		t.Fatalf("exit 2 = %v, want a plain error", err)
+	}
+	if _, err := classifyDu("/", []byte(""), "", 0); err == nil {
+		t.Fatal("empty output was accepted as a measurement")
+	}
+	if _, err := classifyDu("/", []byte("not-a-number\t/\n"), "", 0); err == nil {
+		t.Fatal("a non-numeric total was accepted")
+	}
+}
 
 // The second term is what makes the budget a disk budget: the container's
 // writable layers outside the workspace (where /tmp and /home/gem live) are

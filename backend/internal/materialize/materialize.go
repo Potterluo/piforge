@@ -584,7 +584,15 @@ func installSkillFS(fs FileSystem, root, snapshots, target, source, slug string,
 		return "", warning, fmt.Errorf("mount skill: make read-only: %w", err)
 	}
 	if writable {
-		return string(MechanismCopy), "the mounted copy is writable by the account that reads it (root without CAP_SYS_ADMIN and with CAP_DAC_OVERRIDE); the tree is frozen but not read-only", nil
+		// Both facts matter and the operator must not lose the first one: a
+		// bind that was refused *and* a copy whose bits do not bind this account
+		// is two failures, not one. Reporting only the second ("the copy is
+		// writable") hid the seccomp/AppArmor refusal that caused it.
+		detail := "the mounted copy is writable by the account that reads it (root without CAP_SYS_ADMIN and with CAP_DAC_OVERRIDE); the tree is frozen but not read-only"
+		if warning != "" {
+			detail = warning + "; " + detail
+		}
+		return string(MechanismCopy), detail, nil
 	}
 	return string(MechanismCopyRO), warning, nil
 }

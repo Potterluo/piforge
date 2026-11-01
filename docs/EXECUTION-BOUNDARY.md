@@ -881,10 +881,19 @@ the "frozen" skill tree, and it was one container escape away from the host.
    five (`CapEff 0000000000000000`). Measured `CapEff` for the container: `00000000000000cb`.
 3. `deploy/Dockerfile.sandbox-agent` deletes `/usr/bin/sudo`, `/usr/sbin/sudo` and
    `/etc/sudoers.d/gem`, makes `/opt/piforge` and `/opt/piforge/piforged` root-owned
-   `0555`, and fails the build if any of that is missing. The mode is real because the
-   container has no capability that bypasses it: a root process in this container is
-   subject to file modes like any other account. Writing `/opt/piforge/piforged` fails
-   as `gem` (EACCES) and would fail for a root that appeared some other way.
+   `0555`, and fails the build if any of that is missing. Writing `/opt/piforge/piforged`
+   fails as `gem` (EACCES, measured 2026-11-01 on Linux).
+
+   **Corrected (Linux pass, 2026-11-01):** this paragraph used to say the mode binds
+   root too, "because the container has no capability that bypasses it". That is false
+   for the container the provider actually starts: `DAC_OVERRIDE` is one of the five it
+   adds back, so root *can* write a 0555 file — measured `CapEff 00000000000000cb` wrote
+   a root-owned 0555 file, while the same container with `DAC_OVERRIDE` dropped
+   (`CapEff 00000000000000c9`) was refused (`docs/LINUX-VERIFY.md`, row L7). The
+   guarantee that survives is the one that matters: the tenant is `gem`, `gem` holds no
+   capability, and no path from `gem` to root exists. The mode is a guard against the
+   tenant, not against the image's own bootstrap — and if a deployment ever drops
+   `DAC_OVERRIDE` from the sandbox, the mode *becomes* a guard against root too.
 
 **What it cost:** five capabilities remain (listed above, each with the operation that
 needs it). Nothing in the product path needed root for itself: `pi`, git, node, the

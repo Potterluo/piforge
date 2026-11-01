@@ -144,9 +144,19 @@ func TestCleanRelRules(t *testing.T) {
 		"a/../../x",
 		"/abs",
 		`\abs`,
-		"C:\\x",
 		"//server/share",
 		"a\x00b",
+	}
+	// A Windows drive path is absolute on Windows and a legal relative file
+	// *name* on POSIX (`C:\x` is one name that CleanRel keeps under the root), so
+	// the refusal is asserted where the platform can honour it, and the
+	// containment invariant is asserted here. The Linux pass measured this as a
+	// suite that was deterministically red off Windows (docs/LINUX-VERIFY.md,
+	// row L12).
+	if runtime.GOOS == "windows" {
+		bad = append(bad, `C:\x`)
+	} else if got, err := CleanRel(`C:\x`); err != nil || strings.HasPrefix(got, "/") {
+		t.Errorf("CleanRel(%q) must contain a foreign-dialect name on this platform: %q, %v", `C:\x`, got, err)
 	}
 	for _, in := range bad {
 		if _, err := CleanRel(in); err == nil {

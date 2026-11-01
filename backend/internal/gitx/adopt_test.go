@@ -323,11 +323,19 @@ func initRepoWithTwoWorktrees(t *testing.T, r *Runner, ctx context.Context) (roo
 	must(root, "init", "-b", "main")
 	// No user.email/user.name on purpose: a fresh container has none, and the adopt
 	// must supply its own fallback rather than fail with "Author identity unknown".
+	//
+	// The *setup* commit still needs an identity to exist at all, and it is taken
+	// at command scope only: `-c` writes nothing to .git/config, so the adopt
+	// below still meets a repository with no identity of its own. On Linux this
+	// is load-bearing — a container has no ~/.gitconfig, so the unqualified
+	// `git commit -m init` this used to run fails with exit 128 and five adopt
+	// tests go red (measured: docs/LINUX-VERIFY.md, row L11). On the Windows
+	// development host the machine's global gitconfig hid it.
 	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("base\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	must(root, "add", "-A")
-	must(root, "commit", "-m", "init")
+	must(root, "-c", "user.name=PiForge Setup", "-c", "user.email=setup@piforge.local", "commit", "-m", "init")
 
 	source = filepath.Join(base, "branch")
 	must(root, "worktree", "add", "-b", "branch", source, "HEAD")

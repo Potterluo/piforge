@@ -300,6 +300,7 @@ func Run(ctx context.Context, p Policy, logger func(format string, args ...any))
 		sysMeasuredAt   time.Time
 		lastAct         = time.Time{}
 		lastNoWriterLog time.Time
+		lastNegativeLog time.Time
 		// halted remembers what the last action stopped. A burst is usually a
 		// loop that opens a new writer every few milliseconds, so the reading that
 		// happens to land between two of them finds nothing to signal; remembering
@@ -323,16 +324,37 @@ func Run(ctx context.Context, p Policy, logger func(format string, args ...any))
 		// added to every reading. Without it the budget was a per-directory number
 		// and 4.84 GB in /tmp left the workspace at 125 KB with no event.
 		if sysRoot != "" && (sysMeasuredAt.IsZero() || time.Since(sysMeasuredAt) >= p.sysInterval()) {
-			if total, serr := MeasureRoot(ctx, sysRoot); serr != nil {
-				logger("quota-enforcer: could not measure the container's writable layers",
-					"sys_root", sysRoot, "error", serr.Error())
-			} else {
+			total, serr := MeasureRoot(ctx, sysRoot)
+			var partial *WalkError
+			usable := serr == nil || errors.As(serr, &partial)
+			var warned int64
+			if usable {
 				extra := total - baseline
 				if extra < 0 {
+					// A walk smaller than the boot baseline means the two numbers
+					// were not measured the same way — the classic cause is the
+					// baseline written by root and this walk run as the sandbox
+					// uid, which cannot read root-only directories. Clamping to 0
+					// is right (the negative is not the tenant's), but saying it
+					// once a minute is what turns "the second term never fires"
+					// into a line an operator can act on.
+					warned = extra
 					extra = 0
 				}
 				sysUsed = extra
 				sysMeasuredAt = time.Now()
+				if partial != nil {
+					logger("quota-enforcer: the container walk could not read part of the tree; the budget counts what it could",
+						"sys_root", sysRoot, "unreadable_entries", partial.Unreadable, "measured_bytes", partial.Bytes)
+				}
+				if warned < 0 && time.Since(lastNegativeLog) > time.Minute {
+					logger("quota-enforcer: the container walk is smaller than the boot baseline; check that the baseline was measured as the same uid as this process",
+						"sys_root", sysRoot, "walk_bytes", total, "baseline_bytes", baseline, "difference", warned)
+					lastNegativeLog = time.Now()
+				}
+			} else {
+				logger("quota-enforcer: could not measure the container's writable layers",
+					"sys_root", sysRoot, "error", serr.Error())
 			}
 		}
 		used := workspace + sysUsed

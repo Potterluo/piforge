@@ -52,6 +52,29 @@ func TestPlatformPlanOverride(t *testing.T) {
 	}
 }
 
+// modeBitsBind asks the host the only question that decides whether copy-ro is
+// an honest label: does a 0444 file really refuse a write for this process?
+//
+// It is asked rather than assumed because the answer depends on the platform
+// *and* on the uid. Windows maps the bit to FILE_ATTRIBUTE_READONLY, which binds
+// everyone; Linux binds the owner, but a root process carrying CAP_DAC_OVERRIDE
+// ignores it — which is `go test ./...` on a stock Linux root host, and the
+// deployment shape a Linux operator is most likely to run it in. Tests that
+// hard-coded copy-ro were only ever right on Windows and on non-root Linux, and
+// this pass measured them failing on Linux root (docs/LINUX-VERIFY.md, row L9).
+func modeBitsBind(t *testing.T) bool {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("probe\n"), 0o644); err != nil {
+		t.Fatalf("probe write: %v", err)
+	}
+	if err := chmodTree(dir, true); err != nil {
+		t.Fatalf("probe chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = chmodTree(dir, false) })
+	return !mountedFileIsWritable(dir)
+}
+
 // FR-14.2 on Windows: each skill is a read-only copy, never a pointer at the
 // bundle. The agent cannot overwrite it, editing the bundle does not reach a
 // running session, and a new session gets the new content.
@@ -71,20 +94,31 @@ func TestMountCopiesReadOnlyOffTheSourcePath(t *testing.T) {
 		t.Fatalf("mounted = %+v", result.Mounted)
 	}
 	mounted := result.Mounted[0]
-	if mounted.Mechanism != string(MechanismCopyRO) {
-		t.Fatalf("mechanism = %q, want copy-ro on windows", mounted.Mechanism)
+	binds := modeBitsBind(t)
+	want := MechanismCopyRO
+	if !binds {
+		want = MechanismCopy
+	}
+	if mounted.Mechanism != string(want) {
+		t.Fatalf("mechanism = %q, want %q (the read-only bits bind this process: %v)", mounted.Mechanism, want, binds)
 	}
 	if filepath.Clean(mounted.Dir) == filepath.Clean(source) {
 		t.Fatal("the mounted path is the source path")
 	}
 	skillFile := filepath.Join(mounted.Dir, "SKILL.md")
 
-	// A write through the mounted path is refused.
-	if err := os.WriteFile(skillFile, []byte("agent was here\n"), 0o644); err == nil {
-		t.Fatal("a skill copied for the agent was writable")
-	}
-	if body, err := os.ReadFile(skillFile); err != nil || !strings.Contains(string(body), "Read the diff") {
-		t.Fatalf("the failed write changed the mounted copy: %q, %v", body, err)
+	// A write through the mounted path is refused — when the mode bits bind this
+	// process. Where they do not (root with CAP_DAC_OVERRIDE), the copy is still
+	// frozen onto a path the bundle does not own, which is the half of the
+	// guarantee that does not depend on a capability, and the mechanism says
+	// `copy` instead of claiming `copy-ro`.
+	if binds {
+		if err := os.WriteFile(skillFile, []byte("agent was here\n"), 0o644); err == nil {
+			t.Fatal("a skill copied for the agent was writable")
+		}
+		if body, err := os.ReadFile(skillFile); err != nil || !strings.Contains(string(body), "Read the diff") {
+			t.Fatalf("the failed write changed the mounted copy: %q, %v", body, err)
+		}
 	}
 	// The source bundle is untouched by the attempt as well.
 	if body, err := os.ReadFile(filepath.Join(source, "SKILL.md")); err != nil || !strings.Contains(string(body), "Read the diff") {
@@ -200,15 +234,22 @@ func TestMountDegradesWhenBindIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
-	if got := result.Mounted[0].Mechanism; got != string(MechanismCopyRO) {
-		t.Fatalf("mechanism after a refused bind = %q, want copy-ro", got)
+	want := MechanismCopyRO
+	binds := modeBitsBind(t)
+	if !binds {
+		want = MechanismCopy
+	}
+	if got := result.Mounted[0].Mechanism; got != string(want) {
+		t.Fatalf("mechanism after a refused bind = %q, want %q (the read-only bits bind this process: %v)", got, want, binds)
 	}
 	if len(result.Warnings) == 0 || !strings.Contains(strings.Join(result.Warnings, "\n"), "bind mount refused") {
 		t.Fatalf("warnings = %v, want the refusal explained", result.Warnings)
 	}
-	skillFile := filepath.Join(result.Mounted[0].Dir, "SKILL.md")
-	if err := os.WriteFile(skillFile, []byte("nope\n"), 0o644); err == nil {
-		t.Fatal("the fallback copy is writable")
+	if binds {
+		skillFile := filepath.Join(result.Mounted[0].Dir, "SKILL.md")
+		if err := os.WriteFile(skillFile, []byte("nope\n"), 0o644); err == nil {
+			t.Fatal("the fallback copy is writable")
+		}
 	}
 }
 
@@ -247,8 +288,14 @@ func TestNoCapabilityIsAReadOnlyCopyWithoutASnapshot(t *testing.T) {
 	if _, serr := os.Stat(snapshots); !os.IsNotExist(serr) {
 		t.Fatalf("a snapshot directory was created although no mount could use it: %v", serr)
 	}
-	if len(result.Warnings) != 0 {
-		t.Fatalf("warnings = %v, want none: copy-ro is the correct answer here, not a degradation", result.Warnings)
+	modeBinds := modeBitsBind(t)
+	if modeBinds {
+		if len(result.Warnings) != 0 {
+			t.Fatalf("warnings = %v, want none: copy-ro is the correct answer here, not a degradation", result.Warnings)
+		}
+	} else if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "writable by the account that reads it") {		// Root with CAP_DAC_OVERRIDE is the one host where the probe may only
+		// report `copy`; the degradation has to be said, not swallowed.
+		t.Fatalf("warnings = %v, want the one honest copy-not-copy-ro line", result.Warnings)
 	}
 
 	mounted := result.Mounted[0]

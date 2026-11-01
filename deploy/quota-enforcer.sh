@@ -70,19 +70,40 @@ done
 # (the image's own files), measured before any tenant process runs. Kept in /run,
 # which is root-owned, so the tenant cannot rewrite it — a baseline the tenant
 # controls would be a budget the tenant controls.
+#
+# Two things about this number are Linux-specific and were measured, not assumed
+# (docs/LINUX-VERIFY.md, 2026-11-01):
+#
+#   * It is measured as gem, the uid the enforcer runs as. `du -sbx /` as root
+#     sees ~470-570 MB more than as gem, because 17 directories in the image are
+#     root-only; subtracting a root number from a gem walk makes the second term
+#     negative (clamped to 0, so /tmp had no budget) or, worse, silently smaller
+#     than the tenant's real usage. Same uid, same tree, same answer.
+#   * It is written only once per container filesystem. /run is on the
+#     container's writable layer, which survives `docker stop` / `docker start`
+#     (the pause/resume path), so the hook runs again on a layer that already
+#     holds the tenant's files. Measured: a second boot after a 200 MB /tmp
+#     burst moved the baseline from 9,044,482,902 to 10,014,794,913 bytes, and
+#     every byte of that burst stopped counting. Keeping the first number keeps
+#     the budget. A fresh container (a new layer) has no file and measures.
 baseline_dir=/run/piforge
 baseline_file="$baseline_dir/disk-baseline"
 mkdir -p "$baseline_dir"
 chmod 755 "$baseline_dir"
-boot_bytes=$(du -sbx / 2>/dev/null | awk '{print $1}')
-case "$boot_bytes" in
-  ''|*[!0-9]*) log "could not measure the boot baseline; the enforcer will measure the workspace only" ;;
-  *)
-    printf '%s\n' "$boot_bytes" > "$baseline_file"
-    chmod 644 "$baseline_file"
-    log "writable-layer baseline: ${boot_bytes} bytes (${baseline_file})"
-    ;;
-esac
+if [ -s "$baseline_file" ]; then
+  log "keeping the boot baseline already recorded: $(cat "$baseline_file") bytes (${baseline_file}); this container layer is reused, so re-measuring would fold the tenant's earlier writes into it"
+else
+  boot_bytes=$(su -s /bin/sh gem -c 'du -sbx / 2>/dev/null' | awk '{print $1}')
+  root_bytes=$(du -sbx / 2>/dev/null | awk '{print $1}')
+  case "$boot_bytes" in
+    ''|*[!0-9]*) log "could not measure the boot baseline; the enforcer will measure the workspace only" ;;
+    *)
+      printf '%s\n' "$boot_bytes" > "$baseline_file"
+      chmod 644 "$baseline_file"
+      log "writable-layer baseline: ${boot_bytes} bytes as gem (${baseline_file}); root sees ${root_bytes:-unknown} bytes, and the difference is the root-only part of the image the enforcer cannot read"
+      ;;
+  esac
+fi
 
 # The supervisor. Root-owned and detached, it starts the enforcer as gem and
 # restarts it whenever it exits — a tenant `kill -9` of the gem process is

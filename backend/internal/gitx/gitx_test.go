@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -644,9 +645,21 @@ func TestPathGuards(t *testing.T) {
 	if p, err := SecurePath(root, "sub/file.go"); err != nil || !strings.HasPrefix(p, root) {
 		t.Errorf("SecurePath ok-case = %q, %v", p, err)
 	}
-	for _, bad := range []string{"../../etc/passwd", "..", "sub/../../escape", "C:\\Windows\\win.ini", "/etc/passwd", "a\x00b"} {
-		if _, err := SecurePath(root, bad); err == nil {
-			t.Errorf("SecurePath(%q) should fail", bad)
+	bad := []string{"../../etc/passwd", "..", "sub/../../escape", "/etc/passwd", "a\x00b"}
+	// The Windows-dialect cases are an *escape* on Windows and a legal relative
+	// file name here: on Linux `C:\Windows\win.ini` is one name that SecurePath
+	// joins under root, so refusing it would be theatre. The guard's job is
+	// containment, and the Linux pass measured that this matters: the invariant
+	// asserts what each platform can actually be asked to honour
+	// (docs/LINUX-VERIFY.md, row L12).
+	if runtime.GOOS == "windows" {
+		bad = append(bad, `C:\Windows\win.ini`, `\\server\share\x`)
+	} else if p, err := SecurePath(root, `C:\Windows\win.ini`); err != nil || !strings.HasPrefix(p, root) {
+		t.Errorf("a Windows-dialect name must still be contained on this platform: %q, %v", p, err)
+	}
+	for _, b := range bad {
+		if _, err := SecurePath(root, b); err == nil {
+			t.Errorf("SecurePath(%q) should fail", b)
 		}
 	}
 	if _, err := CleanRel("a/./b/../c"); err != nil {

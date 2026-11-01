@@ -58,11 +58,20 @@ RUN ln -sf ../lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.j
 #   2. this RUN deletes the sudo binary and the sudoers entry, so the runtime
 #      path has no passwordless-root tool at all — not even one that a future
 #      image or a missing security-opt could revive.
-#   3. the launcher is root-owned and mode 0555: no write bit for anyone,
-#      including root, which is real because the container runs with
-#      --cap-drop ALL and therefore cannot hold CAP_DAC_OVERRIDE. A file root
-#      cannot write is the difference between "a compromised agent can repoint
-#      the supervisor" and "it cannot".
+#   3. the launcher is root-owned and mode 0555: no write bit for anyone. Be
+#      precise about which account that binds, because the Linux measurement
+#      (2026-11-01, docs/LINUX-VERIFY.md) says something narrower than "root,
+#      too": the provider gives the sandbox CHOWN, DAC_OVERRIDE, FOWNER, SETUID
+#      and SETGID because the image's own bootstrap needs them
+#      (backend/internal/sandbox/docker.go, sandboxCapAdd). Root in this
+#      container therefore *can* write a 0555 file — measured: CapEff
+#      ...00cb wrote a root-owned 0555 file, the same container without
+#      DAC_OVERRIDE (...00c9) could not. What the mode buys is the tenant's
+#      half: gem (uid 1000, CapEff 0) cannot write, rename or delete the
+#      launcher, and no_new_privs plus the removed sudo leave gem no way to
+#      become root. The mode guards against the tenant, not against the image's
+#      own bootstrap; the earlier wording of this comment claimed both, and only
+#      the first is true.
 #
 # /opt/piforge itself goes 0555 for the same reason. The build fails if any of
 # this is missing, so a base-image update cannot silently reintroduce it.

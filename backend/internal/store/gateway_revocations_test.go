@@ -87,7 +87,17 @@ func TestGatewayRevocationSweepRemovesOnlyExpiredRows(t *testing.T) {
 		t.Fatalf("revoke %s: %v", live, err)
 	}
 
-	deleted, err := st.SweepGatewayRevocations(ctx, now)
+	// A past expiry is deliberately clamped to the revocation instant ("a
+	// revocation is valid at least from now", RevokeGatewayToken), so the sweep
+	// has to run at an instant *after* the revoke call. Sweeping at the same
+	// `now` this test started with was a race the Windows development host hid:
+	// its clock is coarse enough that `now` and the store's `now` were the same
+	// value, while Linux's nanosecond clock makes the store's clamp a microsecond
+	// later and the sweep deletes nothing — the suite was deterministically red
+	// on a native Linux host (docs/LINUX-VERIFY.md, row L13).
+	sweepAt := time.Now().Add(time.Second)
+
+	deleted, err := st.SweepGatewayRevocations(ctx, sweepAt)
 	if err != nil {
 		t.Fatalf("SweepGatewayRevocations: %v", err)
 	}
@@ -102,7 +112,7 @@ func TestGatewayRevocationSweepRemovesOnlyExpiredRows(t *testing.T) {
 	}
 
 	// Sweeping again is a no-op, not an error or a double delete.
-	if deleted, err := st.SweepGatewayRevocations(ctx, now); err != nil || deleted != 0 {
+	if deleted, err := st.SweepGatewayRevocations(ctx, sweepAt); err != nil || deleted != 0 {
 		t.Fatalf("second sweep = %d, %v; want 0, nil", deleted, err)
 	}
 }
