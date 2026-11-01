@@ -39,6 +39,8 @@
 
 本批（租户出口策略，tenancy 的最后一块）不改变 FR 状态：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。它补的是上一批 §12.4 自己写下的那条"没有出口控制"：沙箱在租户桥上仍能上公网，`npm install`、`curl`、被投毒的依赖都拿到宿主的出网能力，而部署里没有一处表达这是不是故意的。现在有 `deploy/tenant-egress.json`（`PIFORGE_TENANT_EGRESS_FILE`，控制面与 runner 都读，启动校验），三种取值：`none`（默认，桥用 `docker network create --internal` 创建，没有默认路由与 NAT，外部 DNS 也不再解析；控制面与 runner 在这条桥上，所以 `/gw/llm`、`/gw/mcp` 与 checkout 照常）、`open`（显式的今天行为）、`allowlist`（**建模但不执行，启动时拒绝并指出租户**——Docker 只能按桥过滤，按 hostname 需要内网桥上的过滤代理或宿主 iptables，两个都没做，所以不假装支持）。同一道闸门还拒绝 `none` + 共享网络、共享网络 + 按租户覆盖、`-sandbox local` + 任何关闭模式；改模式要重建桥，代码宁可拒绝建沙箱并给出 `docker network rm`，也不让"看着建好了、其实还开着"的桥存在。管理页 `/admin/status` 的「租户配额与网络」多了一行「沙箱出口」并按账号显示 `出口：关闭/开放`（`GET /v1/admin/status` 的 `tenant_limits.egress_*`）。证据：`scripts/probe-egress.ps1` 在同一个一次性栈上把默认租户设成 `none`、另一个设成 `open`，从沙箱内部量 DNS、按名字与按字面地址的公网请求、控制面 `/healthz` 200、`/v1/*` 401、自己的网关 200，并在**被关闭的租户**里跑一条真实 prompt（能跑通，因为 agent 需要的是网关不是公网）。设计与不宣称的东西见 `docs/EXECUTION-BOUNDARY.md` §13，运维与排查见 `docs/SANDBOX-DEPLOY.md` §1.7.5。
 
+本批（`48-change-list` 的 flake + 快速打开的陈旧响应）不改变任何 FR 状态：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135 行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。两条都不是功能缺失，而是「一次绿能不能被相信」：`48-change-list` 是整轮 e2e 里唯一红过一次的 spec（retry 后绿），根因是断言读的是**快照**——`expect.poll` 只证明服务端提交了索引，面板自己的刷新还没画上来，而 `allInnerTexts()` 不重试（实测余量 8–26 ms；把面板的状态读延迟 400 ms 后同一个 spec 30/30 变红）；快速打开的 `cancelled` 标志写在 `setTimeout` 回调**内部**，effect 的 cleanup 拿不到它，过期的搜索仍会写结果（清空输入框后仍显示「搜索失败」也是同一条）。两处都做了 fail-first，并留下可重放的杠杆（`PIFORGE_E2E_SLOW_GIT_STATUS_MS`、两个 vitest 用例）。**已知 flake 列表现在为空**：整轮 e2e 182/182、重试 0 次；`pwsh scripts/deliver-check.ps1 -Image piforge:local` 从当前工作树重建的镜像上 **125/125 PASS、exit 0**（run `20261101-201608`，见文末「门禁」）。
+
 ---
 
 ---
@@ -2341,3 +2343,134 @@ pnpm --dir web exec next build   ok（Next.js 16.4.3 / Turbopack）
 ```
 
 证据：`e2e/.artifacts/fix-48-flake/fail-first-quick-open-web.log`（未入库）。
+
+---
+
+## 本批：`48-change-list` 的 flake（2026-11-01）
+
+**不改变任何 FR 状态**：126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1；整表 135 行 =
+DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1。修的是「一次绿能不能被相信」。
+
+**症状.** 整轮 e2e 里唯一红过一次的 spec，retry 后绿（上一批记录 182 = 181 passed + 1 flaky）。红在
+`expect(states.every((state) => state === "已暂存")).toBe(true)`：`Expected: true / Received: false`，
+`states` 是 `["未跟踪","未跟踪","未跟踪","未跟踪"]`。
+
+**诊断（先量，再改）.** 临时探针 spec（用完删除）复刻同一串步骤并打印三个时刻，`PROBE_DELAY=0` 五次：
+
+```
+[probe] delay=0 poll=302ms read=321ms panel=330ms statesNow=["已暂存","已暂存","已暂存","已暂存"]
+[probe] delay=0 poll=287ms read=312ms panel=320ms statesNow=["已暂存","已暂存","已暂存","已暂存"]
+[probe] delay=0 poll=291ms read=322ms panel=329ms statesNow=["已暂存","已暂存","已暂存","已暂存"]
+[probe] delay=0 poll=291ms read=316ms panel=323ms statesNow=["已暂存","已暂存","已暂存","已暂存"]
+[probe] delay=0 poll=283ms read=304ms panel=312ms statesNow=["已暂存","已暂存","已暂存","已暂存"]
+```
+
+`poll` = `expect.poll(GET /git/status)` 第一次看到「没有一个是 `?`」的时刻，`read` = 紧接着
+`allInnerTexts()` 的时刻，`panel` = 面板把四个徽章画成「已暂存」的时刻。**poll 证明的是服务端提交了
+索引，不是这个标签页画完了**：`useAsync` 在 signature 变化后刻意保留上一份 `data`（刷新时不闪骨架），
+所以刷新在途时面板画的是**旧快照**。正常机器上三个时刻只差 8–26 ms，谁先到取决于一次往返的抖动——
+这就是「一整轮红一次」的全部来源，而 `allInnerTexts()` / `evaluateAll()` **不重试**。
+
+把这句话变成可重复的实验：给页面自己的 `/git/status` 加 400 ms 延迟（一台刚跑完 180 个 spec 的机器
+对一次 100–300 ms 的请求做的就是这件事），同一段代码立刻变成：
+
+```
+[probe] delay=400 poll=288ms read=305ms panel=613ms statesNow=["未跟踪","未跟踪","未跟踪","未跟踪"]
+[probe] delay=400 poll=279ms read=298ms panel=592ms statesNow=["未跟踪","未跟踪","未跟踪","未跟踪"]
+[probe] delay=400 poll=275ms read=295ms panel=594ms statesNow=["未跟踪","未跟踪","未跟踪","未跟踪"]
+```
+
+**不是产品缺陷——四个候选逐个排掉（都量过）：**
+
+1. **服务端不缓存。** `handleGitStatus` 每次现跑 `gitx.Status`（`git status --porcelain=v2` + 计数），
+   中间没有缓存层；
+2. **面板的刷新不早于提交。** `mutate` 是 `await api.git.stage(...)` 之后才 `git.refresh()`，所以
+   那次刷新读到的索引一定是提交之后的；
+3. **旧响应盖不掉新响应。** `useAsync` 的 `alive` 在 signature 变化时丢掉上一轮的响应，所以「慢的
+   旧请求后到」不会写进列表（否则那会是真 bug，而不是 8–26 ms 的窗口）；
+4. **读操作会不会把写弄失败？** 会——但产品已经挡住了：把 `harden.go` 的 `GIT_OPTIONAL_LOCKS=0`
+   拿掉，同一台机器上 200 次 `git add` 有 **18 次**死在
+   `Unable to create '…/.git/index.lock': File exists`，带着它是 **0 次**。这条以前没有任何测试，
+   本批补上（见下）。
+
+**修法（改测试，不给断言松绑）.** 先等面板自己说「没有东西可暂存」，再读快照：
+
+```ts
+const badge = page.getByTestId("git-state");
+await expect(badge).toHaveText(files.map(() => "已暂存"), { timeout: 20_000 });
+await expect(page.getByTestId("git-stage-all")).toHaveCount(0, { timeout: 20_000 });
+```
+
+两条都是会重试的断言，断言的仍是**同一个不变量**（四个徽章全是「已暂存」；`git-stage-all` 只在还有
+`canStage` 的行时渲染，它消失就是面板自己的「没有东西可暂存」）。其后
+`toHaveCount` / `evaluateAll` / `allInnerTexts` / `not.toContain("部分暂存")` / `toBeEnabled` /
+`toContainText("4 个改动")` **一条没改**，依旧是严格快照。
+
+**fail-first（同一段代码、同一台机器、同一个命令）.**
+
+```
+PIFORGE_E2E_SLOW_GIT_STATUS_MS=400 … --repeat-each=30（旧断言）  30 failed / 31 passed (6.9m)
+    每个 repeat 的两次尝试都红：Expected: true / Received: false（states 是 未跟踪）
+PIFORGE_E2E_SLOW_GIT_STATUS_MS=400 … --repeat-each=30（新断言）  61 passed (4.1m)
+… --repeat-each=30（改前，杠杆关闭）                            61 passed (3.3m)
+… --repeat-each=30（改后，杠杆关闭）                            61 passed (3.6m)
+```
+
+**说清楚的一件事**：什么都不改、就这样跑 30 次是**绿的**——这个 flake 只在整轮负载下露头（余量
+8–26 ms）。所以上面那组「慢客户端」不是美化过的复现，而是把真实条件（一次往返慢 300 ms）固定下来；
+`PIFORGE_E2E_SLOW_GIT_STATUS_MS` 因此留在 spec 里（默认 0，正常运行一个字节都不变），任何人可以
+重放这条证据。证据文件：`e2e/.artifacts/fix-48-flake/*.log`（`.artifacts` 未入库）。
+
+**回归（Go，钉住 e2e 现在依赖的那条服务端保证）.** `backend/internal/gitx/status_order_test.go`：
+
+- `TestAStatusReadCannotMakeAStageFail`：8 个 goroutine 连续 `Status`，同时 80 次 `Stage`；要求
+  0 次写失败、0 次读失败，且读次数 ≥ 80（否则等于没并发）；
+- `TestAStageIsCommittedBeforeItReturns`：每次 `Stage` 返回后立刻 `Status`，那条路径必须已在索引里
+  （不是 `?`），20 轮——「返回即提交」从注释变成断言。
+
+fail-first：把 `GIT_OPTIONAL_LOCKS=0` 从 `harden.go` 拿掉，`-count=3` **3/3 失败**
+（`1 of 80 stages failed while a status read was running; first: … exit 128: fatal: Unable to create
+'…/.git/index.lock': File exists.`）；放回去 10/10 通过
+（`e2e/.artifacts/fix-48-flake/fail-first-git-guard.log`）。
+
+**已知 flake 列表现在为空**：整轮 e2e 见下（182/182，重试 0 次）。`retries: 1` 仍然留着，因为它把
+flake 报出来（标成 flaky）而不是藏起来；本批之后没有 spec 依赖它。其余 spec 里也有「快照读」
+（`39-builtin-skills`、`64-skill-palette`、`71-terminal-tabs` 的 `evaluateAll`），但它们的元素在被
+断言之前就已稳定（技能列表、终端 tab 由同一个响应渲染，之后不再来源于服务端刷新），本批没有为它们改
+断言——差异在于 `48` 读的是**会再次刷新的**值。
+
+### 门禁（本批，实测输出）
+
+```
+go build ./...                                    exit 0
+go vet ./...                                      exit 0
+go test ./... -count=1                            44 个包 ok / 0 FAIL（httpapi 62.3s，gitx 34.0s）
+pnpm --dir web lint                               exit 0（0 error / 0 warning）
+pnpm --dir web test -- --run                      42 files / 307 tests passed（30.1s）
+pnpm --dir web exec next build                    ok（Next.js 16.4.3 / Turbopack）
+pnpm --dir e2e test                               182 passed（8.7m；0 retry / 0 flaky）
+docker build --build-arg INSTALL_CHROMIUM=true -t piforge:local .   exit 0
+                                                  （manifest list sha256:7dbc8788b1b3…）
+pwsh scripts/deliver-check.ps1 -Image piforge:local                 125/125 PASS，exit 0（run 20261101-201608，105.0s）
+```
+
+**drill（实测，从当前工作树重建的镜像）.** 镜像按门禁要求重建（`--build-arg INSTALL_CHROMIUM=true`，
+exit 0）：`docker inspect --format '{{.Id}}'` = `sha256:7dbc8788b1b3…`，config digest
+`sha256:4d00a79669…` 与上一次构建**相同**，即镜像内容未变（只是 build 的 attestation manifest 不同）。
+同一条命令跑完：
+
+```
+run id                20261101-201608
+checks                125 PASS / 0 FAIL
+exit code             0
+total                 105.0s
+agent turn            13.4s（settle 680 events）；commit 059815801e26…「Add primes script and tests」
+test run / PR         1 条 npm test = passed；drill/pull-request → http://127.0.0.1:7799/acme/widgets/pull/7
+browser               截图 49 962 B / 157 色；chromium 61.0s 空闲后 0
+pf-local 断言         same container id 7dc14e4a7525a8… / still running / /healthz 200
+checkout after drill  clean
+provider key / token  0 个文本产物里出现
+```
+
+汇总与证据：`e2e/.artifacts/delivery-drill/20261101-201608/`（`summary.json` 的 `failure` 是 `null`），
+本批的完整输出在 `e2e/.artifacts/fix-48-flake/drill-final.log`。`pf-local`（:7722）本批未重启、未改动。

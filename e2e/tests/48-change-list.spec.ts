@@ -13,6 +13,24 @@ import { USER, apiWrite, login, openNewSession, sendPrompt } from "./helpers";
  */
 test.describe("the change list says what git says", () => {
   test("a fully staged file is listed once, and an untracked file has a diff", async ({ page }) => {
+    // The slow-client lever behind this spec's fail-first evidence (STATUS.md,
+    // "48-change-list 的 flake"). A full suite run puts enough load on the box
+    // that the panel's own status read takes 100–300 ms; `page.route` makes
+    // that reproducible on demand instead of one-in-182:
+    //
+    //   PIFORGE_E2E_SLOW_GIT_STATUS_MS=400 pnpm --dir e2e test 48-change-list --repeat-each=30
+    //
+    // With the assertions below reading a snapshot straight after the API poll,
+    // that command failed 30/30 ("已暂存" was still "未跟踪" in the DOM). It is
+    // off by default: the spec asserts the same invariant either way, and the
+    // invariant must not depend on the client being faster than the poll.
+    const slowClient = Number(process.env.PIFORGE_E2E_SLOW_GIT_STATUS_MS ?? "0");
+    if (slowClient > 0) {
+      await page.route("**/v1/sessions/*/git/status*", async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, slowClient));
+        await route.continue();
+      });
+    }
     await login(page, USER);
     const sessionId = await openNewSession(page);
     await sendPrompt(page, "hello");
@@ -65,6 +83,18 @@ test.describe("the change list says what git says", () => {
     await expect(rows).toHaveCount(files.length, { timeout: 20_000 });
     const paths = await rows.evaluateAll((els) => els.map((el) => el.getAttribute("data-path")));
     expect(new Set(paths).size).toBe(files.length);
+
+    // The poll above proves what the *server* committed. It says nothing about
+    // whether this tab has painted it yet: the panel keeps the previous status
+    // on screen while its refresh is in flight, so the DOM can still say
+    // 未跟踪 for as long as one round trip takes (a full run: 100–300 ms; the
+    // 全部暂存 button disappearing is the panel's own "nothing left to stage"
+    // signal). `allInnerTexts` is a one-shot read — it does not retry — so
+    // reading it straight after the poll is how this spec used to go red and
+    // green again on retry. Wait on the invariant itself, then read.
+    const badge = page.getByTestId("git-state");
+    await expect(badge).toHaveText(files.map(() => "已暂存"), { timeout: 20_000 });
+    await expect(page.getByTestId("git-stage-all")).toHaveCount(0, { timeout: 20_000 });
 
     const states = await page.getByTestId("git-state").allInnerTexts();
     expect(states).toHaveLength(files.length);

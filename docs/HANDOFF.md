@@ -1412,3 +1412,18 @@ changes — could not reach it, and a search that resolved after the user kept t
 now belongs to the effect, which lives exactly as long as the request can;
 `web/components/workspace/quick-open.test.tsx` drives fake timers and answers the abandoned request on
 purpose, so the race is deterministic: 2 failed before the change, 2 passed after.
+
+**The last retry-dependent spec is gone, and the gate list is now honest.** `48-change-list` was
+the only spec that went red and green again on a retry, and the fault was the spec's: it read the
+change list's badges with a one-shot `allInnerTexts()` immediately after an API poll, so the
+assertion raced the tab's *own* status refetch (measured margin 8–26 ms). The poll proves the server
+committed the index; it says nothing about what this tab has painted, and the panel deliberately
+keeps the previous status on screen while its refresh is in flight. The spec now waits on the
+invariant first — four 已暂存 badges and the 全部暂存 button gone — then reads the same strict
+snapshot as before. The condition that made it flake is reproducible on demand:
+`PIFORGE_E2E_SLOW_GIT_STATUS_MS=400 pnpm --dir e2e test 48-change-list --repeat-each=30` (off by
+default, a no-op in a normal run) was 30/30 red before the change and 0/30 after; the unmodified
+30× loop is green either way, which is why the lever exists. Two Go tests now pin the server
+guarantees e2e leans on (`backend/internal/gitx/status_order_test.go`): a status read cannot make a
+stage fail — removing `GIT_OPTIONAL_LOCKS=0` fails the test 3/3 and killed 18 of 200 real `git add`s
+on this box — and a stage is committed before the call returns.
