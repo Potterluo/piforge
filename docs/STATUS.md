@@ -2285,3 +2285,59 @@ pwsh scripts/deliver-check.ps1 -Image piforge:local   125/125 PASS，DRILL，exi
   `GET /v1/…/caps`，因为为一个纯提示多一个端点不值得，注释已写明「服务端是权威」。
 - 图片上限仍是 4；本批只保证它不再静默，没有改产品规则。
 - `pf-local`（:7722）未重启、未改动。
+
+---
+
+## 本批：快速打开的陈旧响应（2026-11-01）
+
+**不改变任何 FR 状态**：126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1；整表 135 行 =
+DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1。它修的不是功能，而是「一次成功的响应会不会画出错误
+的列表」。
+
+**根因.** `web/components/workspace/quick-open.tsx` 的搜索 effect：
+
+```ts
+const handle = window.setTimeout(() => {
+  let cancelled = false;                 // ← 在回调内部创建
+  api.files.search(...).then(…).catch(…).finally(…);
+  return () => { cancelled = true; };    // ← 这个返回值没有人接收
+}, 180);
+return () => window.clearTimeout(handle);
+```
+
+`setTimeout` 的回调一返回，它返回的 cleanup 就丢了；effect 的 cleanup 只 `clearTimeout`，对**已经
+发出**的请求没有任何作用。于是「输入 `alp` → 请求在途 → 用户继续输入（或清空）」之后，`alp` 的响应
+仍然 `setResults(...)`／`setError(...)`：列表里出现上一个查询的命中；清空输入框时更明显——错误分支
+画在空查询分支**之前**，一次迟到的失败会在空输入框上留下「搜索失败」。
+
+**修法.** 取消标志上提到 effect 作用域（请求能活多久，标志就能活多久），cleanup 同时置位并
+`clearTimeout`；debounce 180 ms 不变，`.then/.catch/.finally` 的三处判断不变。没有改成
+`AbortController`：那需要 `api.files.search` 透传 `signal`，而 `lib/api/client.ts` 的 `search` 没有
+这个参数，为一个客户端竞态扩 API 不划算；effect 的生命周期本来就与查询一致（查询一变 effect 重跑、
+cleanup 先跑），一个标志足够。
+
+**fail-first（vitest，假定时器 + 手动 resolve/reject 的 deferred）.**
+`web/components/workspace/quick-open.test.tsx`：
+
+```
+改前：Tests 2 failed (2)
+  × does not write the answer of a query the user has already moved past
+    AssertionError: expected [ <div …(12)>…(3)</div> ] to have a length of +0 but got 1
+  × does not report a failure for a search the user has already cleared
+    AssertionError: expected <div …(1)></div> to be null     （正文是「搜索失败」）
+改后：Tests 2 passed (2)
+```
+
+两个用例都**确定性地**制造竞态：`vi.advanceTimersByTime(180)` 让请求发出，`fireEvent.change` 换掉
+查询（或清空），**然后**才 `resolve`/`reject` 那个 deferred——不靠等待、不靠轮询。第二个用例钉住
+「迟到的失败不许留在空输入框上」这条可见后果。
+
+**门禁（本批相关项，实测输出）.**
+
+```
+pnpm --dir web lint              exit 0（0 error / 0 warning）
+pnpm --dir web test -- --run     42 files / 307 tests passed
+pnpm --dir web exec next build   ok（Next.js 16.4.3 / Turbopack）
+```
+
+证据：`e2e/.artifacts/fix-48-flake/fail-first-quick-open-web.log`（未入库）。

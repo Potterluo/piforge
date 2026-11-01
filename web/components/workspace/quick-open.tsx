@@ -94,9 +94,21 @@ export function QuickOpen({
     const trimmed = query.trim();
     if (trimmed.length === 0) return;
 
+    /**
+     * Owned by the effect, not by the timer callback.
+     *
+     * It used to be declared *inside* the `setTimeout` below, where the
+     * cleanup that runs when the query changes could never reach it: the
+     * callback had already returned, so its closure kept `cancelled === false`
+     * and a search that answered after the user kept typing still called
+     * `setResults` — the palette listed hits for a query that was gone (and a
+     * late rejection drew 搜索失败 over an empty box). The flag has to exist for
+     * as long as the request can, which is exactly the effect's lifetime.
+     */
+    let cancelled = false;
+
     // Debounced: one search per keystroke would spawn one `rg` per character.
     const handle = window.setTimeout(() => {
-      let cancelled = false;
       setSearching(true);
       api.files
         .search(sessionId, trimmed, mode === "content")
@@ -112,12 +124,12 @@ export function QuickOpen({
         .finally(() => {
           if (!cancelled) setSearching(false);
         });
-      return () => {
-        cancelled = true;
-      };
     }, 180);
 
-    return () => window.clearTimeout(handle);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
   }, [open, query, mode, sessionId]);
 
   const choose = React.useCallback(

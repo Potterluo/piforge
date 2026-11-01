@@ -1403,3 +1403,12 @@ rounds (12 errors / 11 warnings when this line was written) and a red gate nobod
 finding hides. The rule set is `eslint-config-next`'s recommended one, which includes React's
 `react-hooks/set-state-in-effect` and `react-hooks/immutability`; the fixes are in `web/` only. Two
 exceptions live in the code with a comment each, and the list is in `docs/STATUS.md`.
+
+**Quick open's debounced search no longer writes a stale answer.** The cancellation flag lived
+*inside* the `setTimeout` callback, so the effect's cleanup — the only thing that runs when the query
+changes — could not reach it, and a search that resolved after the user kept typing still called
+`setResults`. Clearing the box then left the previous query's hits on screen, or a late rejection's
+「搜索失败」 over an empty input (the error branch is drawn before the empty-query branch). The flag
+now belongs to the effect, which lives exactly as long as the request can;
+`web/components/workspace/quick-open.test.tsx` drives fake timers and answers the abandoned request on
+purpose, so the race is deterministic: 2 failed before the change, 2 passed after.
