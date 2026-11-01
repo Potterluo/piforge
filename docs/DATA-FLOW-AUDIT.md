@@ -118,7 +118,7 @@ new sink appears unregistered.
 | `GET …/search` — `handleSearch` — `workspace_handlers.go:174` | `q`, `type` | spawns `rg` | `q` is passed as `--regexp=<q>` (one argv element, cannot become an option); `--no-config`; symlinks not followed; result/file caps | **VERIFIED GUARDED** (argv separation) | a pathological regex is bounded by `--max-count`/limits, not refused. |
 | `GET /v1/sessions/{id}/artifacts` (+`download`) — `handleArtifactFile` — `artifacts.go:82` | `id`, `path` | serves under `<ArtifactsDir>/<session>` | ownership; `artifactSessionRoot` refuses a separator in the id; `fsx.Resolve` — probe: 400 | **VERIFIED GUARDED** | — |
 | `POST …/browser/screenshot` — `handleBrowserScreenshot` — `browser_screenshot.go:35` | session `id`, `tab` | captures and writes a PNG | ownership; the file name is generated (`<ts>-<ms>.png`); the directory is the session's artifact root; `featureDenied` | **VERIFIED GUARDED** | `tab` is passed to CDP, not to a path. |
-| `GET …/logs` | see sessions | — | — | **VERIFIED GUARDED** | — |
+| `GET …/logs` (same handler as above) | — | — | — | **VERIFIED GUARDED** (see sessions) | — |
 
 ## 7. Git
 
