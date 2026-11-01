@@ -1359,12 +1359,48 @@ func workspaceModeOf(root string) contracts.WorkspaceMode {
 	return contracts.WorkspaceHost
 }
 
-func (d *Docker) resolve(sandboxID string) string {
-	if strings.HasPrefix(sandboxID, "piforge-") {
-		return sandboxID
+// NormalizeSandboxID turns every id this deployment hands around into the one
+// string the daemon knows: the container name.
+//
+// There are two ids for one sandbox, and they were allowed to leak into each
+// other. The row (and the local provider) use the pair id `sbx_<hash>` built by
+// ID(); the container is `piforge-<hash>` (containerName). Both carry the same
+// 16 hex characters of the same (user, project) hash, so the mapping is a
+// prefix, not a lookup — and every entry point that accepts an id has to accept
+// either form:
+//
+//	GET/POST /v1/sessions/{id}/sandbox/pause  → the handler passes the row id
+//	the runner's /v1/sandboxes/{id}/pause     → the URL id, verbatim
+//	a restarted control plane                 → whatever the row holds
+//
+// The failure this prevents is exact: pause passed `sbx_<hash>`, this function
+// used to prepend `piforge-` blindly, and the daemon was asked to stop
+// `piforge-sbx_<hash>` — a container that has never existed — while the real
+// sandbox sat READY. Resume failed identically, so idle pause could never park
+// anything.
+//
+// An id that is neither form is returned with the container prefix: it will not
+// resolve, and "not found" is the honest answer for it. A bare hash
+// (`<16 hex>`), which is what a hand-written probe or a screenshot of `docker
+// ps` shows, is accepted too.
+func NormalizeSandboxID(sandboxID string) string {
+	id := strings.TrimSpace(sandboxID)
+	if id == "" {
+		return id
 	}
-	return "piforge-" + sandboxID
+	if strings.HasPrefix(id, "piforge-") {
+		return id
+	}
+	if rest, ok := strings.CutPrefix(id, "sbx_"); ok {
+		return "piforge-" + rest
+	}
+	return "piforge-" + id
 }
+
+// resolve is NormalizeSandboxID for this provider's callers. Every lifecycle
+// method goes through it, so a caller that passes the row id and a caller that
+// passes the container name reach the same container.
+func (d *Docker) resolve(sandboxID string) string { return NormalizeSandboxID(sandboxID) }
 
 // inspect returns the container's status string ("running", "exited", ...).
 func (d *Docker) inspect(ctx context.Context, name string) (string, error) {

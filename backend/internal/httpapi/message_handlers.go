@@ -554,7 +554,14 @@ func (s *server) wakeSandbox(r *http.Request, userID string, sess *contracts.Ses
 		return
 	}
 	if sb.State == contracts.SandboxPaused {
-		live, rerr := s.deps.Sandbox.Resume(r.Context(), sandbox.ID(sb.UserID, sb.ProjectID))
+		// The row carries the provider's id (the container name for a container
+		// provider); re-deriving the pair id here is the same mistake the pause
+		// handler had (docs/EXECUTION-BOUNDARY.md §14.4).
+		resumeID := sb.ID
+		if strings.TrimSpace(resumeID) == "" {
+			resumeID = sandbox.ID(sb.UserID, sb.ProjectID)
+		}
+		live, rerr := s.deps.Sandbox.Resume(r.Context(), resumeID)
 		if rerr != nil {
 			return
 		}

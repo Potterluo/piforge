@@ -2,11 +2,11 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/piforge/piforge/backend/internal/auth"
 	"github.com/piforge/piforge/backend/internal/contracts"
 	"github.com/piforge/piforge/backend/internal/sandbox"
-	"github.com/piforge/piforge/backend/internal/store"
 )
 
 // Sandbox lifecycle endpoints (PRD FR-5.2, FR-5.9).
@@ -66,10 +66,16 @@ func (s *server) handleSandboxPause(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := auth.MustUser(r.Context())
-	// The provider keys a sandbox by (user, project), not by the row's id: the row is
-	// created after the directory exists, so the two ids never agreed. Passing the row id
-	// answered "sandbox: not found" for a sandbox that was right there.
-	providerID := sandbox.ID(sb.UserID, sb.ProjectID)
+	// The provider needs the id it knows the sandbox by, and this row carries it:
+	// the docker provider stores the container name (`piforge-<hash>`) as the
+	// sandbox id, the local provider the pair id (`sbx_<hash>`). Re-deriving the
+	// pair id here is what produced the 422 — the docker provider was asked for
+	// `piforge-sbx_<hash>`. sandbox.ID stays as the fallback for a row written
+	// before the id was recorded.
+	providerID := sb.ID
+	if strings.TrimSpace(providerID) == "" {
+		providerID = sandbox.ID(sb.UserID, sb.ProjectID)
+	}
 	if err := s.deps.Sandbox.Pause(r.Context(), providerID); err != nil {
 		s.fail(w, r, apiErr(contracts.ErrSandboxUnavail, "暂停失败：%v", err))
 		return
@@ -92,7 +98,12 @@ func (s *server) handleSandboxResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := auth.MustUser(r.Context())
-	live, err := s.deps.Sandbox.Resume(r.Context(), sandbox.ID(sb.UserID, sb.ProjectID))
+	// Same rule as pause: the row's id is the provider's id (see above).
+	resumeID := sb.ID
+	if strings.TrimSpace(resumeID) == "" {
+		resumeID = sandbox.ID(sb.UserID, sb.ProjectID)
+	}
+	live, err := s.deps.Sandbox.Resume(r.Context(), resumeID)
 	if err != nil {
 		s.fail(w, r, apiErr(contracts.ErrSandboxUnavail, "唤醒失败：%v", err))
 		return
@@ -128,20 +139,5 @@ func (s *server) handleSandboxSnapshots(w http.ResponseWriter, r *http.Request) 
 
 // sessionsOnSandbox lists the sessions whose worktree belongs to one sandbox.
 func (s *server) sessionsOnSandbox(r *http.Request, userID, sandboxID string) []string {
-	sessions, err := s.deps.Store.ListSessions(r.Context(), userID, store.SessionFilter{Limit: 200})
-	if err != nil {
-		return nil
-	}
-	out := make([]string, 0, 4)
-	for _, sess := range sessions {
-		if sess.WorktreeID == "" {
-			continue
-		}
-		wt, werr := s.deps.Store.Worktree(r.Context(), userID, sess.WorktreeID)
-		if werr != nil || wt.SandboxID != sandboxID {
-			continue
-		}
-		out = append(out, sess.ID)
-	}
-	return out
+	return s.sessionsOnSandboxContext(r.Context(), userID, sandboxID)
 }
