@@ -44,6 +44,20 @@ import (
 // path is its credential.
 const MCPGatewayPrefix = "/gw/mcp/"
 
+// SessionBinder is the address half of the sandbox binding
+// (docs/EXECUTION-BOUNDARY.md §16.3) for a credential that names a session
+// rather than a sandbox.
+//
+// The broker token is minted by this control plane, lives in the sandbox's
+// mcp.json and is therefore exactly as portable as a model token was: copied out,
+// it answered from the host too. It has no proof half — there is nowhere in Pi's
+// mcp.json to interpolate a per-request value that is not in the file itself — so
+// what it gets is the strong half: it is only accepted from an address the
+// session's sandbox owns.
+type SessionBinder interface {
+	AuthorizeSession(ctx context.Context, sessionID, remoteAddr string) error
+}
+
 // mcpBrokerTimeout bounds one brokered call's *connection* setup, not its body:
 // MCP responses can stream (SSE), so the useful bound is on the dial.
 const mcpBrokerTimeout = 30 * time.Second
@@ -72,6 +86,18 @@ func (s *server) handleMCPGateway(w http.ResponseWriter, r *http.Request) {
 		}
 		mcpUnauthorized(w, "this broker token is not valid")
 		return
+	}
+	// The credential is real; now the question a portable token cannot answer:
+	// did this request come from the sandbox the session runs in? A refusal looks
+	// like every other refusal to the caller (401, same message) and is named in
+	// the log, which is where an operator needs the reason.
+	if s.deps.SandboxBinding != nil {
+		if err := s.deps.SandboxBinding.AuthorizeSession(ctx, record.SessionID, r.RemoteAddr); err != nil {
+			s.log.WarnContext(r.Context(), "an MCP broker token was used from outside its sandbox",
+				"session", record.SessionID, "remote", r.RemoteAddr, "error", err.Error())
+			mcpUnauthorized(w, "this broker token is not valid")
+			return
+		}
 	}
 	server, err := s.deps.Store.MCPServerByID(ctx, record.ServerID)
 	if err != nil {

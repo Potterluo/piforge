@@ -560,15 +560,26 @@ Ordered roughly by how much they will hurt. Nothing here is softened.
      the tenant cannot rewrite it; nothing verifies its hash at spawn. A launcher that
      was tampered with would run *inside* that tenant's own sandbox (the control plane
      starts it there, as `gem`), so the blast radius is the sandbox, not the host.
-   - **Token revocation is durable; the token itself is still portable for an hour.**
-     The one-hour gateway token (`llmgw.DefaultTTL`, `-gateway-token-ttl`) is revoked
-     when the session's agent stops, through the single `Runtime.Stop` choke point, and
-     the revocation is a row in `gateway_revocations` now — measured: pause → `401`,
-     `docker restart piforge` → still `401` (`on_record=1` at boot), while the resumed
-     session's new token (generation 1) answers `200`. What is still true: the token is a
-     bearer credential with no binding to the sandbox, so anyone who can read
-     `models.json` (the agent, anything it runs) can spend it from anywhere until it
-     expires. See `docs/EXECUTION-BOUNDARY.md` §16.3.
+   - **A model-gateway token only works from its own sandbox.** It used to be a portable
+     bearer credential for an hour: it answered `/gw/llm` from the host (that is how the
+     acceptance pass tested it), from a sibling sandbox and from another tenant, and it
+     was readable in `models.json`. Now the token carries the sandbox it belongs to
+     (`b` in the signed claims) and the gateway requires two things it did not before: the
+     request must arrive **from an address that sandbox has** (Docker's embedded DNS,
+     re-read on a mismatch, so pause/resume and a control-plane restart are followed rather
+     than re-bound), and it must carry **`X-PF-Sandbox-Proof: HMAC(per-sandbox secret,
+     token)`**. The secret is sealed in the sandbox row and never enters the container; the
+     value that does is a per-token HMAC in the *agent's environment*, referenced from
+     `models.json` as `$PIFORGE_SANDBOX_PROOF`, so the file an attacker copies no longer
+     carries everything. Measured on the isolated stack: inside `200`, from the host `403
+     sandbox_address_mismatch` (even with the proof copied along), from a sibling sandbox
+     `403`, from another tenant `403`, same token still `200` after `docker restart
+     piforge`, `401` after pause and after the second restart, resumed token `200`; the MCP
+     broker token is bound by address too (`200` inside, `401` from the host). What is
+     still true: the agent inside its own sandbox can of course use it, `-sandbox local`
+     mints unbound tokens (the boot log says so), and the address half trusts this
+     deployment's network shape — mTLS is the answer that does not, and it is not done.
+     See `docs/EXECUTION-BOUNDARY.md` §16.3.
    - **Disk is bounded per file, per burst and per total.** See "Disk quota" above:
      `--storage-opt size=` is ignored by this daemon, and a size-capped tmpfs enforces a
      hard cap but loses the workspace on restart. So the bound is: one file cannot exceed

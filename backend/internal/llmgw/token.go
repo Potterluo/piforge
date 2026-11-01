@@ -27,7 +27,19 @@ type Claims struct {
 	Provider  string `json:"p"`
 	// Model is advisory: it is set when the session pinned one, so a proxy log
 	// can name it even though the request body carries the real model id.
-	Model     string `json:"m,omitempty"`
+	Model string `json:"m,omitempty"`
+	// Sandbox is the sandbox this token may be spent from: the container's name
+	// for a container placement (which is also the sandbox row's id), empty for a
+	// placement with no container. It is what makes the token a *bound* credential
+	// rather than a portable one — Verify proves the signature, and the gateway
+	// then requires the request to arrive from that sandbox's address, with a
+	// proof the sandbox holds (see binding.go).
+	//
+	// It is in the clear because it is not a secret: a container name is derivable
+	// from the (user, project) pair by anyone who can see the deployment, and the
+	// check it enables is "did this request come from there", which no amount of
+	// knowing the name can fake.
+	Sandbox   string `json:"b,omitempty"`
 	IssuedAt  int64  `json:"iat"`
 	ExpiresAt int64  `json:"exp"`
 	// Generation is the session's revocation generation at the moment the token
@@ -296,6 +308,22 @@ func (s *Signer) RevokedCount() int {
 // the *persisted* number, or the resumed session's token would be refused by the
 // very rule that keeps the old one dead.
 func (s *Signer) Issue(sessionID, userID, provider, model string, now time.Time) (string, error) {
+	return s.IssueBound(sessionID, userID, provider, model, "", now)
+}
+
+// IssueBound is Issue for a token that may only be spent from one sandbox.
+//
+// sandboxID is the sandbox the agent runs in (the container's name for a
+// container placement). Empty means "not bound", which is the local placement:
+// the agent runs on the control plane's own host, so there is no other address it
+// could be required to arrive from, and claiming one would lock it out of its own
+// gateway.
+//
+// The claim is written into the signed payload, so a copied token cannot drop it,
+// and the proof the gateway demands in addition (X-PF-Sandbox-Proof) is not in
+// this file at all — it is computed here and travels in the agent's environment
+// (see binding.go).
+func (s *Signer) IssueBound(sessionID, userID, provider, model, sandboxID string, now time.Time) (string, error) {
 	if sessionID == "" || userID == "" || provider == "" {
 		return "", errors.New("llmgw: session, user and provider are required to issue a token")
 	}
@@ -308,6 +336,7 @@ func (s *Signer) Issue(sessionID, userID, provider, model string, now time.Time)
 		UserID:     userID,
 		Provider:   provider,
 		Model:      model,
+		Sandbox:    strings.TrimSpace(sandboxID),
 		IssuedAt:   now.Unix(),
 		Generation: generation,
 		ExpiresAt:  now.Add(s.ttl).Unix(),

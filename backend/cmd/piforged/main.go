@@ -693,14 +693,52 @@ func run() error {
 		"ttl", signer.TTL().String(),
 		"revoked_on", "the session's agent stopping (pause, archive, delete, model switch); not on shutdown, because a container agent outlives this process",
 		"detail", "the token is minted per agent spawn and ends with the process; the TTL is the backstop")
+	// The third thing that bounds a leaked token, after the lifetime and the
+	// revocation: *where* it can be spent. It used to answer /gw/llm from the
+	// host, from another sandbox and from another tenant, because nothing tied it
+	// to the container it was minted in (docs/EXECUTION-BOUNDARY.md §16.3).
+	//
+	// Two halves, deliberately different in kind — see internal/llmgw/binding.go:
+	//
+	//	address  the request must arrive from an address this sandbox has. Docker's
+	//	         embedded DNS is authoritative for container names and this process
+	//	         is joined to every tenant bridge, so the answer is live: a restart
+	//	         onto a new address is followed on the next lookup, and a mismatch
+	//	         forces one. No re-bind hook, and therefore nothing to get stale.
+	//	proof    HMAC(per-sandbox secret, token) in X-PF-Sandbox-Proof. The secret
+	//	         is sealed in the sandbox row and never enters the container; the
+	//	         value in models.json is the reference "$PIFORGE_SANDBOX_PROOF".
+	//
+	// Both apply only to a token that carries a sandbox claim, which is every
+	// token minted for a container placement. The local placement mints unbound
+	// tokens and says so below: its agent runs on this host, so there is no second
+	// address to require.
+	binder := &llmgw.Binder{
+		Addresses: llmgw.NewDNSAddresses(),
+		Proofs:    sandboxProofSecrets{st: st},
+		Sessions:  sessionSandboxes{st: st},
+		Logger:    func(format string, args ...any) { logger.Warn(fmt.Sprintf(format, args...)) },
+	}
 	gateway, err := llmgw.New(llmgw.Config{
 		Store:  st,
 		Box:    box,
 		Signer: signer,
+		Binder: binder,
 		Logger: func(format string, args ...any) { logger.Debug(fmt.Sprintf(format, args...)) },
 	})
 	if err != nil {
 		return fmt.Errorf("init model gateway: %w", err)
+	}
+	if isContainerSandbox(opt.sandboxKind) {
+		logger.Info("model gateway tokens are bound to their sandbox",
+			"sandbox", opt.sandboxKind,
+			"address", "the request must arrive from the sandbox's own address on the tenant bridge",
+			"proof", "X-PF-Sandbox-Proof = HMAC(per-sandbox secret, token), carried in the agent environment, never in models.json",
+			"covers", "a token copied out of the sandbox is refused from the host, from another sandbox and from another tenant")
+	} else {
+		logger.Warn("model gateway tokens are NOT bound to a sandbox",
+			"sandbox", opt.sandboxKind,
+			"detail", "the local placement runs the agent on this host, so there is no other address to require; a token copied out of the workspace still works from anywhere until it expires or is revoked")
 	}
 	gatewayBase := strings.TrimRight(firstNonEmpty(opt.gatewayURL, "http://"+opt.addr), "/")
 
@@ -942,12 +980,34 @@ func run() error {
 			return agentSetup{}
 		}
 
-		token, terr := signer.Issue(spec.SessionID, spec.UserID, providerName, modelID, time.Now())
+		// The token is bound to the sandbox the agent will spend it from, and the
+		// proof that makes "a token alone" useless is computed here (see
+		// docs/EXECUTION-BOUNDARY.md §16.3). Both halves are needed before a token
+		// exists, so a sandbox whose secret cannot be read is a *failed spawn*: a
+		// token this process cannot bind must not be minted at all.
+		bindSandbox, proofSecret, berr := sandboxBindingFor(ctx, st, spec.SessionID)
+		if berr != nil {
+			logger.Warn("cannot bind this session's model gateway token to its sandbox; refusing to mint an unbindable token",
+				"session", spec.SessionID, "error", berr.Error())
+			return agentSetup{}
+		}
+
+		token, terr := signer.IssueBound(spec.SessionID, spec.UserID, providerName, modelID, bindSandbox, time.Now())
 		if terr != nil {
 			logger.Warn("cannot mint a model gateway token", "session", spec.SessionID, "error", terr.Error())
 			return agentSetup{}
 		}
 		gatewayURL := gatewayBase + "/gw/llm/" + token
+
+		// The headers the provider sends are a *reference* to the agent's
+		// environment, not the proof itself: models.json is the file an attacker
+		// copies, and it must not carry the value that makes the token spendable.
+		var headers map[string]string
+		var proofEnv string
+		if bindSandbox != "" && proofSecret != "" {
+			headers = map[string]string{llmgw.HeaderProof: "$" + llmgw.ProofEnv}
+			proofEnv = llmgw.ProofEnv + "=" + llmgw.Proof(proofSecret, token)
+		}
 
 		res, werr := pimodel.Write(filepath.Join(opt.dataDir, "pi-agents", spec.SessionID), pimodel.Spec{
 			GatewayURL:   gatewayURL,
@@ -955,6 +1015,7 @@ func run() error {
 			Models:       models,
 			APIKind:      api,
 			ProviderName: providerName,
+			Headers:      headers,
 		})
 		if werr != nil {
 			logger.Warn("cannot write the pi model configuration",
@@ -993,24 +1054,35 @@ func run() error {
 			}
 		}
 
+		// PI_CODING_AGENT_DIR is the authoritative pointer; the *_BASE_URL
+		// variables stay for clients that read them directly.
+		//
+		// No GIT_CONFIG_* entries: they existed to tell a host-side agent that
+		// a container-owned checkout belonged to another account, and stage 4
+		// deleted that execution. Inside the sandbox the agent runs as the
+		// account that owns the tree, so there is no "dubious ownership" to
+		// lift (sandboxAgentEnv used to strip them for that reason).
+		env := []string{
+			"PI_CODING_AGENT_DIR=" + res.Dir,
+			"ANTHROPIC_BASE_URL=" + gatewayURL,
+			"ANTHROPIC_API_KEY=" + token,
+			"OPENAI_BASE_URL=" + gatewayURL + "/v1",
+			"OPENAI_API_KEY=" + token,
+			"PIFORGE_GATEWAY_TOKEN=" + token,
+		}
+		// The proof is the one entry that is not a copy of something already on
+		// disk: models.json names it with "$…", Pi expands it per request, and the
+		// gateway checks it against the sandbox's sealed secret. It is an
+		// environment variable of the *agent process*, not an entry in the
+		// container's environment: nothing else in the sandbox needs it, and a
+		// value nothing else can read is a value nothing else can copy.
+		if proofEnv != "" {
+			env = append(env, proofEnv)
+		}
+
 		return agentSetup{
 			Args: args,
-			// PI_CODING_AGENT_DIR is the authoritative pointer; the *_BASE_URL
-			// variables stay for clients that read them directly.
-			//
-			// No GIT_CONFIG_* entries: they existed to tell a host-side agent that
-			// a container-owned checkout belonged to another account, and stage 4
-			// deleted that execution. Inside the sandbox the agent runs as the
-			// account that owns the tree, so there is no "dubious ownership" to
-			// lift (sandboxAgentEnv used to strip them for that reason).
-			Env: []string{
-				"PI_CODING_AGENT_DIR=" + res.Dir,
-				"ANTHROPIC_BASE_URL=" + gatewayURL,
-				"ANTHROPIC_API_KEY=" + token,
-				"OPENAI_BASE_URL=" + gatewayURL + "/v1",
-				"OPENAI_API_KEY=" + token,
-				"PIFORGE_GATEWAY_TOKEN=" + token,
-			},
+			Env:  env,
 		}
 	}
 
@@ -1306,6 +1378,9 @@ func run() error {
 		SandboxSnapshotDir:   filepath.Join(opt.dataDir, "snapshots"),
 		DataDir:              abs(opt.dataDir),
 		LLMGateway:           gateway,
+		// The same binder, for the MCP broker's half of the rule: a broker token
+		// copied out of the sandbox is refused from anywhere else too (§16.3).
+		SandboxBinding: binder,
 		Browser:              browsers,
 		Term:                 termAdapter{m: terminals},
 		Provisioner:          prov,

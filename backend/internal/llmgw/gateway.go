@@ -45,6 +45,12 @@ type Config struct {
 	Signer *Signer
 	// Transport overrides the HTTP transport (tests use this).
 	Transport http.RoundTripper
+	// Binder enforces "this token works only from its own sandbox": the request
+	// must arrive from an address the sandbox has, and (when the deployment has a
+	// per-sandbox secret) carry a proof. Nil disables both halves, which is what a
+	// hand-built test gateway gets; a deployment always sets it, and its boot log
+	// says which halves are on.
+	Binder *Binder
 	// Now is injectable for tests.
 	Now func() time.Time
 	// Logger receives one line per forwarded request.
@@ -103,15 +109,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var claims Claims
 	verified := false
+	presented := ""
 	if pathToken != "" {
 		if cl, verr := h.cfg.Signer.Verify(r.Context(), pathToken, h.cfg.Now()); verr == nil {
-			claims, verified = cl, true
+			claims, verified, presented = cl, true, pathToken
 		}
 	}
 	if !verified {
 		if bearerToken := bearer(r.Header.Get("Authorization")); bearerToken != "" {
 			if cl, verr := h.cfg.Signer.Verify(r.Context(), bearerToken, h.cfg.Now()); verr == nil {
-				claims, verified = cl, true
+				claims, verified, presented = cl, true, bearerToken
 				// The segment was part of the upstream path after all.
 				rest = "/" + pathToken + rest
 			}
@@ -123,6 +130,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			msg = "invalid or expired token"
 		}
 		writeErr(w, http.StatusUnauthorized, "invalid_token", msg)
+		return
+	}
+
+	// The token is valid; now the question a bearer credential cannot answer: is
+	// this request coming from the sandbox the token was minted for? Spelled out
+	// in binding.go. A refusal is 403, not 401: the credential is real, and the
+	// holder is what is wrong. The binder logs the reason at a level an operator
+	// reads; this line stays at the gateway's own (debug) level because it is the
+	// per-request trace.
+	if err := h.cfg.Binder.Authorize(r.Context(), claims, presented, r.RemoteAddr, r.Header.Get(HeaderProof)); err != nil {
+		var refused *Denied
+		if errors.As(err, &refused) {
+			writeErr(w, http.StatusForbidden, refused.Code, refused.Message)
+			return
+		}
+		writeErr(w, http.StatusForbidden, "sandbox_binding_failed", err.Error())
 		return
 	}
 

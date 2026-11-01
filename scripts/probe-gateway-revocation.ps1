@@ -14,15 +14,23 @@
     (session, user, provider, iat/exp, generation) — the claims are not secret,
     the signature is.
 
+    Calls that need the token to *work* are made from inside the sandbox, because
+    after docs/EXECUTION-BOUNDARY.md §16.3 a token is bound to its sandbox: the
+    same token from the host is 403 by design, and this drill would otherwise be
+    measuring the binding instead of the revocation. Calls that ask "is it dead"
+    are made from the host while the container is paused (it cannot run anything
+    then), where a dead token answers 401.
+
     Steps (each one is a PASS/FAIL line in the artifact):
       1. a real prompt, so an agent starts and a token is minted;
-      2. the token works from the host (GET /gw/llm/<token>/v1/models -> 200);
+      2. the token works from inside its sandbox (GET /gw/llm/<token>/v1/models
+         -> 200) and is refused from the host (-> 403);
       3. pause the sandbox: the same token -> 401;
       4. restart the control plane (docker restart piforge);
       5. the same token -> 401 again  <-- the proof, and the boot log's
          `gateway_revocations on_record=` says the row was loaded from disk;
-      6. resume, send a second prompt: the new token (generation N+1) -> 200,
-         and the old token is still 401.
+      6. resume, send a second prompt: the new token (generation N+1) -> 200 from
+         the resumed sandbox, and the old token is still 401.
 
     Each real model call is a provider request: two here (the READY prompt and
     the RESUMED prompt). Nothing else in this script talks to the provider.
@@ -103,7 +111,9 @@ function Invoke-Api {
 
 # One host-side call with a sandbox token. The URL is the same shape the
 # sandbox's models.json carries, with the host's address instead of piforge:7700.
-function Get-ModelsStatus([string]$token) {
+# Since §16.3 this is the *refused* path (403) for a live token, and the path that
+# answers 401 for a dead one (revocation is checked before the binding).
+function Get-ModelsStatusFromHost([string]$token) {
     $url = "$BaseUrl/gw/llm/$token/v1/models"
     try {
         $resp = Invoke-WebRequest -UseBasicParsing -Uri $url -SkipHttpErrorCheck -TimeoutSec 30
@@ -114,15 +124,30 @@ function Get-ModelsStatus([string]$token) {
     }
 }
 
+# One call from inside the sandbox, the way the agent itself makes it: the token
+# in the path, and the proof the agent's environment carries. The script goes in
+# on stdin so neither value appears in an argv.
+function Get-ModelsStatusInSandbox([string]$sandboxID, [string]$url) {
+    $inner = @'
+P=$(for p in /proc/[0-9]*; do tr '\0' '\n' < "$p/environ" 2>/dev/null | sed -n 's/^PIFORGE_SANDBOX_PROOF=//p'; done | head -n 1)
+code=$(curl -sS -m 20 -o /tmp/pf-body -w '%{http_code}' -H "X-PF-Sandbox-Proof: $P" "URL" 2>/dev/null)
+printf 'CODE=%s\n' "$code"
+'@
+    $inner = $inner.Replace('URL', $url)
+    $raw = ($inner | & docker exec -i -u gem $sandboxID sh -s 2>&1) -join "`n"
+    if ($raw -match 'CODE=(\d+)') { return [int]$Matches[1] }
+    return 0
+}
+
 function Get-TokenFromSandbox([string]$sandboxID, [string]$sessionID) {
     $path = "/workspace/.piforge/agents/$sessionID/models.json"
     $raw = & docker exec -u gem $sandboxID cat $path 2>$null
     if (-not $raw) { return $null }
     $doc = "$raw" | ConvertFrom-Json
     return [pscustomobject]@{
-        Token    = $doc.providers.piforge.apiKey
-        BaseURL  = $doc.providers.piforge.baseUrl
-        Path     = $path
+        Token   = $doc.providers.piforge.apiKey
+        BaseURL = $doc.providers.piforge.baseUrl
+        Path    = $path
     }
 }
 
@@ -150,6 +175,16 @@ $login = Invoke-RestMethod -Method Post -Uri "$BaseUrl/v1/auth/login" -ContentTy
     -Body (@{ email = $AdminEmail; password = $AdminPassword } | ConvertTo-Json -Compress) -SessionVariable session
 $admin = [pscustomobject]@{ User = $login.user; CSRF = $login.csrf; Session = $session }
 Say "login: $($admin.User.email) role=$($admin.User.role)"
+
+# Leftovers from an earlier run of this drill would otherwise take the tenant past
+# its sandbox quota. Only this drill's own projects ("revocation-*") are removed.
+$listed = Invoke-Api -Method GET -Path "/v1/projects" -Session $admin.Session
+foreach ($p in @($listed.Body.projects)) {
+    if ($p.name -like "revocation-*") {
+        $r = Invoke-Api -Method DELETE -Path "/v1/projects/$($p.id)" -Session $admin.Session -CSRF $admin.CSRF
+        Say ("cleanup: removed project {0} ({1}) -> {2}" -f $p.name, $p.id, $r.Status)
+    }
+}
 
 $projectName = "revocation-$stamp"
 $project = Invoke-Api -Method POST -Path "/v1/projects" -Session $admin.Session -CSRF $admin.CSRF -Body @{ name = $projectName }
@@ -197,16 +232,20 @@ Say ("token A: len={0} sha256={1} session={2} provider={3} g={4} ttl_s={5} baseU
         $before.Token.Length, (Get-TokenFingerprint $before.Token), $claims.s, $claims.p, [int]$claims.g, ($claims.exp - $claims.iat), $maskedBase)
 Check "token A is the session's own token" ($claims.s -eq $sessionID) ("claims.s=" + $claims.s)
 
-$statusBefore = Get-ModelsStatus $before.Token
-Check "token A works from the host before the pause" ($statusBefore -eq 200) ("GET /gw/llm/<A>/v1/models -> " + $statusBefore)
+$statusInSandbox = Get-ModelsStatusInSandbox $sandboxID "$($before.BaseURL)/models"
+Check "token A works from inside its sandbox before the pause" ($statusInSandbox -eq 200) ("GET inside -> " + $statusInSandbox)
+$statusFromHost = Get-ModelsStatusFromHost $before.Token
+Check "the same token is refused from the host (§16.3 binds it to the sandbox)" ($statusFromHost -eq 403) ("GET from the host -> " + $statusFromHost)
 
 # ---------------------------------------------------------------------------
 # 2. pause revokes it (the existing behaviour, re-proved here because the
-#    restart proof depends on the pause having happened)
+#    restart proof depends on the pause having happened). A paused container runs
+#    nothing, so this one call is made from the host: 401 means revoked, which is
+#    checked before the address is.
 # ---------------------------------------------------------------------------
 $pause = Invoke-Api -Method POST -Path "/v1/sessions/$sessionID/sandbox/pause" -Session $admin.Session -CSRF $admin.CSRF
 Check "pause" ($pause.Body.state -eq "PAUSED") ("state=" + $pause.Body.state)
-$statusAfterPause = Get-ModelsStatus $before.Token
+$statusAfterPause = Get-ModelsStatusFromHost $before.Token
 Check "token A is refused after the pause" ($statusAfterPause -eq 401) ("GET -> " + $statusAfterPause)
 
 # ---------------------------------------------------------------------------
@@ -235,7 +274,7 @@ $onRecord = 0
 if ("$bootAfter" -match "on_record=(\d+)") { $onRecord = [int]$Matches[1] }
 Check "the restarted process loaded a revocation from disk" ($onRecord -ge 1) ("on_record=" + $onRecord)
 
-$statusAfterRestart = Get-ModelsStatus $before.Token
+$statusAfterRestart = Get-ModelsStatusFromHost $before.Token
 Check "token A is STILL refused after the restart" ($statusAfterRestart -eq 401) ("GET -> " + $statusAfterRestart)
 
 # ---------------------------------------------------------------------------
@@ -268,32 +307,40 @@ Say ("token B: len={0} sha256={1} session={2} g={3} ttl_s={4}" -f `
         $after.Token.Length, (Get-TokenFingerprint $after.Token), $claimsAfter.s, [int]$claimsAfter.g, ($claimsAfter.exp - $claimsAfter.iat))
 Check "token B is a different token, one generation later" (($after.Token -ne $before.Token) -and ([int]$claimsAfter.g -eq ([int]$claims.g + 1))) ("g: " + [int]$claims.g + " -> " + [int]$claimsAfter.g)
 
-$statusNew = Get-ModelsStatus $after.Token
-Check "token B works from the host (the resumed generation is valid)" ($statusNew -eq 200) ("GET -> " + $statusNew)
-$statusOldAgain = Get-ModelsStatus $before.Token
-Check "token A is still refused while token B works" ($statusOldAgain -eq 401) ("GET -> " + $statusOldAgain)
+$statusNew = Get-ModelsStatusInSandbox $sandboxID "$($after.BaseURL)/models"
+Check "token B works from the resumed sandbox (the resumed generation is valid)" ($statusNew -eq 200) ("GET inside -> " + $statusNew)
+$statusNewHost = Get-ModelsStatusFromHost $after.Token
+Check "token B is refused from the host, like token A was" ($statusNewHost -eq 403) ("GET from the host -> " + $statusNewHost)
+# Revocation is checked before the binding, so a dead token answers 401 from
+# anywhere — including from its own sandbox, where the address is right.
+$statusOldInSandbox = Get-ModelsStatusInSandbox $sandboxID "$($before.BaseURL)/models"
+$statusOldAgain = Get-ModelsStatusFromHost $before.Token
+Check "token A is still refused while token B works" (($statusOldAgain -eq 401) -and ($statusOldInSandbox -eq 401)) `
+    ("from the host -> " + $statusOldAgain + ", from inside the sandbox -> " + $statusOldInSandbox)
 
-$verdict = "RESULT durable_revocation={0} old_token_after_restart={1} resumed_token={2} generations={3}->{4} on_record={5}" -f `
-    ($(if ($statusAfterRestart -eq 401) { "401" } else { "BROKEN" })), $statusAfterRestart, $statusNew, [int]$claims.g, [int]$claimsAfter.g, $onRecord
+$verdict = "RESULT durable_revocation={0} old_token_after_restart={1} resumed_token={2} host_before_pause={3} generations={4}->{5} on_record={6}" -f `
+    ($(if ($statusAfterRestart -eq 401) { "401" } else { "BROKEN" })), $statusAfterRestart, $statusNew, $statusFromHost, [int]$claims.g, [int]$claimsAfter.g, $onRecord
 Say ""
 Say $verdict
 Say ("failures=" + $script:Failures)
 
 $script:Lines | Set-Content -Path $logPath
 [pscustomobject]@{
-    project_id          = $projectID
-    session_id          = $sessionID
-    sandbox_id          = $sandboxID
-    token_a_sha256      = (Get-TokenFingerprint $before.Token)
-    token_a_generation  = $claims.g
-    token_b_sha256      = (Get-TokenFingerprint $after.Token)
-    token_b_generation  = $claimsAfter.g
-    status_before       = $statusBefore
-    status_after_pause  = $statusAfterPause
+    project_id           = $projectID
+    session_id           = $sessionID
+    sandbox_id           = $sandboxID
+    token_a_sha256       = (Get-TokenFingerprint $before.Token)
+    token_a_generation   = $claims.g
+    token_b_sha256       = (Get-TokenFingerprint $after.Token)
+    token_b_generation   = $claimsAfter.g
+    status_in_sandbox    = $statusInSandbox
+    status_from_host     = $statusFromHost
+    status_after_pause   = $statusAfterPause
     status_after_restart = $statusAfterRestart
-    status_resumed      = $statusNew
-    on_record           = $onRecord
-    failures            = $script:Failures
+    status_resumed       = $statusNew
+    status_resumed_host  = $statusNewHost
+    on_record            = $onRecord
+    failures             = $script:Failures
 } | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $OutDir "summary.json")
 Write-Host "artifacts: $OutDir"
 

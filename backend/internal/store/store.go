@@ -238,6 +238,13 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if err := addColumn(ctx, db, "sandboxes", "workspace", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
+	// The per-sandbox proof secret (sandbox_proof.go, docs/EXECUTION-BOUNDARY.md
+	// §16.3). An older row reads back empty and the secret is minted on first use,
+	// so a sandbox created before this column existed gets bound to its own proof
+	// at its next agent spawn instead of being refused model access forever.
+	if err := addColumn(ctx, db, "sandboxes", "proof_cipher", "BLOB"); err != nil {
+		return fmt.Errorf("store: migrate: %w", err)
+	}
 	// Where this project opens pull requests, and the sealed token for it
 	// (FR-12.6). Old projects read back empty, which the UI describes as "not
 	// configured yet" instead of guessing a forge from the repository URL.

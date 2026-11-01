@@ -35,6 +35,15 @@ type Spec struct {
 	APIKind string
 	// ProviderName is only a display name.
 	ProviderName string
+	// Headers are request headers the provider entry sends with every call.
+	//
+	// They exist for one purpose: the value is a *reference* to the agent's
+	// environment ("$PIFORGE_SANDBOX_PROOF"), which Pi resolves at request time.
+	// The proof that binds a model token to its sandbox therefore is not in this
+	// file — and this file is the one an attacker reads out of
+	// /workspace/.piforge/agents/<session>/models.json
+	// (docs/EXECUTION-BOUNDARY.md §16.3).
+	Headers map[string]string
 }
 
 // Result is what the caller needs to launch Pi.
@@ -58,7 +67,11 @@ type providerFile struct {
 	API        string      `json:"api"`
 	APIKey     string      `json:"apiKey"`
 	AuthHeader bool        `json:"authHeader,omitempty"`
-	Models     []modelFile `json:"models"`
+	// Headers are Pi's per-provider request headers. Values resolve like apiKey
+	// ("$NAME" is environment interpolation), which is what lets this file name a
+	// secret it does not contain.
+	Headers map[string]string `json:"headers,omitempty"`
+	Models  []modelFile       `json:"models"`
 }
 
 type modelFile struct {
@@ -112,6 +125,7 @@ func Write(dir string, spec Spec) (Result, error) {
 				API:        api,
 				APIKey:     spec.Token,
 				AuthHeader: true,
+				Headers:    spec.Headers,
 				Models:     models,
 			},
 		},

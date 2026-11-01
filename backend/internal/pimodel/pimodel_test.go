@@ -95,3 +95,42 @@ func TestWriteDefaultsTheAPIKind(t *testing.T) {
 		t.Fatalf("default api missing:\n%s", raw)
 	}
 }
+
+// The model token's proof header must be a *reference* to the agent's
+// environment, never the value: models.json is the file an attacker copies
+// (docs/EXECUTION-BOUNDARY.md §16.3), so a proof written here would be the same
+// portable credential the binding exists to end.
+func TestWriteEmitsTheProofHeaderAsAnEnvironmentReference(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "agent")
+	if _, err := Write(dir, Spec{
+		GatewayURL: "http://piforge:7700/gw/llm/tok123",
+		Token:      "tok123",
+		Models:     []string{"deepseek-v4-flash"},
+		Headers:    map[string]string{"X-PF-Sandbox-Proof": "$PIFORGE_SANDBOX_PROOF"},
+	}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "models.json"))
+	if err != nil {
+		t.Fatalf("read models.json: %v", err)
+	}
+	var file struct {
+		Providers map[string]struct {
+			Headers map[string]string `json:"headers"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatalf("models.json is not JSON: %v", err)
+	}
+	got := file.Providers[GatewayProvider].Headers["X-PF-Sandbox-Proof"]
+	if got != "$PIFORGE_SANDBOX_PROOF" {
+		t.Fatalf("header = %q, want the environment reference", got)
+	}
+	// And nothing that looks like a proof (64 hex characters) is in the file.
+	if strings.Contains(strings.ToLower(string(raw)), strings.Repeat("0123456789abcdef", 4)) {
+		t.Fatalf("models.json carries a literal proof:\n%s", raw)
+	}
+	if strings.Contains(string(raw), "piforged") {
+		t.Fatalf("models.json leaks a server-side detail:\n%s", raw)
+	}
+}

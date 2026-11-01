@@ -1196,6 +1196,14 @@ empty), `TestResumedGenerationIsValidAfterARestart`, `TestSweepKeepsAResumedToke
 `…ExtendKeepsResumedTokenAlive` / `…HaveNoCascadingForeignKey` / `…OutlivesTheSession`,
 and `TestRevocationHookSkipsOnlyTheShutdownStop` for the shutdown exception.
 
+**One line in the block above is no longer what the probe measures.** §16.3 binds a token
+to its sandbox, so `token A works from the host` and `token B works from the host` are
+`403` by design now. `scripts/probe-gateway-revocation.ps1` makes those two calls from
+*inside* the sandbox instead (`Get-ModelsStatusInSandbox`), and the calls that ask "is it
+dead" stay on the host while the container is paused, where a revoked token answers `401`.
+The rest of the block — the generations, the durable `on_record`, the `401`s — is unchanged
+and re-measured by the same script.
+
 ### 16.2 The disk overshoot: measured at 3.27x, then bounded to 1.05x
 
 **Defect, measured on this host instead of assumed.** `scripts/probe-quota-overshoot.ps1`
@@ -1263,14 +1271,204 @@ still-growing past the threshold, explicit threshold, no limit, zero count),
 `TestRunningSandboxIDsFollowsTheStatusAndTheWorktree` for the "is a run in flight" query
 that picks the interval.
 
-### 16.3 What is still open
+### 16.3 The token is bound to its sandbox (was: "what is still open")
 
-The token is still a **portable bearer credential for up to an hour**: it answers
-`/gw/llm` from the host, with no binding to the sandbox, container or address, and it is
-readable by any process in the sandbox that can read `models.json` (owned by `gem`, `0600`
-— i.e. the agent and anything it runs). Revocation now survives a restart, which bounds
-the *life* of a leaked token; it does not bound the *holder*. Binding the token to the
-sandbox (a per-container secret in a header the gateway checks, or a mTLS identity) is the
-next step, and it is a bigger change than this pass: the SDK in the sandbox would have to
-send the proof, and the gateway would need a per-sandbox secret store that survives
-container replacement.
+**Defect (what this section said before this pass, kept because it was true).** The token
+was a **portable bearer credential for up to an hour**: it answered `/gw/llm` from the
+host, from another sandbox and from another tenant, with no binding to the sandbox,
+container or address, and it was readable by any process in the sandbox that could read
+`models.json`. Revocation bounded the *life* of a leaked token; nothing bounded the
+*holder*.
+
+That is closed. A token now names the sandbox it may be spent from, and the gateway
+requires the request to arrive **from that sandbox's own address** *and* to carry **a proof
+that sandbox holds**. A copied token is worthless anywhere else for its whole life.
+
+**Options, and why both halves shipped.** mTLS (option c) is the answer that does not
+depend on the network view, and it is out of scope for this pass: it needs a CA, per-
+sandbox certificate issuance and rotation, a second listener, and an SDK that trusts the
+CA — a change that would not have shipped today. It stays the next step for a hosting
+claim (§16.3 "what is still not true").
+
+| half | what it is | what it alone would miss |
+|---|---|---|
+| **(b) address** | the request's TCP source address must be one the sandbox has on its tenant bridge | a network view that makes two sandboxes look alike — SNAT, a proxy in front of the gateway, a resolver that answers the wrong thing. It is also a property of *this deployment's shape* (the control plane is joined to every tenant bridge), not of the protocol |
+| **(a) proof** | `X-PF-Sandbox-Proof: HMAC-SHA256(per-sandbox secret, token)` | everything about *who is inside the sandbox*: the agent runs there, so anything running as the sandbox account can read the agent's environment exactly as it can read `models.json`. A proof is copyable in the same way a token is — it is one file harder, not a second factor against the agent |
+
+The composition is the claim: **the address is the half that cannot be copied**, so a token
+lifted out of the container (the file, or an `env` dump) cannot be used from the host, from
+a sibling sandbox on the same bridge, or from another tenant's sandbox; the secret is the
+belt for a deployment whose network view is wrong, because two sandboxes behind one
+apparent address still have different secrets.
+
+**Mechanism.**
+
+* **The claim.** `Signer.IssueBound(..., sandboxID, now)` writes the sandbox id (the
+  container name, which is also the sandbox row's id) into the signed payload as `b`. A
+  copied token cannot drop it, and it is not a secret: the container name is derived from
+  the (user, project) pair by anyone who can see the deployment, and the check it enables
+  is "did this request come from there", which knowing the name cannot fake. A token with
+  no `b` is unbound — that is the local placement (`-sandbox local`), where the agent runs
+  on the control plane's own host, and the boot log says so either way.
+* **The address half** (`internal/llmgw/binding.go`, `DNSAddresses`). The gateway asks the
+  process's resolver for the sandbox id and compares the answer with `r.RemoteAddr` —
+  never with `X-Forwarded-For`, which is header text a client writes. In the isolated
+  deployment this is Docker's embedded DNS: the control plane is joined to every tenant
+  bridge, the sandbox is a container on one of them, and the embedded server is
+  authoritative for container names. That is why there is **no re-bind hook and no map to
+  go stale**: the answer is live. A cached answer is reused for 2 s; a mismatch forces a
+  fresh lookup before refusing (so a container that comes back on a new address is
+  followed); a resolver failure falls back to the last known good address (a DNS hiccup
+  must not lock an agent out of its own gateway, and a stale address is not reachable by
+  anyone else); no answer and no cache is a refusal, not a pass.
+* **The proof half** (`store/sandbox_proof.go`). The secret is 32 bytes from `crypto/rand`,
+  sealed with the deployment's AES-GCM box in `sandboxes.proof_cipher`, and minted lazily
+  by `EnsureSandboxProofSecret` at the moment a token is minted for that sandbox. It
+  **never enters the container**. What crosses the boundary is
+  `HMAC(secret, token)` — worth exactly one token — and it travels in the **agent process's
+  environment** (`PIFORGE_SANDBOX_PROOF`), not in a container env var and not on any
+  command line. `models.json` carries the reference, which Pi resolves per request (its own
+  schema: *"Request headers. Values resolve like apiKey"*, and apiKey is *"Literal key,
+  `$NAME` environment interpolation, or `!command` output"*):
+
+  ```json
+  "headers": { "X-PF-Sandbox-Proof": "$PIFORGE_SANDBOX_PROOF" }
+  ```
+
+  So the file an attacker copies holds the token and a pointer; the proof is one process's
+  environment away — readable by anything running as that account, which is stated below.
+* **Order and codes.** Signature (401) → revocation generation (401) → address (403
+  `sandbox_address_mismatch` / `sandbox_address_unresolved`) → proof (403
+  `sandbox_proof_missing` / `sandbox_proof_invalid` / `sandbox_proof_unavailable`) →
+  provider lookup. A dead token therefore answers `401` from anywhere, including its own
+  sandbox, and a live token answers `403` everywhere except its own. Every refusal is one
+  `WARN` line naming session, sandbox, source address and reason — a silent 403 would have
+  been the wrong answer to "my sandbox cannot reach the gateway".
+* **The MCP broker gets the same address half** (`httpapi/mcp_broker.go`): its token is
+  control-plane-minted and lives in the sandbox's `mcp.json`, so it was portable in exactly
+  the same way. It has no proof half — Pi's `mcp.json` has no place to interpolate a
+  per-request value that is not in the file — so it is bound by address only, and a refusal
+  is the broker's usual `401` (same body as every other refusal) plus the reason in the log.
+* **Shutdown, pause and resume behave as §16.1 left them.** `docker restart piforge` does
+  not change a container's address, and the secret is a row, so the token an agent already
+  holds keeps working through a restart; pause revokes it (401), and the resume's new token
+  (generation + 1) gets a new proof at spawn.
+
+**Evidence** (`scripts/probe-sandbox-binding.ps1`, isolated stack on 7723, artifacts under
+`e2e/.artifacts/sandbox-binding/20261101-112610`; the token is never printed — length,
+SHA-256 prefix and claims only, and the in-sandbox calls are fed to `sh -s` on stdin so
+neither the token nor the proof appears in any argv):
+
+```
+sandbox A: session=ses_… sandbox=piforge-b4e0a17c5c0fbc35 state=READY
+PASS  the first prompt settles with a model answer            (running=False answer=READY)
+token A: len=246 sha256=400441adbf2e session=ses_… sandbox_claim=piforge-b4e0a17c5c0fbc35 provider=volc g=0
+PASS  the token carries the sandbox it may be spent from      (claim=piforge-b4e0a17c5c0fbc35)
+PASS  models.json names the proof as a reference and does not contain it  (header=$PIFORGE_SANDBOX_PROOF)
+proof A: len=64 sha256=566cc9df00d9                           (read from the agent's own environment)
+PASS  GET <baseUrl>/models from INSIDE the sandbox -> 200     (status=200)
+PASS  the same call without the proof is refused              (403 sandbox_proof_missing)
+PASS  the same token from the HOST is refused -- even with the proof copied along
+      (403 sandbox_address_mismatch: … addresses 172.27.0.4; the request arrived from 172.25.0.1)
+PASS  the token alone from the host is refused as well        (403 sandbox_address_mismatch)
+PASS  token A from a SIBLING sandbox of the same tenant is refused
+      (403 … addresses 172.27.0.4; the request arrived from 172.27.0.5)
+PASS  token A from ANOTHER TENANT's sandbox is refused
+      (403 … addresses 172.27.0.4; the request arrived from 172.28.0.4)
+restarting piforge ...
+PASS  token A still works from its sandbox after the restart (same token, no re-mint)  (status=200)
+PASS  the session's agent still works after the restart       (accepted=True token_unchanged=True)
+PASS  pause; token A is refused after the pause               (401)
+PASS  the restarted process loaded a revocation from disk     (on_record=4)
+PASS  token A is STILL refused after the restart              (401)
+PASS  resume; the prompt after the resume settles             (accepted=True)
+token B: len=254 sha256=e76a23f9af98 g=1 sandbox_claim=piforge-b4e0a17c5c0fbc35
+PASS  token B is a different token, one generation later      (g: 0 -> 1)
+PASS  token B works from the resumed sandbox                  (status=200)
+PASS  token B is refused from the host like token A was       (403)
+PASS  the broker token answers from its own sandbox           (200 {"status":"ok"})
+PASS  the broker token is refused from the host               (401)
+PASS  the broker token is refused from a sibling sandbox      (401)
+RESULT in_sandbox=200 host_with_proof=403 host_without_proof=403 sibling=403 other_tenant=403
+       same_token_after_restart=200 revoked_after_pause=401 revoked_after_restart=401
+       resumed_token=200 mcp_in_sandbox=200 mcp_from_host=401 on_record=4
+failures=0
+```
+
+The container log from the same run, which is what an operator would have to debug with:
+
+```
+level=WARN msg="llmgw: refused a bound token: session=ses_… sandbox=piforge-b4e0a17c5c0fbc35
+  from=172.27.0.4 reason=sandbox_proof_missing: … needs the X-PF-Sandbox-Proof header"
+level=WARN msg="llmgw: refused a bound token: session=ses_… sandbox=piforge-b4e0a17c5c0fbc35
+  from=172.25.0.1 reason=sandbox_address_mismatch: … addresses 172.27.0.4; the request arrived from 172.25.0.1"
+level=WARN msg="an MCP broker token was used from outside its sandbox" session=ses_…
+  remote=172.27.0.5:43464 error="sandbox_address_mismatch: …"
+```
+
+**What an attacker who copies the token can and cannot do now.**
+
+* **Can:** use it from inside the sandbox it belongs to — including anything running as that
+  sandbox's account that also reads the agent's environment (`/proc/<pid>/environ`), because
+  that is where the proof is. This bounds *where* a credential works, not *who* inside the
+  sandbox may use it; a compromised agent still spends the user's provider quota until the
+  session is paused (revocation) or the hour runs out.
+* **Cannot:** use it from the operator's host, from another sandbox of the same tenant
+  (same bridge, a different address — measured `172.27.0.4` vs `172.27.0.5`), from another
+  tenant's sandbox (`172.28.0.4`), or by replaying it through anything that changes the
+  source address. Cannot survive a pause: revocation is checked first, so a dead token is
+  `401` even from its own sandbox.
+* **Cannot** spend an MCP broker token from outside the session's sandbox either.
+
+**What is still not true.**
+
+* **Not covered: the agent inside its own sandbox.** It is supposed to call the gateway; the
+  property bought here is that the credential is worthless *outside*.
+* **Not covered: the local placement.** `-sandbox local` mints unbound tokens (there is no
+  second address to require); the boot log says so in a `WARN`.
+* **The address half trusts this deployment's network shape.** If a future deployment fronts
+  the gateway with something that rewrites source addresses, or runs `-sandbox-network-mode
+  shared` behind a proxy, the check degrades to the proof half. mTLS is the fix that does
+  not depend on the view, and it is still the next step.
+* **A tenant that can make its own container's address change** (destroy/recreate via its
+  own project) gets a new address and therefore a token bound to nothing: the agent is gone
+  with the container, so this is a non-event, but it is why the binding is resolved per
+  request rather than stored at mint.
+* **A *recreated* control-plane container is off the tenant bridges until the next
+  `Ensure`.** That is not new — the panels reach a sandbox through the same membership
+  (`ensureNetwork` joins `piforge` to the tenant's bridge on every create/adopt) — but the
+  binding makes it visible at the gateway too: until a session's sandbox is Ensured, a live
+  agent's model calls answer `403 sandbox_address_unresolved`. `docker restart piforge`
+  keeps the memberships (measured above); `docker compose up -d` after an image change does
+  not, and the next session start repairs it.
+* **One row per sandbox is new state.** Losing `proof_cipher` (a restored database without
+  `secret.key`, §1.4.6's backup section) makes every live proof unverifiable: the agent gets
+  `403 sandbox_proof_unavailable` and the next prompt mints a new secret and a new token.
+  It fails closed and it heals on the next spawn, which is the behaviour to expect from a
+  backup that lost its key.
+
+**Tests.** `TestASandboxCanSpendItsTokenFromItsOwnAddress`,
+`TestATokenCopiedOutOfTheSandboxIsRefusedFromTheHost`,
+`TestATokenIsRefusedFromAnotherSandboxOfTheSameTenant`,
+`TestTheBindingFollowsAnAddressThatMoved` (a cached address that no longer matches forces a
+fresh lookup, so pause/resume and a replacement container are followed rather than
+refused), `TestAMismatchIsNotResolvedByAFreshLookupThatStillDisagrees`,
+`TestAnUnresolvableSandboxIsClosedNotOpen`, `TestAResolverHiccupKeepsTheLastKnownAddress`,
+`TestAnUnboundTokenIsNotAddressChecked`, `TestTheProofIsDemandedAndChecked` (table: none,
+another token's, another sandbox's, the right one), `TestASandboxWithNoSecretIsClosedNotOpen`,
+`TestABinderWithoutSecretsEnforcesTheAddressAlone`,
+`TestABrokerTokenIsBoundToItsSessionsSandbox`,
+`TestTheGatewayRefusesABoundTokenFromOutsideItsSandbox` (handler level: 200 inside, 403 from
+the host with `sandbox_address_mismatch`, 403 without the proof, 401 for a bad signature),
+`TestABoundTokenIsRefusedBeforeAnyProviderLookup`,
+`TestTheGatewayLeavesAnUnboundTokenAlone`, `TestRemoteIPReadsOnlyTheTransport`;
+store: `TestSandboxProofSecretIsPerSandboxSealedAndStable` (idempotent, per sandbox, sealed,
+survives a reopen); pimodel: `TestWriteEmitsTheProofHeaderAsAnEnvironmentReference`; broker:
+`TestMCPBrokerRefusesATokenFromOutsideTheSandbox`, `TestMCPBrokerWithoutABinderStillAnswers`.
+
+**Costs, stated as costs.** One DNS lookup per sandbox per 2 s (cached, ~0.1 ms warm) and
+one indexed row read for the proof, per request — both after the signature check, so an
+unauthenticated caller cannot make the gateway do either; one new sealed column; one header
+in `models.json`; and one more way for a sandbox to be told "no" (a bridge the control
+plane is not joined to would turn every model call into `403 sandbox_address_unresolved`,
+which is why the boot log names the binding and the refusal names the address).

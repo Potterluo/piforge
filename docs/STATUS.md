@@ -1654,7 +1654,8 @@ e2e/.artifacts/pids/measure-*.txt                 scripts/measure-pids.ps1 的�
 ## 本批：第三轮对抗验收留下的两条风险（磁盘突发上界 + 撤销落库，2026-11-01）
 
 `e2e/.artifacts/adversarial2/VERDICT.md` 的三条「运维会担心」里，这一批关掉两条，第三条
-（token 本身是 1 小时可携带 bearer 凭证）如实保留、不写成已解决。
+（token 本身是 1 小时可携带 bearer 凭证）如实保留、不写成已解决。**（第三条已在下一批关掉：
+见文末「本批：token 只在自己的沙箱里能用」（2026-11-01）；这一段保留原文。**
 
 ### FIX 1（安全）撤销集合从内存搬进数据库
 
@@ -1699,7 +1700,8 @@ e2e/.artifacts/pids/measure-*.txt                 scripts/measure-pids.ps1 的�
 ### 边界（本批没有做的）
 
 - token 仍是 1 小时可携带的 bearer 凭证（不绑定沙箱/容器/地址）；绑定的设计写在
-  `docs/EXECUTION-BOUNDARY.md` §16.3，没有实现。
+  `docs/EXECUTION-BOUNDARY.md` §16.3，没有实现。**（下一批已实现并实测：见文末「本批：
+  token 只在自己的沙箱里能用」；这条保留在这里，因为它当时是真的。）**
 - 执行器被租户杀掉之后不自动重启（下次容器启动会重跑 hook）；没有"解冻"按钮，恢复路径
   就是暂停/恢复。
 - 没有在 K8s/gVisor 下验证这套机制（本批只有 compose + runner 形态）。
@@ -1722,3 +1724,77 @@ pwsh scripts/deliver-check.ps1                   119/119 checks passed（98.0s�
 一次说明：deliver-check 的第一次跑在提交之前，唯一的失败是它自己的守卫
 「the source checkout is clean after the drill」（118/119）——工作树里是本批未提交的改动，
 不是产品缺陷；提交后重跑是 119/119。
+
+## 本批：token 只在自己的沙箱里能用（第四轮，2026-11-01）
+
+第三轮留下的那条（token 是 1 小时可携带的 bearer 凭证）关掉了。验收当时就是**从宿主**把
+`/gw/llm` 用成功的，这一批之后同样一条命令从宿主拿到的是 `403 sandbox_address_mismatch`。
+不改任何 FR 状态：**126 条 FR 仍为 DONE 68 / PARTIAL 42 / MISSING 15 / 不做 1**；**整表 135
+行 = DONE 77 / PARTIAL 42 / MISSING 15 / 不做 1**。
+
+**选型**：同时做 (b) 源地址绑定与 (a) per-sandbox 证明；(c) mTLS 明确不做（要 CA、per-sandbox
+证书签发与轮换、第二个监听、SDK 信任，这一轮做不完）。两半各管一半，单独一半会漏的东西写在
+`docs/EXECUTION-BOUNDARY.md` §16.3 的表里：地址这一半**复制不走**，所以复制出容器的 token 在
+别处不可用；证明这一半是给「网络视图错了」准备的（两条沙箱源地址看起来一样时，秘密仍不同）。
+
+**机制**（代码位置）：`llmgw.Claims.b` = 沙箱 id，`Signer.IssueBound` 写进签名载荷
+（`internal/llmgw/token.go`）；地址 = 用本进程解析器查容器名（隔离部署里是 Docker 内建 DNS，
+控制面在每条租户桥上）并与 `r.RemoteAddr` 比，**不看** `X-Forwarded-For`，缓存 2 s、不一致时
+强制重新解析一次再拒绝、解析失败退回上次已知地址、从来解析不到就拒绝（`llmgw/binding.go`）；
+证明 = `HMAC-SHA256(per-sandbox secret, token)`，秘密 32 字节随机、封在
+`sandboxes.proof_cipher`（`store/sandbox_proof.go`，惰性生成、幂等、活过重启），**从不进入
+容器**，过界的只有 HMAC，且它在 **agent 进程的环境变量** `PIFORGE_SANDBOX_PROOF` 里；
+`models.json` 写的是 `"X-PF-Sandbox-Proof": "$PIFORGE_SANDBOX_PROOF"`（Pi 的 headers 支持
+`$NAME` 环境插值），所以攻击者复制的那个文件不再包含一切。顺序：签名 401 → 撤销 401 → 地址
+403 → 证明 403 → 取 provider，每次拒绝一行 WARN（session / sandbox / 源地址 / 原因）。MCP
+broker token 同样绑（只有地址这一半，Pi 的 `mcp.json` 没有地方为每个请求插值），拒绝是 broker
+惯用的 401 + 日志原因。
+
+**实测**（`scripts/probe-sandbox-binding.ps1`，7723 隔离栈，产物
+`e2e/.artifacts/sandbox-binding/20261101-112610`，failures=0）：
+
+```
+PASS  the first prompt settles with a model answer            (answer=READY)
+PASS  token A carries the sandbox it may be spent from        (claim=piforge-b4e0a17c5c0fbc35)
+PASS  models.json names the proof as a reference, not the value
+PASS  GET <baseUrl>/models from INSIDE the sandbox -> 200
+PASS  the same call without the proof is refused              (403 sandbox_proof_missing)
+PASS  the same token from the HOST is refused, even with the proof copied along
+      (403 sandbox_address_mismatch: addresses 172.27.0.4, arrived from 172.25.0.1)
+PASS  token A from a SIBLING sandbox of the same tenant       (403 … arrived from 172.27.0.5)
+PASS  token A from ANOTHER TENANT's sandbox                   (403 … arrived from 172.28.0.4)
+PASS  token A still works from its sandbox after the restart  (200, same token, no re-mint)
+PASS  the session's agent still works after the restart       (accepted=True token_unchanged=True)
+PASS  token A refused after pause / after the restart         (401 / 401, on_record=4)
+PASS  token B (g=1) works from the resumed sandbox            (200)
+PASS  the broker token: 200 from its sandbox, 401 from the host and from a sibling
+RESULT in_sandbox=200 host_with_proof=403 host_without_proof=403 sibling=403 other_tenant=403
+       same_token_after_restart=200 revoked_after_pause=401 revoked_after_restart=401
+       resumed_token=200 mcp_in_sandbox=200 mcp_from_host=401 on_record=4
+```
+
+同批改动与回归：`scripts/probe-gateway-revocation.ps1` 的两条断言改到沙箱里跑（「token 从宿主
+能用」现在是 403；`RESULT … host_before_pause=403 … resumed_token=200`，failures=0），两个探针
+都先删自己上一轮的 `binding-*` / `revocation-*` 项目，所以同一个库上可以反复跑；新增
+`scripts/drill-key.ps1`：只经它读 `PIFORGE_DRILL_KEY`，任何输出只有 `len=36 sha256=xxxxxxxx…`
+这种指纹。
+
+**仍然不成立**（详见 §16.3）：沙箱里的 agent 自己当然能用（这一轮界定的是「在哪儿」，不是
+「谁」）；`-sandbox local` 不绑定（启动日志 WARN）；地址这一半信任这套部署的网络形状，mTLS
+仍是补这一点的下一步；`proof_cipher` 是新的状态，用丢了 `secret.key` 的备份恢复会让在跑的
+agent 拿到 `403 sandbox_proof_unavailable`，下一次 prompt 重新签发即自愈（fail closed）。
+
+### 门禁（本批，实测输出）
+
+```
+go build ./...                                   ok
+go vet ./...                                     ok
+go test ./... -count=1                           43 个包全 ok（httpapi 41.1s，gitx 23.2s）
+pnpm --dir web test -- --run                     38 files / 292 tests passed (26.4s)
+pnpm --dir web exec next build                   ok（Next.js 16.4.3 / Turbopack）
+pnpm --dir e2e test                              182 passed
+pwsh scripts/deliver-check.ps1                   119/119
+```
+
+栈：`pwsh scripts/up-isolated.ps1 -Rebuild` 起在 7723，`-Down` 收掉；`pf-local`（7722）全程
+未动：同一个容器 id `7dc14e4a7525a8…`、`/healthz -> 200`。

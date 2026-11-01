@@ -1659,6 +1659,12 @@ PASS  token A is still refused while token B works        (GET -> 401)
 RESULT durable_revocation=401 old_token_after_restart=401 resumed_token=200 generations=0->1 on_record=1
 ```
 
+**这段里有两行现在不成立了**：`token A/B works from the host` —— §1.4.9 之后 token 绑到它自己的
+沙箱，从宿主是 `403`。`scripts/probe-gateway-revocation.ps1` 已经把这两次调用改到沙箱里
+（`Get-ModelsStatusInSandbox`），「是否已死」的判断仍在宿主上做（容器暂停时跑不了命令，那里
+死 token 是 `401`）。其余各行（generation、落库的 `on_record`、各个 `401`）不变，仍由同一个
+脚本复测。
+
 测试：`TestRevocationSurvivesAControlPlaneRestart`（真 store：撤销 → 关库 → 开库 → 新
 signer 拒绝旧 token，且它内存里的集合是空的，避免「用内存碰巧过了」）、
 `TestResumedGenerationIsValidAfterARestart`、`TestSweepKeepsAResumedTokenAlive`、
@@ -1726,13 +1732,107 @@ WARN。第二轮验收在同一机制上量到 3.95 GB 和 5.41 GB —— 所以
 `TestRunningSandboxIDsFollowsTheStatusAndTheWorktree`（哪块沙箱有 run 在跑，决定用哪个
 间隔）。
 
-#### 本轮仍然留着的一条
+#### 本轮仍然留着的一条 → 下一节关掉了
 
-token 仍是一小时内**可携带的 bearer 凭证**：在宿主上用 `/gw/llm` 能答，不绑定沙箱/容器/
-地址，且 `models.json` 由 `gem` 拥有（`0600`，agent 和它跑的东西都能读）。落库的撤销界定的
-是它的**寿命**，不是**持有者**。把它绑到沙箱（网关校验的 per-container secret header，或
-mTLS 身份）是下一步，比这一轮大：沙箱里的 SDK 得会带上证明，网关还得有一份能活过容器
-替换的 per-sandbox 秘密存储。详见 `docs/EXECUTION-BOUNDARY.md` §16.3。
+（这一小节当时写的是：token 仍是一小时内可携带的 bearer 凭证，在宿主上用 `/gw/llm`
+能答，不绑定沙箱/容器/地址；落库的撤销界定的是它的**寿命**，不是**持有者**。）
+
+**它已经不再是那样了**：第四轮（§1.4.9）把 token 绑到了它自己的沙箱 —— 源地址 + per-sandbox
+证明。上面这段保留下来，是因为它是当时诚实的说法；现在成立的说法在 §1.4.9 和
+`docs/EXECUTION-BOUNDARY.md` §16.3。还没被覆盖的（agent 在自己沙箱里当然能用、`-sandbox
+local` 不绑定、mTLS 没做）也在那两处逐条写明。
+
+### 1.4.9 第四轮：token 只在自己的沙箱里能用（2026-11-01）
+
+第三轮结束时留下的最后一条风险是「token 是**一小时内可携带的 bearer 凭证**」：验收时
+它就是**从宿主**用成功的。这一轮把它关掉，而且没有把 pause→resume / 控制面重启弄坏。
+
+**选型：同时做 (b) 源地址绑定 与 (a) per-sandbox 证明；(c) mTLS 明确不做。** mTLS 是唯一
+不依赖「网络视图正确」的方案，但它要 CA、要 per-sandbox 证书签发与轮换、要第二个监听、
+还要沙箱里的 SDK 信任那个 CA —— 这一轮做不完，所以不做，写在这里而不是假装考虑过。
+
+两半各管什么，以及**单独一半会漏什么**：
+
+| 一半 | 是什么 | 单独一半会漏掉 |
+|---|---|---|
+| (b) 源地址 | 请求的 TCP 源地址必须是该沙箱在租户桥上的地址 | 「两条沙箱看起来一样」的网络视图：SNAT、网关前面的代理、解析器答错。它还是**这套部署形状**的性质（控制面加入了每条租户桥），不是协议的性质 |
+| (a) 证明 | `X-PF-Sandbox-Proof: HMAC-SHA256(per-sandbox secret, token)` | 「沙箱里面是谁」：agent 就跑在那儿，任何以该账号运行的进程都能读 agent 的环境，就像能读 `models.json` 一样。证明和 token 一样可被复制 —— 只是多一个文件，不是对 agent 的第二因子 |
+
+组合起来才是结论：**地址这一半复制不走**，所以从容器里拿出去的 token（文件，或 `env`
+转储）在宿主、同租户的兄弟沙箱、别的租户的沙箱里都不可用；秘密是给「网络视图错了」
+准备的皮带，因为两条沙箱就算源地址看起来一样，秘密也不同。
+
+**机制**（细节与代码位置见 `docs/EXECUTION-BOUNDARY.md` §16.3）：
+
+- token 的签名载荷里多一个 `b`（沙箱 id = 容器名），复制 token 改不掉它；没有 `b` 的
+  token 不绑定 —— 那是 `-sandbox local`（agent 就跑在宿主上），启动日志用 WARN 说清楚。
+- 地址：网关用**本进程的解析器**查沙箱名（隔离部署里就是 Docker 内建 DNS，控制面在每条
+  租户桥上，内建 DNS 对容器名是权威），和 `r.RemoteAddr` 比，**不看** `X-Forwarded-For`。
+  缓存 2 s；不一致时**强制重新解析一次**再拒绝，所以容器换地址会被跟上；解析失败退回
+  上一次已知地址（DNS 抖一下不该把 agent 锁在自己网关外面）；从来解析不到 = 拒绝。
+  **没有回绑钩子，也没有会过期的表** —— 这正是它能在 pause→resume 和控制面重启后活下来
+  的原因。
+- 证明：32 字节 `crypto/rand`，用部署的 AES-GCM box 封在 `sandboxes.proof_cipher`，在给
+  这块沙箱签 token 的那一刻惰性生成（`EnsureSandboxProofSecret`）。**它从不进入容器**；
+  过界的只有 `HMAC(secret, token)`（只值一个 token），而且放在 **agent 进程的环境变量**
+  `PIFORGE_SANDBOX_PROOF` 里 —— 不是容器 env，也不在任何命令行上。`models.json` 里写的是
+  引用，Pi 按请求解析（它自己的 schema：headers "Values resolve like apiKey"，apiKey 支持
+  `$NAME` 环境插值）：
+
+  ```json
+  "headers": { "X-PF-Sandbox-Proof": "$PIFORGE_SANDBOX_PROOF" }
+  ```
+
+- 顺序：签名（401）→ 撤销 generation（401）→ 地址（403 `sandbox_address_mismatch` /
+  `sandbox_address_unresolved`）→ 证明（403 `sandbox_proof_missing` / `_invalid` /
+  `_unavailable`）→ 取 provider。所以**死 token 从哪儿都是 401**（包括它自己的沙箱），
+  **活 token 只有在自己沙箱里才是 200**。每次拒绝一行 WARN，带 session、sandbox、源地址、
+  原因。
+- **MCP broker token 同样绑**（它也是控制面签的、也躺在沙箱的 `mcp.json` 里）：只有地址
+  这一半 —— Pi 的 `mcp.json` 没有地方为每个请求插一个「文件里没有的值」；拒绝仍是 broker
+  惯用的 `401`（body 和别的拒绝一样），原因在日志里。
+
+**证据**（`scripts/probe-sandbox-binding.ps1`，隔离栈 7723，产物
+`e2e/.artifacts/sandbox-binding/20261101-112610`；token 只打印长度/sha256 前缀/claims；
+沙箱内的调用通过 stdin 喂给 `sh -s`，所以 token 和证明都不出现在任何 argv 里）：
+
+```
+PASS  the first prompt settles with a model answer            (running=False answer=READY)
+token A: len=246 sha256=400441adbf2e … sandbox_claim=piforge-b4e0a17c5c0fbc35 g=0
+PASS  models.json names the proof as a reference and does not contain it  (header=$PIFORGE_SANDBOX_PROOF)
+PASS  GET <baseUrl>/models from INSIDE the sandbox -> 200     (status=200)
+PASS  the same call without the proof is refused              (403 sandbox_proof_missing)
+PASS  the same token from the HOST is refused -- even with the proof copied along
+      (403 sandbox_address_mismatch: … 172.27.0.4; the request arrived from 172.25.0.1)
+PASS  token A from a SIBLING sandbox of the same tenant is refused  (403 … arrived from 172.27.0.5)
+PASS  token A from ANOTHER TENANT's sandbox is refused             (403 … arrived from 172.28.0.4)
+PASS  token A still works from its sandbox after the restart (same token, no re-mint)  (200)
+PASS  the session's agent still works after the restart       (accepted=True token_unchanged=True)
+PASS  token A is refused after the pause / still after the restart  (401 / 401, on_record=4)
+token B: len=254 sha256=e76a23f9af98 g=1
+PASS  token B works from the resumed sandbox                  (200)
+PASS  the broker token answers from its own sandbox           (200 {"status":"ok"})
+PASS  the broker token is refused from the host / a sibling   (401 / 401)
+RESULT in_sandbox=200 host_with_proof=403 host_without_proof=403 sibling=403 other_tenant=403
+       same_token_after_restart=200 revoked_after_pause=401 revoked_after_restart=401
+       resumed_token=200 mcp_in_sandbox=200 mcp_from_host=401 on_record=4
+failures=0
+```
+
+**现在成立 / 现在仍不成立**（完整版在 §16.3）：
+
+- 成立：复制出容器的 token 对它整个生命周期内、在任何别的地方都无效（宿主、同租户兄弟
+  沙箱、别的租户，连证明一起复制也不行）；同一个 token 能活过控制面重启；pause 之后
+  401，恢复后的新 token 立刻可用。
+- 仍不成立：**沙箱里的 agent 自己当然能用**（它本来就该用；这一轮界定的是「在哪儿」，
+  不是「谁」）；`-sandbox local` 不绑定（启动日志 WARN 说明）；地址这一半信任这套部署的
+  网络形状，将来若在网关前面加一层改写源地址的东西，就退化到只剩证明 —— mTLS 仍是补上
+  这一点的下一步。
+
+**门禁**：`go build ./...`、`go vet ./...`、`go test ./... -count=1`、`pnpm --dir web test
+-- --run`（292）、`pnpm --dir web exec next build`、e2e（182）、`pwsh
+scripts/deliver-check.ps1`（119/119，`PIFORGE_DRILL_KEY` 由 `scripts/drill-key.ps1` 读入
+子进程，只打印长度和 sha256 前缀）。
 
 ### 1.5 推荐方案下仍然会坏的地方（这一节是重点）
 

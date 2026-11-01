@@ -92,6 +92,11 @@ CREATE TABLE IF NOT EXISTS sandboxes (
     -- key would open every tenant's shell once sandboxes are addressable by name
     -- on a shared network. Never selected by sandboxCols.
     api_key_cipher BLOB,
+    -- The sandbox's own proof secret, sealed the same way (store/sandbox_proof.go).
+    -- The gateway HMACs a model token with it, so "a token alone" is not enough
+    -- to spend it; the value never enters the container, only HMAC(secret, token)
+    -- in the agent's environment does. Never selected by sandboxCols.
+    proof_cipher   BLOB,
     UNIQUE (project_id)
 );
 

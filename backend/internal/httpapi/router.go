@@ -231,6 +231,12 @@ type Deps struct {
 	// LLMGateway is mounted at /gw/llm/. It authenticates with its own signed
 	// token, so it is deliberately outside the cookie auth chain.
 	LLMGateway http.Handler
+	// SandboxBinding is the address half of the sandbox binding
+	// (docs/EXECUTION-BOUNDARY.md §16.3) applied to the MCP broker: a broker token
+	// is only accepted from an address the session's sandbox owns. Nil leaves the
+	// broker unbound, which only a hand-built test server should do — the
+	// deployment always wires it (cmd/piforged) and says so in its boot log.
+	SandboxBinding SessionBinder
 	// Browser owns one Chrome per sandbox. Nil disables the browser panel with
 	// a typed 422 rather than a hanging socket.
 	Browser *browser.Manager
