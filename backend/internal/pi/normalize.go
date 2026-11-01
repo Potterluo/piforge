@@ -85,6 +85,11 @@ type ToolEndedPayload struct {
 	ToolCallID string `json:"tool_call_id"`
 	Name       string `json:"name,omitempty"`
 	IsError    bool   `json:"is_error,omitempty"`
+	// ExitCode is the process status when the tool's result details carry one
+	// (Pi reports it for bash-like tools as exitCode/exit_code). It is a
+	// pointer because "exited 0" and "the tool reported no code" are different
+	// facts, and the audit trail stores NULL for the latter.
+	ExitCode   *int   `json:"exit_code,omitempty"`
 	DurationMS int64  `json:"duration_ms,omitempty"`
 	Text       string `json:"text,omitempty"`
 	Valid      bool   `json:"valid"`
@@ -474,10 +479,15 @@ func (n *Normalizer) Translate(raw []byte) ([]contracts.Event, error) {
 		}
 		n.asm.OnToolEnd(w)
 		res, _ := n.asm.Result(w.ToolCallID)
+		var details json.RawMessage
+		if w.Result != nil {
+			details = w.Result.Details
+		}
 		return n.emit(contracts.EvToolEnded, ToolEndedPayload{
 			ToolCallID: w.ToolCallID,
 			Name:       w.ToolName,
 			IsError:    w.IsError,
+			ExitCode:   exitCodeFromDetails(details),
 			DurationMS: w.DurationMS,
 			Text:       res.Text,
 			Valid:      res.Valid,
@@ -682,4 +692,26 @@ func joinThinkingBlocks(blocks []Block) string {
 		}
 	}
 	return out
+}
+
+// exitCodeFromDetails reads the process status a tool result reports.
+//
+// Pi's bash-like tools put it in result.details as `exitCode` (some versions
+// write `exit_code`). A tool that reports no code returns nil, which the audit
+// row stores as NULL: "not reported" is not "exited 0".
+func exitCodeFromDetails(details json.RawMessage) *int {
+	if len(details) == 0 {
+		return nil
+	}
+	var parsed struct {
+		ExitCode      *int `json:"exitCode"`
+		ExitCodeSnake *int `json:"exit_code"`
+	}
+	if err := json.Unmarshal(details, &parsed); err != nil {
+		return nil
+	}
+	if parsed.ExitCode != nil {
+		return parsed.ExitCode
+	}
+	return parsed.ExitCodeSnake
 }

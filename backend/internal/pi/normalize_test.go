@@ -435,6 +435,7 @@ func TestMessageEndCarriesTheProviderError(t *testing.T) {
 		t.Fatalf("error = %q", payload.Error)
 	}
 }
+
 // TestInterruptedRunReportsNoFailure pins the shape real Pi produced when a user
 // stopped a run: the assistant message is a *provider error* ("This operation was
 // aborted", stopReason "error"), and only agent_settled.aborted says it was a
@@ -510,6 +511,49 @@ func TestInterruptedRunReportsNoFailure(t *testing.T) {
 		}
 		if payload.Error != "" {
 			t.Fatalf("stopReason aborted carried a failure: %q", payload.Error)
+		}
+	}
+}
+
+// The audit trail stores the process status when Pi reports one, and NULL when
+// it does not. "Exited 0" and "not reported" must not collapse into the same
+// value, which is why the payload field is a pointer.
+func TestToolEndedCarriesExitCodeFromDetails(t *testing.T) {
+	n := NewNormalizer("ses_exit", contracts.KindMain)
+	translateRaw(t, n, `{"type":"tool_execution_start","toolCallId":"c1","toolName":"bash","args":{"command":"exit 7"}}`)
+
+	events := translateRaw(t, n, `{"type":"tool_execution_end","toolCallId":"c1","toolName":"bash","isError":true,"durationMs":9,"result":{"content":[{"type":"text","text":"boom"}],"details":{"exitCode":7}}}`)
+	var ended *contracts.Event
+	for i := range events {
+		if events[i].Type == contracts.EvToolEnded {
+			ended = &events[i]
+		}
+	}
+	if ended == nil {
+		t.Fatalf("no tool.ended in %v", typesOf(events))
+	}
+	var payload ToolEndedPayload
+	if err := json.Unmarshal(ended.Payload, &payload); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if payload.ExitCode == nil || *payload.ExitCode != 7 {
+		t.Fatalf("exit_code = %v, want 7", payload.ExitCode)
+	}
+
+	// A tool with no details reports no code; the pointer stays nil.
+	n2 := NewNormalizer("ses_exit2", contracts.KindMain)
+	translateRaw(t, n2, `{"type":"tool_execution_start","toolCallId":"c2","toolName":"read","args":{"path":"a"}}`)
+	events = translateRaw(t, n2, `{"type":"tool_execution_end","toolCallId":"c2","toolName":"read","result":{"content":[{"type":"text","text":"ok"}]}}`)
+	for _, ev := range events {
+		if ev.Type != contracts.EvToolEnded {
+			continue
+		}
+		payload = ToolEndedPayload{}
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+			t.Fatalf("payload: %v", err)
+		}
+		if payload.ExitCode != nil {
+			t.Fatalf("a tool with no details reported exit_code=%d", *payload.ExitCode)
 		}
 	}
 }

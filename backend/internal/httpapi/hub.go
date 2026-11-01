@@ -268,6 +268,7 @@ func (h *hub) applyDerivedState(userID string, ev contracts.Event) {
 		var p struct {
 			ToolCallID string `json:"tool_call_id"`
 			IsError    bool   `json:"is_error"`
+			ExitCode   *int   `json:"exit_code"`
 			DurationMS int64  `json:"duration_ms"`
 			Text       string `json:"text"`
 		}
@@ -279,6 +280,7 @@ func (h *hub) applyDerivedState(userID string, ev contracts.Event) {
 		size := len(p.Text)
 		if err := h.store.FinishToolCall(ctx, userID, p.ToolCallID, store.ToolCallFinish{
 			IsError:     p.IsError,
+			ExitCode:    p.ExitCode,
 			DurationMS:  &dur,
 			ResultBytes: &size,
 			EndedAt:     &ended,

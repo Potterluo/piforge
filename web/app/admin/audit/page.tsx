@@ -396,6 +396,9 @@ function AuditLine({ row }: { row: AuditRow }) {
         <span className="font-mono" title={row.commit_sha}>
           提交 {row.commit_sha ? row.commit_sha.slice(0, 12) : "—"}
         </span>
+        {row.exit_code !== undefined ? (
+          <span className="font-mono tabular-nums">退出码 {row.exit_code}</span>
+        ) : null}
         <span className="tabular-nums">
           用量 {row.run_tokens_in} in / {row.run_tokens_out} out
           {row.run_cost_usd > 0 ? ` · $${row.run_cost_usd.toFixed(4)}` : ""}
