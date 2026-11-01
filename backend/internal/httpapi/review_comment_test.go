@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -189,6 +190,62 @@ func TestPostMessageWithReviewComment(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt is missing %q:\n%s", want, prompt)
 		}
+	}
+}
+
+// TestComposeReviewPromptCapsTruncateInsteadOfRefusing pins the shape of the
+// caps: they are budgets for the composed message, not validation. A comment
+// with too many quoted lines, a huge line or a huge body is still sent — it is
+// cut, visibly, and never answered with a 400. (docs/HANDOFF.md's API shapes
+// says the same thing; without this test the next reader may reintroduce a
+// refusal "for safety".)
+func TestComposeReviewPromptCapsTruncateInsteadOfRefusing(t *testing.T) {
+	longLine := strings.Repeat("y", 500)
+	// The long line is inside the 24-line window on purpose: a line past it is
+	// dropped before the per-line cap is ever applied.
+	quote := []string{longLine}
+	for i := 2; i <= 30; i++ {
+		quote = append(quote, fmt.Sprintf("line %d", i))
+	}
+	body := strings.Repeat("z", 5000)
+
+	got, err := composeReviewPrompt(ReviewComment{
+		Path:    "notes.txt",
+		Line:    3,
+		EndLine: 99, // past the end of the file: accepted, it is only a header
+		Quote:   quote,
+		Body:    body,
+	}, nil, false)
+	if err != nil {
+		t.Fatalf("the caps must not refuse the comment: %v", err)
+	}
+
+	// The header keeps the anchor the caller sent, even past EOF.
+	if !strings.Contains(got, "行内评论 · notes.txt:3-99") {
+		t.Fatalf("the end_line was not used in the header:\n%s", got)
+	}
+	// 24 lines make it; the rest are replaced by one visible marker.
+	if !strings.Contains(got, "…（其余行已省略）") {
+		t.Fatalf("the truncated quote is not marked:\n%s", got)
+	}
+	if strings.Contains(got, "line 25") || strings.Contains(got, "line 30") {
+		t.Fatalf("a quote line past the cap was kept:\n%s", got)
+	}
+	if !strings.Contains(got, "line 24") {
+		t.Fatalf("the 24th quote line was dropped:\n%s", got)
+	}
+	// Each line stops at 400 runes plus an ellipsis; the body at 4000.
+	if !strings.Contains(got, strings.Repeat("y", 400)+"…") {
+		t.Fatalf("the long quote line was not cut at 400 runes")
+	}
+	if strings.Contains(got, strings.Repeat("y", 401)) {
+		t.Fatalf("the long quote line kept more than 400 runes")
+	}
+	if !strings.Contains(got, strings.Repeat("z", 4000)+"…") {
+		t.Fatalf("the body was not cut at 4000 runes")
+	}
+	if strings.Contains(got, strings.Repeat("z", 4001)) {
+		t.Fatalf("the body kept more than 4000 runes")
 	}
 }
 

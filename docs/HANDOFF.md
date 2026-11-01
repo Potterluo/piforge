@@ -170,8 +170,8 @@ docker run -d --name pf-local -p 7722:7700 -v piforge-data:/data `
   `dev@piforge.local / piforge-dev-123` (user). They exist only on a first boot against
   an empty data volume, and the log names them without printing the passwords. Unset
   passwords means generated ones, not logged, not recoverable without another admin. The
-  login page still says the initial password is printed to the boot log; **it is not** —
-  the log names the accounts only, so use the values here.
+  login page now says the same thing (it used to claim the boot log printed the initial
+  password; that copy was wrong, not the log), so use the values here.
 - **Provider env vars**: `PIFORGE_DEFAULT_PROVIDER` (here `volc`),
   `PIFORGE_BOOTSTRAP_PROVIDER='name|base_url|model'`,
   `PIFORGE_BOOTSTRAP_PROVIDER_KEY`. Bootstrap creates the shared provider only when none
@@ -543,8 +543,10 @@ Flow notes:
 
 Every write (`POST`/`PUT`/`PATCH`/`DELETE`) needs the CSRF token from login as the header
 **`X-Pf-Csrf`**; without it the answer is
-`403 {"code":"forbidden","message":"missing or invalid CSRF token"}`, and `X-CSRF-Token`
-is not the name. (Header names are case-insensitive; the code's constant is `X-PF-CSRF`.)
+`403 {"error":{"code":"forbidden","message":"missing or invalid CSRF token"}}`, and
+`X-CSRF-Token` is not the name. (Header names are case-insensitive; the code's constant is
+`X-PF-CSRF`.) Every API error uses that `{"error":{code,message}}` envelope — the `details`
+object sits beside `message` when there is one.
 Login is the cookie-auth exception (there is no session to protect yet; a bearer API key is
 exempt too, because it carries no cookie): `POST /v1/auth/login` with
 `{"email":"…","password":"…"}` → `200 {"user":{…},"csrf":"…"}`, sets cookies `pf_session`
@@ -553,13 +555,71 @@ header. Send that same `csrf` value back on every write.
 
 | Call | Body |
 |---|---|
-| `POST /v1/sessions/{id}/messages` | `{"text":"<prompt>","client_msg_id":"<uuid>"}` — `client_msg_id` is required (or send an `Idempotency-Key` header); it makes the send idempotent per session. `{"text": …}` alone is `400 {"code":"invalid_argument","message":"client_msg_id is required"}`. |
+| `POST /v1/projects` | `{"name":"…","repo_url":"…","default_branch":"…"}` — **no field is required, but the body is**: `{}` is a blank workspace, while an absent body is `400 {"error":{"code":"invalid_argument","message":"request body is required"}}`. An empty `name` is derived from the repository basename (`空白工作区 · MM-DD` for a blank workspace) and suffixed `-2`, `-3`… on collision; an explicit `name` that is taken is `409 {"error":{"code":"conflict","message":"项目名称「…」已存在（不区分大小写），请换一个名称"}}`. An empty `repo_url` is allowed; any other value must be `https://…` or `git@host:path`, or it is `400 {"error":{"code":"invalid_argument","message":"repo_url must be an https URL or git@host:path"}}`. → `201 {"project":{…}}` |
+| `POST /v1/projects/{id}/sessions` | `{"title":"…","model_ref":"…","thinking_level":"…","kind":"main","ephemeral":false}` — **every field is optional and so is the body**: this handler uses the tolerant decoder, so a body-less `POST` creates a `main` session. `kind` accepts `main`, `branch` or `sidecar` (the latter two are the shapes `/fork` and `/sidecar` use); anything else is `400 {"error":{"code":"invalid_argument","message":"unknown kind \"…\""}}`. `worktree_id` and `parent_id`, when sent, must name rows of the caller's or the answer is `404`; the project itself is proved before the body is parsed, so a stranger's project id and a typo look the same. → `201 {"session":{…}}` |
+| `POST /v1/sessions/{id}/messages` | `{"text":"<prompt>","client_msg_id":"<uuid>"}` — `client_msg_id` is required (or send an `Idempotency-Key` header); it makes the send idempotent per session. `{"text": …}` alone is `400 {"error":{"code":"invalid_argument","message":"client_msg_id is required"}}`. |
 | `POST /v1/sessions/{id}/fork` | `{"entry_id":"<id from /fork-points>"}` — one required field, and unknown fields are refused (`title` → `400 invalid JSON body: json: unknown field "title"`). `label` and `copy_changes` are the only other fields the handler accepts. |
-| message with `review_comment` | `{"client_msg_id":"…","review_comment":{"path":"notes.txt","line":12,"side":"new","hunk":"@@ -1,3 +1,4 @@","quote":["<line text>"],"body":"…"}}` — `quote` is a **`[]string`**, not a string (a scalar fails with `400 … cannot unmarshal string into Go struct field ReviewComment.review_comment.quote of type []string`); `path` is worktree-relative, `line` is 1-based, `side` is `new` or `old`, and `end_line` is optional. |
+| message with `review_comment` | `{"client_msg_id":"…","review_comment":{"path":"notes.txt","line":12,"side":"new","hunk":"@@ -1,3 +1,4 @@","quote":["<line text>"],"body":"…"}}` — `quote` is a **`[]string`**, not a string (a scalar fails with `400 … cannot unmarshal string into Go struct field ReviewComment.review_comment.quote of type []string`); `path` is worktree-relative, `line` is 1-based, `side` is `new` or `old`, and `end_line` is optional. With a `review_comment` present, `text` may be omitted: the server composes the prompt from the anchor and the quoted code. |
 
 These are the shapes a script gets wrong first because the UI never shows them: a message
 needs an idempotency key the browser generates, a fork body is one field (its title is
 `label`, not `title`), and a review comment quotes an array of lines.
+
+**`review_comment` caps** (`backend/internal/httpapi/review_comment.go`). They are
+**truncations, not refusals** — nothing here answers 400, and the caller is not told the
+quote or the body was cut; the truncation only shows up in the composed message:
+
+| field | cap | what happens over the cap |
+|---|---|---|
+| `quote` | 24 lines (`maxReviewQuoteLines`) | the extra lines are dropped and the composed quote ends with a line `…（其余行已省略）` |
+| each `quote[i]` | 400 runes (`maxReviewQuoteRune`) | the line is cut at 400 runes and a `…` is appended |
+| `body` | 4000 runes (`maxReviewBodyRune`) | the body is cut at 4000 runes and a `…` is appended |
+| `end_line` | none | optional; `0`/omitted means "same as `line`", a value below `line` is clamped to it, and a value past the end of the file is accepted verbatim (it only appears in the `行内评论 · path:line-end` header) |
+
+The 400s that do exist are about the anchor, not the size, and each is exact:
+`review_comment.path is required`, `review_comment.path must be a relative path inside the
+worktree`, `review_comment.line must be a positive line number`, `review_comment.body is
+required`, `review_comment.side must be "new" or "old"`, and (with `continue_interrupted`)
+`continue_interrupted and review_comment cannot be combined`.
+
+**From zero, in one PowerShell block.** Login → project → session → message, no UI, no
+`curl`; the CSRF token from step 1 is what every later write sends as `X-Pf-Csrf`, and the
+cookie jar from `-SessionVariable` is what carries `pf_session`. Measured against a
+throwaway `pwsh scripts/up-isolated.ps1` stack on 7723 (see "Run it" for the key):
+
+```powershell
+$base = "http://127.0.0.1:7723"
+
+# 1. Log in. The body carries the CSRF token; the response sets pf_session + pf_csrf.
+$login = Invoke-RestMethod -Method Post -Uri "$base/v1/auth/login" `
+  -ContentType "application/json" `
+  -Body '{"email":"dev@piforge.local","password":"piforge-dev-123"}' `
+  -SessionVariable web
+$headers = @{ "X-Pf-Csrf" = $login.csrf }
+
+# 2. Create a project. Every field is optional; {} is a blank workspace.
+$project = (Invoke-RestMethod -Method Post -Uri "$base/v1/projects" -WebSession $web `
+  -Headers $headers -ContentType "application/json" -Body '{"name":"handoff-check"}').project
+$project.id
+
+# 3. Create a session in it. The body is optional too; this one names a title.
+$session = (Invoke-RestMethod -Method Post -Uri "$base/v1/projects/$($project.id)/sessions" `
+  -WebSession $web -Headers $headers -ContentType "application/json" `
+  -Body '{"title":"handoff-check"}').session
+$session.id
+
+# 4. Send a prompt. client_msg_id is required and makes a retry idempotent.
+$send = @{ text = "Reply with exactly: ok"; client_msg_id = [guid]::NewGuid().ToString() }
+Invoke-RestMethod -Method Post -Uri "$base/v1/sessions/$($session.id)/messages" `
+  -WebSession $web -Headers $headers -ContentType "application/json" `
+  -Body ($send | ConvertTo-Json -Compress)
+```
+
+The message returns `200 {"accepted":true,"disposition":"started",…}`; the answer arrives
+on the SSE stream and settles into `GET …/entries`, not in that response. The seeded
+passwords above are the values the documented `docker run` sets with
+`PIFORGE_SEED_*`; a deployment that did not set them has generated, unlogged passwords
+(see "Seeded accounts").
 
 ### What the panels call
 
