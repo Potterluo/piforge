@@ -49,6 +49,7 @@ classified:
 | L14 | `mount --bind` + `MS_RDONLY` freezes the skill snapshot | `materialize/bind_linux.go`, `skillsnap/unmount_linux.go` | (a) with SYS_ADMIN | `mount --bind`, then `mount -o remount,bind,ro`: write → `Read-only file system`, `touch` → `Read-only file system`, `umount -l` → OK. The shipped sandbox has no SYS_ADMIN and uses `copy-ro` by design | holds |
 | L15 | `Pdeathsig` and `Setsid` keep the agent tied to its supervisor | `liveness/proc_linux.go`, `agentsupervisor/proc_linux.go` | (a) | `go test ./internal/liveness ./internal/agentsupervisor` on Linux: **ok** (1.44 s / 0.47 s). The Windows branch is not a silent skip: `proc_other.go` returns nil and both platforms close the agent's stdin on exit | holds; caveat R3 |
 | L16 | A real agent turn works on Linux | the whole stack | gated | `verify-linux.sh` logs in, creates a project and session, prompts, and reads `verify-linux.txt` back — only when `PIFORGE_VERIFY_KEY` (or `_KEY_FILE`) is set; otherwise `SKIP` | not run in this pass (no key in this shell) |
+| L17 | The image under test **is** the image this tree builds | `deploy/Dockerfile.sandbox-agent` (`LABEL piforge.source-digest`), `backend/cmd/sourcedigest`, `scripts/up-isolated.ps1`, `scripts/verify-linux.sh` | (a) precondition, not a product assertion | `docker image inspect -f '{{index .Config.Labels "piforge.source-digest"}}'` equals the digest `backend/cmd/sourcedigest` computes from this tree and the parent image's id. A mismatch, or no label at all, fails L17 and **refuses** the container section, naming the rebuild command | holds: the stale `:isolated` label `5ce0d3fd2bee` is refused; an image built from this tree is labelled `954f1b873432` and passes |
 
 ### (c) Windows-only workarounds that Linux does not need
 
@@ -111,9 +112,10 @@ A related measurement, because it explains a false negative I hit first:
 also the product's pause/resume path, so `verify-linux.sh` uses stop/start and
 looks for the "keeping" line rather than merely comparing the number.
 
-**The image in this checkout was stale, and the script said so.** The prebuilt
-`piforge/sandbox-agent:isolated` was built before F1/F2, so a first run of
-`verify-linux.sh` against it produced two `FAIL`s —
+**The image in this checkout was stale, and the script said so — but only after
+failing on quota assertions.** The prebuilt `piforge/sandbox-agent:isolated` was
+built before F1/F2, so a first run of `verify-linux.sh` against it produced two
+`FAIL`s —
 
 ```
 FAIL L5 the uid-1000 walk (8465783972) is below the baseline (9044482902): the whole-container term reads 0
@@ -122,7 +124,55 @@ FAIL L6 the baseline moved from 9044482902 to 9078516168 across a restart; the 2
 
 — which is exactly the bug, reported by the check rather than hidden. After
 `docker build -f deploy/Dockerfile.sandbox-agent --build-arg AGENT_IMAGE=piforge:local -t piforge/sandbox-agent:linux-verify .`
-the same run is **28 passed, 0 failed, 9 skipped**.
+the same run is **28 passed, 0 failed, 9 skipped** (29 passed once L17 exists).
+
+That run cost a round: two red lines three hundred lines into the drill looked
+like a regression, and the only thing wrong was an image from an older tree. So
+the staleness is now a **precondition** (L17) instead of a surprise. The sandbox
+image carries `piforge.source-digest` — stamped by `deploy/Dockerfile.sandbox-agent`
+itself, not only by the build script — and `verify-linux.sh` compares it with the
+digest `backend/cmd/sourcedigest` computes from this tree before it asserts
+anything. A mismatch refuses the container section and prints what to run:
+
+```
+FAIL  L17  piforge/sandbox-agent:isolated was built from another tree: label 5ce0d3fd2bee, this tree 954f1b873432 (parent piforge:isolated); refusing to run the container assertions against it
+INFO  rebuild it with:
+INFO  docker build -f deploy/Dockerfile.sandbox-agent \
+                  --build-arg AGENT_IMAGE=piforge:isolated \
+                  --build-arg PIFORGE_SOURCE_DIGEST=954f1b873432c59bf957b6d9c2488d82fadce84e7689a91a40586150ce61e490 \
+                  -t piforge/sandbox-agent:isolated .
+INFO  or, where pwsh is available: pwsh scripts/up-isolated.ps1 -Rebuild (it rebuilds all three images)
+SKIP  L3  the container assertions did not run: piforge/sandbox-agent:isolated is not the image this tree builds
+```
+
+### Rebuilding the sandbox image
+
+The one command that refreshes everything, and the one the refusal names first:
+
+```
+pwsh scripts/up-isolated.ps1 -Rebuild          # all three images, then start the stack
+pwsh scripts/up-isolated.ps1 -BuildOnly -Rebuild   # build only, start nothing
+```
+
+`up-isolated.ps1` now refuses too: with `-NoBuild` it compares the labels before
+starting and exits with the rebuild command instead of starting a stale stack.
+To rebuild the sandbox image by hand — the same command `verify-linux.sh` prints,
+with *your* digest:
+
+```
+digest=$(cd backend && go run ./cmd/sourcedigest -root .. \
+  -dockerfile deploy/Dockerfile.sandbox-agent -agent-image piforge:isolated)
+docker build -f deploy/Dockerfile.sandbox-agent \
+  --build-arg AGENT_IMAGE=piforge:isolated \
+  --build-arg PIFORGE_SOURCE_DIGEST="$digest" \
+  -t piforge/sandbox-agent:isolated .
+```
+
+The `PIFORGE_SOURCE_DIGEST` build arg is what makes the image carry the label: a
+build without it produces an unlabelled image, which both scripts refuse (nothing
+then says which tree it came from). The digest includes the id of the
+control-plane image the sandbox was built `FROM`, so rebuild `piforge:isolated`
+first if its sources changed — `-Rebuild` does both in order.
 
 
 **F3 — `du`'s exit 1 was treated as "no measurement".**
@@ -186,6 +236,12 @@ non-zero on any failure, no provider key required.
 * **kernel surface** — `uname`; `/proc/self/status` and `CapEff`; whether 0444
   binds this process *and* whether `CAP_DAC_OVERRIDE` explains the answer;
   cgroup v2 presence.
+* **freshness** — L17, the precondition for everything below: the sandbox image's
+  `piforge.source-digest` label must equal the digest of this tree (and of the
+  control-plane image it was built `FROM`). A stale or unlabelled image is
+  **refused** before any assertion runs, with the rebuild command printed — see
+  "Rebuilding the sandbox image" below. Without Go the check `SKIP`s and says so;
+  it never guesses.
 * **sandbox container** — boots the real image with the provider's flags
   (`--cap-drop ALL` + the five, `no-new-privileges`, `--pids-limit`, `--memory`,
   `--ulimit fsize`) and asserts: uid 1000 / `gem` CapEff 0; the enforcer running
@@ -221,7 +277,7 @@ checked instead), and the agent turn (no key).
 | gate | result |
 |------|--------|
 | `go build ./...` | pass |
-| `go test ./... -count=1` (Windows host) | pass. One note: `agentsupervisor` `TestSupervisorKeepsTheAgentAliveWhenTheClientLeaves` flaked 1 run in 4 (pre-existing, untouched by this pass: "the reattaching client was given no backlog"); the same test passes on Linux, and the gate run itself was green |
+| `go test ./... -count=1` (Windows host) | pass. The one known flake, `agentsupervisor` `TestSupervisorKeepsTheAgentAliveWhenTheClientLeaves` ("the reattaching client was given no backlog"), was a real attach-order race — the client was published as current before its handshake was queued, so a record the agent wrote in that window reached the wire first and was read as the frame. Fixed in `supervisor.attach`; 50/50 green afterwards, whole package 20/20, and `TestEveryReattachSeesTheHandshakeFirst` guards the ordering |
 | `go test ./... -count=1` **on Linux** | 42 packages ok, 0 failures (golang:1.25-bookworm container); 13 tests in five packages failed before this pass's fixes |
 | `pnpm --dir web lint` | pass |
 | `pnpm --dir web test -- --run` | pass |

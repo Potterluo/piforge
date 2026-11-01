@@ -19,7 +19,12 @@
 # otherwise. The key is never echoed.
 #
 # What the ids mean: docs/LINUX-VERIFY.md carries the assumption table, and each
-# check id (L1..L16, N1..N5) is a row there with its (a)/(b)/(c) classification.
+# check id (L1..L17, N1..N5) is a row there with its (a)/(b)/(c) classification.
+#
+# L17 is a precondition, not a product assertion: it refuses to run the container
+# section on a sandbox image whose piforge.source-digest label is not this tree's
+# digest, and prints the rebuild command. Use `PIFORGE_SANDBOX_IMAGE` to name the
+# image, `PIFORGE_AGENT_IMAGE` to name the control-plane image it was built FROM.
 set -u
 
 ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -187,6 +192,87 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Freshness (L17): the sandbox image must be the one *this tree* builds.
+#
+# A label nobody compares is decoration. The prebuilt piforge/sandbox-agent:isolated
+# was built before the quota fixes, and the first run of this script discovered it
+# by failing two quota assertions three hundred lines in — which reads like a
+# product bug and cost a round. A stale image is not a product bug, so it is named
+# here, before any assertion runs, with the command that fixes it.
+#
+# The digest comes from backend/cmd/sourcedigest — the same program
+# scripts/up-isolated.ps1 labels the images with, so the two cannot disagree about
+# what "stale" means. It needs Go; without it the check says so and the drill
+# continues, because "unproven" must not look like either answer.
+# ---------------------------------------------------------------------------
+short_digest() { printf '%s' "$1" | cut -c1-12; }
+
+digest_of() { # $1 dockerfile, $2 the control-plane image the sandbox was built FROM
+  if [ -n "$2" ]; then
+    ( cd "$ROOT_DIR/backend" && go run ./cmd/sourcedigest -root "$ROOT_DIR" \
+        -dockerfile "$1" -agent-image "$2" 2>/dev/null )
+  else
+    ( cd "$ROOT_DIR/backend" && go run ./cmd/sourcedigest -root "$ROOT_DIR" -dockerfile "$1" 2>/dev/null )
+  fi
+}
+
+rebuild_command() { # $1 image, $2 its parent ref, $3 the digest this tree expects
+  printf 'docker build -f deploy/Dockerfile.sandbox-agent \\\n            --build-arg AGENT_IMAGE=%s \\\n            --build-arg PIFORGE_SOURCE_DIGEST=%s \\\n            -t %s .' \
+    "${2:-piforge:local}" "${3:-<digest>}" "$1"
+}
+
+# sandbox_freshness sets SD_FRESH (fresh|stale|unknown), SD_WHY, and — when a
+# digest could be computed — SD_WANT and SD_AGENT (the parent it was computed
+# against), so the caller can print a rebuild command that will actually satisfy
+# the check.
+sandbox_freshness() {
+  local image="$1" label candidate want
+  SD_FRESH=unknown
+  SD_WHY=""
+  SD_WANT=""
+  SD_AGENT=""
+  label=$(docker image inspect -f '{{index .Config.Labels "piforge.source-digest"}}' "$image" 2>/dev/null | tr -d '\r\n')
+  case "$label" in
+    '<no value>') label="" ;;
+  esac
+
+  # The digest includes the full id of the parent image: the sandbox carries
+  # piforged and pi from it, so a rebuilt control plane makes the sandbox stale
+  # even when this tree did not change. Any locally present candidate can be the
+  # parent — the drill runs against :isolated, :dev and :local tags — but the tree
+  # half of the digest still has to match.
+  for candidate in ${PIFORGE_AGENT_IMAGE:-} piforge:isolated piforge:local piforge:dev; do
+    [ -n "$candidate" ] || continue
+    docker image inspect "$candidate" >/dev/null 2>&1 || continue
+    want=$(digest_of "deploy/Dockerfile.sandbox-agent" "$candidate")
+    [ -n "$want" ] || continue
+    if [ -z "$SD_WANT" ]; then
+      SD_WANT=$want
+      SD_AGENT=$candidate
+    fi
+    if [ -n "$label" ] && [ "$want" = "$label" ]; then
+      SD_FRESH=fresh
+      SD_WHY="$image carries this tree's digest ($(short_digest "$want")), built FROM $candidate"
+      return 0
+    fi
+  done
+
+  if [ -z "$label" ]; then
+    SD_FRESH=stale
+    SD_WHY="$image carries no piforge.source-digest label, so nothing says which tree it was built from (built by hand, or before the label existed)"
+    return 1
+  fi
+  if [ -z "$SD_WANT" ]; then
+    SD_FRESH=unknown
+    SD_WHY="$image is labelled $(short_digest "$label"), but this tree's digest could not be computed here: it needs go and a local control-plane image (go run ./backend/cmd/sourcedigest -root . -dockerfile deploy/Dockerfile.sandbox-agent -agent-image piforge:isolated). Freshness is unproven, not asserted"
+    return 2
+  fi
+  SD_FRESH=stale
+  SD_WHY="$image was built from another tree: label $(short_digest "$label"), this tree $(short_digest "$SD_WANT") (parent $SD_AGENT)"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Docker checks: the sandbox image is Linux, so this is where the drill's
 # assertions actually run.
 # ---------------------------------------------------------------------------
@@ -203,11 +289,33 @@ else
     done
   fi
 
+  SD_FRESH=unknown
+  SD_WHY=""
+  SD_WANT=""
+  SD_AGENT=""
+  if [ -n "$SANDBOX_IMAGE" ]; then
+    sandbox_freshness "$SANDBOX_IMAGE" || true
+  fi
+
   if [ -z "$SANDBOX_IMAGE" ]; then
     skip L3 "no piforge sandbox image locally; build it with:
         docker build -f deploy/Dockerfile.sandbox-agent --build-arg AGENT_IMAGE=piforge:local -t piforge/sandbox-agent:dev .
       then set PIFORGE_SANDBOX_IMAGE=piforge/sandbox-agent:dev"
+  elif [ "$SD_FRESH" = "stale" ]; then
+    # Refuse, and say what to run. The assertions are not run at all: against a
+    # stale image their failures describe an older tree, and a reader cannot tell
+    # that from a regression.
+    fail L17 "$SD_WHY; refusing to run the container assertions against it"
+    info "rebuild it with:"
+    info "$(rebuild_command "$SANDBOX_IMAGE" "$SD_AGENT" "$SD_WANT")"
+    info "or, where pwsh is available: pwsh scripts/up-isolated.ps1 -Rebuild (it rebuilds all three images)"
+    skip L3 "the container assertions did not run: $SANDBOX_IMAGE is not the image this tree builds"
   else
+    if [ "$SD_FRESH" = "fresh" ]; then
+      pass L17 "$SD_WHY"
+    else
+      skip L17 "$SD_WHY"
+    fi
     info "sandbox image: $SANDBOX_IMAGE (base $BASE_IMAGE)"
 
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true

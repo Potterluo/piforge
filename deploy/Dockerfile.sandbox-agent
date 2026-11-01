@@ -21,9 +21,19 @@
 #
 # Build:
 #   docker build -f deploy/Dockerfile.sandbox-agent \
-#     --build-arg AGENT_IMAGE=piforge:local -t piforge/sandbox-agent:dev .
+#     --build-arg AGENT_IMAGE=piforge:local \
+#     --build-arg PIFORGE_SOURCE_DIGEST=$(cd backend && go run ./cmd/sourcedigest \
+#         -root .. -dockerfile deploy/Dockerfile.sandbox-agent -agent-image piforge:local) \
+#     -t piforge/sandbox-agent:dev .
 #
 # Then deploy with PIFORGE_SANDBOX_IMAGE=piforge/sandbox-agent:dev.
+#
+# The label is not decoration: scripts/verify-linux.sh and scripts/up-isolated.ps1
+# compare it with the digest of the tree and *refuse* an image that does not match
+# (one built by hand without the build arg above is refused too, because nothing
+# then says which tree it came from). A stale sandbox image silently masks fixes —
+# it has already cost several rounds — so an unlabelled image has to be rebuilt,
+# not tolerated.
 
 ARG BASE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0
 ARG AGENT_IMAGE=piforge:local
@@ -31,6 +41,13 @@ ARG AGENT_IMAGE=piforge:local
 FROM ${AGENT_IMAGE} AS agent
 
 FROM ${BASE}
+
+# The digest of the tree this image was built from, in the same shape every other
+# piforge image carries. Declared in this stage because a global ARG is not
+# visible inside one; empty when the build did not pass it, which is exactly what
+# the scripts refuse.
+ARG PIFORGE_SOURCE_DIGEST=
+LABEL piforge.source-digest=$PIFORGE_SOURCE_DIGEST
 
 # The agent runtime, from the same builder that produced the control plane.
 COPY --from=agent /usr/local/lib/node_modules/@earendil-works /usr/local/lib/node_modules/@earendil-works

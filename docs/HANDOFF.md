@@ -91,10 +91,32 @@ image it was built on top of, so a rebuilt control plane rebuilds the sandbox by
 rule. A file touched without a content change never rebuilds; a **backdated** edit always
 does. The rule used to compare mtimes, and a source file edited with its mtime set into
 the past made the script print `piforge:isolated is current` while the tree differed — a
-"verified green" claim can measure a stale image that way. Mtimes survive only as the
-fallback for a tree where no digest can be computed at all (no git), and the log line says
-when that happens. `scripts/verify-image-freshness.ps1` runs the four cases and prints
-each decision.
+"verified green" claim can measure a stale image that way. `scripts/verify-image-freshness.ps1`
+runs the four cases and prints each decision.
+
+The rule lives in **one** place now, `backend/cmd/sourcedigest`, and both scripts call it.
+The clock is no longer an input at all: with no git the digest narrows to the four recipe
+files (`-root` prints `files=N`, so an empty list cannot pass as a full one), and if even
+those cannot be read the scripts stop instead of guessing. The sandbox image stamps the
+label from **its own Dockerfile** (`ARG PIFORGE_SOURCE_DIGEST` → `LABEL piforge.source-digest`),
+so a build that does not go through `up-isolated.ps1` carries it too — and one that omits
+the build arg is unlabelled, which is a refusal, not a shrug.
+
+**Refreshing the images is one command, and both scripts name it when they refuse:**
+
+```
+pwsh scripts/up-isolated.ps1 -Rebuild                 # all three images, then start
+pwsh scripts/up-isolated.ps1 -BuildOnly -Rebuild      # build only, start nothing
+```
+
+`scripts/verify-linux.sh` compares the sandbox image's label with this tree's digest
+below and **refuses** the container section on a mismatch — printing that `docker build`
+line with the exact digest — because a stale image already cost a round: two Linux quota
+fixes were masked by a prebuilt `piforge/sandbox-agent:isolated`, and the drill only found
+out by failing two quota assertions three hundred lines in (see `docs/LINUX-VERIFY.md`,
+L17 and "Rebuilding the sandbox image"). `up-isolated.ps1 -NoBuild` refuses a stale image
+for the same reason: it is the one path that skipped the freshness phase, and it used to
+start the stack anyway.
 
 **The port is part of the stack's identity.** If `pf-isolated` is already up on another
 port, `up-isolated.ps1` refuses and names the port it is on instead of re-publishing the
