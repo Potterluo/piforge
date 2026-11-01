@@ -123,6 +123,10 @@ type DockerConfig struct {
 	// Pids caps the container's process/thread count (docker --pids-limit), the
 	// guard against one agent exhausting the host's PID table. Zero is unlimited.
 	Pids int
+	// DiskBytes caps one file in the sandbox (RLIMIT_FSIZE) and is the budget the
+	// control plane measures the workspace against. Zero is unlimited. See
+	// Limits.DiskBytes for why the cap is per file and what enforces the total.
+	DiskBytes int64
 	// LimitsFor resolves the limits of one tenant's sandbox. Nil means every
 	// sandbox gets CPUs/Memory/Pids, which is the single-tenant shape.
 	//
@@ -531,6 +535,74 @@ func (d *Docker) runContainer(ctx context.Context, name, userID, projectID, work
 	return err
 }
 
+// sandboxCapAdd is the complete capability set a sandbox container keeps.
+//
+// It is the result of a measurement, not a guess: the image was started with
+// `--cap-drop ALL --security-opt no-new-privileges` and run until its own
+// services came up, then each capability below was added back one at a time
+// because the boot log named the operation that failed without it. The AIO
+// image is the reference; a deployment that runs a different image starts from
+// the same five and adds what *its* image proves it needs.
+//
+//	CHOWN         gem.sh chowns /home/gem, /workspace, the log/run directories
+//	              and the X11 socket to the sandbox user (uid 1000). Without it
+//	              /workspace stays root-owned, the agent cannot write its own
+//	              checkout, and the first prompt fails.
+//	DAC_OVERRIDE  the same bootstrap writes into paths the image already owns as
+//	              gem (/var/lib/aio-sandbox, /var/run/gem, the code-server and
+//	              Jupyter trees) and removes stale files there. Read literally,
+//	              root without this capability is subject to file modes — which
+//	              is the behaviour this container wants for everything *except*
+//	              its own startup.
+//	FOWNER        the bootstrap chmods directories gem owns (/run/user/1000,
+//	              /tmp/.X11-unix). Without it: "chmod: changing permissions of
+//	              '/run/user/1000': Operation not permitted".
+//	SETUID        root → gem for every service the image starts (nginx master
+//	              stays root, the file/shell/terminal services run as gem).
+//	SETGID        the same transitions, for the group half.
+//
+// Everything Docker grants by default and this list does not is gone, and each
+// absence is a whole class of attack that no longer starts here:
+//
+//	NET_RAW        raw sockets: ARP/packet spoofing on the tenant bridge, `ping`
+//	               as a probe of the host network.
+//	NET_BIND_SERVICE  binding a privileged port inside the container.
+//	SETFCAP        handing capabilities to another binary.
+//	SYS_CHROOT     chroot, the usual first half of a filesystem escape.
+//	MKNOD          creating device nodes.
+//	KILL           signalling processes of another uid.
+//	AUDIT_WRITE    writing the kernel audit log.
+//
+// The agent account itself (`gem`) holds none of these: capabilities are
+// per-thread and gem never has any (CapEff 0000000000000000). The five above
+// belong to the container's bootstrap/root services only.
+var sandboxCapAdd = []string{"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID"}
+
+// applyHardening writes the container-level security posture into `docker run`.
+//
+// --security-opt no-new-privileges is the half that actually ends the leak the
+// adversarial run found. The image's runtime entrypoint writes
+// `/etc/sudoers.d/gem` (`gem ALL=(ALL) NOPASSWD:ALL`) and ships a setuid-root
+// /usr/bin/sudo, so `sudo -n id` was root inside the sandbox. With
+// no_new_privs set, execve() of a setuid binary does not change the effective
+// uid: sudo runs as gem, cannot setuid(0), and answers "sudo: no new privileges
+// flag is set" (or, on a sudo build that ignores it, fails the setuid step).
+// The capability drop is the belt: even a root process that appeared some other
+// way holds only the five capabilities above, so it cannot mount, cannot chroot,
+// cannot create device nodes and cannot signal other accounts' processes.
+//
+// This is deliberately an argv-level rule rather than an image-level one: it
+// applies to the stock AIO image a deployment may still name, not only to the
+// hardened image this repository builds.
+func (d *Docker) applyHardening(args []string) []string {
+	args = append(args, "--security-opt", "no-new-privileges")
+	args = append(args, "--cap-drop", "ALL")
+	for _, capability := range sandboxCapAdd {
+		args = append(args, "--cap-add", capability)
+	}
+	return args
+}
+
 // containerArgs is the `docker run` argv for one sandbox.
 //
 // It is a function of the config, the pair and the key alone so the two endpoint
@@ -570,6 +642,7 @@ func (d *Docker) containerArgs(ctx context.Context, name, userID, projectID, wor
 		args = append(args, "-v", workspace+":"+containerWorkspace)
 	}
 	args = append(args, "--restart", "unless-stopped")
+	args = d.applyHardening(args)
 	// The image treats $WORKSPACE as "the workspace directory (global for all
 	// services)" and chowns it to its sandbox user at startup (gem.sh:
 	// `mkdir -p "$WORKSPACE"; chown "$USER:$USER" "$WORKSPACE"`). Its default is

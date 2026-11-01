@@ -40,8 +40,46 @@ COPY --from=agent /app/bin/piforged /opt/piforge/piforged
 # world-readable (the agent runs as `gem`, not as root) and piforged is only
 # executable, so the sandbox user cannot modify either.
 RUN ln -sf ../lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js /usr/local/bin/pi \
- && chmod -R a+rX /usr/local/lib/node_modules/@earendil-works \
- && chmod 0755 /opt/piforge/piforged
+ && chmod -R a+rX /usr/local/lib/node_modules/@earendil-works
+
+# ---------------------------------------------------------------------------
+# The root this image used to hand the tenant.
+#
+# The base image's runtime bootstrap (gem.sh) creates the sandbox user and, as
+# root, appends `gem ALL=(ALL) NOPASSWD:ALL` to /etc/sudoers.d/gem. Together with
+# the setuid /usr/bin/sudo it ships, that made `sudo -n id` answer uid=0 inside
+# the sandbox — one container escape away from the host, and able to rewrite the
+# launcher (/opt/piforge/piforged) the control plane starts on every run.
+#
+# Three things close it, and each works without the other two:
+#
+#   1. no-new-privileges (docker run --security-opt, sandbox.go): a setuid binary
+#      cannot raise the effective uid, so sudo cannot work even where it exists.
+#   2. this RUN deletes the sudo binary and the sudoers entry, so the runtime
+#      path has no passwordless-root tool at all — not even one that a future
+#      image or a missing security-opt could revive.
+#   3. the launcher is root-owned and mode 0555: no write bit for anyone,
+#      including root, which is real because the container runs with
+#      --cap-drop ALL and therefore cannot hold CAP_DAC_OVERRIDE. A file root
+#      cannot write is the difference between "a compromised agent can repoint
+#      the supervisor" and "it cannot".
+#
+# /opt/piforge itself goes 0555 for the same reason. The build fails if any of
+# this is missing, so a base-image update cannot silently reintroduce it.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    rm -f /usr/bin/sudo /usr/sbin/sudo /usr/local/bin/sudo; \
+    rm -f /etc/sudoers.d/gem; \
+    chown root:root /opt/piforge /opt/piforge/piforged; \
+    chmod 0555 /opt/piforge /opt/piforge/piforged; \
+    test -x /opt/piforge/piforged; \
+    if [ -e /usr/bin/sudo ] || [ -e /usr/sbin/sudo ]; then \
+      echo "the sandbox image must not carry sudo" >&2; exit 1; \
+    fi; \
+    if [ "$(stat -c %a /opt/piforge/piforged)" != "555" ]; then \
+      echo "the agent launcher must be 0555 (no write bit for anyone)" >&2; exit 1; \
+    fi; \
+    ls -ld /opt/piforge; ls -l /opt/piforge/piforged
 
 # Fail the build, not the first session, when the agent cannot start as the
 # account -agent-in-sandbox uses (user gem, uid 1000, created by the image's
