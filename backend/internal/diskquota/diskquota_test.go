@@ -2,6 +2,7 @@ package diskquota
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,6 +127,62 @@ func TestForgetDropsTheCachedReport(t *testing.T) {
 	g.Forget("sbx_forget")
 	if got := g.Cached(context.Background(), "sbx_forget", root); got.Bytes != 2048 {
 		t.Fatalf("Forget did not drop the cached report: %+v", got)
+	}
+}
+
+// A measurer is how a detached workspace is measured at all: the sandbox's files
+// are in a volume this process cannot see, so the answer comes from inside the
+// sandbox. The decision (Over) has to follow that measurement, not a host walk of
+// a path that does not exist here.
+func TestMeasureWithUsesTheInSandboxNumber(t *testing.T) {
+	g := New(Config{QuotaBytes: 4 << 20})
+	root := "/workspace" // the container path a detached sandbox reports
+	calls := 0
+	measure := func(_ context.Context, sandboxID, got string) (Measurement, error) {
+		calls++
+		if sandboxID != "piforge-abc" || got != root {
+			t.Fatalf("measurer got (%q, %q)", sandboxID, got)
+		}
+		return Measurement{Bytes: 3 << 30}, nil
+	}
+	rep := g.MeasureWith(context.Background(), "piforge-abc", root, measure)
+	if calls != 1 {
+		t.Fatalf("measurer called %d times, want 1", calls)
+	}
+	if rep.Bytes != 3<<30 || !rep.Over || rep.Unmeasurable {
+		t.Fatalf("report does not reflect the in-sandbox measurement: %+v", rep)
+	}
+	if !strings.Contains(g.Message(rep), "3.0 GiB") {
+		t.Fatalf("the refusal does not name the measured size: %s", g.Message(rep))
+	}
+}
+
+// A measurement that cannot be made is reported as unknown, never as zero: a
+// zero is a number an operator reads as "empty" and a page renders as "0 B,
+// under budget", which is exactly how a 3 GiB sandbox showed over=false.
+func TestMeasureWithFailedMeasurementIsUnknownNotZero(t *testing.T) {
+	g := New(Config{QuotaBytes: 2 << 30})
+	rep := g.MeasureWith(context.Background(), "piforge-abc", "/workspace", func(context.Context, string, string) (Measurement, error) {
+		return Measurement{}, errors.New("sandbox API: connection refused")
+	})
+	if !rep.Unmeasurable {
+		t.Fatalf("a failed measurement was not marked unmeasurable: %+v", rep)
+	}
+	if rep.Over {
+		t.Fatalf("an unmeasurable sandbox was called over quota: %+v", rep)
+	}
+	if !strings.Contains(rep.Error, "connection refused") {
+		t.Fatalf("the report does not carry the reason: %+v", rep)
+	}
+	// And the failure is not cached: the next reader retries instead of being
+	// served "unknown" for a minute.
+	calls := 0
+	got := g.CachedWith(context.Background(), "piforge-abc", "/workspace", func(context.Context, string, string) (Measurement, error) {
+		calls++
+		return Measurement{Bytes: 4 << 30}, nil
+	})
+	if !got.Over || calls != 1 {
+		t.Fatalf("a failed report was cached (calls=%d, report=%+v)", calls, got)
 	}
 }
 

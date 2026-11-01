@@ -204,6 +204,44 @@ func ensureSharedDirs(ctx context.Context, client *aio.Client, containerRoot str
 	return nil
 }
 
+// sandboxAPIWakeWindow bounds how long a dial waits for a sandbox's API after a
+// resume. The AIO image needs a few seconds between `docker start` and the first
+// command that works; 25 s is generous for a loaded host and short enough that a
+// genuinely broken sandbox still fails the prompt.
+const sandboxAPIWakeWindow = 25 * time.Second
+
+// waitForSandboxAPI polls a trivial command until the sandbox's API answers.
+//
+// It exists for the wake path: resuming a paused sandbox starts a container
+// whose services are not listening yet, so the next message would otherwise fail
+// with a connection error that reads like a refusal. The retry is bounded and
+// only for the startup window; a sandbox that is gone stays gone.
+func waitForSandboxAPI(ctx context.Context, client *aio.Client, root string) error {
+	deadline := time.Now().Add(sandboxAPIWakeWindow)
+	var last error
+	for {
+		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		res, err := client.Exec(probeCtx, "true", root)
+		cancel()
+		if err == nil && res.ExitCode == 0 {
+			return nil
+		}
+		if err != nil {
+			last = err
+		} else {
+			last = fmt.Errorf("exit %d: %s", res.ExitCode, strings.TrimSpace(res.Output))
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("agent-in-sandbox: the sandbox API did not answer within %s (is the sandbox starting?): %w", sandboxAPIWakeWindow, last)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
 // workspacePath joins elements under a sandbox workspace root in the root's own
 // syntax. A container root is POSIX whatever this process runs on, and
 // filepath.Join would turn "/workspace/.piforge" into "\workspace\.piforge" on a
@@ -317,6 +355,17 @@ func (a *sandboxAgent) Dial(spec contracts.SessionSpec, sessionFile string) (io.
 	setup := a.setup(spec)
 	client, err := a.client(ctx, target.SandboxID)
 	if err != nil {
+		return nil, err
+	}
+	// A sandbox that was paused (by the idle policy, by the disk watchdog, or by
+	// the user) is woken by the message that arrives next — and a wake-up is a
+	// container start, which returns before the image's services are listening.
+	// Without this wait the first prompt after a resume died with "connection
+	// refused" from the sandbox API, which is a race, not a refusal: the sandbox
+	// is coming up. It was invisible while pause could not work (the 422 fixed in
+	// docs/EXECUTION-BOUNDARY.md §14.4), and now that pausing works the wake path
+	// has to as well.
+	if err := waitForSandboxAPI(ctx, client, root); err != nil {
 		return nil, err
 	}
 	if err := ensureSharedDirs(ctx, client, root); err != nil {
@@ -586,6 +635,7 @@ func (a *sandboxAgent) stageModelConfig(ctx context.Context, sandboxID string, s
 
 	// The directory is created by the sandbox user, so both Pi's own files and
 	// the control plane's write end up with one owner.
+	//
 	if res, err := client.Exec(ctx, "mkdir -p -- "+aio.Quote(agentDir)+" && chmod -R a+rwX -- "+aio.Quote(agentDir), containerRoot); err != nil {
 		return "", fmt.Errorf("agent-in-sandbox: prepare %s: %w", agentDir, err)
 	} else if res.ExitCode != 0 {

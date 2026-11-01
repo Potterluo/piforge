@@ -781,6 +781,14 @@ export interface SandboxUsage {
   /** The walk hit its file cap; `bytes` is a lower bound. */
   truncated?: boolean;
   measured_at: string;
+  /**
+   * The workspace could not be measured (a sandbox that did not answer). `bytes`
+   * is then meaningless and `over` is false because nothing was proven, so the
+   * page says "未知" instead of showing a zero an operator would trust.
+   */
+  unmeasurable?: boolean;
+  /** Why the measurement failed, for an operator. No secret. */
+  error?: string;
 }
 
 /** One runtime directory's footprint (see backend/internal/runtimedirs). */

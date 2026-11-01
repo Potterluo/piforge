@@ -328,14 +328,22 @@ export default function AdminStatusPage() {
                       : "（配额未启用，仅显示用量）"}
                   </p>
                   {data.sandbox_usage.map((row) => {
-                    const percent =
-                      row.quota_bytes > 0 ? Math.round((row.bytes / row.quota_bytes) * 100) : null;
+                    // A sandbox the deployment could not measure is "unknown",
+                    // not "0 B, under budget": the figure used to be a walk of a
+                    // directory that does not exist here, which read as empty
+                    // while the sandbox held gigabytes.
+                    const percent = row.unmeasurable
+                      ? null
+                      : row.quota_bytes > 0
+                        ? Math.round((row.bytes / row.quota_bytes) * 100)
+                        : null;
                     const near = percent !== null && percent >= 80;
                     return (
                       <div
                         key={row.sandbox_id}
                         data-testid={`stat-sandbox-${row.sandbox_id}`}
                         data-over={row.over ? "true" : "false"}
+                        data-unmeasurable={row.unmeasurable ? "true" : undefined}
                         className="flex items-baseline justify-between gap-3 border-b border-border/60 py-1 text-[11px] last:border-0"
                       >
                         <span className="truncate font-mono text-[10px]" title={`${row.user_id} / ${row.project_id}`}>
@@ -346,11 +354,13 @@ export default function AdminStatusPage() {
                             row.over ? "text-destructive" : near ? "text-amber-600" : "text-muted-foreground"
                           }`}
                         >
-                          <span>{formatBytes(row.bytes)}</span>
-                          {row.quota_bytes > 0 ? (
+                          <span title={row.error}>{row.unmeasurable ? "未知" : formatBytes(row.bytes)}</span>
+                          {row.quota_bytes > 0 && percent !== null ? (
                             <span>
                               / {formatBytes(row.quota_bytes)} · {percent}%
                             </span>
+                          ) : row.quota_bytes > 0 ? (
+                            <span>/ {formatBytes(row.quota_bytes)}</span>
                           ) : null}
                           {row.over ? <span>已超出</span> : near ? <span>接近上限</span> : null}
                         </span>

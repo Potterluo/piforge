@@ -47,6 +47,11 @@ type DockerOptions struct {
 	// Pids is the default process limit (docker --pids-limit); zero means "no
 	// limit". A create request carries the tenant's own value and wins over this.
 	Pids int
+	// DiskBytes is the default disk budget per sandbox, applied as the
+	// container's RLIMIT_FSIZE. A create request carries the control plane's
+	// quota and wins over this; see sandbox.Limits.DiskBytes for what the cap
+	// covers and what the periodic check adds.
+	DiskBytes int64
 	// NetworkMode is how sandbox network membership is decided: "shared" puts every
 	// sandbox on Network, "tenant" gives each tenant its own bridge (see
 	// sandbox.NetworkMode). Empty is shared, the pre-multi-tenant behaviour.
@@ -302,6 +307,7 @@ func (p *DockerProvider) creator(request sandbox.RunnerRequest) (*sandbox.Docker
 		CPUs:                firstNonEmpty(request.CPUs, p.opts.CPUs),
 		Memory:              firstNonEmpty(request.Memory, p.opts.Memory),
 		Pids:                firstInt(request.Pids, p.opts.Pids),
+		DiskBytes:           firstInt64(request.DiskBytes, p.opts.DiskBytes),
 		DataRoot:            p.opts.DataRoot,
 		APIPort:             p.apiPort(request.APIPort),
 		APIKey:              firstNonEmpty(request.APIKey, p.opts.APIKey),
@@ -380,6 +386,17 @@ func firstNonEmpty(values ...string) string {
 
 // firstInt is firstNonEmpty for the one numeric field (pids): a request's value
 // wins when it is positive, which is how "unlimited" is expressed.
+// firstInt64 is firstNonEmpty for the disk budget: a request's positive value
+// wins, zero means "whatever this runner is configured with".
+func firstInt64(values ...int64) int64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
 func firstInt(values ...int) int {
 	for _, value := range values {
 		if value > 0 {

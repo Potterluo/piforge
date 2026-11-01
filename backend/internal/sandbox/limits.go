@@ -28,16 +28,33 @@ type Limits struct {
 	// may have. Zero means unlimited, which is the value that lets one sandbox
 	// exhaust the host's PID table.
 	Pids int
+	// DiskBytes is the sandbox's workspace budget, applied as the container's
+	// RLIMIT_FSIZE (`docker run --ulimit fsize=`). Zero means no limit.
+	//
+	// It is a *per-file* cap, not a per-filesystem one, and that distinction is
+	// why the quota needed two mechanisms: a single `fallocate -l 3G` cannot
+	// exceed the budget under RLIMIT_FSIZE (the write fails, the process gets
+	// SIGXFSZ), while a tree of many files each just under the cap needs
+	// something measuring the total — the periodic watchdog in internal/httpapi.
+	//
+	// The alternatives were measured on this daemon and are documented in
+	// docs/SANDBOX-DEPLOY.md §6: `--storage-opt size=` is accepted and silently
+	// ignored (Docker Desktop's overlayfs), and it would not cover the workspace
+	// volume anyway; ext4 project quotas need a mount option this volume does not
+	// have; a size-limited tmpfs or a loopback filesystem would make the
+	// workspace non-persistent or need CAP_SYS_ADMIN, which this container no
+	// longer has.
+	DiskBytes int64
 }
 
 // IsZero reports whether this limit set constrains nothing.
 func (l Limits) IsZero() bool {
-	return strings.TrimSpace(l.CPUs) == "" && strings.TrimSpace(l.Memory) == "" && l.Pids <= 0
+	return strings.TrimSpace(l.CPUs) == "" && strings.TrimSpace(l.Memory) == "" && l.Pids <= 0 && l.DiskBytes <= 0
 }
 
 // String renders the limit the way an operator reads it in a log line.
 func (l Limits) String() string {
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
 	if l.CPUs != "" {
 		parts = append(parts, "cpus="+l.CPUs)
 	}
@@ -47,10 +64,30 @@ func (l Limits) String() string {
 	if l.Pids > 0 {
 		parts = append(parts, "pids="+strconv.Itoa(l.Pids))
 	}
+	if l.DiskBytes > 0 {
+		parts = append(parts, "disk="+HumanDisk(l.DiskBytes))
+	}
 	if len(parts) == 0 {
 		return "unlimited"
 	}
 	return strings.Join(parts, " ")
+}
+
+// HumanDisk renders a byte budget for a log line ("2.0 GiB"). It mirrors
+// diskquota.HumanBytes without importing that package: limits are the provider's,
+// the report is the control plane's.
+func HumanDisk(n int64) string {
+	if n < 1024 {
+		return strconv.FormatInt(n, 10) + " B"
+	}
+	value := float64(n)
+	units := []string{"KiB", "MiB", "GiB", "TiB"}
+	i := -1
+	for value >= 1024 && i < len(units)-1 {
+		value /= 1024
+		i++
+	}
+	return strconv.FormatFloat(value, 'f', 1, 64) + " " + units[i]
 }
 
 // Validate rejects a limit that Docker would refuse at create time, so a typo in
@@ -61,6 +98,9 @@ func (l Limits) Validate() error {
 		if err != nil || cpus <= 0 {
 			return fmt.Errorf("cpus %q is not a positive number of CPUs (for example 2 or 0.5)", raw)
 		}
+	}
+	if l.DiskBytes < 0 {
+		return fmt.Errorf("disk %d must not be negative, it is a byte budget (0 means no limit)", l.DiskBytes)
 	}
 	if raw := strings.TrimSpace(l.Memory); raw != "" {
 		if _, err := ParseMemMB(raw); err != nil {
@@ -153,6 +193,19 @@ func (d *Docker) applyLimits(args []string, limits Limits) []string {
 		// until the host's PID table is full, which takes down every tenant.
 		args = append(args, "--pids-limit", strconv.Itoa(limits.Pids))
 	}
+	if limits.DiskBytes > 0 {
+		// The disk guard, at the kernel: every process in the container inherits
+		// RLIMIT_FSIZE, so no single file can grow past the budget. The soft and
+		// hard limits are the same on purpose — a shell could raise the soft one
+		// otherwise (`ulimit -f unlimited` needs no privilege), and the tenant's
+		// terminal is a shell.
+		//
+		// What it does not do: bound the *sum* of many files. The periodic check
+		// in internal/httpapi measures the workspace inside the sandbox and stops
+		// the agents when the total goes over (docs/SANDBOX-DEPLOY.md §6).
+		limit := strconv.FormatInt(limits.DiskBytes, 10)
+		args = append(args, "--ulimit", "fsize="+limit+":"+limit)
+	}
 	return args
 }
 
@@ -194,9 +247,20 @@ func (l Limits) RecordedLimits() (cpuMilli, memMB int) {
 
 // limitsFor resolves the limits of one tenant's sandbox: the configured policy
 // when there is one, the deployment-wide defaults otherwise.
+//
+// The policy can be silent about the disk budget (tenantlimits.Limits has no
+// disk field: the quota is the deployment's `-sandbox-disk-quota`), so a zero
+// from it is filled from the deployment default. Without that fill the policy
+// silently disabled the disk cap for every tenant — which is exactly what the
+// first run of the hardened stack showed: the watchdog measured 2 GiB while the
+// container had `Max file size unlimited`.
 func (d *Docker) limitsFor(ctx context.Context, userID string) Limits {
 	if d.cfg.LimitsFor != nil {
-		return d.cfg.LimitsFor(ctx, userID)
+		limits := d.cfg.LimitsFor(ctx, userID)
+		if limits.DiskBytes == 0 {
+			limits.DiskBytes = d.cfg.DiskBytes
+		}
+		return limits
 	}
-	return Limits{CPUs: d.cfg.CPUs, Memory: d.cfg.Memory, Pids: d.cfg.Pids}
+	return Limits{CPUs: d.cfg.CPUs, Memory: d.cfg.Memory, Pids: d.cfg.Pids, DiskBytes: d.cfg.DiskBytes}
 }

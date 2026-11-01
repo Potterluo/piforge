@@ -197,6 +197,7 @@ type options struct {
 	// sandboxDiskQuota is the per-sandbox disk budget in bytes (FR-5.8). Zero
 	// disables enforcement; the admin report still measures.
 	sandboxDiskQuota int64
+
 	// skillMaxBytes caps the total a single skill import may expand (FR-5.8).
 	skillMaxBytes int64
 	// sessionReconcileInterval is how often the watchdog compares persisted
@@ -286,6 +287,7 @@ func run() error {
 	flag.Int64Var(&opt.sandboxDiskQuota, "sandbox-disk-quota",
 		diskquota.DefaultQuotaBytes,
 		"per-sandbox disk budget in bytes, measured on the checkout; 0 disables (env PIFORGE_SANDBOX_DISK_QUOTA, default 2 GiB)")
+
 	flag.Int64Var(&opt.skillMaxBytes, "skill-max-bytes",
 		httpapi.DefaultSkillMaxBytes,
 		"total bytes one skill import may expand on disk; 0 is refused (env PIFORGE_SKILL_MAX_BYTES, default 32 MiB)")
@@ -684,6 +686,7 @@ func run() error {
 			CPUs:     opt.sandboxCPUs,
 			Memory:   opt.sandboxMemory,
 			Pids:     opt.sandboxPids,
+			DiskBytes: opt.sandboxDiskQuota,
 			DataRoot: filepath.Join(opt.dataDir, "sandboxes"),
 			APIPort:  8080,
 			APIKey:   opt.sandboxAPIKey,
@@ -726,6 +729,9 @@ func run() error {
 			CPUs:     opt.sandboxCPUs,
 			Memory:   opt.sandboxMemory,
 			Pids:     opt.sandboxPids,
+			// The disk budget travels with the create for the same reason, and it
+			// is the number this process measures the workspace against.
+			DiskBytes: opt.sandboxDiskQuota,
 			// The tenant's limits travel with the create, because the runner is a
 			// shared service that must not have to know which tenant it is serving.
 			LimitsFor: tenants.sandboxLimits,
@@ -1211,6 +1217,16 @@ func run() error {
 		AgentIsolated:    opt.agentInSandbox,
 		SandboxDiskQuota: opt.sandboxDiskQuota,
 		SkillMaxBytes:    opt.skillMaxBytes,
+		// The quota is measured where the workspace is. With a container provider
+		// that is inside the sandbox: the reported root is /workspace, a path this
+		// process cannot open, and walking it here is how the admin page came to
+		// report 0 B / over=false for a sandbox holding 3 GiB. One measurer feeds
+		// the admin figure, the run-boundary refusal and the periodic watchdog, so
+		// the three cannot disagree.
+		MeasureSandbox: sandboxDiskMeasurer(remoteSB, keys),
+		// And the kill that makes "the watchdog stops the agent" true for a
+		// container placement, where the agent outlives this process's stream.
+		StopAgent: sandboxAgentStopper(remoteSB, keys),
 		// The quota policy and the network mode are what the admin status page
 		// reports next to each tenant's sandbox count: "what limit is this tenant
 		// running with" has to be answerable without reading the deployment file.
@@ -1273,6 +1289,13 @@ func run() error {
 		"kept_live", report.Live,
 		"watchdog", opt.sessionReconcileInterval.String())
 	go rec.Start(ctx, opt.sessionReconcileInterval)
+
+	// The periodic half of the disk quota. The run boundary refuses the *next*
+	// turn; this is what stops the current one, and what makes the admin figure a
+	// measurement instead of a walk of a directory that does not exist here. It
+	// no-ops (loudly) when no quota is configured or nothing can measure a
+	// sandbox from inside.
+	handler.StartDiskWatch(ctx)
 
 	// Stage 3: after reconciliation has decided which runs are really alive,
 	// reconnect to them. The agents kept running inside their sandboxes while this
@@ -1539,6 +1562,7 @@ func newRuntime(opt options, logger *slog.Logger, setup func(contracts.SessionSp
 		EnvFor: func(spec contracts.SessionSpec) []string {
 			return setup(spec).Env
 		},
+
 	}
 	if agent != nil {
 		// The process is not ours to spawn: Dial starts it in the sandbox and

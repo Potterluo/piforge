@@ -1,0 +1,140 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"path"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/piforge/piforge/backend/internal/aio"
+	"github.com/piforge/piforge/backend/internal/diskquota"
+	"github.com/piforge/piforge/backend/internal/sandbox"
+)
+
+// diskMeasureTimeout bounds one `du` inside the sandbox. A checkout with a
+// dependency tree is the slow case; a walk that cannot finish in this window is
+// reported as unmeasurable rather than allowed to hold the admin request.
+const diskMeasureTimeout = 30 * time.Second
+
+// sandboxAgentStopper kills one session's agent inside its sandbox.
+//
+// Why it is needed: a container placement's agent is owned by a detached
+// supervisor inside the sandbox, built to survive a control-plane restart — so
+// pi.Runtime.Stop only closes this process's end of the stream. For the disk
+// watchdog that is not enough: the point is to end the writes. SIGTERM to the
+// supervisor makes it take the agent's process group down (internal/agentsupervisor
+// treats the signal as "the sandbox wants this stopped"), which is the same path
+// `docker stop` takes.
+//
+// The match is on the supervisor's own argv, which carries `-session <id>`; the
+// session id is unique, so nothing else in the container matches. It runs through
+// the sandbox's own shell API as the sandbox user, so it needs no privilege the
+// agent does not already have — one tenant can already kill its own processes.
+func sandboxAgentStopper(remote sandbox.Remote, keys sandboxKeys) func(context.Context, string, string) error {
+	if remote == nil {
+		return nil
+	}
+	return func(ctx context.Context, sandboxID, sessionID string) error {
+		ctx, cancel := context.WithTimeout(ctx, diskMeasureTimeout)
+		defer cancel()
+		endpoint, err := remote.Endpoint(ctx, sandboxID)
+		if err != nil {
+			return err
+		}
+		key, err := keys.For(ctx, sandboxID)
+		if err != nil {
+			return err
+		}
+		client, err := aio.New(aio.Config{
+			BaseURL: endpoint,
+			APIKey:  key,
+			Root:    sandbox.ContainerWorkspace,
+			Timeout: diskMeasureTimeout,
+		})
+		if err != nil {
+			return err
+		}
+		pattern := "agent-supervisor.*-session " + sessionID
+		// `; true` because pkill exits 1 when nothing matched, and "there was
+		// nothing to kill" is success for this caller.
+		res, err := client.Exec(ctx, "pkill -TERM -f -- "+aio.Quote(pattern)+" 2>/dev/null; true", sandbox.ContainerWorkspace)
+		if err != nil {
+			return err
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("pkill exited %d: %s", res.ExitCode, strings.TrimSpace(res.Output))
+		}
+		return nil
+	}
+}
+
+// sandboxDiskMeasurer answers "how big is this sandbox's workspace" from inside
+// the sandbox.
+//
+// The need for it is the detached workspace (stage 2 of
+// docs/EXECUTION-BOUNDARY.md): the sandbox's files live in a volume nothing else
+// mounts, and the RootDir the row reports is /workspace — a path that exists only
+// inside the container. Walking it here found nothing, so the admin page showed
+// `0 B / 2.0 GiB, over=false` for a sandbox holding 3 GiB, and the run boundary's
+// 507 check never fired for the placement this repository ships. The measurement
+// has to cross the same door the agent's files do.
+//
+// It runs `du -sb` through the sandbox's own shell API, as the sandbox user —
+// the account that owns the tree, so nothing is hidden from it by permissions.
+// The number is apparent size (GNU `-b`), which over-counts a sparse file rather
+// than under-counting it: a quota that is wrong in the safe direction.
+func sandboxDiskMeasurer(remote sandbox.Remote, keys sandboxKeys) diskquota.Measurer {
+	if remote == nil {
+		return nil
+	}
+	return func(ctx context.Context, sandboxID, root string) (diskquota.Measurement, error) {
+		root = path.Clean(strings.TrimSpace(root))
+		if root != sandbox.ContainerWorkspace && !strings.HasPrefix(root, sandbox.ContainerWorkspace+"/") {
+			return diskquota.Measurement{}, fmt.Errorf("sandbox %s reports %q, which is not a container path this process can measure", sandboxID, root)
+		}
+		ctx, cancel := context.WithTimeout(ctx, diskMeasureTimeout)
+		defer cancel()
+
+		endpoint, err := remote.Endpoint(ctx, sandboxID)
+		if err != nil {
+			return diskquota.Measurement{}, fmt.Errorf("measure %s: %w", sandboxID, err)
+		}
+		key, err := keys.For(ctx, sandboxID)
+		if err != nil {
+			return diskquota.Measurement{}, fmt.Errorf("measure %s: %w", sandboxID, err)
+		}
+		client, err := aio.New(aio.Config{
+			BaseURL: endpoint,
+			APIKey:  key,
+			Root:    sandbox.ContainerWorkspace,
+			Timeout: diskMeasureTimeout,
+		})
+		if err != nil {
+			return diskquota.Measurement{}, fmt.Errorf("measure %s: %w", sandboxID, err)
+		}
+		// One number, one command: du's summary for the workspace, first field.
+		// `cut -f1` because GNU du separates the size from the path with a tab.
+		command := "du -sb -- " + aio.Quote(root) + " 2>/dev/null | cut -f1"
+		res, err := client.Exec(ctx, command, sandbox.ContainerWorkspace)
+		if err != nil {
+			return diskquota.Measurement{}, fmt.Errorf("measure %s: %w", sandboxID, err)
+		}
+		if res.ExitCode != 0 {
+			return diskquota.Measurement{}, fmt.Errorf("measure %s: du exited %d: %s", sandboxID, res.ExitCode, strings.TrimSpace(res.Output))
+		}
+		fields := strings.Fields(strings.TrimSpace(res.Output))
+		if len(fields) == 0 {
+			return diskquota.Measurement{}, fmt.Errorf("measure %s: du printed no size", sandboxID)
+		}
+		bytes, err := strconv.ParseInt(fields[0], 10, 64)
+		if err != nil {
+			return diskquota.Measurement{}, fmt.Errorf("measure %s: du printed %q: %w", sandboxID, fields[0], err)
+		}
+		// The file count is deliberately not measured: a second `find | wc -l`
+		// per tick would double the walk for a number the admin page does not
+		// show, and the quota decision is about bytes.
+		return diskquota.Measurement{Bytes: bytes}, nil
+	}
+}

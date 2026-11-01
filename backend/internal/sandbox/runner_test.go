@@ -238,6 +238,46 @@ func TestRunnerEnsureSendsTheContainerRequest(t *testing.T) {
 	}
 }
 
+// The disk budget has to reach the create even when the tenant policy says
+// nothing about it: the policy has no disk field, the quota is the deployment's,
+// and a policy that is silent must not silently turn the container's
+// RLIMIT_FSIZE off. The first hardened run is what showed this — the watchdog
+// measured 2 GiB while the container reported `Max file size unlimited`.
+func TestRunnerCreateCarriesTheDiskBudgetDespiteASilentPolicy(t *testing.T) {
+	dataRoot := t.TempDir()
+	provider, log := startTestRunner(t, dataRoot, func(w http.ResponseWriter, r *http.Request) {
+		writeRecord(t, w, RunnerRecord{
+			ID:                "piforge-0123456789abcdef",
+			State:             contracts.SandboxReady,
+			RootDir:           filepath.Join(dataRoot, "usr_1", "prj_1"),
+			ContainerPathRoot: ContainerWorkspace,
+		})
+	})
+	// This is what the deployment's own resolver returns: CPU/memory/pids from
+	// the file, nothing about disk.
+	provider.cfg.DiskBytes = 2 << 30
+	provider.cfg.LimitsFor = func(context.Context, string) Limits {
+		return Limits{CPUs: "1", Memory: "2g", Pids: 512}
+	}
+	if _, err := provider.Ensure(context.Background(), "usr_1", "prj_1", "", "main"); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	requests := log.all()
+	if len(requests) != 1 {
+		t.Fatalf("%d requests, want 1", len(requests))
+	}
+	var body RunnerRequest
+	if err := json.Unmarshal([]byte(requests[0].Body), &body); err != nil {
+		t.Fatalf("request body: %v", err)
+	}
+	if body.DiskBytes != 2<<30 {
+		t.Fatalf("create carried disk_bytes=%d, want 2 GiB (the deployment's quota)", body.DiskBytes)
+	}
+	if body.Pids != 512 || body.CPUs != "1" {
+		t.Fatalf("the policy's other limits were lost: %+v", body)
+	}
+}
+
 // State, endpoint and the branch worktree are the three calls the rest of the
 // product makes outside Ensure. Their method and path are the contract with the
 // runner, so they are pinned literally.

@@ -132,6 +132,30 @@ type Deps struct {
 	// DiskQuotaReportTTL is how long the admin screen may reuse a measurement.
 	// Zero uses diskquota.DefaultReportTTL.
 	DiskQuotaReportTTL time.Duration
+	// MeasureSandbox measures one sandbox's workspace from *inside* the sandbox.
+	//
+	// It exists because a detached workspace is not a directory this process can
+	// open: the reported root is /workspace, a path that only exists in the
+	// container. Without this the admin figure was a walk of a nonexistent host
+	// directory — 0 bytes, `over=false`, while the sandbox held 3 GiB — and the
+	// run boundary had the same blind spot. Nil keeps the host walk, which is
+	// right for a shared-workspace deployment and for hand-built test servers.
+	MeasureSandbox diskquota.Measurer
+	// DiskWatchInterval is how often the periodic disk check measures a sandbox.
+	// Zero uses the package default (5s). Only used when the quota is enabled and
+	// MeasureSandbox is set.
+	DiskWatchInterval time.Duration
+	// StopAgent kills one session's agent process *inside its sandbox*.
+	//
+	// Runtime.Stop is not enough for a container placement: the agent is owned by
+	// a detached supervisor inside the sandbox that deliberately survives a
+	// closed control-plane stream (that is how a restarted control plane
+	// reattaches to the same process). So "stop the agent" has to reach the
+	// sandbox, and the place that decides it is the disk watchdog: an agent
+	// writing past the quota has to stop writing, not just stop being watched.
+	// Nil leaves the watchdog with the runtime stop alone, which is correct for
+	// the local placement (the agent is this process's child).
+	StopAgent func(ctx context.Context, sandboxID, sessionID string) error
 	// AgentIsolated reports that this deployment runs every agent inside a
 	// sandbox container (a docker or runner placement; stage 4 of
 	// docs/EXECUTION-BOUNDARY.md made that the only placement for them). It is a
@@ -260,6 +284,10 @@ type server struct {
 	// diskQuota measures sandboxes against the FR-5.8 budget and caches the
 	// reports the admin screen reads.
 	diskQuota *diskquota.Guardian
+	// diskMu guards diskWatchState, the per-sandbox strike counter the periodic
+	// disk watchdog keeps (sandbox_disk_watch.go).
+	diskMu         sync.Mutex
+	diskWatchState map[string]diskWatch
 }
 
 // NewRouter builds the complete HTTP handler, including the recover middleware.
@@ -321,6 +349,7 @@ func newServer(d Deps) *server {
 		ReportTTL:  d.DiskQuotaReportTTL,
 		Now:        s.now,
 	})
+	s.diskWatchState = map[string]diskWatch{}
 	s.leases = browserlease.New(d.BrowserTakeoverTTL, s.now)
 	return s
 }

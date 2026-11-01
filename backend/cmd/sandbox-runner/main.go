@@ -69,6 +69,8 @@ func run() error {
 			"default memory limit per sandbox, e.g. 2g, when a create request carries none")
 		pids = flag.Int("pids", envInt("SANDBOX_PIDS", 0),
 			"default process limit per sandbox (docker --pids-limit); 0 leaves it unlimited")
+		diskBytes = flag.Int64("disk-bytes", envInt64("SANDBOX_DISK_BYTES", 0),
+			"default disk budget per sandbox in bytes, applied as the container's RLIMIT_FSIZE; 0 leaves it unlimited")
 		apiPort = flag.Int("api-port", envInt("SANDBOX_API_PORT", 8080),
 			"container port that serves the sandbox HTTP API")
 		apiKey = flag.String("api-key", envOr("SANDBOX_API_KEY", ""),
@@ -134,6 +136,7 @@ func run() error {
 		CPUs:                *cpus,
 		Memory:              *memory,
 		Pids:                *pids,
+		DiskBytes:           *diskBytes,
 		APIPort:             *apiPort,
 		APIKey:              *apiKey,
 		ContainerEndpoint:   *containerEndpoint,
@@ -266,6 +269,20 @@ func envInt(name string, fallback int) int {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+// envInt64 is envInt for a byte budget, which can exceed a 32-bit int on a
+// deployment that gives one tenant a large quota.
+func envInt64(name string, fallback int64) int64 {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
 		return fallback
 	}

@@ -59,8 +59,15 @@ func (s *server) enforceSandboxQuota(ctx context.Context, userID string, sess *c
 	if sb == nil || strings.TrimSpace(sb.RootDir) == "" {
 		return nil
 	}
-	rep := g.Measure(ctx, sb.ID, sb.RootDir)
+	rep := g.MeasureWith(ctx, sb.ID, sb.RootDir, s.sandboxMeasurer(sb.RootDir))
 	if !rep.Over {
+		// An unmeasurable sandbox is reported, not refused: the run would fail
+		// on its own if the sandbox were unreachable, and a 507 that claims
+		// "over quota" for a failed `du` would be a lie the user acts on.
+		if rep.Unmeasurable {
+			s.log.WarnContext(ctx, "sandbox disk quota: the workspace could not be measured; the run is not refused",
+				slog.String("sandbox", sb.ID), slog.String("error", rep.Error))
+		}
 		return nil
 	}
 
@@ -89,6 +96,12 @@ func (s *server) enforceSandboxQuota(ctx context.Context, userID string, sess *c
 // failure is logged, never fatal: the run is refused either way, and a missing
 // event must not turn "over quota" into "internal error".
 func (s *server) recordQuotaRefusal(ctx context.Context, userID string, sess *contracts.Session, sb *contracts.Sandbox, rep diskquota.Report, message string) {
+	s.appendQuotaRefusal(ctx, userID, sess.ID, sb, rep, message)
+}
+
+// appendQuotaRefusal is recordQuotaRefusal by session id, for the callers that
+// have no *contracts.Session in hand (the periodic disk watchdog).
+func (s *server) appendQuotaRefusal(ctx context.Context, userID, sessionID string, sb *contracts.Sandbox, rep diskquota.Report, message string) {
 	payload, err := json.Marshal(map[string]any{
 		"code":        contracts.ErrSandboxDiskQuota,
 		"message":     message,
@@ -100,14 +113,14 @@ func (s *server) recordQuotaRefusal(ctx context.Context, userID string, sess *co
 		return
 	}
 	event := &contracts.Event{
-		SessionID: sess.ID,
+		SessionID: sessionID,
 		Type:      contracts.EvPlatformErr,
 		Payload:   payload,
 		TS:        time.Now(),
 	}
 	if _, err := s.deps.Store.AppendEvent(context.WithoutCancel(ctx), userID, event); err != nil {
 		s.log.WarnContext(ctx, "could not record a disk-quota refusal",
-			"session", sess.ID, "error", err.Error())
+			"session", sessionID, "error", err.Error())
 	}
 }
 
@@ -125,6 +138,11 @@ type sandboxUsageRow struct {
 	Over       bool      `json:"over"`
 	Truncated  bool      `json:"truncated,omitempty"`
 	MeasuredAt time.Time `json:"measured_at"`
+	// Unmeasurable says this row's Bytes is not a measurement. The page shows
+	// "unknown" for it instead of a zero, which is the difference between "this
+	// sandbox is empty" and "this deployment cannot see it".
+	Unmeasurable bool   `json:"unmeasurable,omitempty"`
+	Error        string `json:"error,omitempty"`
 }
 
 // sandboxUsage measures every sandbox against the budget. The guardian caches a
@@ -141,17 +159,19 @@ func (s *server) sandboxUsage(ctx context.Context) []sandboxUsageRow {
 		return rows
 	}
 	for _, dir := range dirs {
-		rep := s.diskQuota.Cached(ctx, dir.ID, dir.RootDir)
+		rep := s.diskQuota.CachedWith(ctx, dir.ID, dir.RootDir, s.sandboxMeasurer(dir.RootDir))
 		rows = append(rows, sandboxUsageRow{
-			SandboxID:  dir.ID,
-			UserID:     dir.UserID,
-			ProjectID:  dir.ProjectID,
-			Bytes:      rep.Bytes,
-			Files:      rep.Files,
-			QuotaBytes: rep.QuotaBytes,
-			Over:       rep.Over,
-			Truncated:  rep.Truncated,
-			MeasuredAt: rep.MeasuredAt,
+			SandboxID:    dir.ID,
+			UserID:       dir.UserID,
+			ProjectID:    dir.ProjectID,
+			Bytes:        rep.Bytes,
+			Files:        rep.Files,
+			QuotaBytes:   rep.QuotaBytes,
+			Over:         rep.Over,
+			Truncated:    rep.Truncated,
+			MeasuredAt:   rep.MeasuredAt,
+			Unmeasurable: rep.Unmeasurable,
+			Error:        rep.Error,
 		})
 	}
 	return rows

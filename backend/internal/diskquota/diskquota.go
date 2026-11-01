@@ -57,6 +57,25 @@ type Config struct {
 	Now func() time.Time
 }
 
+// Measurement is what one measurement of a sandbox's workspace saw.
+type Measurement struct {
+	Bytes     int64
+	Files     int
+	Truncated bool
+}
+
+// Measurer measures a sandbox's workspace. It exists because "how big is this
+// sandbox" stopped being a question about a directory on this host: with a
+// detached workspace the checkout lives in a volume only the sandbox mounts, so
+// the only honest answer comes from inside the sandbox (a `du` over its own
+// API). A deployment with a shared workspace leaves it nil and the host walk
+// answers.
+//
+// An error means "the question could not be answered" — not "zero bytes". The
+// difference matters: a report that silently reads 0 for a sandbox it cannot see
+// is how an admin page came to show `over=false` for a sandbox holding 3 GiB.
+type Measurer func(ctx context.Context, sandboxID, root string) (Measurement, error)
+
 // Report is one sandbox's measured footprint against its budget.
 type Report struct {
 	SandboxID string `json:"sandbox_id"`
@@ -73,6 +92,15 @@ type Report struct {
 	QuotaBytes int64 `json:"quota_bytes"`
 	// Over is the decision: a positive quota and Bytes above it.
 	Over bool `json:"over"`
+	// Unmeasurable says the walk could not be made: the sandbox did not answer,
+	// or its workspace is not a directory this deployment can reach. Bytes is
+	// then meaningless, and Over is false because nothing was proven — not
+	// because the sandbox is under its budget. The admin screen renders this as
+	// "unknown" instead of a zero it would have to trust.
+	Unmeasurable bool `json:"unmeasurable,omitempty"`
+	// Error is why the measurement failed, for the operator log. It is not a
+	// secret: a sandbox API error is a URL and a status code.
+	Error string `json:"error,omitempty"`
 	// MeasuredAt is when the walk finished.
 	MeasuredAt time.Time `json:"measured_at"`
 }
@@ -113,6 +141,14 @@ func (g *Guardian) Disabled() bool { return g.Limit() <= 0 }
 // Measure walks one sandbox root and returns a fresh report. It is the check a
 // run boundary uses: the answer must include what the last turn wrote.
 func (g *Guardian) Measure(ctx context.Context, sandboxID, root string) Report {
+	return g.MeasureWith(ctx, sandboxID, root, nil)
+}
+
+// MeasureWith is Measure with an explicit measurer. A nil measurer (or one that
+// fails) falls back to the host walk when the root is a host directory; when the
+// root is a container path there is nothing to walk here, so a failed measurer
+// produces an Unmeasurable report rather than a zero that reads as "empty".
+func (g *Guardian) MeasureWith(ctx context.Context, sandboxID, root string, measure Measurer) Report {
 	if g == nil {
 		return Report{SandboxID: sandboxID, Root: root}
 	}
@@ -121,7 +157,7 @@ func (g *Guardian) Measure(ctx context.Context, sandboxID, root string) Report {
 		// that would read as "empty".
 		return Report{SandboxID: sandboxID, Root: root, QuotaBytes: g.cfg.QuotaBytes}
 	}
-	rep := g.walk(sandboxID, root)
+	rep := g.walk(ctx, sandboxID, root, measure)
 	g.mu.Lock()
 	g.reports[sandboxID] = rep
 	g.mu.Unlock()
@@ -131,16 +167,23 @@ func (g *Guardian) Measure(ctx context.Context, sandboxID, root string) Report {
 // Cached returns the report for one sandbox, walking it only when the last
 // measurement is older than ReportTTL. This is what the admin screen reads.
 func (g *Guardian) Cached(ctx context.Context, sandboxID, root string) Report {
+	return g.CachedWith(ctx, sandboxID, root, nil)
+}
+
+// CachedWith is Cached with an explicit measurer. A failed measurement is not
+// cached: the next reader retries instead of being served a stale "unknown" for
+// a minute.
+func (g *Guardian) CachedWith(ctx context.Context, sandboxID, root string, measure Measurer) Report {
 	if g == nil {
 		return Report{SandboxID: sandboxID, Root: root}
 	}
 	g.mu.Lock()
 	rep, ok := g.reports[sandboxID]
 	g.mu.Unlock()
-	if ok && rep.Root == root && g.cfg.Now().Sub(rep.MeasuredAt) < g.cfg.ReportTTL {
+	if ok && !rep.Unmeasurable && rep.Root == root && g.cfg.Now().Sub(rep.MeasuredAt) < g.cfg.ReportTTL {
 		return rep
 	}
-	return g.Measure(ctx, sandboxID, root)
+	return g.MeasureWith(ctx, sandboxID, root, measure)
 }
 
 // Forget drops a cached report, so the next Cached walks again. A sandbox that
@@ -157,17 +200,26 @@ func (g *Guardian) Forget(sandboxID string) {
 // walk measures the root with the same bounded walk the runtime-directory report
 // uses; one implementation means the admin screen and the refusal cannot disagree
 // about how big a sandbox is.
-func (g *Guardian) walk(sandboxID, root string) Report {
-	usage := runtimedirs.Measure(sandboxID, root, g.cfg.MaxFiles)
+func (g *Guardian) walk(ctx context.Context, sandboxID, root string, measure Measurer) Report {
 	rep := Report{
 		SandboxID:  sandboxID,
 		Root:       root,
-		Bytes:      usage.Bytes,
-		Files:      usage.Files,
-		Truncated:  usage.Truncated,
 		QuotaBytes: g.cfg.QuotaBytes,
 		MeasuredAt: g.cfg.Now(),
 	}
+	if measure != nil {
+		got, err := measure(ctx, sandboxID, root)
+		if err != nil {
+			rep.Unmeasurable = true
+			rep.Error = err.Error()
+			return rep
+		}
+		rep.Bytes, rep.Files, rep.Truncated = got.Bytes, got.Files, got.Truncated
+		rep.Over = rep.QuotaBytes > 0 && rep.Bytes > rep.QuotaBytes
+		return rep
+	}
+	usage := runtimedirs.Measure(sandboxID, root, g.cfg.MaxFiles)
+	rep.Bytes, rep.Files, rep.Truncated = usage.Bytes, usage.Files, usage.Truncated
 	rep.Over = rep.QuotaBytes > 0 && rep.Bytes > rep.QuotaBytes
 	return rep
 }

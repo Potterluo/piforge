@@ -109,6 +109,11 @@ type RunnerConfig struct {
 	// Pids caps the container's process count (docker --pids-limit); zero leaves
 	// the runner's default in charge.
 	Pids int
+	// DiskBytes is the sandbox's disk budget, sent with every create so the
+	// runner can apply it as the container's RLIMIT_FSIZE. It is the same number
+	// this process measures the workspace against, so the two halves of the quota
+	// cannot drift.
+	DiskBytes int64
 	// LimitsFor resolves one tenant's limits. Nil means every create carries
 	// CPUs/Memory/Pids, which is the single-tenant shape.
 	LimitsFor func(ctx context.Context, userID string) Limits
@@ -210,9 +215,17 @@ func (r *Runner) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.EnsureTimeout)
 	defer cancel()
 
-	limits := Limits{CPUs: r.cfg.CPUs, Memory: r.cfg.Memory, Pids: r.cfg.Pids}
+	limits := Limits{CPUs: r.cfg.CPUs, Memory: r.cfg.Memory, Pids: r.cfg.Pids, DiskBytes: r.cfg.DiskBytes}
 	if r.cfg.LimitsFor != nil {
 		limits = r.cfg.LimitsFor(ctx, userID)
+		// The tenant policy has no disk field: the budget is the deployment's
+		// quota, so a silent policy must not turn the container's RLIMIT_FSIZE
+		// off. (This is the remote half of the same rule Docker.limitsFor
+		// applies locally; the first hardened run is what showed the gap —
+		// the watchdog measured 2 GiB while the container said "unlimited".)
+		if limits.DiskBytes == 0 {
+			limits.DiskBytes = r.cfg.DiskBytes
+		}
 	}
 	request := RunnerRequest{
 		UserID:    userID,
@@ -225,6 +238,7 @@ func (r *Runner) Ensure(ctx context.Context, userID, projectID, repoURL, branch 
 		CPUs:      limits.CPUs,
 		Memory:    limits.Memory,
 		Pids:      limits.Pids,
+		DiskBytes: limits.DiskBytes,
 		// The network is the runner's decision when it is per tenant: it is the
 		// process that creates the bridge, and naming the shared network here
 		// would put the container back on it.
@@ -543,6 +557,12 @@ type RunnerRequest struct {
 	// Pids caps the container's process count (docker --pids-limit); zero means
 	// "no limit". The runner sends it only when the tenant's policy sets one.
 	Pids int `json:"pids,omitempty"`
+	// DiskBytes is the tenant's disk budget in bytes, applied by the runner as
+	// the container's RLIMIT_FSIZE (docker --ulimit fsize). It travels with the
+	// create for the same reason the limits do — the runner is the process that
+	// creates the container — and it is the same number the control plane
+	// measures the workspace against.
+	DiskBytes int64 `json:"disk_bytes,omitempty"`
 	// Network is the Docker network the container joins.
 	Network string `json:"network,omitempty"`
 	// TenantNetwork asks for the tenant's own bridge instead of Network
