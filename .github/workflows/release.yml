@@ -197,24 +197,41 @@ jobs:
           AGENT_IMAGE: ghcr.io/potterluo/piforge:${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
-          docker buildx build \
-            --file deploy/Dockerfile.sandbox-agent \
-            --platform "$PLATFORMS" \
-            $TAG_ARGS_SANDBOX \
-            --build-arg AGENT_IMAGE="$AGENT_IMAGE" \
-            --build-arg PIFORGE_SOURCE_DIGEST="$DIGEST" \
-            $LABEL_ARGS \
-            --label org.opencontainers.image.title=piforge-sandbox-agent \
-            --label piforge.source-digest="$DIGEST" \
-            $ATTEST_ARGS \
-            --cache-from type=gha,scope=sandbox \
-            --cache-to type=gha,mode=max,scope=sandbox \
-            --metadata-file "$RUNNER_TEMP/sandbox.json" \
-            $PUSH_ARGS \
-            .
-          digest=$(jq -r '."containerimage.digest" // ""' "$RUNNER_TEMP/sandbox.json")
-          echo "$IMAGE_SANDBOX digest: ${digest:-<built locally, not pushed>}"
-          echo "sandbox=${digest:-none}" >> "$RUNNER_TEMP/digests.txt"
+          if [ "$PUSH" = true ]; then
+            docker buildx build \
+              --file deploy/Dockerfile.sandbox-agent \
+              --platform "$PLATFORMS" \
+              $TAG_ARGS_SANDBOX \
+              --build-arg AGENT_IMAGE="$AGENT_IMAGE" \
+              --build-arg PIFORGE_SOURCE_DIGEST="$DIGEST" \
+              $LABEL_ARGS \
+              --label org.opencontainers.image.title=piforge-sandbox-agent \
+              --label piforge.source-digest="$DIGEST" \
+              $ATTEST_ARGS \
+              --cache-from type=gha,scope=sandbox \
+              --cache-to type=gha,mode=max,scope=sandbox \
+              --metadata-file "$RUNNER_TEMP/sandbox.json" \
+              --push \
+              .
+            digest=$(jq -r '."containerimage.digest" // ""' "$RUNNER_TEMP/sandbox.json")
+            echo "$IMAGE_SANDBOX digest: ${digest:-none}"
+            echo "sandbox=${digest:-none}" >> "$RUNNER_TEMP/digests.txt"
+          else
+            # Nothing was published, so `FROM $AGENT_IMAGE` cannot be resolved
+            # by the container driver (it reads registries, not the local store).
+            # The classic builder does see the control-plane image the previous
+            # step loaded, so a no-push run still builds this recipe for real.
+            docker build \
+              --file deploy/Dockerfile.sandbox-agent \
+              --build-arg AGENT_IMAGE="$AGENT_IMAGE" \
+              --build-arg PIFORGE_SOURCE_DIGEST="$DIGEST" \
+              $LABEL_ARGS \
+              --label org.opencontainers.image.title=piforge-sandbox-agent \
+              --label piforge.source-digest="$DIGEST" \
+              --tag "$IMAGE_SANDBOX:$VERSION" \
+              .
+            echo "sandbox=none (built locally, not pushed)" >> "$RUNNER_TEMP/digests.txt"
+          fi
 
       # ---------------------------------------------------------------------
       # Sandbox runner: the only service that holds /var/run/docker.sock.
