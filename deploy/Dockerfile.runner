@@ -35,6 +35,12 @@ FROM docker:29-cli
 
 COPY --from=build /out/sandbox-runner /usr/local/bin/sandbox-runner
 
+# The digest of the tree this image was built from, in the shape every other
+# piforge image carries (see deploy/Dockerfile.sandbox-agent). Empty when the
+# build did not pass it: the freshness checks read that as "unknown tree".
+ARG PIFORGE_SOURCE_DIGEST=
+LABEL piforge.source-digest=$PIFORGE_SOURCE_DIGEST
+
 # The runner is stateless: containers outlive it, their names come from
 # (user, project), and their workspaces live on the shared volume it mounts, not
 # in this image. Restarting it must not lose a sandbox, and it does not.

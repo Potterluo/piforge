@@ -1,0 +1,294 @@
+name: release
+
+# Publishes the three images this project ships, built from the recipes in this
+# repository (not from a second, drifting copy of them):
+#
+#   ghcr.io/potterluo/piforge                control plane + web app  (Dockerfile)
+#   ghcr.io/potterluo/piforge-runner         the docker-socket holder (deploy/Dockerfile.runner)
+#   ghcr.io/potterluo/piforge-sandbox-agent  what a sandbox runs      (deploy/Dockerfile.sandbox-agent)
+#
+# Trigger: a `v*` tag, or a manual run that names the tag — that is how a drill
+# (`v0.0.0-drill`) or a re-publish of an existing tag is done without moving it.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and publish, e.g. v1.2.3 (vMAJOR.MINOR.PATCH[-PRERELEASE])'
+        required: true
+        type: string
+      push:
+        description: 'Push to ghcr.io (uncheck to only build, and see whether it builds)'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  # ghcr.io rejects an uppercase namespace, so the owner is written out rather
+  # than interpolated from github.repository_owner ("Potterluo").
+  IMAGE: ghcr.io/potterluo/piforge
+  IMAGE_RUNNER: ghcr.io/potterluo/piforge-runner
+  IMAGE_SANDBOX: ghcr.io/potterluo/piforge-sandbox-agent
+  SOURCE: https://github.com/Potterluo/piforge
+  # Multi-arch: linux/amd64 only, and deliberately. The sandbox recipe is built
+  # FROM a vendor AIO image that is published for linux/amd64 alone, so it cannot
+  # be arm64. The control plane would need `next build` (plus the npm install of
+  # the agent) to run under arm64 emulation, and that has not been proven here —
+  # shipping a second platform nobody ran would be a claim, not a build. The Go
+  # half does cross-compile (`GOARCH=arm64 go build ./...`), so when the web half
+  # is proven this one value is all that changes for the control plane and runner.
+  PLATFORMS: linux/amd64
+
+jobs:
+  publish:
+    name: build and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # One place decides what a tag means: the three refs of the version, and
+      # whether `latest` may move. A pre-release (`v1.2.3-rc.1`, and the drill
+      # `v0.0.0-drill`) gets the version tags but never `latest`: a drill must
+      # not become what `docker pull …:latest` returns.
+      - name: resolve the version, the tags and the labels
+        id: meta
+        env:
+          IN_TAG: ${{ inputs.tag }}
+          IN_PUSH: ${{ github.event_name == 'push' || inputs.push }}
+        run: |
+          set -euo pipefail
+          tag="${IN_TAG:-${GITHUB_REF_NAME}}"
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$'; then
+            echo "::error::'$tag' is not a release tag of the form vMAJOR.MINOR.PATCH[-PRERELEASE]"
+            exit 1
+          fi
+          version="${tag#v}"
+          case "$version" in
+            *-*) prerelease=true ;;
+            *)   prerelease=false ;;
+          esac
+          major="${version%%.*}"
+          rest="${version#*.}"
+          minor="${rest%%.*}"
+          created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          push="$IN_PUSH"
+
+          # The tags every image gets, in the order the summary lists them.
+          tags="$tag $version $major.$minor"
+          if [ "$prerelease" = false ]; then tags="$tags latest"; fi
+
+          tag_args() {
+            local image="$1" out="" t
+            for t in $tags; do out="$out --tag $image:$t"; done
+            printf '%s' "$out"
+          }
+
+          # Provenance and SBOM are attestations on the pushed index, so they
+          # only make sense for a real push.
+          attest=""
+          if [ "$push" = true ]; then attest="--provenance=mode=max --sbom=true"; fi
+
+          {
+            echo "VERSION=$version"
+            echo "MAJOR_MINOR=$major.$minor"
+            echo "CREATED=$created"
+            echo "PUSH=$push"
+            echo "PRERELEASE=$prerelease"
+            echo "TAGS=$(printf '%s' "$tags" | tr ' ' ',')"
+            echo "TAG_ARGS_CONTROL=$(tag_args "$IMAGE")"
+            echo "TAG_ARGS_RUNNER=$(tag_args "$IMAGE_RUNNER")"
+            echo "TAG_ARGS_SANDBOX=$(tag_args "$IMAGE_SANDBOX")"
+            echo "ATTEST_ARGS=$attest"
+            echo "PUSH_ARGS=$( [ "$push" = true ] && printf '%s' --push || printf '%s' '--load' )"
+            echo "LABEL_ARGS=--label org.opencontainers.image.source=$SOURCE --label org.opencontainers.image.version=$version --label org.opencontainers.image.revision=$GITHUB_SHA --label org.opencontainers.image.licenses=Apache-2.0 --label org.opencontainers.image.created=$created --label org.opencontainers.image.ref.name=$tag"
+          } >> "$GITHUB_ENV"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "pushed=$push" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        if: ${{ github.event_name == 'push' || inputs.push }}
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: go module cache warm (sourcedigest is a Go program)
+        run: cd backend && go mod download
+
+      # ---------------------------------------------------------------------
+      # Control plane. Its source digest is an input to the sandbox image: the
+      # sandbox is built *from* this image, so a rebuilt control plane has to
+      # rebuild the sandbox. That is why the sandbox's digest is computed after
+      # this push, against the image's full id rather than its tag.
+      # ---------------------------------------------------------------------
+      - name: source digest — control plane
+        id: digest_control
+        run: |
+          set -euo pipefail
+          json=$(cd backend && go run ./cmd/sourcedigest -root .. -dockerfile Dockerfile -json)
+          echo "$json"
+          echo "digest=$(printf '%s' "$json" | jq -r .digest)" >> "$GITHUB_OUTPUT"
+
+      - name: build and push — control plane
+        env:
+          DIGEST: ${{ steps.digest_control.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file Dockerfile \
+            --platform "$PLATFORMS" \
+            $TAG_ARGS_CONTROL \
+            --build-arg PIFORGE_SOURCE_DIGEST="$DIGEST" \
+            $LABEL_ARGS \
+            --label org.opencontainers.image.title=piforge \
+            --label piforge.source-digest="$DIGEST" \
+            $ATTEST_ARGS \
+            --cache-from type=gha,scope=control \
+            --cache-to type=gha,mode=max,scope=control \
+            --metadata-file "$RUNNER_TEMP/control.json" \
+            $PUSH_ARGS \
+            .
+          digest=$(jq -r '."containerimage.digest" // ""' "$RUNNER_TEMP/control.json")
+          echo "$IMAGE digest: ${digest:-<built locally, not pushed>}"
+          echo "control=${digest:-none}" >> "$RUNNER_TEMP/digests.txt"
+
+      # ---------------------------------------------------------------------
+      # Sandbox agent. `AGENT_IMAGE` is the control plane the sandbox is built
+      # FROM, and `-agent-image` folds that image's *full id* into the digest —
+      # the same invocation scripts/up-isolated.ps1 uses, so a local stack and a
+      # release label agree on what the sandbox's digest means.
+      # ---------------------------------------------------------------------
+      - name: pull the control plane so the sandbox digest can name it by id
+        if: ${{ github.event_name == 'push' || inputs.push }}
+        run: docker pull "$IMAGE:$VERSION"
+
+      - name: source digest — sandbox agent
+        id: digest_sandbox
+        env:
+          AGENT_IMAGE: ghcr.io/potterluo/piforge:${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          json=$(cd backend && go run ./cmd/sourcedigest -root .. \
+            -dockerfile deploy/Dockerfile.sandbox-agent -agent-image "$AGENT_IMAGE" -json)
+          echo "$json"
+          echo "digest=$(printf '%s' "$json" | jq -r .digest)" >> "$GITHUB_OUTPUT"
+
+      - name: build and push — sandbox agent
+        env:
+          DIGEST: ${{ steps.digest_sandbox.outputs.digest }}
+          AGENT_IMAGE: ghcr.io/potterluo/piforge:${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file deploy/Dockerfile.sandbox-agent \
+            --platform "$PLATFORMS" \
+            $TAG_ARGS_SANDBOX \
+            --build-arg AGENT_IMAGE="$AGENT_IMAGE" \
+            --build-arg PIFORGE_SOURCE_DIGEST="$DIGEST" \
+            $LABEL_ARGS \
+            --label org.opencontainers.image.title=piforge-sandbox-agent \
+            --label piforge.source-digest="$DIGEST" \
+            $ATTEST_ARGS \
+            --cache-from type=gha,scope=sandbox \
+            --cache-to type=gha,mode=max,scope=sandbox \
+            --metadata-file "$RUNNER_TEMP/sandbox.json" \
+            $PUSH_ARGS \
+            .
+          digest=$(jq -r '."containerimage.digest" // ""' "$RUNNER_TEMP/sandbox.json")
+          echo "$IMAGE_SANDBOX digest: ${digest:-<built locally, not pushed>}"
+          echo "sandbox=${digest:-none}" >> "$RUNNER_TEMP/digests.txt"
+
+      # ---------------------------------------------------------------------
+      # Sandbox runner: the only service that holds /var/run/docker.sock.
+      # ---------------------------------------------------------------------
+      - name: source digest — sandbox runner
+        id: digest_runner
+        run: |
+          set -euo pipefail
+          json=$(cd backend && go run ./cmd/sourcedigest -root .. -dockerfile deploy/Dockerfile.runner -json)
+          echo "$json"
+          echo "digest=$(printf '%s' "$json" | jq -r .digest)" >> "$GITHUB_OUTPUT"
+
+      - name: build and push — sandbox runner
+        env:
+          DIGEST: ${{ steps.digest_runner.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file deploy/Dockerfile.runner \
+            --platform "$PLATFORMS" \
+            $TAG_ARGS_RUNNER \
+            --build-arg PIFORGE_SOURCE_DIGEST="$DIGEST" \
+            $LABEL_ARGS \
+            --label org.opencontainers.image.title=piforge-runner \
+            --label piforge.source-digest="$DIGEST" \
+            $ATTEST_ARGS \
+            --cache-from type=gha,scope=runner \
+            --cache-to type=gha,mode=max,scope=runner \
+            --metadata-file "$RUNNER_TEMP/runner.json" \
+            $PUSH_ARGS \
+            .
+          digest=$(jq -r '."containerimage.digest" // ""' "$RUNNER_TEMP/runner.json")
+          echo "$IMAGE_RUNNER digest: ${digest:-<built locally, not pushed>}"
+          echo "runner=${digest:-none}" >> "$RUNNER_TEMP/digests.txt"
+
+      # A build that "succeeded" but published nothing is the failure this step
+      # exists for: the published manifest is looked up in the registry, not read
+      # from the build's own report.
+      - name: what the registry actually has
+        if: ${{ github.event_name == 'push' || inputs.push }}
+        run: |
+          set -euo pipefail
+          for image in "$IMAGE" "$IMAGE_SANDBOX" "$IMAGE_RUNNER"; do
+            fresh=$(docker buildx imagetools inspect "$image:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)
+            echo "$image:$VERSION -> $fresh"
+            grep -q "$fresh" "$RUNNER_TEMP/digests.txt" \
+              || { echo "::error::$image:$VERSION resolves to $fresh, which the build did not report"; exit 1; }
+          done
+
+      - name: summary — how to pull, and what each image resolved to
+        run: |
+          set -euo pipefail
+          digest_of() { sed -n "s/^$1=//p" "$RUNNER_TEMP/digests.txt"; }
+          {
+            echo "## PiForge ${TAG:-?} ($(printf '%s' "$TAGS" | tr ',' ' '))"
+            echo
+            if [ "$PUSH" = true ]; then
+              echo "Pull:"
+              echo
+              echo '```'
+              echo "docker pull $IMAGE:${VERSION}"
+              echo "docker pull $IMAGE_SANDBOX:${VERSION}"
+              echo "docker pull $IMAGE_RUNNER:${VERSION}"
+              echo '```'
+            else
+              echo "Built only (\`push\` was off); nothing was published."
+            fi
+            echo
+            echo "| image | digest |"
+            echo "|---|---|"
+            echo "| \`$IMAGE:${VERSION}\` | \`$(digest_of control)\` |"
+            echo "| \`$IMAGE_SANDBOX:${VERSION}\` | \`$(digest_of sandbox)\` |"
+            echo "| \`$IMAGE_RUNNER:${VERSION}\` | \`$(digest_of runner)\` |"
+            echo
+            echo "Control plane needs: \`-p 7700:7700\`, \`-v piforge-data:/data\`, \`PIFORGE_SANDBOX\` and"
+            echo "a provider key (\`PIFORGE_BOOTSTRAP_PROVIDER_KEY\`). Pre-release tags never move \`latest\`."
+          } >> "$GITHUB_STEP_SUMMARY"

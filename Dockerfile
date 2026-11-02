@@ -115,6 +115,14 @@ ENV NODE_ENV=production \
     PIFORGE_PORT=7700 \
     PIFORGE_CHROME=""
 
+# The digest of the tree this image was built from, stamped the same way the
+# sandbox recipe stamps it (deploy/Dockerfile.sandbox-agent): the scripts that
+# compare an image against a checkout read `piforge.source-digest`, and the
+# release workflow passes the value backend/cmd/sourcedigest computed. Empty when
+# the build did not pass it, which says "unknown tree" rather than inventing one.
+ARG PIFORGE_SOURCE_DIGEST=
+LABEL piforge.source-digest=$PIFORGE_SOURCE_DIGEST
+
 VOLUME ["/data"]
 EXPOSE 7700
 
