@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 552" width="960" height="552"
+     role="img" aria-labelledby="t01 d01">
+  <title id="t01">PiForge deployment</title>
+  <desc id="d01">Browser to control plane to sandbox provider to one sandbox per user and project;
+    the provider key stays in the control plane, the sandbox holds only a per-session gateway token.</desc>
+  <style>
+    text { font-family: ui-sans-serif, system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #1d2227; }
+    .t { font-size: 13px; font-weight: 600; }
+    .n { font-size: 13px; }
+    .l { font-size: 12px; }
+    .m { font-size: 12px; fill: #67707a; }
+    .box { fill: #ffffff; stroke: #a9b1ba; stroke-width: 1; }
+    .grp { fill: none; stroke: #b6bec7; stroke-width: 1; stroke-dasharray: 4 4; }
+    .soft { fill: #f4f6f8; stroke: #a9b1ba; stroke-width: 1; }
+    .line { fill: none; stroke: #7f8994; stroke-width: 1; }
+    .dash { fill: none; stroke: #7f8994; stroke-width: 1; stroke-dasharray: 5 4; }
+    .flow { fill: none; stroke: #2f5d9e; stroke-width: 2; }
+    .rule { stroke: #dfe3e8; stroke-width: 1; }
+  </style>
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="2" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L8,4 L0,8 L2,4 z" fill="#7f8994"/>
+    </marker>
+    <marker id="arb" markerWidth="10" markerHeight="10" refX="2.5" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L10,5 L0,10 L2.5,5 z" fill="#2f5d9e"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="552" fill="#ffffff"/>
+
+  <text class="t" x="24" y="30">PiForge deployment: one control plane, one sandbox per (user, project)</text>
+
+  <!-- browser: x=24..128, y=104..192 -->
+  <rect class="box" x="24" y="104" width="104" height="88"/>
+  <text class="n" x="76" y="132" text-anchor="middle">browser</text>
+  <text class="l" x="76" y="152" text-anchor="middle">Next.js UI</text>
+  <text class="m" x="76" y="172" text-anchor="middle">REST + SSE</text>
+
+  <!-- control plane: x=160..416, y=64..368 -->
+  <rect class="box" x="160" y="64" width="256" height="304"/>
+  <text class="n" x="176" y="88" font-weight="600">control plane (Go)</text>
+  <line class="rule" x1="160" y1="96" x2="416" y2="96"/>
+
+  <rect class="soft" x="176" y="104" width="224" height="40"/>
+  <text class="l" x="188" y="129">httpapi · REST + SSE hub</text>
+
+  <rect class="soft" x="176" y="152" width="224" height="40"/>
+  <text class="l" x="188" y="177">provision · sandbox + worktree</text>
+
+  <rect class="soft" x="176" y="200" width="224" height="40"/>
+  <text class="l" x="188" y="225">llmgw · /gw/llm/&lt;token&gt;</text>
+
+  <rect class="soft" x="176" y="248" width="224" height="40"/>
+  <text class="l" x="188" y="273">SQLite · runs, sealed keys</text>
+
+  <text class="m" x="176" y="320">for a container placement,</text>
+  <text class="m" x="176" y="338">no agent code runs here</text>
+
+  <!-- provider group: x=456..604, y=80..336 -->
+  <rect class="grp" x="456" y="80" width="148" height="256"/>
+  <text class="m" x="468" y="100">provider: -sandbox</text>
+
+  <rect class="box" x="468" y="112" width="124" height="44"/>
+  <text class="n" x="480" y="130">local</text>
+  <text class="m" x="480" y="148">host dir (dev)</text>
+
+  <rect class="box" x="468" y="164" width="124" height="44"/>
+  <text class="n" x="480" y="182">docker</text>
+  <text class="m" x="480" y="200">daemon in-process</text>
+
+  <rect class="box" x="468" y="216" width="124" height="44"/>
+  <text class="n" x="480" y="234">runner</text>
+  <text class="m" x="480" y="252">HTTP, docker CLI</text>
+
+  <rect class="box" x="468" y="268" width="124" height="44"/>
+  <text class="n" x="480" y="286">k8s</text>
+  <text class="m" x="480" y="304">pod + PVC</text>
+
+  <text class="m" x="456" y="356">local: host dir,</text>
+  <text class="m" x="456" y="372">dev only, no container</text>
+
+  <!-- sandbox: x=644..936, y=64..368 -->
+  <rect class="box" x="644" y="64" width="292" height="304"/>
+  <text class="n" x="660" y="88" font-weight="600">sandbox · one per (user, project)</text>
+  <line class="rule" x1="644" y1="96" x2="936" y2="96"/>
+
+  <rect class="soft" x="660" y="104" width="260" height="40"/>
+  <text class="l" x="672" y="129">agent process: pi --mode rpc</text>
+
+  <rect class="soft" x="660" y="152" width="260" height="40"/>
+  <text class="l" x="672" y="177">workspace volume at /workspace</text>
+
+  <rect class="soft" x="660" y="200" width="260" height="40"/>
+  <text class="l" x="672" y="225">shell · file · browser API :8080</text>
+
+  <rect class="soft" x="660" y="248" width="260" height="40"/>
+  <text class="l" x="672" y="273">gateway token in models.json</text>
+
+  <text class="m" x="660" y="316">no /data, no provider key,</text>
+  <text class="m" x="660" y="334">no Docker socket</text>
+
+  <!-- arrows: the deployment path is the primary path -->
+  <path class="flow" d="M133,148 L147,148" marker-end="url(#arb)"/>
+  <path class="flow" d="M421,238 L443,238" marker-end="url(#arb)"/>
+  <path class="flow" d="M609,238 L631,238" marker-end="url(#arb)"/>
+
+  <!-- model traffic: sandbox -> gateway in the control plane -->
+  <path class="dash" d="M790,373 L790,408 Q790,416 782,416 L298,416 Q290,416 290,408 L290,379"
+        marker-end="url(#ar)"/>
+  <text class="m" x="540" y="402" text-anchor="middle">model calls go to /gw/llm/&lt;token&gt;: the gateway injects the provider key</text>
+
+  <!-- legend -->
+  <line class="rule" x1="24" y1="440" x2="936" y2="440"/>
+  <text class="t" x="24" y="464">Secrets</text>
+  <text class="t" x="624" y="464">Never in the sandbox</text>
+
+  <text class="l" x="24" y="490">provider key — sealed in SQLite, decrypted per request by the gateway</text>
+  <text class="l" x="24" y="512">gateway token — one session, 1 h TTL, revoked on pause</text>
+  <text class="l" x="24" y="534">sandbox API key — per sandbox, sealed; the panels call with it</text>
+
+  <line class="rule" x1="600" y1="448" x2="600" y2="540"/>
+
+  <text class="l" x="624" y="490">/data — SQLite, master.key, other tenants</text>
+  <text class="l" x="624" y="512">the provider key (only the gateway holds it)</text>
+  <text class="l" x="624" y="534">the Docker socket (held by the runner)</text>
+</svg>
+

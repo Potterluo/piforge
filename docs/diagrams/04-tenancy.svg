@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 624" width="960" height="624"
+     role="img" aria-labelledby="t04 d04">
+  <title id="t04">Tenant isolation</title>
+  <desc id="d04">One Docker bridge per tenant, one sandbox and one workspace volume per user and
+    project, quotas enforced where containers are made, egress closed by default, and the one
+    documented non-claim: two sandboxes of the same tenant share their bridge.</desc>
+  <style>
+    text { font-family: ui-sans-serif, system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #1d2227; }
+    .t { font-size: 13px; font-weight: 600; }
+    .n { font-size: 13px; }
+    .l { font-size: 12px; }
+    .m { font-size: 12px; fill: #67707a; }
+    .box { fill: #ffffff; stroke: #a9b1ba; stroke-width: 1; }
+    .grp { fill: none; stroke: #b6bec7; stroke-width: 1; stroke-dasharray: 4 4; }
+    .bar { fill: #eef1f4; stroke: #a9b1ba; stroke-width: 1; }
+    .line { fill: none; stroke: #7f8994; stroke-width: 1; }
+    .join { fill: none; stroke: #2f5d9e; stroke-width: 2; }
+    .dash { fill: none; stroke: #7f8994; stroke-width: 1; stroke-dasharray: 5 4; }
+    .rule { stroke: #dfe3e8; stroke-width: 1; }
+  </style>
+  <defs>
+    <marker id="arb" markerWidth="12" markerHeight="12" refX="3" refY="6" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L12,6 L0,12 L3,6 z" fill="#2f5d9e"/>
+    </marker>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="2" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L8,4 L0,8 L2,4 z" fill="#7f8994"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="624" fill="#ffffff"/>
+  <text class="t" x="24" y="30">Tenant isolation: one bridge per tenant, one sandbox per (user, project)</text>
+
+  <!-- shared services -->
+  <rect class="box" x="24" y="64" width="328" height="80"/>
+  <text class="n" x="40" y="88" font-weight="600">control plane</text>
+  <text class="l" x="40" y="110">gateway · hub · quota checks</text>
+  <text class="l" x="40" y="128">joined to every tenant bridge</text>
+
+  <rect class="box" x="376" y="64" width="272" height="80"/>
+  <text class="n" x="392" y="88" font-weight="600">runner</text>
+  <text class="l" x="392" y="110">the only docker.sock holder</text>
+  <text class="l" x="392" y="128">creates bridges and containers</text>
+
+  <rect class="box" x="672" y="64" width="264" height="80"/>
+  <text class="n" x="688" y="88" font-weight="600">tenant limits (file)</text>
+  <text class="l" x="688" y="110">cpus · memory · pids</text>
+  <text class="l" x="688" y="128">max_sandboxes → 409</text>
+
+  <!-- join bus -->
+  <path class="join" d="M188,149 L188,164"/>
+  <path class="join" d="M512,149 L512,164"/>
+  <path class="join" d="M188,164 L720,164"/>
+  <path class="join" d="M248,164 L248,194" marker-end="url(#arb)"/>
+  <path class="join" d="M720,164 L720,194" marker-end="url(#arb)"/>
+
+  <!-- tenant A -->
+  <rect class="grp" x="24" y="176" width="448" height="304"/>
+  <text class="m" x="40" y="196">tenant A · usr_01J…</text>
+
+  <rect class="bar" x="40" y="208" width="416" height="32"/>
+  <text class="l" x="56" y="228">piforge-t-&lt;hex&gt; · --internal · egress=none</text>
+
+  <rect class="box" x="40" y="264" width="188" height="112"/>
+  <text class="n" x="56" y="288">sandbox · project 1</text>
+  <text class="l" x="56" y="310">volume piforge-ws-…</text>
+  <text class="l" x="56" y="328">:8080 · per-sandbox key</text>
+  <text class="l" x="56" y="346">agent · terminal · browser</text>
+
+  <rect class="box" x="252" y="264" width="204" height="112"/>
+  <text class="n" x="268" y="288">sandbox · project 2</text>
+  <text class="l" x="268" y="310">volume piforge-ws-…</text>
+  <text class="l" x="268" y="328">:8080 · per-sandbox key</text>
+  <text class="l" x="268" y="346">agent · terminal · browser</text>
+
+  <path class="dash" d="M134,380 L134,404 Q134,412 142,412 L346,412 Q354,412 354,404 L354,380"/>
+  <text class="m" x="248" y="436" text-anchor="middle">same tenant: siblings share this bridge</text>
+  <text class="m" x="248" y="454" text-anchor="middle">and reach each other's :8080 (401) — not claimed</text>
+
+  <!-- tenant B -->
+  <rect class="grp" x="504" y="176" width="432" height="304"/>
+  <text class="m" x="520" y="196">tenant B · a second account</text>
+
+  <rect class="bar" x="520" y="208" width="400" height="32"/>
+  <text class="l" x="536" y="228">piforge-t-&lt;hex&gt; · --internal · egress=none</text>
+
+  <rect class="box" x="536" y="264" width="200" height="112"/>
+  <text class="n" x="552" y="288">sandbox · project 3</text>
+  <text class="l" x="552" y="310">volume piforge-ws-…</text>
+  <text class="l" x="552" y="328">:8080 · per-sandbox key</text>
+  <text class="l" x="552" y="346">agent · terminal · browser</text>
+
+  <text class="m" x="520" y="408">cross-tenant, measured from A's sandbox:</text>
+  <text class="m" x="520" y="426">getent hosts B → no such host; B:8080 → timeout</text>
+
+  <!-- egress band -->
+
+  <rect x="24" y="504" width="912" height="96" fill="#fbfbfc" stroke="#d5dae0" stroke-width="1"/>
+  <text class="n" x="40" y="528">Egress: what the tenant's mode decides (the bridge enforces it)</text>
+  <text class="n" x="40" y="552">reachable</text>
+  <text class="l" x="40" y="572">control plane: /gw/llm, /gw/mcp</text>
+  <text class="l" x="40" y="590">runner: provisioning calls</text>
+
+  <line class="rule" x1="492" y1="512" x2="492" y2="596"/>
+
+  <text class="n" x="516" y="552">not reachable with mode none</text>
+  <text class="l" x="516" y="572">the internet: no route, NAT or DNS</text>
+  <text class="l" x="516" y="590">169.254.169.254 and other tenants</text>
+</svg>
+
+
+

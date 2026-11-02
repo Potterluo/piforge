@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 716" width="960" height="716"
+     role="img" aria-labelledby="t05 d05">
+  <title id="t05">The data directory</title>
+  <desc id="d05">Every path the control plane creates under its data directory, the row that owns it,
+    the eager delete that removes it, and the janitor and audit retention as the reclaim path.</desc>
+  <style>
+    text { font-family: ui-sans-serif, system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #1d2227; }
+    .t { font-size: 13px; font-weight: 600; }
+    .n { font-size: 13px; }
+    .l { font-size: 12px; }
+    .m { font-size: 12px; fill: #67707a; }
+    .p { font-size: 12px; fill: #1d2227; }
+    .box { fill: #ffffff; stroke: #a9b1ba; stroke-width: 1; }
+    .chip { fill: #eef1f4; stroke: #a9b1ba; stroke-width: 1; }
+    .grp { fill: none; stroke: #b6bec7; stroke-width: 1; stroke-dasharray: 4 4; }
+    .line { fill: none; stroke: #7f8994; stroke-width: 1; }
+    .tree { fill: none; stroke: #b6bec7; stroke-width: 1; }
+    .rule { stroke: #dfe3e8; stroke-width: 1; }
+  </style>
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="2" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L8,4 L0,8 L2,4 z" fill="#7f8994"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="716" fill="#ffffff"/>
+  <text class="t" x="24" y="30">The data directory: one owner per path, one reclaim path</text>
+
+  <rect class="box" x="24" y="64" width="184" height="40"/>
+  <text class="n" x="40" y="90">/data</text>
+  <text class="m" x="104" y="90">one volume</text>
+
+  <path class="tree" d="M64,104 L64,466"/>
+  <path class="tree" d="M64,158 L76,158"/>
+  <path class="tree" d="M64,202 L76,202"/>
+  <path class="tree" d="M64,246 L76,246"/>
+  <path class="tree" d="M64,290 L76,290"/>
+  <path class="tree" d="M64,334 L76,334"/>
+  <path class="tree" d="M64,378 L76,378"/>
+  <path class="tree" d="M64,422 L76,422"/>
+  <path class="tree" d="M64,466 L76,466"/>
+
+  <text class="m" x="88" y="124">path</text>
+  <text class="m" x="320" y="124">holds</text>
+  <text class="m" x="600" y="124">owner</text>
+  <text class="m" x="700" y="124">reclaimed by</text>
+
+  <text class="p" x="88" y="162">piforge.db (+ -wal, -shm)</text>
+  <text class="m" x="320" y="162">SQLite: sessions, runs, events, sealed keys</text>
+  <rect class="chip" x="600" y="146" width="78" height="24"/>
+  <text class="l" x="639" y="162" text-anchor="middle">deployment</text>
+  <text class="m" x="700" y="162">never — the deployment's state</text>
+
+  <text class="p" x="88" y="206">master.key, secret.key, gateway.key</text>
+  <text class="m" x="320" y="206">back these up with the database</text>
+  <rect class="chip" x="600" y="190" width="78" height="24"/>
+  <text class="l" x="639" y="206" text-anchor="middle">deployment</text>
+  <text class="m" x="700" y="206">never — part of the backup</text>
+
+  <text class="p" x="88" y="250">sandboxes/&lt;usr&gt;/&lt;prj&gt;/</text>
+  <text class="m" x="320" y="250">local provider only — dev placement</text>
+  <rect class="chip" x="600" y="234" width="59" height="24"/>
+  <text class="l" x="629" y="250" text-anchor="middle">project</text>
+  <text class="m" x="700" y="250">project delete → janitor sweep</text>
+
+  <text class="p" x="88" y="294">pi-agents/&lt;session&gt;/</text>
+  <text class="m" x="320" y="294">staged models.json / mcp.json per session</text>
+  <rect class="chip" x="600" y="278" width="59" height="24"/>
+  <text class="l" x="629" y="294" text-anchor="middle">session</text>
+  <text class="m" x="700" y="294">session delete → janitor sweep</text>
+
+  <text class="p" x="88" y="338">skill-snapshots/&lt;session&gt;/</text>
+  <text class="m" x="320" y="338">frozen skill tree for one session</text>
+  <rect class="chip" x="600" y="322" width="59" height="24"/>
+  <text class="l" x="629" y="338" text-anchor="middle">session</text>
+  <text class="m" x="700" y="338">session delete → janitor sweep</text>
+
+  <text class="p" x="88" y="382">artifacts/&lt;session&gt;/</text>
+  <text class="m" x="320" y="382">browser screenshots, per session</text>
+  <rect class="chip" x="600" y="366" width="59" height="24"/>
+  <text class="l" x="629" y="382" text-anchor="middle">session</text>
+  <text class="m" x="700" y="382">session delete → janitor sweep</text>
+
+  <text class="p" x="88" y="426">snapshots/&lt;sandbox&gt;/&lt;ts&gt;/</text>
+  <text class="m" x="320" y="426">idle-reaper manifest (host workspace)</text>
+  <rect class="chip" x="600" y="410" width="59" height="24"/>
+  <text class="l" x="629" y="426" text-anchor="middle">sandbox</text>
+  <text class="m" x="700" y="426">project delete → janitor sweep</text>
+
+  <text class="p" x="88" y="470">skills/&lt;skl_id&gt;/</text>
+  <text class="m" x="320" y="470">skill bundles: SKILL.md plus files</text>
+  <rect class="chip" x="600" y="454" width="47" height="24"/>
+  <text class="l" x="623" y="470" text-anchor="middle">skill</text>
+  <text class="m" x="700" y="470">skill delete → janitor sweep</text>
+
+  <!-- outside the data directory -->
+  <rect class="grp" x="24" y="496" width="448" height="96"/>
+  <text class="n" x="40" y="520">outside /data, and not swept</text>
+  <text class="l" x="40" y="542">workspace volumes piforge-ws-&lt;hash&gt; (docker, runner)</text>
+  <text class="l" x="40" y="560">or the PVC piforge-ws-&lt;hash8&gt; (k8s)</text>
+  <text class="l" x="40" y="578">Destroy keeps them; nothing lists them</text>
+
+  <rect class="box" x="496" y="496" width="440" height="96"/>
+  <text class="n" x="512" y="520">retention is policy, not cleanup</text>
+  <text class="l" x="512" y="542">audit rows: 90 days by default; 0 keeps them forever</text>
+  <text class="l" x="512" y="560">one whole tool call at a time, never half a row</text>
+  <text class="l" x="512" y="578">deleting a session does not delete its audit rows</text>
+
+  <!-- the reclaim path -->
+  <text class="m" x="24" y="614">the reclaim path</text>
+
+  <rect class="box" x="24" y="636" width="192" height="56"/>
+  <text class="n" x="40" y="658">row deleted</text>
+  <text class="m" x="40" y="676">session, project or skill</text>
+
+  <rect class="box" x="248" y="636" width="208" height="56"/>
+  <text class="n" x="264" y="658">eager delete</text>
+  <text class="m" x="264" y="676">the endpoint removes it</text>
+
+  <rect class="box" x="488" y="636" width="216" height="56"/>
+  <text class="n" x="504" y="658">janitor pass</text>
+  <text class="m" x="504" y="676">startup, then on its interval</text>
+
+  <rect class="box" x="736" y="636" width="200" height="56"/>
+  <text class="n" x="752" y="658">reclaimed</text>
+  <text class="m" x="752" y="676">count and bytes logged</text>
+
+  <path class="line" d="M221,664 L237,664" marker-end="url(#ar)"/>
+  <path class="line" d="M461,664 L477,664" marker-end="url(#ar)"/>
+  <path class="line" d="M709,664 L725,664" marker-end="url(#ar)"/>
+</svg>
+
+

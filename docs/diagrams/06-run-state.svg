@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 712" width="960" height="712"
+     role="img" aria-labelledby="t06 d06">
+  <title id="t06">A run's states</title>
+  <desc id="d06">A run starts, then settles, aborts on a user stop, or is interrupted when
+    reconciliation proves no agent is alive. Each terminal state writes a different set of events
+    into the transcript; a control-plane restart with a live supervisor is not an interruption.</desc>
+  <style>
+    text { font-family: ui-sans-serif, system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #1d2227; }
+    .t { font-size: 13px; font-weight: 600; }
+    .n { font-size: 13px; }
+    .l { font-size: 12px; }
+    .m { font-size: 12px; fill: #67707a; }
+    .box { fill: #ffffff; stroke: #a9b1ba; stroke-width: 1; }
+    .end { fill: #f4f6f8; stroke: #a9b1ba; stroke-width: 1; }
+    .grp { fill: none; stroke: #b6bec7; stroke-width: 1; stroke-dasharray: 4 4; }
+    .line { fill: none; stroke: #7f8994; stroke-width: 1; }
+    .dash { fill: none; stroke: #7f8994; stroke-width: 1; stroke-dasharray: 5 4; }
+  </style>
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="2" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L8,4 L0,8 L2,4 z" fill="#7f8994"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="712" fill="#ffffff"/>
+  <text class="t" x="24" y="30">A run's states, and what the transcript shows when it stops short</text>
+
+  <!-- the restart that is not an interruption -->
+  <rect class="grp" x="24" y="72" width="496" height="104"/>
+  <text class="n" x="40" y="96">restart, with the supervisor still alive</text>
+  <text class="l" x="40" y="120">ReattachLiveSessions runs before the port opens.</text>
+  <text class="l" x="40" y="138">The supervisor replays its 8 MiB window, so the same run settles.</text>
+  <text class="l" x="40" y="156">Not an interruption. A longer outage drops records, not the agent.</text>
+
+  <!-- entry and the running state -->
+  <rect class="box" x="24" y="300" width="160" height="64"/>
+  <text class="n" x="104" y="330" text-anchor="middle">POST /messages</text>
+  <text class="m" x="104" y="350" text-anchor="middle">one prompt</text>
+
+  <rect class="box" x="216" y="300" width="200" height="64"/>
+  <text class="n" x="232" y="326">started</text>
+  <text class="m" x="232" y="346">run.started · streaming</text>
+
+  <path class="line" d="M189,332 L205,332" marker-end="url(#ar)"/>
+
+  <!-- terminals -->
+  <rect class="end" x="624" y="112" width="264" height="96"/>
+  <text class="n" x="640" y="136">settled — agent_settled</text>
+  <text class="l" x="640" y="158">run.settled</text>
+  <text class="m" x="640" y="176">the only completion signal</text>
+
+  <rect class="end" x="624" y="296" width="264" height="96"/>
+  <text class="n" x="640" y="320">aborted — user stop</text>
+  <text class="l" x="640" y="342">run.aborted</text>
+  <text class="l" x="640" y="360">run.interrupted{cause: stop}</text>
+  <text class="m" x="640" y="378">one neutral line, then Continue</text>
+
+  <rect class="end" x="624" y="464" width="264" height="120"/>
+  <text class="n" x="640" y="488">interrupted — reconcile</text>
+  <text class="l" x="640" y="510">run.settled{status: interrupted}</text>
+  <text class="l" x="640" y="528">run.interrupted{cause: restart}</text>
+  <text class="l" x="640" y="546">or {cause: process_exit}</text>
+  <text class="l" x="640" y="564">platform.error{run_interrupted}</text>
+
+  <!-- transitions -->
+  <path class="line" d="M421,312 C 500,312 500,160 613,160" marker-end="url(#ar)"/>
+  <path class="line" d="M421,344 L613,344" marker-end="url(#ar)"/>
+  <path class="line" d="M421,356 C 500,356 500,524 613,524" marker-end="url(#ar)"/>
+
+  <!-- what the probe proves -->
+  <rect class="box" x="24" y="424" width="316" height="112"/>
+  <text class="n" x="40" y="448">what "no agent" means</text>
+  <text class="l" x="40" y="472">the liveness probe reads a marker</text>
+  <text class="l" x="40" y="490">written inside the sandbox. A probe</text>
+  <text class="l" x="40" y="508">that cannot answer is unknown: the</text>
+  <text class="l" x="40" y="526">run stays running and is retried.</text>
+
+  <!-- continue -->
+  <path class="dash" d="M756,589 L756,640 Q756,648 748,648 L358,648 Q350,648 350,640 L350,375"
+        marker-end="url(#ar)"/>
+  <text class="m" x="540" y="634" text-anchor="middle">Continue (offered after a stop too): a new run</text>
+
+  <text class="m" x="24" y="688">runs.status also allows failed; nothing in this tree settles a run that way.</text>
+</svg>

@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 664" width="960" height="664"
+     role="img" aria-labelledby="t03 d03">
+  <title id="t03">The execution boundary</title>
+  <desc id="d03">What runs in the control plane and what runs in the sandbox, the three things a
+    sandbox cannot reach, and the -sandbox local exception, which is host placement for development.</desc>
+  <style>
+    text { font-family: ui-sans-serif, system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #1d2227; }
+    .t { font-size: 13px; font-weight: 600; }
+    .n { font-size: 13px; }
+    .l { font-size: 12px; }
+    .m { font-size: 12px; fill: #67707a; }
+    .box { fill: #ffffff; stroke: #a9b1ba; stroke-width: 1; }
+    .panel { fill: #fcfcfd; stroke: #a9b1ba; stroke-width: 1; }
+    .grp { fill: none; stroke: #b6bec7; stroke-width: 1; stroke-dasharray: 4 4; }
+    .soft { fill: #f4f6f8; stroke: #c3cad2; stroke-width: 1; }
+    .line { fill: none; stroke: #7f8994; stroke-width: 1; }
+    .flow { fill: none; stroke: #2f5d9e; stroke-width: 2; }
+    .bnd { stroke: #b6bec7; stroke-width: 1; stroke-dasharray: 5 4; }
+    .halo { fill: #ffffff; }
+  </style>
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="2" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L8,4 L0,8 L2,4 z" fill="#7f8994"/>
+    </marker>
+    <marker id="arb" markerWidth="12" markerHeight="12" refX="3" refY="6" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L12,6 L0,12 L3,6 z" fill="#2f5d9e"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="664" fill="#ffffff"/>
+  <text class="t" x="24" y="30">The execution boundary: what runs where, and what a sandbox cannot reach</text>
+
+  <text class="m" x="480" y="84" text-anchor="middle">container boundary</text>
+  <line class="bnd" x1="480" y1="92" x2="480" y2="392"/>
+
+  <!-- control plane: x=24..400, y=92..392 -->
+  <rect class="panel" x="24" y="92" width="376" height="300"/>
+  <text class="n" x="40" y="116" font-weight="600">control plane</text>
+  <text class="m" x="40" y="134">decides and records; no sandboxed work</text>
+
+  <rect class="soft" x="40" y="152" width="344" height="36"/>
+  <text class="l" x="52" y="175">httpapi · REST + SSE fan-out</text>
+
+  <rect class="soft" x="40" y="194" width="344" height="36"/>
+  <text class="l" x="52" y="217">hub · one live agent per session</text>
+
+  <rect class="soft" x="40" y="236" width="344" height="36"/>
+  <text class="l" x="52" y="259">provision · sandbox, worktree, skills</text>
+
+  <rect class="soft" x="40" y="278" width="344" height="36"/>
+  <text class="l" x="52" y="301">llmgw · token in, decrypted key out</text>
+
+  <rect class="soft" x="40" y="320" width="344" height="36"/>
+  <text class="l" x="52" y="343">SQLite and the three keys, under /data</text>
+
+  <text class="m" x="40" y="380">the rule holds for every container placement</text>
+
+  <!-- sandbox: x=560..936, y=92..392 -->
+  <rect class="panel" x="560" y="92" width="376" height="300"/>
+  <text class="n" x="576" y="116" font-weight="600">sandbox</text>
+  <text class="m" x="576" y="134">the agent, and everything it forks</text>
+
+  <rect class="soft" x="576" y="152" width="344" height="36"/>
+  <text class="l" x="588" y="175">agent: pi --mode rpc</text>
+
+  <rect class="soft" x="576" y="194" width="344" height="36"/>
+  <text class="l" x="588" y="217">terminal shells, same account</text>
+
+  <rect class="soft" x="576" y="236" width="344" height="36"/>
+  <text class="l" x="588" y="259">browser: Chrome over CDP</text>
+
+  <rect class="soft" x="576" y="278" width="344" height="36"/>
+  <text class="l" x="588" y="301">shell + file API on :8080</text>
+
+  <rect class="soft" x="576" y="320" width="344" height="36"/>
+  <text class="l" x="588" y="343">workspace volume at /workspace</text>
+
+  <text class="m" x="576" y="380">no route to /data or the Docker socket</text>
+
+  <!-- crossings: 160 attach, 224 model call, 288 panels, 352 events -->
+  <rect class="halo" x="447" y="132" width="66" height="18"/>
+  <text class="m" x="480" y="146" text-anchor="middle">RPC attach</text>
+  <path class="flow" d="M405,160 L546,160" marker-end="url(#arb)"/>
+
+  <rect class="halo" x="444" y="196" width="72" height="18"/>
+  <text class="m" x="480" y="210" text-anchor="middle">model call</text>
+  <path class="line" d="M555,224 L411,224" marker-end="url(#ar)"/>
+
+  <rect class="halo" x="431" y="260" width="98" height="18"/>
+  <text class="m" x="480" y="274" text-anchor="middle">panel requests</text>
+  <path class="line" d="M405,288 L549,288" marker-end="url(#ar)"/>
+
+  <rect class="halo" x="437" y="324" width="86" height="18"/>
+  <text class="m" x="480" y="338" text-anchor="middle">events, logs</text>
+  <path class="line" d="M555,352 L411,352" marker-end="url(#ar)"/>
+
+  <!-- not reachable -->
+  <text class="n" x="24" y="420" font-weight="600">Not reachable from inside a sandbox</text>
+
+  <rect class="box" x="24" y="436" width="296" height="88"/>
+  <text class="n" x="40" y="462">no /data</text>
+  <text class="l" x="40" y="486">/data is not mounted:</text>
+  <text class="l" x="40" y="504">SQLite, master.key, other tenants</text>
+
+  <rect class="box" x="344" y="436" width="296" height="88"/>
+  <text class="n" x="360" y="462">no provider key</text>
+  <text class="l" x="360" y="486">the gateway injects it</text>
+  <text class="l" x="360" y="504">per request, in memory</text>
+
+  <rect class="box" x="664" y="436" width="272" height="88"/>
+  <text class="n" x="680" y="462">no Docker socket</text>
+  <text class="l" x="680" y="486">the runner holds it;</text>
+  <text class="l" x="680" y="504">the sandbox never mounts it</text>
+
+  <!-- the exception -->
+  <rect class="grp" x="24" y="548" width="912" height="92"/>
+  <text class="n" x="40" y="572" font-weight="600">-sandbox local: host placement, development only</text>
+  <text class="l" x="40" y="596">the agent is this process's child: one filesystem, one user, no container boundary.</text>
+  <text class="l" x="40" y="614">The boot log carries a WARN naming what runs on the host; nothing on the right exists here.</text>
+</svg>

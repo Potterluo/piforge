@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 736" width="960" height="736"
+     role="img" aria-labelledby="t02 d02">
+  <title id="t02">One message's life</title>
+  <desc id="d02">A prompt travels from the browser through model resolution and the session hub into
+    the sandbox, the agent calls the model gateway with a per-session token bound to that sandbox, and
+    the events stream back to the browser over SSE.</desc>
+  <style>
+    text { font-family: ui-sans-serif, system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; fill: #1d2227; }
+    .t { font-size: 13px; font-weight: 600; }
+    .n { font-size: 13px; }
+    .l { font-size: 12px; }
+    .m { font-size: 12px; fill: #67707a; }
+    .box { fill: #ffffff; stroke: #a9b1ba; stroke-width: 1; }
+    .note { fill: #f7f8fa; stroke: #c3cad2; stroke-width: 1; }
+    .life { stroke: #ccd2d9; stroke-width: 1; stroke-dasharray: 4 5; }
+    .line { fill: none; stroke: #7f8994; stroke-width: 1; }
+    .dash { fill: none; stroke: #7f8994; stroke-width: 1; stroke-dasharray: 5 4; }
+    .flow { fill: none; stroke: #2f5d9e; stroke-width: 2; }
+  </style>
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="2" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L8,4 L0,8 L2,4 z" fill="#7f8994"/>
+    </marker>
+    <marker id="arb" markerWidth="12" markerHeight="12" refX="3" refY="6" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L12,6 L0,12 L3,6 z" fill="#2f5d9e"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="736" fill="#ffffff"/>
+  <text class="t" x="24" y="30">One message: from POST to a streamed answer</text>
+
+  <!-- lifelines -->
+  <line class="life" x1="112" y1="124" x2="112" y2="680"/>
+  <line class="life" x1="392" y1="124" x2="392" y2="680"/>
+  <line class="life" x1="672" y1="124" x2="672" y2="680"/>
+  <line class="life" x1="864" y1="124" x2="864" y2="680"/>
+
+  <!-- participants -->
+  <rect class="box" x="24" y="72" width="176" height="52"/>
+  <text class="n" x="112" y="96" text-anchor="middle">browser</text>
+  <text class="m" x="112" y="114" text-anchor="middle">workbench UI</text>
+
+  <rect class="box" x="252" y="72" width="280" height="52"/>
+  <text class="n" x="392" y="96" text-anchor="middle">control plane (Go)</text>
+  <text class="m" x="392" y="114" text-anchor="middle">httpapi · hub · llmgw</text>
+
+  <rect class="box" x="572" y="72" width="200" height="52"/>
+  <text class="n" x="672" y="96" text-anchor="middle">sandbox</text>
+  <text class="m" x="672" y="114" text-anchor="middle">(user, project)</text>
+
+  <rect class="box" x="792" y="72" width="144" height="52"/>
+  <text class="n" x="864" y="96" text-anchor="middle">upstream</text>
+  <text class="m" x="864" y="114" text-anchor="middle">model API</text>
+
+  <!-- 1. the message -->
+  <text class="m" x="252" y="156" text-anchor="middle">POST /v1/sessions/{id}/messages</text>
+  <path class="flow" d="M117,168 L378,168" marker-end="url(#arb)"/>
+
+  <!-- 2. model resolution -->
+  <rect class="note" x="242" y="188" width="300" height="44"/>
+  <text class="l" x="392" y="208" text-anchor="middle">model resolution</text>
+  <text class="m" x="392" y="226" text-anchor="middle">session pin, else user shadows admin</text>
+
+  <!-- 3. hub.ensure -->
+  <text class="m" x="532" y="248" text-anchor="middle">hub.ensure: spawn or reattach</text>
+  <path class="line" d="M397,260 L661,260" marker-end="url(#ar)"/>
+
+  <!-- 4. inside the sandbox -->
+  <rect class="note" x="572" y="280" width="200" height="44"/>
+  <text class="l" x="672" y="300" text-anchor="middle">supervisor → pi</text>
+  <text class="m" x="672" y="318" text-anchor="middle">models.json: token</text>
+
+  <!-- 5. the agent calls the gateway -->
+  <text class="m" x="532" y="340" text-anchor="middle">POST /gw/llm/&lt;token&gt; + proof</text>
+  <path class="line" d="M667,352 L403,352" marker-end="url(#ar)"/>
+
+  <!-- 6. what the gateway does with it -->
+  <rect class="note" x="242" y="372" width="300" height="44"/>
+  <text class="l" x="392" y="392" text-anchor="middle">verify, in this order</text>
+  <text class="m" x="392" y="410" text-anchor="middle">signature · generation · address · proof</text>
+
+  <!-- 7. egress -->
+  <text class="m" x="800" y="432" text-anchor="middle">forward with the real key</text>
+  <path class="line" d="M397,444 L853,444" marker-end="url(#ar)"/>
+
+  <!-- 8..11. the way back -->
+  <text class="m" x="800" y="472" text-anchor="middle">streamed response</text>
+  <path class="dash" d="M859,484 L403,484" marker-end="url(#ar)"/>
+
+  <text class="m" x="532" y="512" text-anchor="middle">tokens to the agent</text>
+  <path class="dash" d="M397,524 L661,524" marker-end="url(#ar)"/>
+
+  <text class="m" x="532" y="552" text-anchor="middle">RPC events (JSONL)</text>
+  <path class="dash" d="M667,564 L403,564" marker-end="url(#ar)"/>
+
+  <text class="m" x="252" y="592" text-anchor="middle">SSE: run.delta … run.settled</text>
+  <path class="dash" d="M387,604 L123,604" marker-end="url(#ar)"/>
+
+  <rect class="note" x="242" y="628" width="300" height="44"/>
+  <text class="l" x="392" y="648" text-anchor="middle">hub rule: persist first,</text>
+  <text class="m" x="392" y="666" text-anchor="middle">then broadcast in seq order</text>
+
+  <!-- footnotes -->
+  <text class="m" x="24" y="700">Refusals, in order: 401 signature · 401 revoked generation · 403 wrong address · 403 missing or bad proof · then the provider lookup.</text>
+  <text class="m" x="24" y="718">The token names its sandbox, expires after 1 h and is revoked on pause; the proof is HMAC(per-sandbox secret, token).</text>
+</svg>
