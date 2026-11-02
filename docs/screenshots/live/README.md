@@ -1,23 +1,31 @@
 # Live screenshots
 
-Taken from a running deployment with a **real model**, not a stubbed peer: the transcript text, tool calls, test results, diffs and audit rows below were produced by an agent run against `volc / deepseek-v4-flash`.
+Every file here comes from a running deployment with a real provider (`volc / deepseek-v4-flash`).
+The transcripts, tool calls, test results, diffs and audit rows were produced by actual agent
+runs, not by a stubbed model.
 
-- Deployment: `pwsh scripts/up-isolated.ps1 -Port 7723` (isolated placement: control plane + runner + sandbox container)
-- Capture script: `e2e/scripts/public-shots.mjs` (`PIFORGE_BASE` selects the deployment, `OUT` the output directory)
-- Viewport 1440×900 at 2×, so each PNG is 2880×1800 (09/10 are 2880×2200: those pages do not fit one viewport)
-- Captured 2026-11-02; the script creates its own throwaway project, runs one real prompt, then deletes it
+- Captured 2026-11-02 against `http://127.0.0.1:7722` (container `pf-local`)
+- All ten files are from **one** run: one throwaway project (`pubshots-<epoch-ms>`) and one
+  session, `素数脚本：测试与提交`; the script deletes the project afterwards and re-checks `/healthz`
+- Script: `e2e/scripts/public-shots.mjs` — `PIFORGE_BASE` picks the deployment, `OUT` the output
+  directory, `ONLY=05` captures one file, `KEEP_PROJECT=1` leaves the project for debugging
+- Viewport 1440×900 at 2×, so 2880×1800 px. `09` and `10` are 2880×2600: those admin pages have
+  no inner scroll container, so at 900 px the per-sandbox quota list and the tenant/egress card
+  would be clipped
 
-| File | What it shows |
+| File | What is actually in it |
 |---|---|
-| `01-home.png` | The workspace list after sign-in: projects on the left, the session list under them. |
-| `02-workbench-running.png` | A run in flight: streamed assistant text, a live tool call, the composer switched to stop/queue. |
-| `03-workbench-settled.png` | The same run settled; the tool trace is one collapsed line and the composer is back to send mode. |
-| `04-test-panel.png` | The test panel after the agent ran `node --test`: parsed counts, duration and the exact command. |
-| `05-changes-panel.png` | The changes panel with a scoped diff, per-file `+N/−N`, and the diff open on the right. |
-| `06-terminal.png` | The built-in terminal attached to **the sandbox container** — its hostname differs from the control plane's. The path shown is the checkout inside that container. |
-| `07-inline-comment.png` | An inline review comment on a diff line: the quote, the comment, and the `位置` line the server added. |
-| `08-fork-dialog.png` | Forking a session into a branch with its own worktree. |
-| `09-admin-status.png` | `/admin/status`: runtime directories, per-sandbox disk quota, tenant limits and the egress mode. |
-| `10-audit.png` | `/admin/audit`: tool calls with model, commit, duration, token usage and the redacted argument preview. |
+| `01-home.png` | The project list after sign-in; the filter narrows it to the demo project, whose card shows branch `main`, sandbox state, and one session. |
+| `02-workbench-running.png` | A run in flight: streamed assistant text, `执行命令 node --test 运行中` in the tool trace, and the composer in stop/queue mode. |
+| `03-workbench-settled.png` | The same run settled; the tool trace collapsed to one line. |
+| `04-test-panel.png` | The test panel after `node --test`: parsed counts, duration, and the command that produced them. |
+| `05-changes-panel.png` | The changes panel with a scoped diff, per-file `+N/−N`, and the diff open beside it. |
+| `06-terminal.png` | The terminal attached to **the per-session sandbox container**: `hostname` is the sandbox, `pwd` is the checkout inside it. Neither the host nor the control plane's own name appears. |
+| `07-inline-comment.png` | An inline review comment on a diff line, with the quoted code and the `位置` line the server composed. |
+| `08-fork-dialog.png` | The fork dialog, filling in the branch that gets its own worktree. |
+| `09-admin-status.png` | `/admin/status`: runtime directories with sizes, per-sandbox quota against its budget, and the tenant limits / egress card. |
+| `10-audit.png` | `/admin/audit`: 13 rows from that run with tool, duration, model, commit, token counts and the redacted argument preview. |
 
-Screens here are of a **local single-host** deployment: one control plane, a runner, and one sandbox container per (user, project). What changes on other placements is written in [`docs/SANDBOX.md`](../SANDBOX.md) and [`docs/SANDBOX-K8S.md`](../SANDBOX-K8S.md).
+The set shows a single-host deployment: one control plane, a runner, and one sandbox container per
+(user, project). Other placements are described in [`docs/SANDBOX.md`](../SANDBOX.md) and
+[`docs/SANDBOX-K8S.md`](../SANDBOX-K8S.md).
