@@ -291,4 +291,4 @@ jobs:
             echo
             echo "Control plane needs: \`-p 7700:7700\`, \`-v piforge-data:/data\`, \`PIFORGE_SANDBOX\` and"
             echo "a provider key (\`PIFORGE_BOOTSTRAP_PROVIDER_KEY\`). Pre-release tags never move \`latest\`."
-          } >> "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
