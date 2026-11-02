@@ -30,6 +30,11 @@ events are persisted and broadcast over SSE.
 The model token inside the sandbox is worth nothing outside it: copied to the host, to a
 sibling sandbox or to another tenant it gets a 403. The provider key never enters the sandbox.
 
+![](docs/diagrams/03-execution-boundary.svg)
+
+Four things cross the boundary — the agent's RPC stream, its model call, panel requests and
+events. The database, the provider key and the Docker socket stay on the other side.
+
 ## Running it
 
 Requires Docker Engine 25+, `git`, and Go 1.25+ if you build from source.
@@ -96,6 +101,11 @@ else, and the agent keeps working because the gateway is what it needs.
 Quotas are per tenant — cpu, memory, pids, maximum concurrent sandboxes — and enforced when the
 container is created; a refusal is a typed `409` naming the limit. Disk is bounded per sandbox
 by `RLIMIT_FSIZE` plus an in-sandbox enforcer.
+
+Every directory under the data volume has an owner and a reclaim path: an eager delete when its
+session or project goes, and a janitor pass for what a crash left behind.
+
+![](docs/diagrams/05-data-layout.svg)
 
 ## The run lifecycle
 

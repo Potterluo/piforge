@@ -137,6 +137,15 @@ pwsh scripts/up-isolated.ps1          # three images, a preflight, the stack on 
       <figcaption>Quotas are per tenant — cpu, memory, pids, concurrent sandboxes — enforced when
         the container is created; a refusal is a typed <code>409</code> naming the limit.</figcaption>
     </figure>
+    <h3>Where agent code actually runs</h3>
+    <p>The boundary is a container, and the diagram says what crosses it and what does not. The one
+      exception is <code>-sandbox local</code>, drawn where it belongs: development only.</p>
+    <figure>
+      <img src="diagrams/03-execution-boundary.svg" alt="Control plane and sandbox, with the four crossings">
+      <figcaption>Four things cross the boundary: the RPC stream, the model call, panel requests, and
+        events. The database, the provider key and the Docker socket stay on the control-plane side.</figcaption>
+    </figure>
+
     <h3>What ends a run</h3>
     <p>A run has exactly one terminal state and the control plane writes which one:
       <code>agent_settled</code>, a user stop, a reconciliation pass after the process died, or a
@@ -146,6 +155,14 @@ pwsh scripts/up-isolated.ps1          # three images, a preflight, the stack on 
       <img src="diagrams/06-run-state.svg" alt="Run state machine">
       <figcaption>Each terminal state writes its own event; the interruption marker carries the
         cause and what the workspace still holds.</figcaption>
+    </figure>
+    <h3>What lives on disk</h3>
+    <p>Every directory under the data volume has an owner and a reclaim path — an eager delete when
+      its session or project goes, and a janitor pass for the rows a crash left behind.</p>
+    <figure>
+      <img src="diagrams/05-data-layout.svg" alt="Data directory layout with owners and reclaim paths">
+      <figcaption>The audit table is retained by policy, not cleanup; workspace volumes live outside
+        the data volume and are removed with their sandbox.</figcaption>
     </figure>
   </div>
 </section>
