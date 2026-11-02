@@ -1,0 +1,121 @@
+/* PiForge — GitHub Pages. System fonts, one accent, no framework. */
+:root {
+  --ink: #14181d;
+  --ink-2: #3f4854;
+  --ink-3: #6b7683;
+  --line: #d7dce2;
+  --line-2: #eceff3;
+  --bg: #ffffff;
+  --bg-2: #f7f8fa;
+  --accent: #2f5d9e;
+  --radius: 3px;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.65 ui-sans-serif, system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.wrap { max-width: 980px; margin: 0 auto; padding: 0 24px; }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code, pre {
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Menlo, Consolas, monospace;
+  font-size: 13.5px;
+}
+
+pre {
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+
+p code, li code, td code {
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: 2px;
+  padding: 1px 4px;
+}
+
+header.top {
+  border-bottom: 1px solid var(--line);
+  padding: 14px 0;
+}
+
+header.top .wrap { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+
+.brand { font-weight: 600; letter-spacing: -0.01em; }
+
+header.top nav { margin-left: auto; display: flex; gap: 18px; flex-wrap: wrap; }
+header.top nav a { color: var(--ink-2); font-size: 14px; }
+
+section { padding: 56px 0; border-bottom: 1px solid var(--line-2); }
+section:last-of-type { border-bottom: 0; }
+
+h1 {
+  font-size: 34px;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  margin: 0 0 14px;
+  font-weight: 650;
+}
+
+h2 {
+  font-size: 20px;
+  letter-spacing: -0.01em;
+  margin: 0 0 18px;
+  font-weight: 600;
+}
+
+h3 { font-size: 15px; margin: 26px 0 8px; font-weight: 600; }
+
+.lede { font-size: 18px; color: var(--ink-2); margin: 0 0 8px; max-width: 46em; }
+
+.meta { color: var(--ink-3); font-size: 13.5px; }
+
+figure { margin: 22px 0 0; }
+figure img { width: 100%; height: auto; display: block; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; }
+figcaption { color: var(--ink-3); font-size: 13px; margin-top: 7px; }
+
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+
+@media (max-width: 760px) {
+  .grid-2, .grid-3 { grid-template-columns: 1fr; }
+  h1 { font-size: 27px; }
+  section { padding: 40px 0; }
+}
+
+table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line-2); vertical-align: top; }
+th { color: var(--ink-3); font-weight: 600; font-size: 13px; text-transform: none; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+ul.limits { padding-left: 18px; margin: 0; }
+ul.limits li { margin: 0 0 10px; color: var(--ink-2); }
+ul.limits li strong { color: var(--ink); }
+
+footer { padding: 34px 0 60px; color: var(--ink-3); font-size: 13.5px; }
+footer a { color: var(--ink-2); }
+
+.tag {
+  display: inline-block;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 12px;
+  color: var(--ink-3);
+  margin-right: 6px;
+}

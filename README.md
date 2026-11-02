@@ -1,336 +1,164 @@
 # PiForge
 
-A multi-user, browser-based coding-agent workbench built on [Pi](https://github.com/earendil-works/pi).
+A self-hosted, multi-user coding-agent workbench. A Go control plane runs
+[Pi](https://github.com/earendil-works/pi) agents inside per-project sandboxes and serves a
+browser UI: transcript, file tree, diff view, terminal, built-in browser, and an operator
+console with quotas, egress policy and an audit trail.
 
-One user, one agent, one workspace — with a file tree, a git graph, file preview, a
-follow-along terminal, an interactive terminal, a built-in browser, and conversations
-that can fork, run in parallel and carry sidecars. Everything runs in an isolated
-sandbox; model keys never leave the control plane.
+Model keys stay in the control plane. Agents run in a container, not on the host.
 
-The product spec lives in [`docs/PRD.md`](docs/PRD.md). It is the authority for every
-behavioural question; this README only covers running the thing.
+Status: working, self-hosted, single host today. The Kubernetes provider is implemented and
+was run against a real cluster, but is not the default. Read [Limits](#limits) before
+deploying.
 
----
+## How it works
+
+![](docs/diagrams/01-system.svg)
+
+One browser session talks to one control plane. The control plane owns the database, the model
+gateway and the agent processes; the sandbox owns the workspace. Everything the agent does —
+its files, its shell, its browser — happens on the sandbox side.
+
+A message goes: `POST /v1/sessions/{id}/messages` → resolve the model → spawn or reattach the
+agent → the agent calls back through the gateway with a token bound to its own sandbox → the
+control plane checks signature, revocation, source address and an HMAC proof, then calls the
+real provider with the real key → the response streams back to the agent → the agent's RPC
+events are persisted and broadcast over SSE.
+
+![](docs/diagrams/02-request-path.svg)
+
+The model token inside the sandbox is worth nothing outside it: copied to the host, to a
+sibling sandbox or to another tenant it gets a 403. The provider key never enters the sandbox.
+
+## Running it
+
+Requires Docker Engine 25+, `git`, and Go 1.25+ if you build from source.
+
+```pwsh
+# PowerShell
+$env:PIFORGE_BOOTSTRAP_PROVIDER_KEY = "<your provider key>"
+pwsh scripts/up-isolated.ps1          # builds three images, runs a preflight, starts the stack on :7723
+```
+
+```bash
+# bash; same script, same result
+export PIFORGE_BOOTSTRAP_PROVIDER_KEY="<your provider key>"
+pwsh scripts/up-isolated.ps1 -Port 7723
+```
+
+It prints the URL and the seeded accounts. `-Down` stops it, `-Rebuild` forces a rebuild. The
+script refuses to start a stack whose images were built from a different source digest than the
+working tree.
+
+There is no default placement. Starting the control plane without `-sandbox` (or
+`PIFORGE_SANDBOX`) is a startup error; `-sandbox local` is the development placement, where the
+agent runs next to the control plane on the host with no container boundary. The container
+shape, for reference:
+
+```pwsh
+docker build --build-arg INSTALL_CHROMIUM=true -t piforge:local .
+docker run -d --name piforge -p 7722:7700 --cap-drop DAC_OVERRIDE `
+  -v piforge-data:/data -e PIFORGE_SANDBOX=local -e PIFORGE_PORT=7700 -e PIFORGE_DATA=/data `
+  -e PIFORGE_SEED_EMAIL=admin@example.com -e PIFORGE_SEED_PASSWORD='<set one>' `
+  -e PIFORGE_DEFAULT_PROVIDER=volc piforge:local
+```
+
+`docs/HANDOFF.md` is the operator view: flags, data layout, keys, backup, restart behaviour,
+and the commands behind every number below.
 
 ## What it looks like
 
-Screenshots from a local run (`e2e/scripts/demo-shots.mjs` reproduces them against a
-fake-Pi instance; the only thing not real in them is the model).
+All of these come from a running deployment with a real model — `e2e/scripts/public-shots.mjs`
+drives it, and [`docs/screenshots/live/README.md`](docs/screenshots/live/README.md) says what
+each one shows.
 
 | | |
 |---|---|
-| ![workbench while a run is streaming](docs/screenshots/03-workbench-running.png) | ![settled run with an expanded tool trace](docs/screenshots/04-workbench-settled.png) |
-| A run in flight: streamed text, a live tool call, and the dual-queue composer (Enter queues, ⌘/Ctrl+Enter interrupts). | Settled: the tool trace opens to its output and input, and the composer returns to send mode. |
-| ![file tree with syntax-highlighted preview](docs/screenshots/06-file-preview.png) | ![git history with lanes](docs/screenshots/07-git-graph.png) |
-| Lazy file tree and a preview with highlighting, line numbers and a language badge. | Commit history with lanes and HEAD markers, from the same sandbox the agent writes to. |
-| ![terminal running real commands](docs/screenshots/08-terminal.png) | ![browser panel showing a live page](docs/screenshots/09-browser.png) |
-| A real PTY: `git log` and `ls` run inside the sandbox checkout. | The sandbox's own Chrome, screencast over CDP — the page the agent is driving. |
+| ![](docs/screenshots/live/02-workbench-running.png) | ![](docs/screenshots/live/04-test-panel.png) |
+| A run in flight: streamed text, a live tool call, stop/queue on the composer. | The test panel after the agent ran `node --test`: counts, duration, the command. |
+| ![](docs/screenshots/live/05-changes-panel.png) | ![](docs/screenshots/live/07-inline-comment.png) |
+| Changes with a scoped diff and per-file `+N/−N`. | An inline comment: the quote reaches the agent with path, line and current position. |
+| ![](docs/screenshots/live/10-audit.png) | ![](docs/screenshots/live/09-admin-status.png) |
+| `/admin/audit`: every tool call with model, commit, duration, tokens, redacted arguments. | `/admin/status`: runtime directories, per-sandbox quota, tenant limits, egress mode. |
 
-More in [`docs/screenshots/`](docs/screenshots): login, project overview, a forked
-branch, user management, and the provider/skill/MCP settings pages.
+More in [`docs/screenshots/live/`](docs/screenshots/live) and the older
+[`docs/screenshots/`](docs/screenshots) set.
 
-Two screens worth calling out, because they are where a self-hosted deployment
-actually gets configured:
+## Tenancy
 
-| | |
-|---|---|
-| ![user management](docs/screenshots/40-admin-users.png) | ![editing a provider](docs/screenshots/42-provider-edit.png) |
-| Accounts: create, promote, disable, reset a password. The last admin cannot demote themselves, and that guard is a test. | A provider's model list is editable in place — any id the endpoint serves — and an empty key field means "keep the one on file". |
-| ![runtime status](docs/screenshots/55-admin-status.png) | ![support mode](docs/screenshots/56-support-mode.png) |
-| What an operator checks when something feels wrong: live agents from the hub's own subscription table, sessions, sandboxes, counts straight from the database. | Support mode is the only way an admin can read somebody's conversation: a required reason, a 30-minute grant, and a receipt the owner sees. |
-## Why it is built this way
+One sandbox per (user, project). Each tenant gets its own Docker network, joined only by the
+control plane and the runner, so a sandbox cannot reach another tenant's sandbox or the control
+plane's own port. Egress is closed by default: a sandbox reaches the model gateway and nothing
+else, and the agent keeps working because the gateway is what it needs.
 
-| Piece | Responsibility |
-|---|---|
-| **Pi** (`pi --mode rpc`) | The agent loop: provider abstraction, tool pipeline, session tree, compaction, skills, MCP. |
-| **Go control plane** | Everything Pi deliberately refuses to do: sandboxes, worktrees, credentials, persistence, SSE fan-out, file/git/terminal/browser services. |
-| **Next.js + shadcn/ui** | The workbench. No bespoke chat primitives — `MessageScroller`, `Trace`, `Code Block` and `Bubble` are used as shipped. |
+![](docs/diagrams/04-tenancy.svg)
 
-Two rules the codebase never breaks:
+Quotas are per tenant — cpu, memory, pids, maximum concurrent sandboxes — and enforced when the
+container is created; a refusal is a typed `409` naming the limit. Disk is bounded per sandbox
+by `RLIMIT_FSIZE` plus an in-sandbox enforcer.
 
-1. **The control plane does not execute untrusted code.** It never runs agent output;
-   only the sandbox does.
-2. **`agent_settled` is the only completion signal.** `agent_end` means one low-level run
-   finished — retries, compaction, steering and follow-ups can still follow. Treating
-   `agent_end` as "done" is the single most common way to get this wrong.
+## The run lifecycle
 
----
+A run ends with exactly one terminal state, and the control plane writes which one: `agent_settled`,
+a user stop, a reconciliation pass after the process died, or a restart with a reattach. The
+transcript says which happened and what survived, including the case where the sandbox is gone
+and nothing can be continued.
 
-## Layout
+![](docs/diagrams/06-run-state.svg)
 
-```
-backend/
-  cmd/piforged/        the server
-  cmd/fakepi/          Pi-compatible RPC peer for tests and local dev (no model needed)
-  internal/contracts/  domain types + AgentRuntime/Workspace/SandboxProvider interfaces
-                       (the bottom of the dependency graph; imports nothing internal)
-  internal/pi/         Pi RPC bridge: framing, command correlation, stream assembly
-  internal/pitest/     the fake peer, importable so tests run in-process
-  internal/store/      SQLite persistence, user-scoped repositories
-  internal/auth/       opaque session tokens, bcrypt, CSRF
-  internal/httpapi/    REST + SSE + WebSocket router (stdlib mux, Go 1.22 patterns)
-  internal/gitx/       git via argv (status, diff, DAG, worktrees)
-  internal/fsx/        file tree, previews, search, path-traversal defence
-  internal/sandbox/    SandboxProvider; local implementation runs on the host
-  internal/term/       PTY sessions with an offset-addressed ring buffer
-  internal/provision/  sandbox -> worktree -> store ordering, and tooling mount
-  internal/materialize/ projects skills and MCP servers into a checkout
-  internal/llmgw/      model egress: per-session tokens, key injection, streaming
-  internal/crypto/     AES-GCM box for provider keys at rest
-  internal/browser/    one Chrome per sandbox, driven over CDP, screencast out
-  tools/wsprobe/       speaks the terminal protocol, for triage without a browser
-web/                   Next.js App Router + shadcn/ui
-e2e/                   Playwright end-to-end suite
-docs/PRD.md            product spec
-docs/research/         the research briefings the spec was derived from
-```
+## How it is verified
 
-## Requirements
-
-- Go 1.25+
-- Node 22+ and pnpm
-- git on PATH
-- Optional: `pi` on PATH for a real agent (without it, the fake peer drives everything)
-- Optional: `rg` (ripgrep) for fast content search; a bounded walk is used otherwise
-- Optional: Chrome/Chromium for the browser panel (`-chrome <path>`); without it
-  the panel reports "unavailable" instead of pretending
-- Optional, for the isolated stack: Docker Engine 25+ (the runner creates sandboxes with
-  `volume-subpath` mounts)
-
-## Run the isolated stack (one command)
-
-This is the deployment shape the product is built for: a control plane container, a
-sandbox runner that is the only process holding `/var/run/docker.sock`, and one
-sandbox container per (user, project) in which the agent, the shell and the browser run.
-The workspace volume is mounted by the sandbox and by nothing else.
-
-```powershell
-$env:PIFORGE_DRILL_KEY='...'   # the provider key; the script never prints it
-pwsh scripts/up-isolated.ps1
-```
-
-That one command:
-
-1. builds the three images in the only order that works — control plane → runner →
-   sandbox image built **from** the control plane, so `pi` and `/opt/piforge/piforged`
-   are inside it at exactly the version the control plane runs;
-2. runs the preflight (`backend/cmd/preflight`): Docker Engine ≥ 25, all three images
-   present, and — the check a tag cannot do — that the sandbox image really contains
-   `/opt/piforge/piforged` and `pi`. It fails before anything starts, naming the missing
-   piece;
-3. starts the stack on **7723** (so it cannot collide with a `pf-local` on 7722) with a
-   fresh data volume, the seeded accounts, and the provider you passed, then waits for
-   `/healthz`.
-
-Then open <http://127.0.0.1:7723/login> (`admin@piforge.local` / `piforge-admin-123`,
-`dev@piforge.local` / `piforge-dev-123` — change them before exposing the port).
-
-```powershell
-pwsh scripts/up-isolated.ps1 -Check     # preflight only: no build, no start
-pwsh scripts/up-isolated.ps1 -Rebuild   # rebuild all three images, then start
-pwsh scripts/up-isolated.ps1 -Down      # remove the stack, its sandboxes and volumes
-```
-
-`.env.example` is the same configuration for the manual path
-(`docker compose -f docker-compose.runner.yml up`). It names `piforge/sandbox-agent`, not
-the published AIO base: that base has no agent runtime, so a sandbox running it cannot
-start the agent — the trap the preflight exists to catch.
-
-## Run it locally
-
-```bash
-# 1. backend (creates ./data and seeds an admin + demo user; the log names the
-#    accounts but never prints their passwords, so choose them here)
-cd backend
-PIFORGE_SEED_PASSWORD='piforge-admin-123' \
-PIFORGE_SEED_USER_PASSWORD='piforge-dev-123' \
-go run ./cmd/piforged -sandbox local -data ../data -addr 127.0.0.1:8080 -fake-pi \
-  -chrome "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-# On Windows PowerShell:
-#   $env:PIFORGE_SEED_PASSWORD='piforge-admin-123'; $env:PIFORGE_SEED_USER_PASSWORD='piforge-dev-123'
-# If you leave them unset, each account gets a generated password that is
-# deliberately NOT logged. With no other admin, the only recovery is a fresh
-# -data directory plus these variables; set them before the first boot.
-
-# 2. frontend
-cd web
-pnpm install
-pnpm dev            # http://localhost:3000, proxies /v1 to 127.0.0.1:8080
-```
-
-`-fake-pi` points the runtime at the built-in fake peer instead of a real `pi`
-binary. The fake peer performs a scripted run (thinking → text → a `bash` tool call
-with streaming output → a final message), which is enough to exercise the entire
-product surface without an API key.
-
-Drop `-fake-pi` once `pi` is installed and configured; nothing else changes.
-
-### Flags that matter
-
-| Flag | Default | Why you would change it |
+| Gate | Command | Last result |
 |---|---|---|
-| `-sandbox` | **none — required** | `local` runs the agent, terminal, browser and files on this host (development only: the boot log carries a WARN that there is no container boundary); `docker`/`runner` run them inside a sandbox. A start that names no provider is refused. |
-| `-data` | `./data` | Sandboxes, the SQLite file and the generated master key live here. |
-| `-fake-pi` | off | Run the whole product with no model account. |
-| `-pi` | `pi` on PATH | A specific Pi binary. |
-| `-chrome` | unset | Enables the browser panel. Unset is a supported state: the API answers 422 with a reason. |
-| `-headless-browser` | on | Turn off to watch the sandbox browser on a real display. |
-| `-browser-idle-timeout` | `60s` | Stop a sandbox browser after this long with no panel viewer attached. `0` keeps the 60s default; a negative value disables the policy. |
-| `-gateway-url` | `http://<addr>` | The base URL handed to agents for model traffic. Must be reachable *from inside* the sandbox. |
-| `-default-provider` | `shared-anthropic` | Which provider a session uses when it pins no model. |
-| `-secure-cookies` | off | Required when serving over TLS. |
-| `-isolation` | `none` | `bubblewrap`/`firejail`: run the agent, terminal shells and the sandbox browser inside a process jail (Linux). |
+| Backend | `cd backend && go test ./... -count=1` | 45 packages, no failures |
+| Web unit | `pnpm --dir web test -- --run` | 307 tests in 42 files |
+| End-to-end | `cd e2e && pnpm test` | 182 tests, 0 retries, 0 flaky |
+| From zero | `pwsh scripts/deliver-check.ps1` | 125 checks: image → stack → real run → commit → test panel → PR → browser → inline comment → teardown |
+| Lint | `pnpm --dir web lint` | 0 errors, 0 warnings |
 
-Environment: `PIFORGE_MASTER_KEY` (base64/hex/32 raw bytes) seals provider keys;
-without it a `master.key` is generated in the data directory on first boot.
-`PIFORGE_ALLOWED_ORIGINS` pins the exact origins allowed to open a terminal or
-browser socket when TLS is terminated in front of the app.
-`PIFORGE_BROWSER_IDLE_TIMEOUT` is the same knob as `-browser-idle-timeout` (a Go
-duration, e.g. `90s`).
+The delivery drill starts from a throwaway volume and a seeded account, so it fails if the
+product needs a step the documentation does not describe. `docs/STATUS.md` is the requirement
+ledger: one row per promise, with the test that asserts it.
 
-**First run without a UI visit.** A fresh deployment has accounts and no model
-account, so every send answers `400 no_model` until somebody opens Settings. An
-unattended deployment (CI, a demo box, a customer's trial) can make that a
-startup step instead:
+Isolation, tenancy and the credential boundary were attacked on purpose, six times. The
+findings and their fixes are in `docs/EXECUTION-BOUNDARY.md`, `docs/DATA-FLOW-AUDIT.md` and
+`docs/AUDIT.md`, including what the audit chain cannot prove.
 
-```sh
-PIFORGE_BOOTSTRAP_PROVIDER='volc|https://ark.cn-beijing.volces.com/api/v3|doubao-seed-1-6'
-PIFORGE_BOOTSTRAP_PROVIDER_KEY='...'
-```
+## Limits
 
-`name|base_url|model` is an OpenAI-compatible provider; `base_url` may be empty.
-On startup it creates the shared provider **only when no usable shared provider
-already exists**, so a restart never replaces an operator's provider (including
-its key). The key is sealed before it reaches the database and is never logged.
-The same values, minus the key, are exposed by `GET /v1/setup` as the admin
-first-run form's prefill. The home page and the composer also show a setup panel
-whose admin action creates the shared provider in place; `GET /v1/setup` returns
-`{needs_provider, is_admin, shared_provider_available}`.
+These are real, and they decide whether this fits:
 
-## How the moving parts fit
+- **One host.** Control plane, runner and sandboxes are containers on one Docker daemon. The
+  Kubernetes provider exists and was run against a real cluster, but multi-host operation and
+  the Linux-native checks in `docs/LINUX-VERIFY.md` are not signed off.
+- **Containers, not microVMs.** A sandbox is a Docker container with `cap-drop ALL` plus five
+  measured capabilities, `no-new-privileges`, no Docker socket and no host mounts. A kernel bug
+  is the escape path; if your tenants are adversarial rather than merely untrusted, use gVisor
+  or a VM runtime.
+- **Same-tenant siblings share a bridge.** Isolation is per tenant, not per sandbox: one user's
+  projects can reach each other's port. The sandbox API key rejects them, but they hold that
+  network position.
+- **Egress is all-or-nothing.** `none` (default) or `open`, per tenant. There is no hostname
+  allow-list; that needs a filtering proxy, which is not built.
+- **Audit is tamper-evident, not tamper-proof.** Rows are chained, so an edit or a deleted row
+  shows up; anything with database write access can recompute the chain, because no HMAC key is
+  kept.
+- **Windows paths are exercised, native Linux is not.** `docs/LINUX-VERIFY.md` separates what ran
+  in Linux containers from what needs a Linux host.
 
-**Model traffic never carries a real key.** A session's process is started with
-`ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL` pointing at `/gw/llm/<token>` and the token
-in place of the API key. The gateway validates the token (stateless HMAC, so no
-database hit per model call), resolves the provider through the user-shadows-admin
-rule, decrypts the key, and streams the response back with `FlushInterval: -1` so
-the first token is not delayed by buffering. Consequences worth knowing: changing
-a model does not restart a sandbox, and a leaked sandbox variable is worth minutes
-against one upstream host.
+## Documents
 
-That last point is worth stating plainly, because an agent can print its own
-environment and sometimes does: the `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` inside a
-sandbox are **per-session gateway tokens**, not the provider's key. They are bound
-to one session, expire on their own, and open exactly one door — the model gateway
-for that session's provider. They cannot read another session, another provider, or
-any other user's data. If one appears in a transcript, it is a token that will be
-dead shortly, not a credential that needs rotating. The provider's real key never
-enters the sandbox at all: it is sealed in the database and injected by the gateway
-on the way out.
+| Document | Contents |
+|---|---|
+| [`docs/HANDOFF.md`](docs/HANDOFF.md) | run, operate, extend; keys and backup |
+| [`docs/PRD.md`](docs/PRD.md) | what the product promises, in behavioural terms |
+| [`docs/SANDBOX.md`](docs/SANDBOX.md), [`docs/SANDBOX-DEPLOY.md`](docs/SANDBOX-DEPLOY.md) | placements, images, isolation |
+| [`docs/SANDBOX-K8S.md`](docs/SANDBOX-K8S.md) | Kubernetes provider and manifests |
+| [`docs/EXECUTION-BOUNDARY.md`](docs/EXECUTION-BOUNDARY.md) | where agent code runs, and what was tried against it |
+| [`docs/AUDIT.md`](docs/AUDIT.md), [`docs/DATA-FLOW-AUDIT.md`](docs/DATA-FLOW-AUDIT.md) | the audit trail; every tenant-input edge |
+| [`docs/DELIVERY-DRILL.md`](docs/DELIVERY-DRILL.md) | the from-zero check, assertion by assertion |
+| [`docs/STATUS.md`](docs/STATUS.md) | the requirement ledger |
 
-**Skills and MCP are files, so they are projected as files.** `internal/materialize`
-writes `.pi/skills/<slug>/SKILL.md` and `.mcp.json` into the checkout on every
-provisioning pass: idempotent, and it removes what it previously mounted when the
-config shrinks. Anything it writes goes into `.git/info/exclude`, never
-`.gitignore` — mounted tooling is not the user's change and must not appear in
-their diff.
+## License
 
-**A skill tree is frozen per session, and read-only without extra capabilities.**
-The mechanism is decided at runtime and named in the UI: a read-only bind mount
-(`bind-ro`) when `CAP_SYS_ADMIN` is available, otherwise a read-only copy
-(`copy-ro`). `copy-ro` needs no capability — the files are 0444/0555, and Windows
-maps that to `FILE_ATTRIBUTE_READONLY` — but the image runs as root, and root
-ignores those bits through `CAP_DAC_OVERRIDE`. The deployment therefore drops
-that one capability (`cap_drop: [DAC_OVERRIDE]`, which costs nothing: every file
-the control plane writes is its own); without the drop the product still starts,
-but reports `copy` (frozen, writable) instead of pretending. `SYS_ADMIN` is
-optional: it upgrades the mechanism (the kernel enforces the mount, and many
-sessions can share one snapshot instead of each holding a copy), not the
-correctness. A session's snapshot lives under `<data>/skill-snapshots/<session>`
-and is deleted with its session or project; the janitor sweeps the ones a crash
-leaves behind.
-
-**One Chrome per sandbox, watched over CDP.** The profile lives in the sandbox root
-(so deleting a sandbox deletes the cookies) and outside the checkout (so it never
-shows up in `git status`). Frames come down as binary JPEG on the same WebSocket
-that carries input up; every frame is acked, because Chrome silently stops sending
-otherwise.
-
-## Test
-
-These are the gates, and each one has to be green before a change is delivered:
-
-```bash
-# backend unit + integration
-cd backend && go test ./... -race
-
-# frontend lint — a gate, not a suggestion; it must exit 0 with no warnings
-cd web && pnpm lint
-
-# frontend unit (git lane layout, SSE reducer, formatting)
-cd web && pnpm test
-
-# end-to-end (starts the backend with the fake peer, drives a real browser)
-# It reuses e2e/.data on purpose: a pass must not depend on a fresh volume, and
-# a reused one is what catches state leaking from one spec to the next.
-cd e2e && pnpm install && pnpm test
-# rebuild e2e/.data from empty when that is what you want
-cd e2e && pnpm test:fresh
-```
-
-The from-zero delivery drill is the last gate: `pwsh scripts/deliver-check.ps1` (see
-`docs/DELIVERY-DRILL.md`). Lint ran red for several rounds without anyone noticing, which is
-the argument for listing it here rather than in a comment: a check nobody runs is a check
-that is already failing.
-
-## Security model in one paragraph
-
-A sandbox is created per `(project, user)` and never shared. It holds no provider key,
-no cloud metadata route and no service-account token; the agent talks to the LLM
-gateway with a short-lived token that only the gateway accepts. `PTY` masters live
-*inside* the sandbox so a snapshot cannot sever a terminal. Ports, preview URLs and the
-browser CDP channel are all addressed by a signed token bound to
-`(user, sandbox, port, expiry)`. File APIs clean and prefix-check every path and refuse
-symlinks that escape the worktree. The full reasoning, including the traps, is in
-PRD §6.
-
-## Status
-
-The whole product surface is implemented and covered: the RPC bridge and its event
-normalization, the session/branch/sidecar model, SQLite persistence with user
-scoping, SSE replay, git status/diff/DAG/worktrees, the file tree and previews, real
-PTYs over a WebSocket relay, the model gateway with sealed keys, skills/MCP
-materialisation, and the sandbox browser.
-
-Test counts, measured on 2026-10-31 against this tree: **734 Go test functions**
-(`cd backend && go test ./... -count=1`, every package ok, including a real-Chrome
-integration test and a real-git repository), **272 frontend unit tests in 34 files**
-(`pnpm --dir web test -- --run`), and **182 end-to-end tests in 93 files** against the real
-control plane in a real browser (`pnpm --dir e2e test --list`; one of the 182 is the
-pre-flight guard, and a full run passes 182/182 on one worker).
-
-Earlier revisions of this paragraph claimed 256 / 108 / 81, and `docs/DELIVERY-DRILL.md`
-§7 records 223 web and 164 e2e tests. Those are the counts of the runs they describe
-(2026-10-30), not of this tree; the numbers above are the ones to trust. The e2e total was
-181 until this tree added `e2e/tests/91-interrupt-then-message.spec.ts`.
-
-What is deliberately not here yet, and why:
-
-- **MicroVM sandboxing (Firecracker/gVisor).** The `SandboxProvider` interface is the
-  seam and the local provider is what runs. A microVM backend needs a host daemon and
-  an image pipeline; neither can be faked honestly, so it stays a seam rather than a
-  stub that pretends. What does exist is `-isolation bubblewrap|firejail`: every
-  process this control plane starts — the agent, the shells in the terminal panel and
-  the sandbox browser — is launched through the same launcher, so the flag covers all
-  three rather than only the agent. The only path it cannot cover is whatever the
-  agent forks itself, which is exactly why the agent is the one process that must be
-  wrapped.
-- **Multi-replica fan-out.** Events are persisted before they are broadcast, so an
-  SSE reconnect is already correct across replicas; what is missing is a shared
-  bus that wakes subscribers on another node.
-- **Binary assets in a skill bundle.** Skills are authored as text: `SKILL.md` in the
-  editor plus any number of picked files, written through
-  `PUT /v1/skills/{id}/bundle`. A bundle that needs a compiled binary or nested
-  directories can be uploaded through that endpoint directly, but the browser picker
-  only sends flat text files.
-
+Not chosen yet. Add one before you expect others to reuse this.

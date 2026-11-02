@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PiForge — self-hosted coding-agent workbench</title>
+<meta name="description" content="A self-hosted, multi-user coding-agent workbench: Go control plane, browser UI, agents running inside per-project sandboxes.">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <span class="brand">PiForge</span>
+    <span class="meta">coding-agent workbench, self-hosted</span>
+    <nav>
+      <a href="#how">How it works</a>
+      <a href="#run">Run it</a>
+      <a href="#shots">Screenshots</a>
+      <a href="#tenancy">Tenancy</a>
+      <a href="#verified">Verification</a>
+      <a href="#limits">Limits</a>
+      <a href="https://github.com/Potterluo/piforge">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<section id="intro">
+  <div class="wrap">
+    <h1>Agents that write code, in a sandbox you control.</h1>
+    <p class="lede">A Go control plane runs <a href="https://github.com/earendil-works/pi">Pi</a>
+      agents inside per-project containers and serves a browser UI: transcript, file tree, diff
+      view, terminal, built-in browser, and an operator console with quotas, egress policy and
+      an audit trail.</p>
+    <p class="meta">Model keys stay in the control plane. Agents run in a container, not on the host.</p>
+    <p>
+      <span class="tag">Go</span><span class="tag">Next.js</span><span class="tag">SQLite</span>
+      <span class="tag">Docker · Kubernetes</span><span class="tag">self-hosted</span>
+    </p>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p>One browser session talks to one control plane. The control plane owns the database, the
+      model gateway and the agent processes; the sandbox owns the workspace. Everything the agent
+      does — its files, its shell, its browser — happens on the sandbox side.</p>
+    <figure>
+      <img src="diagrams/01-system.svg" alt="Control plane, sandbox provider and one sandbox per (user, project)">
+      <figcaption>The control plane never mounts a workspace. The sandbox holds the agent, the
+        checkout and the panel API; the provider key does not enter it.</figcaption>
+    </figure>
+    <p>One message: <code>POST /v1/sessions/{id}/messages</code> → resolve the model → spawn or
+      reattach the agent → the agent calls back through the gateway with a token bound to its own
+      sandbox → the control plane checks signature, revocation, source address and an HMAC proof,
+      then calls the real provider → the response streams back → the agent's RPC events are
+      persisted and broadcast over SSE.</p>
+    <figure>
+      <img src="diagrams/02-request-path.svg" alt="Life of one message through the gateway">
+      <figcaption>The model token inside a sandbox is worth nothing outside it: copied to the host,
+        to a sibling sandbox or to another tenant it is refused.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="run">
+  <div class="wrap">
+    <h2>Run it</h2>
+    <p>Docker Engine 25+, <code>git</code>, and Go 1.25+ if you build from source.</p>
+<pre><code>$env:PIFORGE_BOOTSTRAP_PROVIDER_KEY = "&lt;your provider key&gt;"
+pwsh scripts/up-isolated.ps1          # three images, a preflight, the stack on :7723</code></pre>
+    <p class="meta">It prints the URL and the seeded accounts. <code>-Down</code> stops it,
+      <code>-Rebuild</code> forces a rebuild. There is no default placement: starting without
+      <code>-sandbox</code> is a startup error, and <code>-sandbox local</code> is the
+      development placement with no container boundary.</p>
+    <p><a href="https://github.com/Potterluo/piforge/blob/master/docs/HANDOFF.md">docs/HANDOFF.md</a>
+      covers flags, data layout, keys, backup and restart behaviour.</p>
+  </div>
+</section>
+
+<section id="shots">
+  <div class="wrap">
+    <h2>Screenshots</h2>
+    <p class="meta">Every image below is from a running deployment with a real model —
+      <code>e2e/scripts/public-shots.mjs</code> drives it, so the transcripts, tool calls, test
+      results and audit rows were produced by an agent run.</p>
+
+    <div class="grid-2">
+      <figure>
+        <img src="screenshots/live/02-workbench-running.png" alt="A run in flight">
+        <figcaption>A run in flight: streamed text, a live tool call, stop/queue on the composer.</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/live/04-test-panel.png" alt="Test panel with parsed results">
+        <figcaption>The test panel after the agent ran <code>node --test</code>: counts, duration, command.</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/live/05-changes-panel.png" alt="Changes panel with a scoped diff">
+        <figcaption>Changes with a scoped diff and per-file <code>+N/−N</code>.</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/live/07-inline-comment.png" alt="Inline review comment reaching the agent">
+        <figcaption>An inline comment: the quote reaches the agent with path, line, and where that line is now.</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/live/06-terminal.png" alt="Terminal attached to the sandbox container">
+        <figcaption>The terminal attached to the sandbox container, not to the host.</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/live/08-fork-dialog.png" alt="Forking a session into a branch">
+        <figcaption>Forking a session into a branch with its own worktree.</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/live/10-audit.png" alt="Admin audit trail">
+        <figcaption>Admin audit: every tool call with model, commit, duration, tokens, redacted arguments.</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/live/09-admin-status.png" alt="Admin runtime status">
+        <figcaption>Runtime status: directories, per-sandbox quota, tenant limits, egress mode.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section id="tenancy">
+  <div class="wrap">
+    <h2>Tenancy</h2>
+    <p>One sandbox per (user, project). Each tenant gets its own Docker network, joined only by
+      the control plane and the runner, so a sandbox cannot reach another tenant's sandbox or the
+      control plane's own port. Egress is closed by default: a sandbox reaches the model gateway
+      and nothing else, and the agent keeps working because the gateway is what it needs.</p>
+    <figure>
+      <img src="diagrams/04-tenancy.svg" alt="Per-tenant network, per-sandbox volume, quotas and egress">
+      <figcaption>Quotas are per tenant — cpu, memory, pids, concurrent sandboxes — enforced when
+        the container is created; a refusal is a typed <code>409</code> naming the limit.</figcaption>
+    </figure>
+    <h3>What ends a run</h3>
+    <p>A run has exactly one terminal state and the control plane writes which one:
+      <code>agent_settled</code>, a user stop, a reconciliation pass after the process died, or a
+      restart with a reattach. The transcript says what happened and what survived — including
+      the case where the sandbox is gone and nothing can be continued.</p>
+    <figure>
+      <img src="diagrams/06-run-state.svg" alt="Run state machine">
+      <figcaption>Each terminal state writes its own event; the interruption marker carries the
+        cause and what the workspace still holds.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="verified">
+  <div class="wrap">
+    <h2>How it is verified</h2>
+    <table>
+      <thead>
+        <tr><th>Gate</th><th>Command</th><th>Last result</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Backend</td><td><code>cd backend &amp;&amp; go test ./... -count=1</code></td><td class="num">45 packages, 0 failures</td></tr>
+        <tr><td>Web unit</td><td><code>pnpm --dir web test -- --run</code></td><td class="num">307 tests / 42 files</td></tr>
+        <tr><td>End-to-end</td><td><code>cd e2e &amp;&amp; pnpm test</code></td><td class="num">182 tests, 0 flaky</td></tr>
+        <tr><td>From zero</td><td><code>pwsh scripts/deliver-check.ps1</code></td><td class="num">125 checks</td></tr>
+        <tr><td>Lint</td><td><code>pnpm --dir web lint</code></td><td class="num">0 errors / 0 warnings</td></tr>
+      </tbody>
+    </table>
+    <p style="margin-top:18px">The from-zero drill starts with a throwaway volume and a seeded
+      account, so it fails if the product needs a step the documentation does not describe. The
+      requirement ledger (<code>docs/STATUS.md</code>) carries one row per promise with the test
+      that asserts it.</p>
+    <p>Isolation, tenancy and the credential boundary were attacked on purpose, six times. The
+      findings and their fixes are in <code>docs/EXECUTION-BOUNDARY.md</code>,
+      <code>docs/DATA-FLOW-AUDIT.md</code> and <code>docs/AUDIT.md</code> — including what the
+      audit chain cannot prove.</p>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <h2>Limits</h2>
+    <ul class="limits">
+      <li><strong>One host.</strong> Control plane, runner and sandboxes are containers on one
+        Docker daemon. The Kubernetes provider exists and was run against a real cluster, but
+        multi-host operation and the Linux-native checks are not signed off.</li>
+      <li><strong>Containers, not microVMs.</strong> A kernel bug is the escape path. If your
+        tenants are adversarial rather than merely untrusted, use gVisor or a VM runtime.</li>
+      <li><strong>Same-tenant siblings share a bridge.</strong> Isolation is per tenant, not per
+        sandbox.</li>
+      <li><strong>Egress is all-or-nothing.</strong> <code>none</code> or <code>open</code> per
+        tenant; no hostname allow-list.</li>
+      <li><strong>Audit is tamper-evident, not tamper-proof.</strong> Rows are chained; anything
+        with database write access can recompute the chain.</li>
+      <li><strong>Windows paths are exercised, native Linux is not.</strong></li>
+    </ul>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>Source: <a href="https://github.com/Potterluo/piforge">github.com/Potterluo/piforge</a> ·
+      Start with <a href="https://github.com/Potterluo/piforge/blob/master/docs/HANDOFF.md">HANDOFF</a>
+      · Ledger in <a href="https://github.com/Potterluo/piforge/blob/master/docs/STATUS.md">STATUS</a></p>
+  </div>
+</footer>
+
+</body>
+</html>
