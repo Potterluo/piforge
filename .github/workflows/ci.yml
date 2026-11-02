@@ -24,10 +24,19 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    env:
+      # The module graph was tidied on Windows; let CI add what a Linux-only
+      # file needs instead of failing on a stale go.mod it cannot repair.
+      GOFLAGS: -mod=mod
     steps:
       - uses: actions/checkout@v4
       - run: git config --global --add safe.directory "$(pwd)/.."
+      - run: go mod download
       - run: go build ./...
+      - name: go.mod was already tidy
+        run: |
+          git -C .. diff --exit-code -- backend/go.mod backend/go.sum \
+            || (echo "::error::go.mod/go.sum changed during the build; run 'go mod tidy' and commit it"; exit 1)
       - run: go vet ./...
       - run: go test ./... -count=1
 
