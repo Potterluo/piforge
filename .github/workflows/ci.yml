@@ -14,15 +14,19 @@ jobs:
   backend:
     name: backend (go)
     runs-on: ubuntu-latest
+    # Run inside the same image the product ships in, as root: the skill-mount
+    # tests assert the read-only projection the deployment actually runs with
+    # (`cap-drop ALL` + the measured add-back set, root-owned 0555 launcher).
+    # On a bare runner the tests run as an unprivileged user and those
+    # assertions test a different thing — they failed for exactly that reason
+    # on the first CI run, so the job now mirrors the deployment user.
+    container: golang:1.25-bookworm
     defaults:
       run:
         working-directory: backend
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: backend/go.mod
-          cache-dependency-path: backend/go.sum
+      - run: git config --global --add safe.directory "$(pwd)/.."
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./... -count=1
