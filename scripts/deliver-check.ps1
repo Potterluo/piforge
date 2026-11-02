@@ -33,7 +33,10 @@
     PIFORGE_BOOTSTRAP_PROVIDER name and PIFORGE_DEFAULT_PROVIDER. Default: volc.
 
 .PARAMETER ProviderBaseURL
-    OpenAI-compatible base URL of the provider.
+    OpenAI-compatible base URL of the provider. There is no real default: the
+    endpoint belongs to the operator, so the script falls back to
+    PIFORGE_PROVIDER_BASE_URL and then to a placeholder, and a drill against the
+    placeholder reaches no model. Pass this, or export that variable.
 
 .PARAMETER ProviderModel
     Model id the provider serves.
@@ -74,7 +77,8 @@ param(
     [string]$Image = "piforge:local",
     [int]$Port = 7731,
     [string]$ProviderName = "volc",
-    [string]$ProviderBaseURL = "https://api.example.com/v1",
+    # The placeholder is not a provider: see .PARAMETER ProviderBaseURL.
+    [string]$ProviderBaseURL = $(if ($env:PIFORGE_PROVIDER_BASE_URL) { $env:PIFORGE_PROVIDER_BASE_URL } else { "https://api.example.com/v1" }),
     [string]$ProviderModel = "deepseek-v4-flash",
     [string]$ContainerName = "pf-drill",
     [string]$VolumeName = "pf-drill-data",

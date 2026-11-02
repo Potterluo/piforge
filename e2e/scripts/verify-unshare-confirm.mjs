@@ -35,7 +35,10 @@ const ADMIN = { email: "admin@piforge.local", password: "piforge-admin-123" };
 const PROVIDER = {
   name: "volc",
   api: "openai-completions",
-  base_url: "https://api.example.com/v1",
+  // The endpoint belongs to the operator, so it is not hard-coded: set
+  // PIFORGE_PROVIDER_BASE_URL to your provider's base URL. The fallback is a
+  // placeholder, and re-creating the provider against it reaches no model.
+  base_url: process.env.PIFORGE_PROVIDER_BASE_URL ?? "https://api.example.com/v1",
   models: [{ id: "deepseek-v4-flash" }],
 };
 

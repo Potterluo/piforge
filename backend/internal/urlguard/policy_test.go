@@ -174,16 +174,16 @@ func TestRefusesSchemesAndShapes(t *testing.T) {
 // the providers and MCP servers a deployment actually uses.
 func TestPublicAddressesAreAllowed(t *testing.T) {
 	policy := policyWith(t, nil, map[string][]string{
-		"api.anthropic.com": {"160.79.104.10"},
-		"api.openai.com":    {"104.18.33.45", "2606:4700::6812:212d"},
-		"mcp.example.com":   {"93.184.216.34"},
-		"api.example.com": {"121.37.0.1"},
+		"api.anthropic.com":   {"160.79.104.10"},
+		"api.openai.com":      {"104.18.33.45", "2606:4700::6812:212d"},
+		"mcp.example.com":     {"93.184.216.34"},
+		"gateway.example.net": {"93.184.216.35"},
 	})
 	for _, raw := range []string{
 		"https://api.anthropic.com/v1/messages",
 		"https://api.openai.com/v1/chat/completions",
 		"https://mcp.example.com/mcp",
-		"http://api.example.com/v1",
+		"http://gateway.example.net/v1",
 		"https://93.184.216.34/", // a public literal needs no DNS
 	} {
 		target, err := policy.Check(context.Background(), raw)

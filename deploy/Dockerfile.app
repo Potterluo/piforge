@@ -15,7 +15,9 @@
 #   pwsh scripts/build-app-image.ps1 -NoBuild # reuse existing artifacts
 #
 # Override the base with --build-arg BASE=... to test against a different stack.
-ARG BASE=registry.example.com/piforge/piforge:dev
+# The default is the local full build (`piforge:dev`, deploy/README.md "Build");
+# a published tag of your own goes in through the build argument.
+ARG BASE=piforge:dev
 FROM ${BASE}
 
 # CJK fonts for the sandbox browser. Debian's slim images carry no CJK glyphs, so

@@ -454,7 +454,7 @@ msg="sandbox API keys are per sandbox" sandbox=runner
 # 0. provider key：从凭据文件读入进程变量，绝不打印、绝不落盘
 $cred = Get-Content (Join-Path $env:USERPROFILE '.dsh\.credentials.yaml') -Raw
 $env:PIFORGE_DRILL_KEY = [regex]::Match($cred, '(?m)^\s*VOLCE_API_KEY:\s*(\S+)\s*$').Groups[1].Value
-$volc  = 'https://api.example.com/v1'   # 本机 pf-local 里存的同一个 volc 端点
+$volc  = 'https://api.example.com/v1'   # 占位符：换成你的服务商的 base URL
 $image = 'enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0'
 $tok   = -join (1..64 | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })   # runner 的 bearer token
 
@@ -546,7 +546,7 @@ docker rmi piforge:runner-drill piforge/sandbox-runner:drill   # 镜像可留，
 
 #### 隔离与真实执行的证据（每条都是命令 + 原始输出）
 
-1. **三台不同的机器**，宿主没有这些路径：
+1. **三个不同的名字**（宿主名、控制面容器 id、沙箱容器 id），宿主没有这些路径：
 
    ```
    host=<host-name>  control=aa5c3b01f5b9  sandbox=eb386c352f77
@@ -593,7 +593,7 @@ docker rmi piforge:runner-drill piforge/sandbox-runner:drill   # 镜像可留，
    ```
    GET /v1/sessions/<sid>/files?path=primes.js -> 200, size=800
    docker exec <sandbox> sha256sum /workspace/repo/primes.js -> 758f11c13fa7…
-   C:\Users\<user>\Downloads\piforge 下 12 个 800 字节的 .js，sha256 与它相同的：0 个
+   <repo> 下 12 个 800 字节的 .js，sha256 与它相同的：0 个
    ```
 
 6. **沙箱里没有 provider key**（key 只在进程变量里，输出只给了命中数）：

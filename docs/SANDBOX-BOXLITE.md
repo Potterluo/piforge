@@ -1,6 +1,6 @@
 # 沙箱评估：BoxLite（每 box 一个 microVM，自有内核，可嵌入）
 
-参考源码：`C:\Users\<user>\Downloads\boxlite-main`（下称 BoxLite，Rust 工作区 + Python/Node/Go/C SDK +
+参考源码：`%USERPROFILE%\Downloads\boxlite-main`（下称 BoxLite，Rust 工作区 + Python/Node/Go/C SDK +
 一个云控制面 `apps/`）。版本 `0.10.8`（`Cargo.toml:40`、`sdks/python/pyproject.toml:3`、
 `sdks/node/package.json:3`）。这份快照**不是 git 仓库**（无 `.git`），所以"最后一次发布是哪天、
 谁在维护"这类问题只能从文件里间接读。
@@ -85,8 +85,8 @@ it is the operator's policy"）。
 | WSL2 | 支持，但要 Windows 11 / build 21390+ 且 `.wslconfig` 里 `nestedVirtualization=true` | `system_check.rs:196-203`、`README.md:239` |
 
 **对本机（Windows + Docker Desktop）意味着什么：** 唯一能跑的是 WSL2 里那台 Linux，且 `/dev/kvm`
-必须可读写。实测（本轮，`wsl -d Ubuntu-24.04`）：`/dev/kvm` 存在、CPU 有 `vmx`，但当前用户
-`<user>` **既不能读也不能写**（`test -r/-w /dev/kvm` 均失败，且不在 `kvm` 组）。也就是说在本机能做的
+必须可读写。实测（本轮，`wsl -d Ubuntu-24.04`）：`/dev/kvm` 存在、CPU 有 `vmx`，但 WSL 里的普通
+用户**既不能读也不能写**（`test -r/-w /dev/kvm` 均失败，且不在 `kvm` 组）。也就是说在本机能做的
 第一件事是 `sudo usermod -aG kvm $USER` 再重进会话——正是 `system_check.rs:209-216` 给出的那句
 `sudo usermod -aG kvm $USER && newgrp kvm`。**这不是 BoxLite 的缺陷，但它是"本机能不能试"的第一道闸。**
 
@@ -531,7 +531,7 @@ REST 无 host bind），唯一解是自写 CGO runner（L），并且 Chrome 在
 
 ## 12. 实际读过的东西
 
-BoxLite（`C:\Users\<user>\Downloads\boxlite-main`）：
+BoxLite（`%USERPROFILE%\Downloads\boxlite-main`）：
 
 - `README.md`、`NOTICE`、`LICENSE`、`SECURITY.md`、`codecov.yml`、`Cargo.toml`、`.gitmodules`
 - `openapi/box.openapi.yaml`（info、48 个 operation、`BoxStatus`、`CreateBoxRequest`、`NetworkSpec`/

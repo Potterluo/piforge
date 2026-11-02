@@ -104,6 +104,9 @@ docker run -d --name pf-drill -p 7731:7700 -v pf-drill-data:/data `
   piforge:local
 ```
 
+`https://api.example.com/v1` 是占位符：换成你的服务商的 base URL。填错了只有真实模型回合会
+失败，其余检查照常跑。
+
 启动后轮询：
 
 ```powershell
@@ -150,7 +153,7 @@ curl.exe -sS -c cookies.txt -H 'Content-Type: application/json' `
 curl.exe -sS -b cookies.txt http://127.0.0.1:7731/v1/setup
 ```
 
-返回（节选，完整见 `setup-admin.json`）：
+返回（节选，完整见 `setup-admin.json`；`base_url` 已脱敏，这里写成占位符）：
 
 ```json
 {
@@ -159,7 +162,7 @@ curl.exe -sS -b cookies.txt http://127.0.0.1:7731/v1/setup
   "shared_provider_available": true,
   "bootstrap": {
     "name": "volc",
-    "base_url": "https://api.example.com/v1",
+    "base_url": "<base_url>",
     "model": "deepseek-v4-flash"
   }
 }
@@ -169,7 +172,7 @@ curl.exe -sS -b cookies.txt http://127.0.0.1:7731/v1/setup
 
 ```text
 time=2026-10-29T23:31:53.695Z level=INFO msg="bootstrap: created the shared model provider"
-  provider=volc base_url=https://api.example.com/v1
+  provider=volc base_url=<base_url>
   model=deepseek-v4-flash has_key=true
 ```
 
@@ -518,8 +521,9 @@ $env:PIFORGE_DRILL_KEY = (
   [regex]::Match((Get-Content $cred -Raw), '(?m)^\s*VOLCE_API_KEY\s*:\s*(\S+)\s*$')
 ).Groups[1].Value
 
-# 2. 跑
-cd C:\Users\<user>\Downloads\piforge
+# 2. 跑（下面的 base URL 是占位符，换成你的服务商的 base URL）
+$env:PIFORGE_PROVIDER_BASE_URL = 'https://api.example.com/v1'
+cd <repo>
 pwsh -NoProfile -File .\scripts\deliver-check.ps1
 ```
 
@@ -574,8 +578,10 @@ pwsh -NoProfile -File .\scripts\deliver-check.ps1
    没有 Chromium 时，服务本身可用，但浏览器面板会报 “unavailable”，本演练的截图断言会失败。
    `docs/SANDBOX-DEPLOY.md` §1.4.1 与 `deploy/README.md` 指的是同一个脚本，只是 `-Tag` 不同。
 
-2. **选择服务商和模型。** 脚本把 `volc`、base URL、`deepseek-v4-flash` 作为参数默认值；
-   换部署时要确认该 endpoint 真的提供这个 model id，并确认容器能直连（需要代理时设置
+2. **选择服务商和模型。** 脚本默认 `volc` 和 `deepseek-v4-flash`；base URL 没有真默认值
+   （它属于 operator 自己的部署），脚本读 `PIFORGE_PROVIDER_BASE_URL`，没有就用占位符
+   `https://api.example.com/v1`。换成你的服务商的 base URL 时要确认该 endpoint 真的提供这个
+   model id，并确认容器能直连（需要代理时设置
    `PIFORGE_HTTP_PROXY` / `HTTPS_PROXY`；浏览器面板还需要 `PIFORGE_BROWSER_PROXY`）。
 
 3. **决定密钥的生命周期。** 演练把 key 放进容器环境变量；`docker inspect` 能看到它

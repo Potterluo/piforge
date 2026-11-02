@@ -11,7 +11,11 @@
 #   pwsh scripts/build-app-image.ps1 -Tag mine    # different tag
 param(
     [string]$Tag = "piforge:local",
-    [string]$Base = "registry.example.com/piforge/piforge:dev",
+    # The stack this image layers on: the local full build (`piforge:dev`,
+    # deploy/README.md "Build"). Pass -Base to layer on a published tag of your
+    # own instead; none is assumed here, because that tag is not this project's
+    # to name.
+    [string]$Base = "piforge:dev",
     [switch]$NoBuild
 )
 

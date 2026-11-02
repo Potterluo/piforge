@@ -1,6 +1,6 @@
 # 沙箱对照：Genet（K8s 个人 Pod 平台）与我们
 
-参考仓库：`D:\refs\Uni_Test\_ref\ucm-system-genet-33127d96216b754a303f348f4e6cb47de88b4960`
+参考仓库：`<path-to-refs>\ucm-system-genet-33127d96216b754a303f348f4e6cb47de88b4960`
 （下称 Genet，Go + client-go + React + Helm，自述"个人 Pod 申请平台"）。
 
 本文只回答一个问题：**它把"沙箱"这件事做成了什么形状，哪些形状值得我们在 K8s provider 里

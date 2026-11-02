@@ -76,7 +76,11 @@ param(
     # -Port is refused instead of silently re-publishing the live stack.
     [switch]$Force,
     [switch]$Down,
-    [string]$Provider = "volc|https://api.example.com/v1|deepseek-v4-flash",
+    # name|base_url|model of the provider a session uses when it pins no model.
+    # Taken from PIFORGE_BOOTSTRAP_PROVIDER when it is already exported (the same
+    # variable this script sets below); otherwise the base URL is a placeholder,
+    # because the real one is the operator's own provider: pass -Provider.
+    [string]$Provider = $(if ($env:PIFORGE_BOOTSTRAP_PROVIDER) { $env:PIFORGE_BOOTSTRAP_PROVIDER } else { "volc|https://api.example.com/v1|deepseek-v4-flash" }),
     [string]$ProviderKey = $env:PIFORGE_DRILL_KEY,
     [string]$DefaultProvider = "volc",
     [string]$RunnerToken = "",

@@ -1,6 +1,6 @@
 # 沙箱对照：kubernetes-sigs/agent-sandbox（本地源码）与我们
 
-参考源码：`C:\Users\<user>\Downloads\agent-sandbox-main`（下称本项目，Go + controller-runtime，
+参考源码：`%USERPROFILE%\Downloads\agent-sandbox-main`（下称本项目，Go + controller-runtime，
 `module sigs.k8s.io/agent-sandbox`，`go.mod:1-5`）。README 里给的安装版本是 `v1.0.2`
 （`README.md:98`），Helm chart 自己是 `0.1.4`（`helm/Chart.yaml:5`）。
 
