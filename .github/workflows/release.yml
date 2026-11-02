@@ -286,7 +286,7 @@ jobs:
           set -euo pipefail
           digest_of() { sed -n "s/^$1=//p" "$RUNNER_TEMP/digests.txt"; }
           {
-            echo "## PiForge ${TAG:-?} ($(printf '%s' "$TAGS" | tr ',' ' '))"
+            echo "## PiForge ${VERSION} ($(printf '%s' "$TAGS" | tr ',' ' '))"
             echo
             if [ "$PUSH" = true ]; then
               echo "Pull:"
