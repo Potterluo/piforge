@@ -20,6 +20,8 @@
       <a href="#tenancy">Tenancy</a>
       <a href="#verified">Verification</a>
       <a href="#limits">Limits</a>
+      <a href="#repo">Repo</a>
+      <a href="#docs">Docs</a>
       <a href="https://github.com/Potterluo/piforge">GitHub</a>
     </nav>
   </div>
@@ -89,6 +91,14 @@ pwsh scripts/up-isolated.ps1          # three images, a preflight, the stack on 
       results and audit rows were produced by an agent run.</p>
 
     <div class="grid-2">
+      <figure>
+        <img src="screenshots/live/01-home.png" alt="Project list after sign-in">
+        <figcaption>Projects on the left, sessions under them; each card carries its branch and sandbox state.</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/live/03-workbench-settled.png" alt="A settled run">
+        <figcaption>The same run settled: the tool trace collapses to one line, the composer returns to send.</figcaption>
+      </figure>
       <figure>
         <img src="screenshots/live/02-workbench-running.png" alt="A run in flight">
         <figcaption>A run in flight: streamed text, a live tool call, stop/queue on the composer.</figcaption>
@@ -215,11 +225,50 @@ pwsh scripts/up-isolated.ps1          # three images, a preflight, the stack on 
 
 </main>
 
+<section id="repo">
+  <div class="wrap">
+    <h2>Inside the repository</h2>
+<pre><code>backend/     Go control plane: httpapi (routes, SSE hub), store (SQLite), pi (agent RPC),
+             llmgw (model gateway), sandbox (local | docker | runner | k8s), provision,
+             gitx, testrun, audit, janitor
+web/         Next.js UI: workbench, transcript, panels (files, diff, tests, terminal,
+             browser), settings, admin
+e2e/         Playwright suite and the scripts that drive a real deployment
+scripts/     up-isolated.ps1, deliver-check.ps1, verify-linux.sh, probes
+deploy/      Dockerfiles, compose files, Kubernetes manifests, tenant policy files
+docs/        the documents below, plus the diagrams and screenshots this page uses</code></pre>
+    <p class="meta">Roughly 960 tracked files. The control plane is stdlib <code>net/http</code> with
+      SQLite; the UI is Next.js 16 on React 19 with shadcn/ui and Tailwind 4.</p>
+  </div>
+</section>
+
+<section id="docs">
+  <div class="wrap">
+    <h2>Documents</h2>
+    <table>
+      <thead><tr><th>Document</th><th>The question it answers</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://github.com/Potterluo/piforge/blob/master/docs/HANDOFF.md">HANDOFF</a></td><td>How do I run, operate and extend this; where are the keys and what breaks if one is lost.</td></tr>
+        <tr><td><a href="https://github.com/Potterluo/piforge/blob/master/docs/SANDBOX.md">SANDBOX</a>, <a href="https://github.com/Potterluo/piforge/blob/master/docs/SANDBOX-DEPLOY.md">SANDBOX-DEPLOY</a></td><td>Which placement to use, what the images are, what is inside the boundary.</td></tr>
+        <tr><td><a href="https://github.com/Potterluo/piforge/blob/master/docs/SANDBOX-K8S.md">SANDBOX-K8S</a></td><td>The Kubernetes provider, its manifests, what a fake client cannot prove.</td></tr>
+        <tr><td><a href="https://github.com/Potterluo/piforge/blob/master/docs/EXECUTION-BOUNDARY.md">EXECUTION-BOUNDARY</a></td><td>Where agent code runs, and everything six rounds of adversarial testing threw at it.</td></tr>
+        <tr><td><a href="https://github.com/Potterluo/piforge/blob/master/docs/DATA-FLOW-AUDIT.md">DATA-FLOW-AUDIT</a></td><td>Every edge where tenant input reaches an action the control plane performs.</td></tr>
+        <tr><td><a href="https://github.com/Potterluo/piforge/blob/master/docs/AUDIT.md">AUDIT</a></td><td>What the audit trail records, and what its hash chain cannot prove.</td></tr>
+        <tr><td><a href="https://github.com/Potterluo/piforge/blob/master/docs/DELIVERY-DRILL.md">DELIVERY-DRILL</a></td><td>The from-zero check, assertion by assertion.</td></tr>
+        <tr><td><a href="https://github.com/Potterluo/piforge/blob/master/docs/STATUS.md">STATUS</a></td><td>The requirement ledger: one row per promise, with the test that asserts it.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+</main>
+
 <footer>
   <div class="wrap">
     <p>Source: <a href="https://github.com/Potterluo/piforge">github.com/Potterluo/piforge</a> ·
       Start with <a href="https://github.com/Potterluo/piforge/blob/master/docs/HANDOFF.md">HANDOFF</a>
-      · Ledger in <a href="https://github.com/Potterluo/piforge/blob/master/docs/STATUS.md">STATUS</a></p>
+      · Ledger in <a href="https://github.com/Potterluo/piforge/blob/master/docs/STATUS.md">STATUS</a>
+      · <a href="https://github.com/Potterluo/piforge/blob/master/LICENSE">Apache-2.0</a></p>
   </div>
 </footer>
 

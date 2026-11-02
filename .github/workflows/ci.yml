@@ -1,0 +1,86 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend (go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./... -count=1
+
+  web:
+    name: web (lint, unit, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm test -- --run
+      - run: pnpm exec next build
+        env:
+          NEXT_TELEMETRY_DISABLED: '1'
+
+  # The e2e suite and the from-zero delivery drill are not here on purpose: they
+  # start real containers and drive a real browser (Chromium plus the sandbox
+  # image), which a default runner cannot do within a sane time budget. Run them
+  # locally: `cd e2e && pnpm test` and `pwsh scripts/deliver-check.ps1`.
+  docs:
+    name: docs (links and diagram sanity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: every README/diagram reference exists
+        run: |
+          set -eu
+          missing=0
+          for f in README.md docs/index.html docs/screenshots/live/README.md; do
+            [ -f "$f" ] || { echo "missing $f"; exit 1; }
+            grep -oE '(docs/)?(diagrams|screenshots/live)/[A-Za-z0-9._-]+\.(svg|png)' "$f" \
+              | sed 's#^docs/##' | sort -u | while read -r ref; do
+                  if [ ! -f "docs/$ref" ]; then echo "broken reference in $f: $ref"; exit 1; fi
+                done
+          done
+          echo "references ok"
+      - name: diagrams are well-formed XML
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+          bad = 0
+          for p in sorted(glob.glob("docs/diagrams/*.svg")):
+              try:
+                  ET.parse(p)
+              except Exception as e:
+                  print(f"{p}: {e}"); bad = 1
+          sys.exit(bad)
+          PY

@@ -171,4 +171,4 @@ These are real, and they decide whether this fits:
 
 ## License
 
-Not chosen yet. Add one before you expect others to reuse this.
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
