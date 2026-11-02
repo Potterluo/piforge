@@ -71,7 +71,19 @@
 <section id="run">
   <div class="wrap">
     <h2>Run it</h2>
-    <p>Docker Engine 25+, <code>git</code>, and Go 1.25+ if you build from source.</p>
+    <p>Pull the three published images, or build them from source with Docker Engine 25+,
+      <code>git</code>, and Go 1.25+.</p>
+<pre><code>docker pull ghcr.io/potterluo/piforge:latest
+docker run -d -p 7722:7700 --cap-drop DAC_OVERRIDE -v piforge-data:/data \
+  -e PIFORGE_SANDBOX=local -e PIFORGE_BOOTSTRAP_PROVIDER_KEY="&lt;your provider key&gt;" \
+  ghcr.io/potterluo/piforge:latest</code></pre>
+    <p class="meta">The other two images a deployment uses are
+      <code>ghcr.io/potterluo/piforge-runner</code> (the sandbox runner) and
+      <code>ghcr.io/potterluo/piforge-sandbox-agent</code> (what a sandbox runs,
+      <code>PIFORGE_SANDBOX_IMAGE</code>). <code>PIFORGE_SANDBOX</code> and a provider key are the
+      two things it cannot guess; <code>/data</code> holds the database and the workspaces. Tags are
+      <code>latest</code> plus the version, and a pre-release tag never moves <code>latest</code>.</p>
+    <p>Or build the same three images from source:</p>
 <pre><code>$env:PIFORGE_BOOTSTRAP_PROVIDER_KEY = "&lt;your provider key&gt;"
 pwsh scripts/up-isolated.ps1          # three images, a preflight, the stack on :7723</code></pre>
     <p class="meta">It prints the URL and the seeded accounts. <code>-Down</code> stops it,

@@ -39,6 +39,31 @@ events. The database, the provider key and the Docker socket stay on the other s
 
 Requires Docker Engine 25+, `git`, and Go 1.25+ if you build from source.
 
+A release publishes three images, built by [`.github/workflows/release.yml`](.github/workflows/release.yml)
+from the recipes in this repository:
+
+| image | what it runs |
+|---|---|
+| `ghcr.io/potterluo/piforge` | the control plane and the web app |
+| `ghcr.io/potterluo/piforge-runner` | the sandbox runner, the only service that holds `docker.sock` |
+| `ghcr.io/potterluo/piforge-sandbox-agent` | what a sandbox runs (`PIFORGE_SANDBOX_IMAGE`) |
+
+```bash
+docker pull ghcr.io/potterluo/piforge:latest
+docker run -d --name piforge -p 7722:7700 --cap-drop DAC_OVERRIDE \
+  -v piforge-data:/data \
+  -e PIFORGE_SANDBOX=local \
+  -e PIFORGE_SEED_EMAIL=admin@example.com -e PIFORGE_SEED_PASSWORD='<set one>' \
+  -e PIFORGE_BOOTSTRAP_PROVIDER_KEY='<your provider key>' \
+  ghcr.io/potterluo/piforge:latest
+```
+
+`PIFORGE_SANDBOX` and a provider key are the two things it cannot guess. `/data` is the volume
+holding the database and the workspaces, and the app listens on 7700 inside the container. Tags
+are `latest` plus the version (`:1.2.3`, `:1.2`); a pre-release tag never moves `latest`.
+
+Or build the same three images from source:
+
 ```pwsh
 # PowerShell
 $env:PIFORGE_BOOTSTRAP_PROVIDER_KEY = "<your provider key>"
