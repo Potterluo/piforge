@@ -9,6 +9,8 @@ name: release
 #
 # Trigger: a `v*` tag, or a manual run that names the tag — that is how a drill
 # (`v0.0.0-drill`) or a re-publish of an existing tag is done without moving it.
+# A manual run of an existing tag must run on that tag's ref; the resolve step
+# refuses a dispatch whose checked-out commit is not the tag's commit.
 on:
   push:
     tags: ['v*']
@@ -29,7 +31,10 @@ permissions:
   packages: write
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  # Key on the tag a run publishes, not the ref it was dispatched from: a
+  # manual re-publish of v1.2.3 from master and the tag push for v1.2.3 write
+  # the same three images, so they must share one group.
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 env:
@@ -72,6 +77,27 @@ jobs:
             echo "::error::'$tag' is not a release tag of the form vMAJOR.MINOR.PATCH[-PRERELEASE]"
             exit 1
           fi
+
+          # A manual run names a tag, but github.sha is the branch it was
+          # dispatched from. When that tag already exists the two must agree:
+          # otherwise the revision label and the source digest describe a
+          # different tree than the tag names. A drill (a tag never pushed) has
+          # nothing to compare, so it keeps building the dispatch ref.
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            if ! remote=$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}"); then
+              echo "::error::could not read refs/tags/$tag from origin to check it against $GITHUB_SHA"
+              exit 1
+            fi
+            tag_commit=$(printf '%s\n' "$remote" | awk -v ref="refs/tags/$tag^{}" '$2 == ref { print $1 }')
+            if [ -z "$tag_commit" ]; then
+              tag_commit=$(printf '%s\n' "$remote" | awk -v ref="refs/tags/$tag" '$2 == ref { print $1 }')
+            fi
+            if [ -n "$tag_commit" ] && [ "$tag_commit" != "$GITHUB_SHA" ]; then
+              echo "::error::tag $tag already exists at $tag_commit, but this manual run checked out $GITHUB_SHA; dispatch the workflow on ref $tag (gh workflow run release.yml --ref $tag -f tag=$tag) so the published revision label and source digest are true"
+              exit 1
+            fi
+          fi
+
           version="${tag#v}"
           case "$version" in
             *-*) prerelease=true ;;
